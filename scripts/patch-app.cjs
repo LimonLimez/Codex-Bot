@@ -63,6 +63,124 @@ function replaceAllExact(text, before, after, expected, label) {
   return text.split(before).join(after);
 }
 
+function sourceRegion(text, start, end, label) {
+  const startIndex = text.indexOf(start);
+  const endIndex = text.indexOf(end, startIndex + start.length);
+  if (startIndex < 0 || endIndex < 0) throw new Error(`Local auth verifier could not find ${label}`);
+  return text.slice(startIndex, endIndex);
+}
+
+function assertPatchInvariant(condition, label) {
+  if (!condition) throw new Error(`Local auth isolation verification failed: ${label}`);
+}
+
+function verifyLocalAuthIsolationSources(mainSource, rendererSource) {
+  const bootstrap = mainSource.slice(0, 12_000);
+  const handoffCall = bootstrap.indexOf("handOffDirectCodexBotLaunch();");
+  const localOnlyAssignment = bootstrap.indexOf('process.env.GROK_BOT_LOCAL_ONLY = "1";');
+  assertPatchInvariant(bootstrap.includes("function handOffDirectCodexBotLaunch()"), "desktop startup defines the direct-launch handoff");
+  assertPatchInvariant(handoffCall >= 0 && handoffCall < localOnlyAssignment, "direct-launch handoff runs before local-only desktop startup");
+  const handoffSource = sourceRegion(
+    bootstrap,
+    "function handOffDirectCodexBotLaunch() {",
+    "\nhandOffDirectCodexBotLaunch();",
+    "direct-launch handoff",
+  );
+  assertPatchInvariant(
+    handoffSource.includes('path.join(installRoot, "tools", "runtime", "Launch-Codex-Bot.ps1")'),
+    "direct launch resolves the installed local runtime launcher",
+  );
+  assertPatchInvariant(
+    handoffSource.includes('path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")'),
+    "direct launch resolves PowerShell beneath the absolute SystemRoot",
+  );
+  assertPatchInvariant(
+    handoffSource.includes('require("node:child_process").spawnSync(') &&
+      handoffSource.includes("windowsHide: true") &&
+      handoffSource.includes('stdio: "ignore"'),
+    "direct-launch handoff synchronously waits for a hidden launcher",
+  );
+  assertPatchInvariant(
+    !handoffSource.includes("detached: true") && !handoffSource.includes(".unref()"),
+    "direct-launch handoff cannot abandon a child that Windows may tear down",
+  );
+  assertPatchInvariant(
+    handoffSource.includes("if (launcherResult.error) throw launcherResult.error;") &&
+      handoffSource.includes("if (launcherResult.signal)") &&
+      handoffSource.includes("if (!Number.isInteger(launcherResult.status))") &&
+      handoffSource.includes("if (launcherResult.status !== 0)"),
+    "direct-launch handoff validates synchronous launcher completion",
+  );
+  assertPatchInvariant(
+    handoffSource.includes("CODEX_BOT_STATE_ROOT") && handoffSource.includes("SAND_HOST_GATEWAY_URL"),
+    "wrapped launches are distinguished by their local gateway environment",
+  );
+  assertPatchInvariant(
+    bootstrap.includes("showCodexBotLocalOnlyLaunchError") && bootstrap.includes("process.exit(1)"),
+    "a missing or failed launcher stops with a local-only error",
+  );
+
+  const localModeGuard = 'if (process.env.GROK_BOT_LOCAL_ONLY === "1") return codexLocalAuthIdentity();';
+  const mainAuthRegion = sourceRegion(
+    mainSource,
+    "function registerCursorAuthIpc(deps) {",
+    "function parseDashboardActionRequest(request3)",
+    "desktop auth IPC region",
+  );
+  const authChannels = [
+    "sand:cursor-auth-status",
+    "sand:cursor-auth-login",
+    "sand:cursor-auth-cancel-login",
+    "sand:cursor-auth-logout",
+  ];
+  for (const channel of authChannels) {
+    const handlerStart = mainAuthRegion.indexOf(`ipcMain9.handle("${channel}"`);
+    const nextHandler = mainAuthRegion.indexOf("\n  ipcMain9.handle(", handlerStart + 1);
+    assertPatchInvariant(handlerStart >= 0, `${channel} handler is present`);
+    const handler = mainAuthRegion.slice(handlerStart, nextHandler < 0 ? mainAuthRegion.length : nextHandler);
+    const guardIndex = handler.indexOf(localModeGuard);
+    const serviceIndex = handler.indexOf("ensureCursorAuthService2()");
+    assertPatchInvariant(guardIndex >= 0, `${channel} returns the local identity in local-only mode`);
+    assertPatchInvariant(serviceIndex >= 0 && guardIndex < serviceIndex, `${channel} short-circuits before vendor auth service access`);
+  }
+
+  const authOpenExternal = sourceRegion(
+    mainSource,
+    "var cursorAuthWiring = createCursorAuthWiring({",
+    "var { ensureCursorAuthService } = cursorAuthWiring;",
+    "desktop auth wiring",
+  );
+  const openExternalGuard = authOpenExternal.indexOf('if (process.env.GROK_BOT_LOCAL_ONLY === "1") return;');
+  const shellOpenExternal = authOpenExternal.indexOf("shell.openExternal(url3)");
+  assertPatchInvariant(openExternalGuard >= 0, "auth browser launch is guarded in local-only mode");
+  assertPatchInvariant(shellOpenExternal >= 0 && openExternalGuard < shellOpenExternal, "auth browser guard runs before shell.openExternal");
+
+  const rendererAuthRegion = sourceRegion(rendererSource, "function mfs(n) {", "function ffs(n)", "renderer auth adapter");
+  const rendererMethods = ["getCursorAuthStatus", "loginCursor", "cancelCursorLogin", "logoutCursor"];
+  for (const method of rendererMethods) {
+    const methodStart = rendererAuthRegion.indexOf(`async ${method}(`);
+    const nextMethod = rendererAuthRegion.indexOf("\n    async ", methodStart + 1);
+    assertPatchInvariant(methodStart >= 0, `renderer ${method} method is present`);
+    const methodSource = rendererAuthRegion.slice(methodStart, nextMethod < 0 ? rendererAuthRegion.length : nextMethod);
+    assertPatchInvariant(methodSource.includes("return codexLocalAuthIdentity();"), `renderer ${method} returns the synthetic local identity`);
+  }
+  assertPatchInvariant(
+    !/\be\.(?:login|logout|cancelLogin)\s*\(/.test(rendererAuthRegion),
+    "renderer auth adapter cannot invoke vendor login, logout, or cancellation",
+  );
+  assertPatchInvariant(
+    mainSource.includes("function codexLocalAuthIdentity()") && rendererSource.includes("function codexLocalAuthIdentity()"),
+    "both processes define the synthetic local identity",
+  );
+}
+
+function verifyLocalAuthIsolation(root) {
+  verifyLocalAuthIsolationSources(
+    fs.readFileSync(path.join(root, "dist", "electron-main", "main.cjs"), "utf8"),
+    fs.readFileSync(path.join(root, "dist", "renderer", "assets", "index-DVUCYGay.js"), "utf8"),
+  );
+}
+
 function walk(directory, visitor) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const file = path.join(directory, entry.name);
@@ -109,6 +227,47 @@ function patchElectronMain(root) {
   const strictIndex = text.indexOf('"use strict";\n');
   if (strictIndex < 0) throw new Error("Electron local-only startup anchor not found");
   const localOnlyBootstrap = `"use strict";
+function showCodexBotLocalOnlyLaunchError(detail) {
+  const message = "Codex Bot must start through its local runtime. " + detail;
+  process.stderr.write("[codex-bot] " + message + "\\n");
+  try {
+    require("electron").dialog.showErrorBox("Codex Bot could not start", message);
+  } catch {}
+}
+function handOffDirectCodexBotLaunch() {
+  if (process.platform !== "win32") return;
+  const stateRoot = process.env.CODEX_BOT_STATE_ROOT?.trim();
+  const gatewayUrl = process.env.SAND_HOST_GATEWAY_URL?.trim();
+  if (stateRoot && gatewayUrl) return;
+  const path = require("node:path");
+  const fs = require("node:fs");
+  const systemRoot = process.env.SystemRoot?.trim();
+  const installRoot = path.resolve(process.resourcesPath, "..", "..");
+  const launcher = path.join(installRoot, "tools", "runtime", "Launch-Codex-Bot.ps1");
+  const powershell = systemRoot && path.isAbsolute(systemRoot)
+    ? path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    : "";
+  if (!powershell || !fs.existsSync(powershell) || !fs.existsSync(launcher)) {
+    showCodexBotLocalOnlyLaunchError("The installed local launcher or Windows PowerShell is missing. Please repair the installation.");
+    process.exit(1);
+  }
+  try {
+    const launcherResult = require("node:child_process").spawnSync(
+      powershell,
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", launcher],
+      { cwd: installRoot, stdio: "ignore", windowsHide: true }
+    );
+    if (launcherResult.error) throw launcherResult.error;
+    if (launcherResult.signal) throw new Error("local launcher was terminated by signal " + launcherResult.signal);
+    if (!Number.isInteger(launcherResult.status)) throw new Error("local launcher did not report an exit code");
+    if (launcherResult.status !== 0) throw new Error("local launcher exited with code " + launcherResult.status);
+    process.exit(0);
+  } catch (error) {
+    showCodexBotLocalOnlyLaunchError("The local launcher failed: " + (error?.message || String(error)));
+    process.exit(1);
+  }
+}
+handOffDirectCodexBotLaunch();
 process.env.GROK_BOT_LOCAL_ONLY = "1";
 process.env.SAND_DISABLE_TELEMETRY = "1";
 process.env.SAND_DISABLE_ANALYTICS = "1";
@@ -186,6 +345,51 @@ function createDesktopAccountAuthorizer(deps) {`,
     'ipcMain9.handle("sand:sand-access", async () => {\n    return await (await ensureSandAccessReader()).read();\n  });',
     'ipcMain9.handle("sand:sand-access", async () => {\n    // Inference is provided by the user-owned local Codex route.\n    return { state: "granted", reason: "none" };\n  });',
     "local inference entitlement",
+  );
+  text = replaceOnce(
+    text,
+    "function registerCursorAuthIpc(deps) {",
+    `function codexLocalAuthIdentity() {
+  return {
+    kind: "logged-in",
+    authId: "codex-bot-local",
+    name: "Codex Bot User",
+    isAnysphereUser: false
+  };
+}
+function registerCursorAuthIpc(deps) {`,
+    "desktop synthetic local identity",
+  );
+  text = replaceOnce(
+    text,
+    '  ipcMain9.handle("sand:cursor-auth-status", async () => {\n    const service = await ensureCursorAuthService2();',
+    '  ipcMain9.handle("sand:cursor-auth-status", async () => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") return codexLocalAuthIdentity();\n    const service = await ensureCursorAuthService2();',
+    "desktop local auth status",
+  );
+  text = replaceOnce(
+    text,
+    '  ipcMain9.handle("sand:cursor-auth-login", async () => {\n    const service = await ensureCursorAuthService2();',
+    '  ipcMain9.handle("sand:cursor-auth-login", async () => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") return codexLocalAuthIdentity();\n    const service = await ensureCursorAuthService2();',
+    "desktop local auth login",
+  );
+  text = replaceOnce(
+    text,
+    '  ipcMain9.handle("sand:cursor-auth-cancel-login", async () => {\n    const service = await ensureCursorAuthService2();',
+    '  ipcMain9.handle("sand:cursor-auth-cancel-login", async () => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") return codexLocalAuthIdentity();\n    const service = await ensureCursorAuthService2();',
+    "desktop local auth cancellation",
+  );
+  text = replaceOnce(
+    text,
+    '  ipcMain9.handle("sand:cursor-auth-logout", async () => {\n    const service = await ensureCursorAuthService2();',
+    '  ipcMain9.handle("sand:cursor-auth-logout", async () => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") return codexLocalAuthIdentity();\n    const service = await ensureCursorAuthService2();',
+    "desktop local auth logout",
+  );
+  text = replaceInRegion(
+    text,
+    "var cursorAuthWiring = createCursorAuthWiring({",
+    '  openExternal: async (url3) => {\n    await import_electron50.shell.openExternal(url3);\n  },',
+    '  openExternal: async (url3) => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") return;\n    await import_electron50.shell.openExternal(url3);\n  },',
+    "ultimate auth browser launch guard",
   );
   text = replaceOnce(
     text,
@@ -459,6 +663,20 @@ function patchRenderer(root, viewToken, viewPort) {
   );
   text = replaceOnce(
     text,
+    "function mfs(n) {",
+    `function codexLocalAuthIdentity() {
+  return {
+    kind: "logged-in",
+    authId: "codex-bot-local",
+    name: "Codex Bot User",
+    isAnysphereUser: false,
+  };
+}
+function mfs(n) {`,
+    "renderer synthetic local identity",
+  );
+  text = replaceOnce(
+    text,
     `    async getCursorAuthStatus(t) {
       return NQ("getCursorAuthStatus", t, () => e.getStatus());
     },`,
@@ -466,14 +684,42 @@ function patchRenderer(root, viewToken, viewPort) {
       Cn(t);
       // This is a renderer-only local identity slot. It unlocks the stock
       // roster and composer without creating or claiming an xAI session.
-      return {
-        kind: "logged-in",
-        authId: "codex-bot-local",
-        name: "Codex Bot User",
-        isAnysphereUser: false,
-      };
+      return codexLocalAuthIdentity();
     },`,
     "local frontend identity adapter",
+  );
+  text = replaceOnce(
+    text,
+    `    async loginCursor(t) {
+      return NQ("loginCursor", t, () => e.login());
+    },`,
+    `    async loginCursor(t) {
+      Cn(t);
+      return codexLocalAuthIdentity();
+    },`,
+    "renderer local login no-op",
+  );
+  text = replaceOnce(
+    text,
+    `    async cancelCursorLogin(t) {
+      return NQ("cancelCursorLogin", t, () => e.cancelLogin());
+    },`,
+    `    async cancelCursorLogin(t) {
+      Cn(t);
+      return codexLocalAuthIdentity();
+    },`,
+    "renderer local login cancellation no-op",
+  );
+  text = replaceOnce(
+    text,
+    `    async logoutCursor(t) {
+      return NQ("logoutCursor", t, () => e.logout());
+    },`,
+    `    async logoutCursor(t) {
+      Cn(t);
+      return codexLocalAuthIdentity();
+    },`,
+    "renderer local logout no-op",
   );
   text = replaceOnce(text, "hns();", "/* Renderer Sentry is disabled in the Codex Bot local-only build. */", "renderer telemetry isolation");
   text = replaceOnce(
@@ -565,6 +811,7 @@ async function main() {
     patchLocalExec(extracted);
     patchHost(extracted);
     patchRenderer(extracted, runtime.viewToken, runtime.viewPort);
+    verifyLocalAuthIsolation(extracted);
     fs.mkdirSync(path.dirname(targetAsar), { recursive: true });
     await asar.createPackageWithOptions(extracted, targetAsar, { unpackDir: "{dist/deps,dist/native}" });
     process.stdout.write(`${JSON.stringify({ ok: true, sourceHash, targetHash: sha256(targetAsar), version: SUPPORTED.version })}\n`);
@@ -573,7 +820,11 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${error.stack || error.message || error}\n`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    process.stderr.write(`${error.stack || error.message || error}\n`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { verifyLocalAuthIsolationSources };

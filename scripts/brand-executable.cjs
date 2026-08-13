@@ -8,8 +8,8 @@ async function main() {
   const rcedit = imported.rcedit || imported.default;
   if (typeof rcedit !== "function") throw new Error("The installed rcedit package did not expose its API.");
   await rcedit(executable, {
-    "file-version": "0.1.0.0",
-    "product-version": "0.1.0.0",
+    "file-version": "0.1.1.0",
+    "product-version": "0.1.1.0",
     "version-string": {
       CompanyName: "Codex Bot contributors",
       FileDescription: "Codex Bot",

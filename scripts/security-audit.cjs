@@ -98,25 +98,28 @@ for (const line of installerManifest.split(/\r?\n/)) {
 if (/Filename:\s*"powershell\.exe"/i.test(installerManifest) || /Exec\(\s*['"]powershell\.exe['"]/i.test(installerManifest)) {
   failures.push("installer/CodexBot.iss: PowerShell launches must use the absolute {sys} Windows PowerShell path");
 }
-if ((installerManifest.match(/\{sys\}\\WindowsPowerShell\\v1\.0\\powershell\.exe/gi) || []).length !== 6) {
+if ((installerManifest.match(/\{sys\}\\WindowsPowerShell\\v1\.0\\powershell\.exe/gi) || []).length !== 3) {
   failures.push("installer/CodexBot.iss: every installer, shortcut, launch, and uninstall PowerShell entry must use the absolute {sys} path");
+}
+if ((installerManifest.match(/\{sys\}\\wscript\.exe/gi) || []).length !== 3) {
+  failures.push("installer/CodexBot.iss: every windowless shortcut and post-install launch must use the absolute {sys} Windows Script Host path");
 }
 
 const launcherScript = fs.readFileSync(path.join(ROOT, "src", "runtime", "Launch-Codex-Bot.ps1"), "utf8");
 const enableAlwaysOnScript = fs.readFileSync(path.join(ROOT, "src", "runtime", "Enable-Always-On.ps1"), "utf8");
 const connectionSource = fs.readFileSync(path.join(ROOT, "src", "codex-connection.cjs"), "utf8");
-if (/Start-Process -FilePath ['"]powershell\.exe['"]/i.test(launcherScript) || !/Start-Process -FilePath \$windowsPowerShell/.test(launcherScript)) {
-  failures.push("src/runtime/Launch-Codex-Bot.ps1: watchdog launch must use the validated absolute Windows PowerShell path");
+if (/Start-Process -FilePath ['"]wscript\.exe['"]/i.test(launcherScript) || !/Start-Process -FilePath \$windowsScriptHost/.test(launcherScript)) {
+  failures.push("src/runtime/Launch-Codex-Bot.ps1: watchdog fallback must use the validated absolute Windows Script Host path");
 }
-if (/New-ScheduledTaskAction -Execute ['"]powershell\.exe['"]/i.test(enableAlwaysOnScript) || !/New-ScheduledTaskAction -Execute \$windowsPowerShell/.test(enableAlwaysOnScript)) {
-  failures.push("src/runtime/Enable-Always-On.ps1: scheduled task must use the validated absolute Windows PowerShell path");
+if (/New-ScheduledTaskAction -Execute ['"]wscript\.exe['"]/i.test(enableAlwaysOnScript) || !/New-ScheduledTaskAction -Execute \$windowsScriptHost/.test(enableAlwaysOnScript)) {
+  failures.push("src/runtime/Enable-Always-On.ps1: scheduled task must use the validated absolute Windows Script Host path");
 }
 for (const [relative, source] of [
   ["src/runtime/Launch-Codex-Bot.ps1", launcherScript],
   ["src/runtime/Enable-Always-On.ps1", enableAlwaysOnScript],
 ]) {
-  if (!/\$windowsPowerShell\s*=\s*Join-Path \$env:SystemRoot 'System32\\WindowsPowerShell\\v1\.0\\powershell\.exe'/.test(source) || !/Test-Path -LiteralPath \$windowsPowerShell -PathType Leaf/.test(source)) {
-    failures.push(`${relative}: absolute Windows PowerShell path must be constructed and validated before use`);
+  if (!/\$windowsScriptHost\s*=\s*Join-Path \$env:SystemRoot 'System32\\wscript\.exe'/.test(source) || !/Test-Path -LiteralPath \$windowsScriptHost -PathType Leaf/.test(source)) {
+    failures.push(`${relative}: absolute Windows Script Host path must be constructed and validated before use`);
   }
 }
 if (/spawnSync\(['"]powershell\.exe['"]/i.test(connectionSource) || !/spawnSync\(WINDOWS_POWERSHELL,/.test(connectionSource)) {

@@ -9,11 +9,29 @@ $toolsRoot = Join-Path $installRoot 'tools'
 $appRoot = Join-Path $installRoot 'app'
 $stateRoot = Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge'
 $runtimePath = Join-Path $stateRoot 'runtime.json'
+$launcherLogRoot = Join-Path $stateRoot 'logs'
+$launcherLog = Join-Path $launcherLogRoot 'launcher.log'
+
+function Write-SafeLauncherLog([string]$Message) {
+    try {
+        New-Item -ItemType Directory -Force -Path $launcherLogRoot | Out-Null
+        $timestamp = [DateTime]::UtcNow.ToString('o')
+        Add-Content -LiteralPath $launcherLog -Value "$timestamp $Message" -Encoding UTF8
+    } catch {
+        # Logging must never replace the original launch failure.
+    }
+}
+
+trap {
+    Write-SafeLauncherLog ("Launch failed: " + $_.Exception.Message)
+    exit 1
+}
+
 $serviceIdentityHelper = Join-Path $PSScriptRoot 'Local-Service-Identity.ps1'
 if (-not (Test-Path -LiteralPath $serviceIdentityHelper)) { throw "Local service identity helper is missing: $serviceIdentityHelper" }
 . $serviceIdentityHelper
-$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) { throw "Windows PowerShell is missing: $windowsPowerShell" }
+$windowsScriptHost = Join-Path $env:SystemRoot 'System32\wscript.exe'
+if (-not (Test-Path -LiteralPath $windowsScriptHost -PathType Leaf)) { throw "Windows Script Host is missing: $windowsScriptHost" }
 
 function Get-RequiredRuntimeValue($Runtime, [string]$Name) {
     $property = $Runtime.PSObject.Properties[$Name]
@@ -125,9 +143,37 @@ $env:SAND_BACKEND_URL = 'http://127.0.0.1:1'
 $script:expectedProxyProcessId = 0
 $script:expectedHostProcessId = 0
 
+function Get-VerifiedLoopbackListenerProcessId {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Port,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedExecutable,
+        [int]$ExpectedProcessId = 0
+    )
+
+    if ($ExpectedProcessId -gt 0 -and (Test-ExpectedLoopbackListener -Port $Port -ExpectedExecutable $ExpectedExecutable -ExpectedProcessId $ExpectedProcessId)) {
+        return $ExpectedProcessId
+    }
+
+    # Another launcher or the watchdog can win the bind after this process
+    # starts an identical installed executable. Re-read the listener and adopt
+    # it only after the helper verifies its path, current-user SID, address,
+    # and exact owning PID. Credentials are never sent before this succeeds.
+    $processIds = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($processIds.Count -ne 1) { return 0 }
+    $candidateProcessId = [int]$processIds[0]
+    if (-not (Test-ExpectedLoopbackListener -Port $Port -ExpectedExecutable $ExpectedExecutable -ExpectedProcessId $candidateProcessId)) {
+        return 0
+    }
+    return $candidateProcessId
+}
+
 function Test-CLIProxyAPI {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.proxyPort) -ExpectedExecutable $proxyExe -ExpectedProcessId $script:expectedProxyProcessId)) { return $false }
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.proxyPort) -ExpectedExecutable $proxyExe -ExpectedProcessId $script:expectedProxyProcessId
+        if ($verifiedProcessId -le 0) { return $false }
+        $script:expectedProxyProcessId = $verifiedProcessId
         $headers = @{ Authorization = "Bearer $($runtime.proxyKey)" }
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.proxyPort)/v1/models" -Method Get -Headers $headers -UseBasicParsing -TimeoutSec 5
         if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { return $false }
@@ -140,7 +186,9 @@ function Test-CLIProxyAPI {
 
 function Test-CoworkerGateway {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) { return $false }
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+        if ($verifiedProcessId -le 0) { return $false }
+        $script:expectedHostProcessId = $verifiedProcessId
         $headers = @{ Authorization = "Bearer $($runtime.gatewayToken)" }
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.gatewayPort)/api/listAgents" -Method Post -Headers $headers -ContentType 'application/json' -Body '{}' -UseBasicParsing -TimeoutSec 5
         return [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 300
@@ -151,7 +199,9 @@ function Test-CoworkerGateway {
 
 function Test-BrowserView {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.viewPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) { return $false }
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.viewPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+        if ($verifiedProcessId -le 0) { return $false }
+        $script:expectedHostProcessId = $verifiedProcessId
         $headers = @{ 'X-Codex-Seat-Token' = [string]$runtime.viewToken }
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.viewPort)/api/status" -Method Get -Headers $headers -UseBasicParsing -TimeoutSec 5
         if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { return $false }
@@ -236,9 +286,11 @@ $body = @{ localToolPermission = 'ask' } | ConvertTo-Json -Compress
 $hostSettingsApplied = $false
 for ($attempt = 0; $attempt -lt 12 -and -not $hostSettingsApplied; $attempt++) {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) {
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+        if ($verifiedProcessId -le 0) {
             throw 'The coworker gateway listener identity changed before host settings were applied.'
         }
+        $script:expectedHostProcessId = $verifiedProcessId
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.gatewayPort)/api/setHostSettings" -Method Post -Headers $headers -ContentType 'application/json' -Body $body -UseBasicParsing -TimeoutSec 5
         $hostSettingsApplied = [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 300
     } catch {
@@ -263,7 +315,19 @@ if ($DebugRenderer) {
     Start-Process -FilePath $portable | Out-Null
 }
 
-$watchdog = Join-Path $PSScriptRoot 'CodexBot-Watchdog.ps1'
-if (Test-Path -LiteralPath $watchdog) {
-    Start-Process -FilePath $windowsPowerShell -ArgumentList @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', "`"$watchdog`"") -WindowStyle Hidden | Out-Null
+$hiddenRunner = Join-Path $PSScriptRoot 'CodexBot-Hidden-Runner.vbs'
+if (-not (Test-Path -LiteralPath $hiddenRunner -PathType Leaf)) {
+    throw "Windowless runtime launcher not found: $hiddenRunner"
+}
+
+try {
+    $watchdogTask = Get-ScheduledTask -TaskName 'Codex Bot Bridge' -ErrorAction Stop
+    if ([string]$watchdogTask.State -ne 'Running') {
+        Start-ScheduledTask -TaskName 'Codex Bot Bridge' -ErrorAction Stop
+    }
+    Write-SafeLauncherLog 'Desktop started; supervision was handed to the registered watchdog task.'
+} catch {
+    Write-SafeLauncherLog ("Registered watchdog task could not be started; using the windowless fallback: " + $_.Exception.Message)
+    Start-Process -FilePath $windowsScriptHost -ArgumentList @('//B', '//NoLogo', "`"$hiddenRunner`"", 'watchdog') -WindowStyle Hidden | Out-Null
+    Write-SafeLauncherLog 'Desktop started; supervision was handed to the windowless watchdog fallback.'
 }

@@ -109,9 +109,36 @@ foreach ($required in @($portable, $proxyExe, $proxyConfig)) {
 $script:expectedProxyProcessId = 0
 $script:expectedHostProcessId = 0
 
+function Get-VerifiedLoopbackListenerProcessId {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$Port,
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedExecutable,
+        [int]$ExpectedProcessId = 0
+    )
+
+    if ($ExpectedProcessId -gt 0 -and (Test-ExpectedLoopbackListener -Port $Port -ExpectedExecutable $ExpectedExecutable -ExpectedProcessId $ExpectedProcessId)) {
+        return $ExpectedProcessId
+    }
+
+    # A launcher can win the bind while this watchdog is starting the same
+    # installed executable. Adopt that listener only after re-verifying the
+    # exact path, current-user SID, loopback address, and owning PID.
+    $processIds = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($processIds.Count -ne 1) { return 0 }
+    $candidateProcessId = [int]$processIds[0]
+    if (-not (Test-ExpectedLoopbackListener -Port $Port -ExpectedExecutable $ExpectedExecutable -ExpectedProcessId $candidateProcessId)) {
+        return 0
+    }
+    return $candidateProcessId
+}
+
 function Test-CLIProxyAPI {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.proxyPort) -ExpectedExecutable $proxyExe -ExpectedProcessId $script:expectedProxyProcessId)) { return $false }
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.proxyPort) -ExpectedExecutable $proxyExe -ExpectedProcessId $script:expectedProxyProcessId
+        if ($verifiedProcessId -le 0) { return $false }
+        $script:expectedProxyProcessId = $verifiedProcessId
         $headers = @{ Authorization = "Bearer $($runtime.proxyKey)" }
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.proxyPort)/v1/models" -Method Get -Headers $headers -UseBasicParsing -TimeoutSec 5
         if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { return $false }
@@ -124,7 +151,9 @@ function Test-CLIProxyAPI {
 
 function Test-CoworkerGateway {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) { return $false }
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+        if ($verifiedProcessId -le 0) { return $false }
+        $script:expectedHostProcessId = $verifiedProcessId
         $headers = @{ Authorization = "Bearer $($runtime.gatewayToken)" }
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.gatewayPort)/api/listAgents" -Method Post -Headers $headers -ContentType 'application/json' -Body '{}' -UseBasicParsing -TimeoutSec 5
         return [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 300
@@ -135,7 +164,9 @@ function Test-CoworkerGateway {
 
 function Test-BrowserView {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.viewPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) { return $false }
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.viewPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+        if ($verifiedProcessId -le 0) { return $false }
+        $script:expectedHostProcessId = $verifiedProcessId
         $headers = @{ 'X-Codex-Seat-Token' = [string]$runtime.viewToken }
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.viewPort)/api/status" -Method Get -Headers $headers -UseBasicParsing -TimeoutSec 5
         if ([int]$response.StatusCode -lt 200 -or [int]$response.StatusCode -ge 300) { return $false }
@@ -157,7 +188,9 @@ function Wait-ForAuthenticatedService([scriptblock]$Probe, [int]$TimeoutSeconds)
 
 function Set-RequiredHostSettings {
     try {
-        if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) { return $false }
+        $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+        if ($verifiedProcessId -le 0) { return $false }
+        $script:expectedHostProcessId = $verifiedProcessId
         $headers = @{ Authorization = "Bearer $($runtime.gatewayToken)" }
         $body = @{ localToolPermission = 'ask' } | ConvertTo-Json -Compress
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($runtime.gatewayPort)/api/setHostSettings" -Method Post -Headers $headers -ContentType 'application/json' -Body $body -UseBasicParsing -TimeoutSec 5
@@ -256,15 +289,18 @@ try {
 
         if ($gatewayReady -and -not (Test-BrowserView)) {
             if (Test-LocalPortListener ([int]$runtime.viewPort)) {
-                if (-not (Test-ExpectedLoopbackListener -Port ([int]$runtime.viewPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) {
+                $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.viewPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+                if ($verifiedProcessId -le 0) {
                     throw "Port $($runtime.viewPort) is occupied by a browser-view listener that does not belong to this installation; the watchdog stopped without sending a view credential."
                 }
+                $script:expectedHostProcessId = $verifiedProcessId
                 if (-not (Wait-ForAuthenticatedService ${function:Test-BrowserView} 10)) {
                     throw 'The verified browser-view process did not pass its authenticated readiness check; the watchdog stopped.'
                 }
             } elseif (-not (Wait-ForAuthenticatedService ${function:Test-BrowserView} 30)) {
                 Write-SafeWatchdogLog 'The browser-view service stopped; restarting the verified coworker host.'
-                if (-not (Stop-ExpectedLoopbackListener -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId)) {
+                $verifiedProcessId = Get-VerifiedLoopbackListenerProcessId -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $script:expectedHostProcessId
+                if ($verifiedProcessId -le 0 -or -not (Stop-ExpectedLoopbackListener -Port ([int]$runtime.gatewayPort) -ExpectedExecutable $portable -ExpectedProcessId $verifiedProcessId)) {
                     throw 'The browser-view service is unavailable and the coworker host identity could not be verified for a safe restart.'
                 }
                 $script:expectedHostProcessId = 0

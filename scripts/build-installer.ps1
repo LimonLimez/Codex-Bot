@@ -9,6 +9,13 @@ $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $buildRoot = Join-Path $projectRoot 'build'
 $vendorRoot = Join-Path $buildRoot 'vendor\cliproxyapi'
 $artifactsRoot = Join-Path $projectRoot 'artifacts'
+$package = Get-Content -Raw -LiteralPath (Join-Path $projectRoot 'package.json') | ConvertFrom-Json
+$packageVersion = [string]$package.version
+if ($packageVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+    throw "package.json contains an invalid release version: $packageVersion"
+}
+$installerName = "CodexBot-Setup-$packageVersion.exe"
+$installerPath = Join-Path $artifactsRoot $installerName
 New-Item -ItemType Directory -Force -Path $vendorRoot, $artifactsRoot | Out-Null
 
 Push-Location $projectRoot
@@ -64,13 +71,19 @@ try {
     }
     & $InnoCompiler (Join-Path $projectRoot 'installer\CodexBot.iss')
     if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-    $installers = @(Get-ChildItem -LiteralPath $artifactsRoot -Filter 'CodexBot-Setup-*.exe')
-    foreach ($installer in $installers) {
-        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
-        $hashFile = Join-Path $artifactsRoot ($installer.Name + '.sha256')
-        "$hash  $($installer.Name)" | Set-Content -LiteralPath $hashFile -Encoding Ascii
-        [pscustomobject]@{ Name = $installer.Name; Length = $installer.Length; SHA256 = $hash; HashFile = $hashFile }
+    if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
+        throw "Inno Setup did not produce the expected current-version installer: $installerName"
     }
+    $installer = Get-Item -LiteralPath $installerPath
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
+    $hashFile = "$installerPath.sha256"
+    $expectedSidecar = "$hash  $installerName"
+    $expectedSidecar | Set-Content -LiteralPath $hashFile -Encoding Ascii
+    $actualSidecar = (Get-Content -Raw -LiteralPath $hashFile).Trim()
+    if ($actualSidecar -cne $expectedSidecar) {
+        throw "The checksum sidecar could not be verified for $installerName."
+    }
+    [pscustomobject]@{ Name = $installer.Name; Length = $installer.Length; SHA256 = $hash; HashFile = $hashFile }
 } finally {
     Pop-Location
 }

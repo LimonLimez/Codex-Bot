@@ -1,5 +1,5 @@
 #define AppName "Codex Bot"
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.1"
 #define AppPublisher "Codex Bot contributors"
 #define AppURL "https://github.com/LimonLimez/Codex-Bot"
 
@@ -46,6 +46,7 @@ Source: "..\src\renderer\codex-ui.js"; DestDir: "{app}\tools\src\renderer"; Flag
 Source: "..\src\renderer\live-seat-component.jsfrag"; DestDir: "{app}\tools\src\renderer"; Flags: ignoreversion
 Source: "..\src\runtime\Launch-Codex-Bot.ps1"; DestDir: "{app}\tools\runtime"; Flags: ignoreversion
 Source: "..\src\runtime\CodexBot-Watchdog.ps1"; DestDir: "{app}\tools\runtime"; Flags: ignoreversion
+Source: "..\src\runtime\CodexBot-Hidden-Runner.vbs"; DestDir: "{app}\tools\runtime"; Flags: ignoreversion
 Source: "..\src\runtime\Local-Service-Identity.ps1"; DestDir: "{app}\tools\runtime"; Flags: ignoreversion
 Source: "..\src\runtime\Enable-Always-On.ps1"; DestDir: "{app}\tools\runtime"; Flags: ignoreversion
 Source: "..\src\runtime\Disable-Always-On.ps1"; DestDir: "{app}\tools\runtime"; Flags: ignoreversion
@@ -70,14 +71,14 @@ Type: files; Name: "{app}\app\resources\app.codex.asar"
 Type: filesandordirs; Name: "{app}\app\resources\app.codex.asar.unpacked"
 
 [Icons]
-Name: "{autoprograms}\Codex Bot"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\tools\runtime\Launch-Codex-Bot.ps1"""; WorkingDir: "{app}"
-Name: "{autodesktop}\Codex Bot"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\tools\runtime\Launch-Codex-Bot.ps1"""; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\Codex Bot"; Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; WorkingDir: "{app}"
+Name: "{autodesktop}\Codex Bot"; Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: checkedonce
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\tools\runtime\Launch-Codex-Bot.ps1"""; Description: "Launch Codex Bot"; Flags: nowait postinstall skipifsilent
+Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; Description: "Launch Codex Bot"; Flags: nowait postinstall skipifsilent runhidden
 
 [UninstallRun]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\tools\runtime\Disable-Always-On.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "DisableCodexBotBridge"

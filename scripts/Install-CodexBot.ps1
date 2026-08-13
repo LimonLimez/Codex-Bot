@@ -20,8 +20,9 @@ $proxyExe = Join-Path $toolsRoot 'cliproxyapi\cli-proxy-api.exe'
 $runtimeVerifier = Join-Path $toolsRoot 'integrity\Verify-GrokBotRuntime.ps1'
 $runtimeManifest = Join-Path $toolsRoot 'integrity\grok-bot-0.16.0-windows-x64.manifest.json'
 $disableAlwaysOn = Join-Path $toolsRoot 'runtime\Disable-Always-On.ps1'
+$enableAlwaysOn = Join-Path $toolsRoot 'runtime\Enable-Always-On.ps1'
 
-foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandIcon, $proxyExe, $runtimeVerifier, $runtimeManifest, $disableAlwaysOn)) {
+foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandIcon, $proxyExe, $runtimeVerifier, $runtimeManifest, $disableAlwaysOn, $enableAlwaysOn)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Installer input is missing: $required" }
 }
 
@@ -182,5 +183,8 @@ if (Test-Path -LiteralPath $patchedUnpacked) {
     Move-Item -LiteralPath $patchedUnpacked -Destination $targetUnpacked
 }
 
-& (Join-Path $toolsRoot 'runtime\Enable-Always-On.ps1')
+# Register the logon watchdog without starting it. The post-install launcher
+# starts the desktop first, then hands supervision to this task, avoiding two
+# first-run processes racing to claim the same private listeners.
+& $enableAlwaysOn
 Write-Output "Codex Bot installed successfully. Runtime state: $stateRoot"

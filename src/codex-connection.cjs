@@ -12,6 +12,7 @@ const DEFAULT_MODEL = "gpt-5.6-terra";
 const DEFAULT_REASONING = "high";
 const DEFAULT_PROXY_URL = "http://127.0.0.1:8317/v1";
 const DEFAULT_PROXY_KEY = "codex-bot-local";
+const CODEX_DEVICE_URL = "https://auth.openai.com/codex/device";
 const STATE_KEY = Symbol.for("codexbot.connection.state");
 const OAUTH_KEY = Symbol.for("codexbot.connection.oauth");
 const WINDOWS_POWERSHELL = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -222,6 +223,26 @@ async function verifyApiKey(apiKey) {
   return true;
 }
 
+function normalizeCodexDeviceUrl(value) {
+  try {
+    const candidate = new URL(String(value || ""));
+    const pathname = candidate.pathname.replace(/\/+$/, "");
+    if (
+      candidate.protocol !== "https:"
+      || candidate.username
+      || candidate.password
+      || candidate.hostname !== "auth.openai.com"
+      || candidate.port
+      || pathname !== "/codex/device"
+      || candidate.search
+      || candidate.hash
+    ) return null;
+    return CODEX_DEVICE_URL;
+  } catch {
+    return null;
+  }
+}
+
 function beginCodexOAuth() {
   setMode("codex-oauth");
   const executable = process.env.GROK_BOT_CLIPROXY_EXE;
@@ -241,9 +262,17 @@ function beginCodexOAuth() {
     let output = "";
     let settled = false;
     const finish = () => {
-      const url = output.match(/Codex device URL:\s*(https:\/\/\S+)/i)?.[1];
+      const printedUrl = output.match(/Codex device URL:\s*(https:\/\/\S+)/i)?.[1];
       const code = output.match(/Codex device code:\s*([A-Z0-9]{4,8}-[A-Z0-9]{4,8})/i)?.[1];
-      if (!url || !code || settled) return;
+      if (!printedUrl || !code || settled) return;
+      const url = normalizeCodexDeviceUrl(printedUrl);
+      if (!url) {
+        settled = true;
+        clearTimeout(timeout);
+        child.kill();
+        reject(new Error("Codex sign-in returned an unexpected device page. Only the official OpenAI device page is allowed."));
+        return;
+      }
       settled = true;
       clearTimeout(timeout);
       resolve({
@@ -359,5 +388,5 @@ function publicStatus() {
 
 module.exports = {
   account, beginCodexOAuth, getConnection, publicStatus, setApiKey, setMode, usage, verifyApiKey,
-  publicOriginForLog, redactError, redactLogDetails, redactSensitiveText,
+  normalizeCodexDeviceUrl, publicOriginForLog, redactError, redactLogDetails, redactSensitiveText,
 };

@@ -1,6 +1,6 @@
 {
   "name": "codex-bot-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A local patch-and-bridge project that connects a user-owned Grok Bot 0.16.0 frontend to their own Codex account.",
   "private": true,
   "license": "MIT",

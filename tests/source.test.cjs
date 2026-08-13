@@ -127,6 +127,11 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   assert.match(builder, /C1D9F07AF4698C4F63A5F6A866BECD8279B7AF849F6E17D7EF4A7D049B54E3B7/i);
   assert.doesNotMatch(builder, /releases\/latest|CLIProxyAPI\/main\/LICENSE/);
   assert.match(builder, /\.sha256/);
+  assert.match(builder, /package\.json'[)]\s*\|\s*ConvertFrom-Json/);
+  assert.match(builder, /\$installerName\s*=\s*"CodexBot-Setup-\$packageVersion\.exe"/);
+  assert.doesNotMatch(builder, /Get-ChildItem[^\r\n]+CodexBot-Setup-\*\.exe/);
+  assert.match(builder, /\$actualSidecar\s*=\s*\(Get-Content -Raw -LiteralPath \$hashFile\)\.Trim\(\)/);
+  assert.match(builder, /\$actualSidecar -cne \$expectedSidecar/);
   assert.match(manifest, /RemoveUserDataOnUninstall/);
   assert.match(manifest, /Local-Service-Identity\.ps1/);
   assert.match(manifest, /UninstallSilent/);
@@ -144,15 +149,16 @@ test("production PowerShell launches use the absolute system executable", () => 
 
   assert.doesNotMatch(manifest, /Filename:\s*"powershell\.exe"/i);
   assert.doesNotMatch(manifest, /Exec\(\s*['"]powershell\.exe['"]/i);
-  assert.equal((manifest.match(/\{sys\}\\WindowsPowerShell\\v1\.0\\powershell\.exe/gi) || []).length, 6);
+  assert.equal((manifest.match(/\{sys\}\\WindowsPowerShell\\v1\.0\\powershell\.exe/gi) || []).length, 3);
+  assert.equal((manifest.match(/\{sys\}\\wscript\.exe/gi) || []).length, 3);
 
   for (const script of [launcher, enableAlwaysOn]) {
-    assert.match(script, /\$windowsPowerShell\s*=\s*Join-Path \$env:SystemRoot 'System32\\WindowsPowerShell\\v1\.0\\powershell\.exe'/);
-    assert.match(script, /Test-Path -LiteralPath \$windowsPowerShell -PathType Leaf/);
+    assert.match(script, /\$windowsScriptHost\s*=\s*Join-Path \$env:SystemRoot 'System32\\wscript\.exe'/);
+    assert.match(script, /Test-Path -LiteralPath \$windowsScriptHost -PathType Leaf/);
   }
-  assert.match(launcher, /Start-Process -FilePath \$windowsPowerShell/);
+  assert.match(launcher, /Start-Process -FilePath \$windowsScriptHost/);
   assert.doesNotMatch(launcher, /Start-Process -FilePath ['"]powershell\.exe['"]/i);
-  assert.match(enableAlwaysOn, /New-ScheduledTaskAction -Execute \$windowsPowerShell/);
+  assert.match(enableAlwaysOn, /New-ScheduledTaskAction -Execute \$windowsScriptHost/);
   assert.doesNotMatch(enableAlwaysOn, /New-ScheduledTaskAction -Execute ['"]powershell\.exe['"]/i);
 
   assert.match(connection, /path\.join\(process\.env\.SystemRoot \|\| "C:\\\\Windows", "System32", "WindowsPowerShell", "v1\.0", "powershell\.exe"\)/);
@@ -217,7 +223,7 @@ test("release defaults to the verified Codex OAuth model and reports cooldowns",
   assert.match(connection, /model_cooldown/);
 });
 
-test("fresh installs enter the genuine workspace without a vendor account", () => {
+test("fresh installs enter the genuine workspace behind the local Codex connection gate", () => {
   const patcher = read("scripts/patch-app.cjs");
   const ui = read("src/renderer/codex-ui.js");
   assert.match(patcher, /async function gus\(n\)/);
@@ -230,9 +236,32 @@ test("fresh installs enter the genuine workspace without a vendor account", () =
   const rendererIdentityStart = patcher.indexOf("async getCursorAuthStatus(t)");
   const rendererIdentityEnd = patcher.indexOf('"local frontend identity adapter"', rendererIdentityStart);
   assert.ok(rendererIdentityStart >= 0 && rendererIdentityEnd > rendererIdentityStart);
-  assert.match(patcher.slice(rendererIdentityStart, rendererIdentityEnd), /authId: "codex-bot-local"/);
+  assert.match(patcher.slice(rendererIdentityStart, rendererIdentityEnd), /return codexLocalAuthIdentity\(\)/);
+  assert.match(patcher, /function codexLocalAuthIdentity\(\)[\s\S]*?authId: "codex-bot-local"/);
   assert.match(patcher, /local computer setup bypass/);
-  assert.doesNotMatch(ui, /installCodexOnboarding\(lastStatus\)/);
+  assert.match(ui, /installCodexOnboarding\(lastStatus\)/);
+  assert.match(ui, /status\?\.account\?\.signedIn \|\| status\?\.connection\?\.mode === "api-key"/);
+  assert.match(ui, /document\.body\.append\(onboarding\)/);
+});
+
+test("the first-run Codex connection gate blocks the workspace and offers both supported routes", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  const helperSource = ui.match(/function hasCodexConnection\(status\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(helperSource);
+  const hasCodexConnection = Function(`"use strict"; ${helperSource}; return hasCodexConnection;`)();
+  assert.equal(hasCodexConnection(null), false);
+  assert.equal(hasCodexConnection({ account: { signedIn: false }, connection: { mode: "codex-oauth" } }), false);
+  assert.equal(hasCodexConnection({ account: { signedIn: true }, connection: { mode: "codex-oauth" } }), true);
+  assert.equal(hasCodexConnection({ account: { signedIn: false }, connection: { mode: "api-key" } }), true);
+  assert.match(ui, /Connect Codex to start/);
+  assert.match(ui, /Use Codex OAuth/);
+  assert.match(ui, /Use OpenAI API key/);
+  assert.match(ui, /child\.inert = true/);
+  assert.match(ui, /data-codex-connection-required/);
+  assert.match(ui, /for \(const eventName of \["beforeinput", "keydown", "submit"\]\)/);
+  assert.match(ui, /onboarding\?\.remove\(\)/);
+  assert.match(ui, /Manage Codex connection/);
+  assert.doesNotMatch(ui, /Â|â€¦|â€¢|�/);
 });
 
 test("the stock desktop coordinator uses only the configured local gateway identity", () => {

@@ -40,10 +40,10 @@ The patcher deliberately rejects every unknown vendor archive. New Grok Bot rele
 
 ## Install
 
-1. Download `CodexBot-Setup-0.1.0.exe` from this repository's Releases page.
+1. Download `CodexBot-Setup-0.1.1.exe` from this repository's Releases page.
 2. Keep Grok Bot installed. The setup wizard asks for its installation folder, normally `C:\Program Files\Grok Bot`.
 3. Launch Codex Bot.
-4. Open the account panel and choose **Connect Codex account**, then complete sign-in in the browser. An OpenAI API key can be selected instead.
+4. On a fresh install, the blocking **Codex connection** dialog appears automatically. Choose **Use Codex OAuth** and complete sign-in in the browser, or choose **Use OpenAI API key** instead.
 
 The installer copies the user's local app into `%LOCALAPPDATA%\Programs\Codex Bot` and patches only that copy. The original Grok Bot installation is never modified.
 
