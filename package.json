@@ -1,0 +1,27 @@
+{
+  "name": "codex-bot-bridge",
+  "version": "0.1.0",
+  "description": "A local patch-and-bridge project that connects a user-owned Grok Bot 0.16.0 frontend to their own Codex account.",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/LimonLimez/Codex-Bot",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LimonLimez/Codex-Bot.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "audit:release": "node scripts/security-audit.cjs",
+    "check": "node --check scripts/patch-app.cjs && node --check src/bridge.cjs && node --check src/codex-connection.cjs && node --check src/browser-seat-bridge.cjs && node --check src/browser-seats/browser-seat-manager.cjs && node --check src/browser-seats/public-web-proxy.cjs && node --check src/browser-seats/browser-action-approval.cjs && node --check src/browser-seats/browser-control-lease.cjs && node --check src/browser-seats/browser-page-hardening.cjs",
+    "build:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1"
+  },
+  "dependencies": {
+    "@electron/asar": "4.2.1",
+    "playwright-core": "1.62.1",
+    "prettier": "3.9.6",
+    "rcedit": "5.0.2"
+  }
+}

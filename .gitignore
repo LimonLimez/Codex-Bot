@@ -1,0 +1,72 @@
+# Build and release output
+/artifacts/
+/build/
+/dist/
+/node_modules/
+*.exe
+*.msi
+*.zip
+*.7z
+*.asar
+*.asar.unpacked/
+
+# Never publish application/runtime data
+/runtime/
+/data/
+/profiles/
+/browser-data/
+/browser-seats/data/
+**/browser-seats/profiles/
+/local-host-data/
+**/session-state.json
+**/chrome-profile/
+**/Default/Cookies*
+**/Default/History*
+**/Default/Login Data*
+**/Default/Web Data*
+**/Local State
+
+# Credentials and per-install configuration
+runtime.json
+connection.json
+config.yaml
+**/cliproxy/auth/
+**/auth/
+codex-*.json
+host-secrets.json
+box-secrets.json
+gateway.json
+*.token
+*.secret
+*.pem
+*.pfx
+*.key
+.env
+.env.*
+.npmrc
+
+# Logs, databases, attachments, and screenshots
+*.log
+*.jsonl
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+attachments/
+downloads/
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Developer-local files
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+*.user
+*.suo
+*.tmp
+*.bak

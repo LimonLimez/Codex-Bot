@@ -1,0 +1,471 @@
+﻿const GB_SEAT_VIEW_URL = "http://127.0.0.1:__CODEX_VIEW_PORT__",
+  GB_SEAT_REQUEST = globalThis.__CODEX_BOT_VIEW_REQUEST__;
+function GBApprovalDetailLines(presentation) {
+  const lines = [];
+  for (const action of presentation?.actions ?? []) {
+    const kind = String(action?.kind || "interactive action").replace(/(^|\s)([a-z])/g, (_m, lead, letter) => `${lead}${letter.toUpperCase()}`);
+    lines.push(`Action: ${kind}`);
+    action?.destination && lines.push(`Destination: ${action.destination}`);
+    if (action?.target) {
+      const target = [
+        action.target.name ? `“${action.target.name}”` : "",
+        action.target.role || "",
+        action.target.fieldType || "",
+      ].filter(Boolean).join(" · ");
+      target && lines.push(`Target: ${target}`);
+    }
+    if (action?.form) {
+      const form = [
+        action.form.method || "Form",
+        action.form.destination ? `→ ${action.form.destination}` : "",
+      ].filter(Boolean).join(" ");
+      lines.push(`Form: ${form}`);
+    }
+    action?.typedContent && lines.push(
+      `Content: ${action.typedContent.category} · ${action.typedContent.length} character${action.typedContent.length === 1 ? "" : "s"}`,
+    );
+  }
+  return lines;
+}
+function GBLiveSeat({ agentId: n, subjectLabel: e }) {
+  const [t, s] = T.useState(null),
+    [r, i] = T.useState(null),
+    [o, l] = T.useState(!1),
+    [q, Q] = T.useState(null),
+    [c, u] = T.useState(""),
+    d = T.useRef(null),
+    m = T.useRef(null),
+    f = T.useRef(null),
+    p = T.useRef(!1),
+    aP = T.useRef(!1),
+    yC = T.useRef(globalThis.crypto.randomUUID());
+  const g = T.useCallback(async () => {
+    if (p.current) return;
+    p.current = !0;
+    try {
+      const v = await GB_SEAT_REQUEST(`/api/frame?seatKey=${encodeURIComponent(n)}`);
+      (s(`data:image/png;base64,${v.screenshotBase64}`),
+        i(v),
+        document.activeElement !== m.current && u(v.url ?? ""));
+    } catch (a) {
+      i({ pageState: "unavailable", error: String(a?.message ?? a) });
+    } finally {
+      p.current = !1;
+    }
+  }, [n]);
+  const j = T.useCallback(async () => {
+    if (aP.current) return;
+    aP.current = !0;
+    try {
+      const B = await GB_SEAT_REQUEST(`/api/approval?seatKey=${encodeURIComponent(n)}`);
+      Q(B.pending ?? null);
+    } catch {
+      // Approval polling is independent from the live frame. A temporarily
+      // delayed screenshot must never hide or deadlock a pending decision.
+    } finally {
+      aP.current = !1;
+    }
+  }, [n]);
+  T.useEffect(() => {
+    let a = !0;
+    g();
+    const v = setInterval(() => a && g(), 850);
+    return () => {
+      ((a = !1), clearInterval(v));
+    };
+  }, [g]);
+  T.useEffect(() => {
+    let a = !0;
+    j();
+    const v = setInterval(() => a && j(), 350);
+    return () => {
+      ((a = !1), clearInterval(v));
+    };
+  }, [j]);
+  T.useEffect(() => {
+    o && setTimeout(() => d.current?.focus(), 0);
+  }, [o]);
+  T.useEffect(() => {
+    if (!o) return;
+    let a = !0;
+    const v = setInterval(async () => {
+      try {
+        await GB_SEAT_REQUEST("/api/control", {
+          seatKey: n,
+          controlId: yC.current,
+          action: "heartbeat",
+        });
+      } catch {
+        a && l(!1);
+      }
+    }, 5000);
+    return () => {
+      ((a = !1), clearInterval(v));
+    };
+  }, [n, o]);
+  T.useEffect(
+    () => () => {
+      GB_SEAT_REQUEST("/api/control", {
+        seatKey: n,
+        controlId: yC.current,
+        action: "release",
+      }).catch(() => {});
+    },
+    [n],
+  );
+  const k = T.useCallback(
+      async (a) => {
+        if (!o) return;
+        try {
+          const y = await GB_SEAT_REQUEST("/api/input", {
+            seatKey: n,
+            controlId: yC.current,
+            actions: a,
+          });
+          (i((x) => ({ ...x, ...y })), u(y.url ?? c), g());
+        } catch (v) {
+          i((y) => ({
+            ...y,
+            pageState: "unavailable",
+            error: String(v?.message ?? v),
+          }));
+        }
+      },
+      [n, c, g, o],
+    ),
+    H = T.useCallback(async () => {
+      try {
+        if (o) {
+          await GB_SEAT_REQUEST("/api/control", {
+            seatKey: n,
+            controlId: yC.current,
+            action: "release",
+          });
+          l(!1);
+          return;
+        }
+        await GB_SEAT_REQUEST("/api/control", {
+          seatKey: n,
+          controlId: yC.current,
+          action: "acquire",
+        });
+        (Q(null), l(!0), setTimeout(() => d.current?.focus(), 0));
+      } catch (a) {
+        i((v) => ({ ...v, pageState: "unavailable", error: String(a?.message ?? a) }));
+      }
+    }, [n, o]),
+    w = T.useCallback((a) => {
+      const v = f.current?.getBoundingClientRect();
+      return v
+        ? {
+            x: Math.max(
+              0,
+              Math.min(
+                1279,
+                Math.round(((a.clientX - v.left) / v.width) * 1280),
+              ),
+            ),
+            y: Math.max(
+              0,
+              Math.min(799, Math.round(((a.clientY - v.top) / v.height) * 800)),
+            ),
+          }
+        : { x: 0, y: 0 };
+    }, []),
+    R = T.useCallback(
+      async (a) => {
+        if (!q) return;
+        await GB_SEAT_REQUEST("/api/approval", { seatKey: n, decision: a, binding: q });
+        Q(null);
+        (j(), g());
+      },
+      [n, q, j, g],
+    ),
+    b = T.useCallback(
+      (a) => {
+        if (a.target.closest?.('[data-gb-overlay="1"]')) return;
+        if (!o) {
+          H();
+          return;
+        }
+        (a.preventDefault(), d.current?.focus());
+        const v = w(a);
+        ((f.current.__gbDrag = {
+          start: v,
+          points: [v],
+          button: a.button === 2 ? 2 : a.button === 1 ? 3 : 1,
+        }),
+          a.currentTarget.setPointerCapture?.(a.pointerId));
+      },
+      [o, w, H],
+    ),
+    S = T.useCallback(
+      (a) => {
+        const v = f.current?.__gbDrag;
+        if (!v) return;
+        const y = w(a),
+          x = v.points[v.points.length - 1];
+        v.points.length < 64 &&
+          Math.hypot(y.x - x.x, y.y - x.y) >= 4 &&
+          v.points.push(y);
+      },
+      [w],
+    ),
+    E = T.useCallback(
+      (a) => {
+        const v = f.current?.__gbDrag;
+        if (!v) return;
+        const y = w(a);
+        ((f.current.__gbDrag = null),
+          a.currentTarget.releasePointerCapture?.(a.pointerId));
+        const x = Math.hypot(y.x - v.start.x, y.y - v.start.y);
+        x > 8 && v.button === 1
+          ? k([{ kind: "drag", path: [...v.points, y], button: v.button }])
+          : k([
+              {
+                kind: "click",
+                coordinate: y,
+                button: v.button,
+                count: 1,
+              },
+            ]);
+      },
+      [k, w],
+    ),
+    N = T.useCallback(
+      (a) => {
+        if (!o || a.target.closest?.('[data-gb-overlay="1"]')) return;
+        a.preventDefault();
+        const v = w(a),
+          y = Math.abs(a.deltaX) > Math.abs(a.deltaY),
+          x = y ? (a.deltaX < 0 ? 3 : 4) : a.deltaY < 0 ? 1 : 2,
+          A = Math.max(
+            1,
+            Math.min(12, Math.ceil(Math.abs(y ? a.deltaX : a.deltaY) / 120)),
+          );
+        k([{ kind: "scroll", coordinate: v, direction: x, amount: A }]);
+      },
+      [o, w, k],
+    ),
+    A = T.useCallback(
+      (a) => {
+        if (!o || a.target.closest?.('[data-gb-overlay="1"]')) return;
+        if (["Control", "Alt", "Shift", "Meta"].includes(a.key)) return;
+        if (a.ctrlKey && a.key.toLowerCase() === "v") return;
+        (a.preventDefault(), a.stopPropagation());
+        if (a.key.length === 1 && !a.ctrlKey && !a.altKey && !a.metaKey) {
+          k([{ kind: "type", text: a.key }]);
+          return;
+        }
+        const v = [];
+        (a.ctrlKey && v.push("CTRL"),
+          a.altKey && v.push("ALT"),
+          a.shiftKey && v.push("SHIFT"),
+          a.metaKey && v.push("META"));
+        const y = a.key === " " ? "SPACE" : a.key;
+        (v.push(y), k([{ kind: "key", key: v.join("+") }]));
+      },
+      [o, k],
+    ),
+    C = T.useCallback(
+      (a) => {
+        if (!o || a.target.closest?.('[data-gb-overlay="1"]')) return;
+        const v = a.clipboardData?.getData("text");
+        v &&
+          (a.preventDefault(),
+          a.stopPropagation(),
+          k([{ kind: "type", text: v }]));
+      },
+      [o, k],
+    ),
+    P = r?.pageState === "challenge",
+    _ = r?.pageState === "unavailable",
+    L = P
+      ? "Verification needed"
+      : _
+        ? "View unavailable"
+        : o
+          ? "You have control"
+          : "Live";
+  return h.jsxs("div", {
+    ref: d,
+    role: "application",
+    tabIndex: 0,
+    "aria-label": `${e}'s live browser. ${L}`,
+    title: o
+      ? "Your mouse and keyboard now control this employee's private browser"
+      : "Click the view or Take control to interact",
+    onPointerDown: b,
+    onPointerMove: S,
+    onPointerUp: E,
+    onWheel: N,
+    onKeyDown: A,
+    onPaste: C,
+    onContextMenu: (a) => o && a.preventDefault(),
+    style: {
+      position: "absolute",
+      inset: 0,
+      zIndex: 50,
+      overflow: "hidden",
+      outline: o ? "2px solid #2f81f7" : "none",
+      outlineOffset: "-2px",
+      background: "#090909",
+      cursor: o ? "default" : "pointer",
+    },
+    children: [
+      t
+        ? h.jsx("img", {
+            ref: f,
+            src: t,
+            alt: `${e}'s live browser`,
+            draggable: !1,
+            style: {
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "fill",
+              userSelect: "none",
+              pointerEvents: "none",
+            },
+          })
+        : h.jsx("div", {
+            ref: f,
+            style: {
+              position: "absolute",
+              inset: 0,
+              display: "grid",
+              placeItems: "center",
+              color: "#a8a8a8",
+              fontSize: 12,
+            },
+            children: `Starting ${e}'s browser…`,
+          }),
+      h.jsxs("div", {
+        "data-gb-overlay": "1",
+        style: {
+          position: "absolute",
+          left: 6,
+          right: 6,
+          top: 6,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          pointerEvents: "none",
+        },
+        children: [
+          h.jsx("button", {
+            type: "button",
+            onPointerDown: (a) => a.stopPropagation(),
+            onClick: (a) => {
+              (a.stopPropagation(), H());
+            },
+            style: {
+              pointerEvents: "auto",
+              border: "1px solid rgba(255,255,255,.22)",
+              borderRadius: 999,
+              background: o ? "#2f81f7" : "rgba(20,20,20,.88)",
+              color: "white",
+              padding: "5px 9px",
+              fontSize: 11,
+              fontWeight: 600,
+            },
+            children: o ? "Release control" : "Take control",
+          }),
+          o
+            ? h.jsx("input", {
+                ref: m,
+                value: c,
+                "aria-label": "Browser address",
+                spellCheck: !1,
+                onPointerDown: (a) => a.stopPropagation(),
+                onPaste: (a) => a.stopPropagation(),
+                onChange: (a) => u(a.target.value),
+                onKeyDown: (a) => {
+                  if (a.key !== "Enter") return;
+                  (a.preventDefault(), a.stopPropagation());
+                  const v = c.trim();
+                  v &&
+                    (k([
+                      { kind: "key", key: "CTRL+L" },
+                      { kind: "type", text: v },
+                      { kind: "key", key: "ENTER" },
+                    ]),
+                    m.current?.blur(),
+                    d.current?.focus());
+                },
+                style: {
+                  pointerEvents: "auto",
+                  minWidth: 0,
+                  flex: 1,
+                  border: "1px solid rgba(255,255,255,.22)",
+                  borderRadius: 999,
+                  background: "rgba(20,20,20,.88)",
+                  color: "white",
+                  padding: "5px 9px",
+                  fontSize: 11,
+                  outline: "none",
+                },
+              })
+            : null,
+          h.jsxs("span", {
+            style: {
+              marginLeft: "auto",
+              flex: "none",
+              borderRadius: 999,
+              background: "rgba(20,20,20,.88)",
+              color: P ? "#ffd866" : _ ? "#ff7b72" : "#d5d5d5",
+              padding: "5px 8px",
+              fontSize: 10,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+            },
+            children: ["● ", L],
+          }),
+        ],
+      }),
+      q
+        ? h.jsxs("div", {
+            "data-gb-overlay": "1",
+            role: "dialog",
+            "aria-label": "Browser action approval",
+            style: {
+              position: "absolute",
+              left: 12,
+              right: 12,
+              bottom: 12,
+              display: "grid",
+              gap: 8,
+              padding: 12,
+              border: "1px solid rgba(255,255,255,.24)",
+              borderRadius: 12,
+              background: "rgba(18,18,18,.97)",
+              color: "white",
+              boxShadow: "0 10px 32px rgba(0,0,0,.45)",
+            },
+            onPointerDown: (a) => a.stopPropagation(),
+            onKeyDown: (a) => a.stopPropagation(),
+            onPaste: (a) => a.stopPropagation(),
+            children: [
+              h.jsx("strong", { children: "Approval needed" }),
+              h.jsx("span", { style: { fontSize: 12, color: "#d5d5d5" }, children: `${q.summary} on ${q.origin}` }),
+              ...GBApprovalDetailLines(q.presentation).map((a, v) => h.jsx("span", {
+                style: { fontSize: 11, color: "#b8b8b8", overflowWrap: "anywhere" },
+                children: a,
+              }, `approval-detail-${v}`)),
+              h.jsxs("div", {
+                style: { display: "flex", gap: 8, flexWrap: "wrap" },
+                children: [
+                  h.jsx("button", { type: "button", onClick: () => R("allow-once"), children: "Allow once" }),
+                  q.siteLeaseAvailable
+                    ? h.jsx("button", { type: "button", onClick: () => R("allow-site"), children: "Allow this site briefly" })
+                    : null,
+                  h.jsx("button", { type: "button", onClick: () => R("deny"), children: "Deny" }),
+                ],
+              }),
+            ],
+          })
+        : null,
+    ],
+  });
+}
