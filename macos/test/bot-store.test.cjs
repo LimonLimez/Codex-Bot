@@ -1,0 +1,1227 @@
+"use strict";
+
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const { AsyncResource } = require("node:async_hooks");
+
+const { BotStore } = require("../src/bots/bot-store.cjs");
+
+const BOT_A_UUID = "11111111-1111-4111-8111-111111111111";
+const BOT_B_UUID = "22222222-2222-4222-8222-222222222222";
+const BOT_C_UUID = "33333333-3333-4333-8333-333333333333";
+const BOT_CASE_UUID = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+const TEMP_A_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const TEMP_B_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const TEMP_C_UUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const NOW = "2026-08-14T12:34:56.000Z";
+
+function sequence(values) {
+  let index = 0;
+  return () => {
+    assert.ok(index < values.length, "test UUID sequence was exhausted");
+    return values[index++];
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((fulfill, fail) => {
+    resolve = fulfill;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
+async function temporaryStore(t, options = {}) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-store-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "bots.json");
+  return {
+    directory,
+    filePath,
+    store: new BotStore({
+      filePath,
+      now: () => NOW,
+      randomUUID: sequence(options.uuids || [BOT_A_UUID, TEMP_A_UUID, BOT_B_UUID, TEMP_B_UUID, BOT_C_UUID, TEMP_C_UUID]),
+      ...(options.fs ? { fs: options.fs } : {}),
+    }),
+  };
+}
+
+function expectedBot(overrides = {}) {
+  const base = {
+    schemaVersion: 1,
+    botId: `bot-${BOT_A_UUID}`,
+    name: "New Bot",
+    appearance: {
+      shape: "blob",
+      color: "red",
+      image: null,
+      title: "",
+      description: "",
+    },
+    notifications: true,
+    createdAt: NOW,
+    updatedAt: NOW,
+    conversations: [],
+    runtime: {
+      provider: null,
+      remoteRuntimeId: null,
+      state: "unprovisioned",
+      lastConfirmedAt: null,
+      lastErrorCode: null,
+    },
+  };
+  return {
+    ...base,
+    ...overrides,
+    appearance: { ...base.appearance, ...(overrides.appearance || {}) },
+    runtime: { ...base.runtime, ...(overrides.runtime || {}) },
+  };
+}
+
+function validStoreDocument(bots = [], legacyImports = {}) {
+  return { schemaVersion: 1, bots, legacyImports };
+}
+
+async function writeDocument(filePath, document) {
+  await fs.writeFile(filePath, `${JSON.stringify(document, null, 2)}\n`, "utf8");
+}
+
+function assertDeepFrozen(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  assert.equal(Object.isFrozen(value), true);
+  for (const nested of Object.values(value)) assertDeepFrozen(nested, seen);
+}
+
+async function outcomeWithin(promise, timeoutMs = 75) {
+  let timeout;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(
+        (value) => ({ status: "fulfilled", value }),
+        (error) => ({ status: "rejected", error }),
+      ),
+      new Promise((resolve) => {
+        timeout = setTimeout(() => resolve({ status: "timeout" }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function assertRuntimeTransactionReentry(outcome) {
+  assert.equal(outcome.status, "rejected", "same-path Store operation must reject without deadlocking");
+  assert.equal(outcome.error?.code, "BOT_STORE_RUNTIME_TRANSACTION_REENTRANT");
+  assert.equal(
+    outcome.error?.message,
+    "Bot store same-path operation is not allowed inside a runtime transaction.",
+  );
+  assert.doesNotMatch(JSON.stringify({
+    code: outcome.error?.code,
+    message: outcome.error?.message,
+  }), /bots\.json|codex-bot-store-|endpoint|authToken|secret/i);
+}
+
+function assertRuntimeTransactionBusy(outcome) {
+  assert.equal(outcome.status, "rejected", "active same-path transaction access must reject without queueing");
+  assert.equal(outcome.error?.code, "BOT_STORE_RUNTIME_TRANSACTION_BUSY");
+  assert.equal(
+    outcome.error?.message,
+    "Bot store path is busy with an active runtime transaction.",
+  );
+  assert.doesNotMatch(JSON.stringify({
+    code: outcome.error?.code,
+    message: outcome.error?.message,
+  }), /bots\.json|codex-bot-store-|endpoint|authToken|secret/i);
+}
+
+test("create stores a stable literal New Bot and ignores caller-owned identity", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const input = {
+    botId: "bot-forged",
+    name: "Search text must not become a name",
+    appearance: { shape: "pebble", color: "blue" },
+    notifications: false,
+    runtime: { provider: "forged", remoteRuntimeId: "shared-runtime", state: "ready" },
+    conversations: [{ source: "chatgpt", conversationId: "forged-chat" }],
+    endpoint: "wss://private.example.test/app-server",
+    authToken: "secret",
+    unknown: "ignored",
+  };
+
+  const created = await store.create(input);
+  assert.deepEqual(created, expectedBot({
+    appearance: { shape: "pebble", color: "blue" },
+    notifications: false,
+  }));
+  assert.equal(created.name, "New Bot");
+  assert.match(created.botId, /^bot-[0-9a-f-]{36}$/);
+  assert.deepEqual(created.runtime, {
+    provider: null,
+    remoteRuntimeId: null,
+    state: "unprovisioned",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+  });
+  assert.deepEqual(created.conversations, []);
+
+  input.appearance.shape = "gem";
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.deepEqual(persisted, validStoreDocument([expectedBot({
+    appearance: { shape: "pebble", color: "blue" },
+    notifications: false,
+  })]));
+  assert.doesNotMatch(JSON.stringify(persisted), /forged|private\.example|secret|unknown/);
+});
+
+test("create inspects only supported fields and never traverses ignored getters or proxy traps", async (t) => {
+  const { store } = await temporaryStore(t);
+  let ignoredGetterCalls = 0;
+  let appearanceGetterCalls = 0;
+  const appearance = { shape: "gem", color: "blue" };
+  Object.defineProperty(appearance, "secret", {
+    enumerable: true,
+    get() {
+      appearanceGetterCalls += 1;
+      throw new Error("ignored appearance getter ran");
+    },
+  });
+  const input = { appearance, notifications: false };
+  Object.defineProperty(input, "runtime", {
+    enumerable: true,
+    get() {
+      ignoredGetterCalls += 1;
+      throw new Error("ignored runtime getter ran");
+    },
+  });
+
+  const created = await store.create(input);
+  assert.equal(created.appearance.shape, "gem");
+  assert.equal(created.appearance.color, "blue");
+  assert.equal(created.notifications, false);
+  assert.equal(ignoredGetterCalls, 0);
+  assert.equal(appearanceGetterCalls, 0);
+
+  const trapCalls = { ownKeys: 0, get: 0, getPrototypeOf: 0 };
+  const proxy = new Proxy({}, {
+    ownKeys() {
+      trapCalls.ownKeys += 1;
+      throw new Error("ignored ownKeys trap ran");
+    },
+    get() {
+      trapCalls.get += 1;
+      throw new Error("ignored get trap ran");
+    },
+    getPrototypeOf() {
+      trapCalls.getPrototypeOf += 1;
+      throw new Error("ignored getPrototypeOf trap ran");
+    },
+    getOwnPropertyDescriptor(_target, key) {
+      if (key === "appearance") return { configurable: true, enumerable: true, writable: true, value: { shape: "egg" } };
+      if (key === "notifications") return { configurable: true, enumerable: true, writable: true, value: true };
+      return undefined;
+    },
+  });
+  const proxied = await store.create(proxy);
+  assert.equal(proxied.appearance.shape, "egg");
+  assert.equal(proxied.notifications, true);
+  assert.deepEqual(trapCalls, { ownKeys: 0, get: 0, getPrototypeOf: 0 });
+
+  let selectedGetterCalls = 0;
+  const selectedAccessor = {};
+  Object.defineProperty(selectedAccessor, "notifications", {
+    enumerable: true,
+    get() {
+      selectedGetterCalls += 1;
+      return false;
+    },
+  });
+  await assert.rejects(store.create(selectedAccessor), /accessor|plain data/i);
+  assert.equal(selectedGetterCalls, 0);
+});
+
+test("rename is the only naming path and profile updates are strictly scoped", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create({ name: "Not a name" });
+  const renamed = await store.rename(created.botId, "Nova");
+  assert.equal(renamed.name, "Nova");
+
+  const updated = await store.updateProfile(created.botId, {
+    appearance: {
+      shape: "gem",
+      color: "violet",
+      image: "data:image/png;base64,aGVsbG8=",
+      title: "Builder",
+      description: "Ships code",
+    },
+    notifications: false,
+  });
+  assert.deepEqual(updated.appearance, {
+    shape: "gem",
+    color: "violet",
+    image: "data:image/png;base64,aGVsbG8=",
+    title: "Builder",
+    description: "Ships code",
+  });
+  assert.equal(updated.notifications, false);
+  assert.equal(updated.name, "Nova");
+  assert.equal(updated.botId, created.botId);
+  assert.deepEqual(updated.runtime, created.runtime);
+  assert.deepEqual(updated.conversations, []);
+
+  await assert.rejects(store.updateProfile(created.botId, { name: "Profile rename" }), /unsupported profile field/i);
+  await assert.rejects(store.updateProfile(created.botId, { runtime: { state: "ready" } }), /unsupported profile field/i);
+  await assert.rejects(store.updateProfile(created.botId, { appearance: { source: "image" } }), /appearance field/i);
+  await assert.rejects(store.rename(created.botId, ""), /name/i);
+  await assert.rejects(store.rename(created.botId, "n".repeat(161)), /name/i);
+  assert.equal((await store.read(created.botId)).name, "Nova");
+});
+
+test("public values are detached deeply frozen snapshots", async (t) => {
+  const { store } = await temporaryStore(t);
+  const input = { appearance: { shape: "pebble", color: "blue" } };
+  const created = await store.create(input);
+  const listed = await store.list();
+  const read = await store.read(created.botId);
+
+  assert.notEqual(created, listed[0]);
+  assert.notEqual(listed[0], read);
+  assert.notEqual(created.appearance, read.appearance);
+  assertDeepFrozen(created);
+  assertDeepFrozen(listed);
+  assertDeepFrozen(read);
+  assert.throws(() => { created.name = "Mutated"; }, TypeError);
+  assert.throws(() => { listed[0].appearance.shape = "gem"; }, TypeError);
+  assert.throws(() => { read.conversations.push({ source: "chatgpt", conversationId: "chat-forged" }); }, TypeError);
+  input.appearance.shape = "egg";
+  assert.equal((await store.read(created.botId)).appearance.shape, "pebble");
+  assert.equal((await store.read(created.botId)).name, "New Bot");
+});
+
+test("serializes overlapping creates without losing either identity", async (t) => {
+  const { filePath, store } = await temporaryStore(t, {
+    uuids: [BOT_A_UUID, TEMP_A_UUID, BOT_B_UUID, TEMP_B_UUID],
+  });
+  const [first, second] = await Promise.all([store.create(), store.create()]);
+  assert.notEqual(first.botId, second.botId);
+  assert.equal((await store.list()).length, 2);
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.deepEqual(new Set(persisted.bots.map(({ botId }) => botId)), new Set([first.botId, second.botId]));
+});
+
+test("fresh Store instances see authoritative same-path mutations", async (t) => {
+  const { filePath, store: firstStore } = await temporaryStore(t);
+  const created = await firstStore.create();
+  const secondStore = new BotStore({ filePath, now: () => NOW });
+  await secondStore.load();
+
+  await firstStore.rename(created.botId, "Visible from disk");
+
+  assert.equal((await secondStore.read(created.botId)).name, "Visible from disk");
+});
+
+test("runtime transaction busy rejection preserves a later stale CAS mismatch", async (t) => {
+  const { filePath, store: firstStore } = await temporaryStore(t);
+  const created = await firstStore.create();
+  await firstStore.updateRuntime(created.botId, {
+    state: "provisioning",
+    lastErrorCode: "RUNTIME_OPERATION.seed",
+  });
+  const secondStore = new BotStore({ filePath, now: () => NOW });
+  let staleCallbackCalls = 0;
+  const entered = deferred();
+  const release = deferred();
+
+  const winnerPromise = firstStore.runtimeTransaction(
+    created.botId,
+    { expectedLastErrorCode: "RUNTIME_OPERATION.seed" },
+    async ({ updateRuntime }) => {
+      entered.resolve();
+      await release.promise;
+      updateRuntime({ lastErrorCode: "RUNTIME_OPERATION.winner" });
+    },
+  );
+  await entered.promise;
+  const busy = await outcomeWithin(secondStore.runtimeTransaction(
+    created.botId,
+    { expectedLastErrorCode: "RUNTIME_OPERATION.seed" },
+    () => { staleCallbackCalls += 1; },
+  ));
+  assertRuntimeTransactionBusy(busy);
+  assert.equal(staleCallbackCalls, 0);
+  release.resolve();
+  const winner = await winnerPromise;
+  const stale = await secondStore.runtimeTransaction(
+    created.botId,
+    { expectedLastErrorCode: "RUNTIME_OPERATION.seed" },
+    () => { staleCallbackCalls += 1; },
+  );
+
+  assert.equal(winner.matched, true);
+  assert.equal(winner.bot.runtime.lastErrorCode, "RUNTIME_OPERATION.winner");
+  assert.equal(stale.matched, false);
+  assert.equal(stale.bot.runtime.lastErrorCode, "RUNTIME_OPERATION.winner");
+  assert.equal(staleCallbackCalls, 0);
+  assertDeepFrozen(winner);
+  assertDeepFrozen(stale);
+});
+
+test("a busy unrelated-bot update can retry after the runtime transaction without data loss", async (t) => {
+  const { filePath, store: firstStore } = await temporaryStore(t, {
+    uuids: [BOT_A_UUID, TEMP_A_UUID, BOT_B_UUID, TEMP_B_UUID, TEMP_C_UUID],
+  });
+  const first = await firstStore.create();
+  const second = await firstStore.create();
+  const secondStore = new BotStore({ filePath, now: () => NOW });
+  const entered = deferred();
+  const release = deferred();
+
+  const runtimeWrite = firstStore.runtimeTransaction(first.botId, {}, async ({ updateRuntime }) => {
+    entered.resolve();
+    await release.promise;
+    updateRuntime({
+      provider: "openai",
+      remoteRuntimeId: "runtime-cross-instance",
+      state: "ready",
+      lastConfirmedAt: NOW,
+      lastErrorCode: null,
+    });
+  });
+  await entered.promise;
+  const busyRename = await outcomeWithin(secondStore.rename(second.botId, "Must not queue"));
+  assertRuntimeTransactionBusy(busyRename);
+  release.resolve();
+  await runtimeWrite;
+  await secondStore.rename(second.botId, "Preserved rename");
+
+  const authoritative = await new BotStore({ filePath }).list();
+  assert.equal(authoritative.find(({ botId }) => botId === first.botId).runtime.remoteRuntimeId, "runtime-cross-instance");
+  assert.equal(authoritative.find(({ botId }) => botId === second.botId).name, "Preserved rename");
+});
+
+test("a thrown runtime transaction releases the same-path lock without committing", async (t) => {
+  const { filePath, store: firstStore } = await temporaryStore(t);
+  const created = await firstStore.create();
+  const secondStore = new BotStore({ filePath, now: () => NOW });
+
+  await assert.rejects(firstStore.runtimeTransaction(created.botId, {}, ({ updateRuntime }) => {
+    updateRuntime({ state: "provisioning", lastErrorCode: "RUNTIME_OPERATION.discarded" });
+    throw new Error("transaction aborted");
+  }), /transaction aborted/);
+  const renamed = await secondStore.rename(created.botId, "Lock released");
+
+  assert.equal(renamed.name, "Lock released");
+  assert.equal(renamed.runtime.state, "unprovisioned");
+  assert.equal(renamed.runtime.lastErrorCode, null);
+});
+
+test("runtime transactions promptly reject same-path reads through the same or another Store", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const created = await store.create();
+  const otherStore = new BotStore({ filePath, now: () => NOW });
+  let sameStoreRead;
+  let otherStoreRead;
+
+  await store.runtimeTransaction(created.botId, {}, async () => {
+    [sameStoreRead, otherStoreRead] = await Promise.all([
+      outcomeWithin(store.read(created.botId)),
+      outcomeWithin(otherStore.read(created.botId)),
+    ]);
+  });
+
+  const later = await otherStore.rename(created.botId, "Lock still usable");
+  assertRuntimeTransactionReentry(sameStoreRead);
+  assertRuntimeTransactionReentry(otherStoreRead);
+  assert.equal(later.name, "Lock still usable");
+});
+
+test("runtime transactions promptly reject nested transactions and mutations then release the lock", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const created = await store.create();
+  const otherStore = new BotStore({ filePath, now: () => NOW });
+  let nestedTransaction;
+  let sameStoreMutation;
+  let otherStoreMutation;
+
+  await store.runtimeTransaction(created.botId, {}, async () => {
+    [nestedTransaction, sameStoreMutation, otherStoreMutation] = await Promise.all([
+      outcomeWithin(store.runtimeTransaction(created.botId, {}, () => {})),
+      outcomeWithin(store.updateRuntime(created.botId, { state: "provisioning" })),
+      outcomeWithin(otherStore.rename(created.botId, "Must not run from transaction")),
+    ]);
+  });
+
+  const later = await otherStore.rename(created.botId, "Ordinary later mutation");
+  assertRuntimeTransactionReentry(nestedTransaction);
+  assertRuntimeTransactionReentry(sameStoreMutation);
+  assertRuntimeTransactionReentry(otherStoreMutation);
+  assert.equal(later.name, "Ordinary later mutation");
+  assert.equal(later.runtime.state, "unprovisioned");
+});
+
+test("nested path transactions reject an outer-path reentry instead of forgetting the outer lock", async (t) => {
+  const first = await temporaryStore(t);
+  const second = await temporaryStore(t);
+  const firstBot = await first.store.create();
+  const secondBot = await second.store.create();
+  let outerPathRead;
+
+  await first.store.runtimeTransaction(firstBot.botId, {}, async () => {
+    await second.store.runtimeTransaction(secondBot.botId, {}, async ({ updateRuntime }) => {
+      outerPathRead = await outcomeWithin(first.store.read(firstBot.botId));
+      updateRuntime({ state: "provisioning" });
+    });
+  });
+
+  const laterFirst = await first.store.rename(firstBot.botId, "Outer lock released");
+  const laterSecond = await second.store.read(secondBot.botId);
+  assertRuntimeTransactionReentry(outerPathRead);
+  assert.equal(laterFirst.name, "Outer lock released");
+  assert.equal(laterSecond.runtime.state, "provisioning");
+});
+
+test("inverse runtime transactions reject cross-path access instead of deadlocking", async (t) => {
+  const first = await temporaryStore(t);
+  const second = await temporaryStore(t);
+  const firstBot = await first.store.create();
+  const secondBot = await second.store.create();
+  const firstEntered = deferred();
+  const secondEntered = deferred();
+  let firstCrossRead;
+  let secondCrossRead;
+
+  const firstTransaction = first.store.runtimeTransaction(firstBot.botId, {}, async () => {
+    firstEntered.resolve();
+    await secondEntered.promise;
+    firstCrossRead = await outcomeWithin(second.store.read(secondBot.botId));
+  });
+  const secondTransaction = second.store.runtimeTransaction(secondBot.botId, {}, async () => {
+    secondEntered.resolve();
+    await firstEntered.promise;
+    secondCrossRead = await outcomeWithin(first.store.read(firstBot.botId));
+  });
+  await Promise.all([firstTransaction, secondTransaction]);
+
+  assertRuntimeTransactionBusy(firstCrossRead);
+  assertRuntimeTransactionBusy(secondCrossRead);
+  assert.equal((await first.store.rename(firstBot.botId, "First lock recovered")).name, "First lock recovered");
+  assert.equal((await second.store.rename(secondBot.botId, "Second lock recovered")).name, "Second lock recovered");
+});
+
+test("outside same-path reads mutations and transactions reject while a runtime transaction is active", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const created = await store.create();
+  const readingStore = new BotStore({ filePath, now: () => NOW });
+  const mutatingStore = new BotStore({ filePath, now: () => NOW });
+  const transactionStore = new BotStore({ filePath, now: () => NOW });
+  const entered = deferred();
+  const release = deferred();
+
+  const activeTransaction = store.runtimeTransaction(created.botId, {}, async () => {
+    entered.resolve();
+    await release.promise;
+  });
+  await entered.promise;
+  const [readOutcome, mutationOutcome, transactionOutcome] = await Promise.all([
+    outcomeWithin(readingStore.read(created.botId)),
+    outcomeWithin(mutatingStore.rename(created.botId, "Must not queue")),
+    outcomeWithin(transactionStore.runtimeTransaction(created.botId, {}, () => {})),
+  ]);
+  release.resolve();
+  await activeTransaction;
+
+  assertRuntimeTransactionBusy(readOutcome);
+  assertRuntimeTransactionBusy(mutationOutcome);
+  assertRuntimeTransactionBusy(transactionOutcome);
+  assert.equal((await readingStore.read(created.botId)).name, "New Bot");
+  assert.equal((await mutatingStore.rename(created.botId, "Lock released")).name, "Lock released");
+  const laterTransaction = await transactionStore.runtimeTransaction(created.botId, {}, ({ updateRuntime }) => {
+    updateRuntime({ state: "provisioning" });
+  });
+  assert.equal(laterTransaction.bot.runtime.state, "provisioning");
+});
+
+test("escaped provider callbacks cannot await the Store's active runtime transaction owner", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create();
+  const escapedResource = new AsyncResource("escaped-store-owner-wait");
+  t.after(() => escapedResource.emitDestroy());
+  let escapedOutcome;
+
+  await store.runtimeTransaction(created.botId, {}, async () => {
+    escapedOutcome = await outcomeWithin(
+      Promise.resolve().then(() => escapedResource.runInAsyncScope(() => (
+        store.waitForRuntimeTransaction()
+      ))),
+    );
+  });
+
+  assert.equal(escapedOutcome.status, "rejected", "escaped callback must reject instead of awaiting its owner");
+  assert.equal(typeof store.waitForRuntimeTransaction, "undefined");
+  assert.doesNotMatch(JSON.stringify({
+    code: escapedOutcome.error?.code,
+    message: escapedOutcome.error?.message,
+  }), /bots\.json|codex-bot-store-|endpoint|authToken|secret/i);
+  assert.equal((await store.rename(created.botId, "Owner wait removed")).name, "Owner wait removed");
+});
+
+test("detached setImmediate and promise descendants become inactive after transaction completion", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create();
+  const releasePromise = deferred();
+  let immediateRead;
+  let promiseMutation;
+
+  await store.runtimeTransaction(created.botId, {}, () => {
+    immediateRead = new Promise((resolve, reject) => {
+      setImmediate(() => store.read(created.botId).then(resolve, reject));
+    });
+    promiseMutation = releasePromise.promise.then(() => store.rename(created.botId, "Detached mutation"));
+  });
+  releasePromise.resolve();
+
+  const [readOutcome, mutationOutcome] = await Promise.all([
+    outcomeWithin(immediateRead),
+    outcomeWithin(promiseMutation),
+  ]);
+  assert.equal(readOutcome.status, "fulfilled");
+  assert.equal(readOutcome.value.botId, created.botId);
+  assert.equal(mutationOutcome.status, "fulfilled");
+  assert.equal(mutationOutcome.value.name, "Detached mutation");
+});
+
+test("a thrown nested transaction deactivates every retained path token", async (t) => {
+  const first = await temporaryStore(t);
+  const second = await temporaryStore(t);
+  const firstBot = await first.store.create();
+  const secondBot = await second.store.create();
+  const releaseDetached = deferred();
+  let retainedOuterRead;
+  let retainedInnerMutation;
+
+  await assert.rejects(
+    first.store.runtimeTransaction(firstBot.botId, {}, async () => {
+      await second.store.runtimeTransaction(secondBot.botId, {}, () => {
+        retainedOuterRead = releaseDetached.promise.then(() => first.store.read(firstBot.botId));
+        retainedInnerMutation = releaseDetached.promise.then(() => (
+          second.store.rename(secondBot.botId, "Nested token released")
+        ));
+        throw new Error("nested transaction aborted");
+      });
+    }),
+    /nested transaction aborted/,
+  );
+  releaseDetached.resolve();
+
+  const [outerOutcome, innerOutcome] = await Promise.all([
+    outcomeWithin(retainedOuterRead),
+    outcomeWithin(retainedInnerMutation),
+  ]);
+  assert.equal(outerOutcome.status, "fulfilled");
+  assert.equal(innerOutcome.status, "fulfilled");
+  assert.equal(innerOutcome.value.name, "Nested token released");
+  assert.equal((await first.store.rename(firstBot.botId, "Ordinary outer mutation")).name, "Ordinary outer mutation");
+  assert.equal((await second.store.read(secondBot.botId)).name, "Nested token released");
+});
+
+test("runtime transactions expose frozen sanitized snapshots and preserve durable write ordering", async (t) => {
+  const calls = [];
+  const instrumentedFs = {
+    ...fs,
+    mkdir: async (...args) => { calls.push(["mkdir", args[0]]); return fs.mkdir(...args); },
+    open: async (...args) => {
+      calls.push(["open", args[0], args[1], args[2]]);
+      const handle = await fs.open(...args);
+      return {
+        writeFile: async (...writeArgs) => { calls.push(["writeFile", args[0]]); return handle.writeFile(...writeArgs); },
+        sync: async () => { calls.push(["sync", args[0]]); return handle.sync(); },
+        close: async () => { calls.push(["close", args[0]]); return handle.close(); },
+      };
+    },
+    rename: async (...args) => { calls.push(["rename", ...args]); return fs.rename(...args); },
+  };
+  const { directory, filePath, store } = await temporaryStore(t, {
+    fs: instrumentedFs,
+    uuids: [BOT_A_UUID, TEMP_A_UUID, TEMP_B_UUID],
+  });
+  const created = await store.create();
+  calls.length = 0;
+  let transactionSnapshot = null;
+  let updatedSnapshot = null;
+
+  const outcome = await store.runtimeTransaction(created.botId, {}, (transaction) => {
+    transactionSnapshot = transaction;
+    assert.throws(() => { transaction.bot.name = "forged"; }, TypeError);
+    assert.throws(() => { transaction.bots.push({}); }, TypeError);
+    updatedSnapshot = transaction.updateRuntime({
+      state: "provisioning",
+      lastErrorCode: "RUNTIME_OPERATION.durable",
+    });
+  });
+
+  assertDeepFrozen(transactionSnapshot);
+  assertDeepFrozen(updatedSnapshot);
+  assertDeepFrozen(outcome);
+  assert.deepEqual(Reflect.ownKeys(outcome), ["matched", "bot"]);
+  assert.equal(outcome.isCurrentRuntimeCommit, undefined);
+  assert.equal(store.isCurrentRuntimeCommit(outcome, created.botId), true);
+  assert.doesNotMatch(JSON.stringify({ transactionSnapshot, updatedSnapshot, outcome }), /endpoint|authToken|credential|secret/i);
+  assert.equal(outcome.bot.runtime.lastErrorCode, "RUNTIME_OPERATION.durable");
+  const opened = calls.find(([operation]) => operation === "open");
+  const renamed = calls.find(([operation]) => operation === "rename");
+  assert.equal(path.dirname(opened[1]), directory);
+  assert.deepEqual(renamed, ["rename", opened[1], filePath]);
+  assert.deepEqual(calls.map(([operation]) => operation), [
+    "mkdir", "open", "writeFile", "sync", "close", "rename", "open", "sync", "close",
+  ]);
+});
+
+test("runtime transaction afterCommit runs after durability and isolates hook exceptions", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const created = await store.create();
+  const calls = [];
+
+  const outcome = await store.runtimeTransaction(
+    created.botId,
+    {
+      afterCommit: (...args) => {
+        calls.push({ args, persisted: JSON.parse(require("node:fs").readFileSync(filePath, "utf8")) });
+        throw new Error("isolated afterCommit failure");
+      },
+    },
+    ({ updateRuntime }) => updateRuntime({
+      state: "provisioning",
+      lastErrorCode: "RUNTIME_OPERATION.after-commit",
+    }),
+  );
+
+  assert.equal(outcome.matched, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, []);
+  assert.equal(calls[0].persisted.bots[0].runtime.state, "provisioning");
+  assert.equal(calls[0].persisted.bots[0].runtime.lastErrorCode, "RUNTIME_OPERATION.after-commit");
+  assert.equal((await store.read(created.botId)).runtime.state, "provisioning");
+  assert.equal((await store.rename(created.botId, "Hook lock released")).name, "Hook lock released");
+});
+
+test("runtime transaction afterCommit accepts only an own plain callable", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create();
+  await assert.rejects(
+    store.runtimeTransaction(created.botId, { afterCommit: true }, () => {}),
+    /afterCommit must be a function/i,
+  );
+  let getterCalls = 0;
+  const accessorOptions = {};
+  Object.defineProperty(accessorOptions, "afterCommit", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return () => {};
+    },
+  });
+  await assert.rejects(
+    store.runtimeTransaction(created.botId, accessorOptions, () => {}),
+    /plain data|accessor/i,
+  );
+  assert.equal(getterCalls, 0);
+  assert.equal((await store.read(created.botId)).runtime.state, "unprovisioned");
+});
+
+test("runtime transaction afterCommit skips stale CAS and precommit failure", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-store-after-commit-precommit-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "bots.json");
+  let failRename = false;
+  const failingFs = {
+    ...fs,
+    rename: async (...args) => {
+      if (!failRename) return fs.rename(...args);
+      failRename = false;
+      const error = new Error("forced precommit rename failure");
+      error.code = "EIO";
+      throw error;
+    },
+  };
+  const store = new BotStore({
+    filePath,
+    fs: failingFs,
+    now: () => NOW,
+    randomUUID: sequence([BOT_A_UUID, TEMP_A_UUID, TEMP_B_UUID, TEMP_C_UUID]),
+  });
+  const created = await store.create();
+  let hooks = 0;
+
+  const mismatch = await store.runtimeTransaction(
+    created.botId,
+    { expectedLastErrorCode: "RUNTIME_OPERATION.not-current", afterCommit: () => { hooks += 1; } },
+    ({ updateRuntime }) => updateRuntime({ state: "failed", lastErrorCode: "NOT_CURRENT" }),
+  );
+  assert.equal(mismatch.matched, false);
+  assert.equal(hooks, 0);
+
+  failRename = true;
+  await assert.rejects(
+    store.runtimeTransaction(
+      created.botId,
+      { afterCommit: () => { hooks += 1; } },
+      ({ updateRuntime }) => updateRuntime({
+        state: "provisioning",
+        lastErrorCode: "RUNTIME_OPERATION.precommit",
+      }),
+    ),
+    /forced precommit rename failure/,
+  );
+  assert.equal(hooks, 0);
+  assert.equal((await store.read(created.botId)).runtime.state, "unprovisioned");
+  assert.equal((await store.rename(created.botId, "Precommit lock released")).name, "Precommit lock released");
+});
+
+test("committed-uncertain runtime transaction invokes afterCommit exactly once", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-store-after-commit-uncertain-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "bots.json");
+  let failDirectorySync = false;
+  const uncertainFs = {
+    ...fs,
+    open: async (target, ...args) => {
+      const handle = await fs.open(target, ...args);
+      if (path.resolve(String(target)) !== path.resolve(directory)) return handle;
+      return {
+        sync: async () => {
+          if (failDirectorySync) {
+            failDirectorySync = false;
+            const error = new Error("forced committed directory sync failure");
+            error.code = "EIO";
+            throw error;
+          }
+          return handle.sync();
+        },
+        close: (...closeArgs) => handle.close(...closeArgs),
+      };
+    },
+  };
+  const store = new BotStore({
+    filePath,
+    fs: uncertainFs,
+    now: () => NOW,
+    randomUUID: sequence([BOT_A_UUID, TEMP_A_UUID, TEMP_B_UUID, TEMP_C_UUID]),
+  });
+  const created = await store.create();
+  let hooks = 0;
+  failDirectorySync = true;
+
+  let committedError = null;
+  await assert.rejects(
+    store.runtimeTransaction(
+      created.botId,
+      { afterCommit: () => { hooks += 1; } },
+      ({ updateRuntime }) => updateRuntime({
+        state: "provisioning",
+        lastErrorCode: "RUNTIME_OPERATION.uncertain-hook",
+      }),
+    ),
+    (error) => {
+      committedError = error;
+      return error?.code === "BOT_STORE_DURABILITY_UNCERTAIN" && error?.committed === true;
+    },
+  );
+
+  assert.equal(hooks, 1);
+  assert.equal(store.isCurrentRuntimeCommit(committedError, created.botId), true);
+  assert.equal((await store.read(created.botId)).runtime.lastErrorCode, "RUNTIME_OPERATION.uncertain-hook");
+  assert.equal((await store.rename(created.botId, "Uncertain hook released")).name, "Uncertain hook released");
+});
+
+test("writes through a synced same-directory temporary file before atomic rename", async (t) => {
+  const calls = [];
+  const instrumentedFs = {
+    ...fs,
+    mkdir: async (...args) => { calls.push(["mkdir", args[0]]); return fs.mkdir(...args); },
+    open: async (...args) => {
+      calls.push(["open", args[0], args[1], args[2]]);
+      const handle = await fs.open(...args);
+      return {
+        writeFile: async (...writeArgs) => { calls.push(["writeFile", args[0]]); return handle.writeFile(...writeArgs); },
+        sync: async () => { calls.push(["sync", args[0]]); return handle.sync(); },
+        close: async () => { calls.push(["close", args[0]]); return handle.close(); },
+      };
+    },
+    rename: async (...args) => { calls.push(["rename", ...args]); return fs.rename(...args); },
+  };
+  const { directory, filePath, store } = await temporaryStore(t, { fs: instrumentedFs });
+  await store.create();
+
+  const opened = calls.find(([operation]) => operation === "open");
+  const renamed = calls.find(([operation]) => operation === "rename");
+  assert.equal(path.dirname(opened[1]), directory);
+  assert.match(path.basename(opened[1]), /^\.bots\.json\.[0-9a-f-]{36}\.tmp$/);
+  assert.deepEqual(opened.slice(2), ["wx", 0o600]);
+  assert.deepEqual(renamed, ["rename", opened[1], filePath]);
+  assert.deepEqual(calls.map(([operation]) => operation), [
+    "mkdir", "open", "writeFile", "sync", "close", "rename", "open", "sync", "close",
+  ]);
+  const directoryOpen = calls[6];
+  assert.deepEqual(directoryOpen, ["open", directory, "r", undefined]);
+});
+
+test("an unowned temp-name collision is never deleted when exclusive open fails", async (t) => {
+  const { directory, store } = await temporaryStore(t);
+  const collision = path.join(directory, `.bots.json.${TEMP_A_UUID}.tmp`);
+  await fs.writeFile(collision, "pre-existing collision", "utf8");
+
+  await assert.rejects(store.create(), { code: "EEXIST" });
+  assert.equal(await fs.readFile(collision, "utf8"), "pre-existing collision");
+  assert.deepEqual(await store.list(), []);
+});
+
+test("post-rename directory sync failure reports uncertain durability but preserves committed state", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-store-directory-sync-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "bots.json");
+  const calls = [];
+  const failingFs = {
+    ...fs,
+    open: async (target, ...args) => {
+      if (target !== directory) return fs.open(target, ...args);
+      calls.push(["directory-open", target, ...args]);
+      return {
+        sync: async () => {
+          calls.push(["directory-sync"]);
+          const error = new Error("forced directory sync failure");
+          error.code = "EIO";
+          throw error;
+        },
+        close: async () => { calls.push(["directory-close"]); },
+      };
+    },
+    rm: async (target, options) => {
+      calls.push(["rm", target]);
+      return fs.rm(target, options);
+    },
+  };
+  const store = new BotStore({
+    filePath,
+    fs: failingFs,
+    now: () => NOW,
+    randomUUID: sequence([BOT_A_UUID, TEMP_A_UUID]),
+  });
+
+  await assert.rejects(store.create(), /directory sync|durability/i);
+  assert.deepEqual(calls.slice(0, 3), [
+    ["directory-open", directory, "r"],
+    ["directory-sync"],
+    ["directory-close"],
+  ]);
+  assert.equal(calls.some(([operation, target]) => operation === "rm" && target === filePath), false);
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.equal(persisted.bots[0].botId, `bot-${BOT_A_UUID}`);
+  assert.equal((await store.read(`bot-${BOT_A_UUID}`)).name, "New Bot");
+  const reloaded = new BotStore({ filePath });
+  assert.equal((await reloaded.read(`bot-${BOT_A_UUID}`)).name, "New Bot");
+});
+
+test("failed atomic rename preserves the destination and cleans only its owned temp", async (t) => {
+  const { directory, filePath } = await temporaryStore(t);
+  const original = validStoreDocument([expectedBot()]);
+  await writeDocument(filePath, original);
+  const sentinel = path.join(directory, ".bots.json.keep.tmp");
+  await fs.writeFile(sentinel, "keep", "utf8");
+  let ownedTemporary = null;
+  const failingFs = {
+    ...fs,
+    open: async (...args) => { ownedTemporary = args[0]; return fs.open(...args); },
+    rename: async () => {
+      const error = new Error("forced atomic rename failure");
+      error.code = "EIO";
+      throw error;
+    },
+  };
+  const store = new BotStore({
+    filePath,
+    fs: failingFs,
+    now: () => NOW,
+    randomUUID: sequence([BOT_B_UUID, TEMP_B_UUID]),
+  });
+  await store.load();
+  await assert.rejects(store.create(), /forced atomic rename failure/);
+
+  assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")), original);
+  assert.equal(await fs.readFile(sentinel, "utf8"), "keep");
+  await assert.rejects(fs.access(ownedTemporary), { code: "ENOENT" });
+  assert.deepEqual((await store.list()).map(({ botId }) => botId), [`bot-${BOT_A_UUID}`]);
+});
+
+test("load rejects malformed versions, keys, timestamps, states, and polluted records", async (t) => {
+  const { filePath } = await temporaryStore(t);
+  const cases = [
+    ["unsupported version", { schemaVersion: 2, bots: [], legacyImports: {} }, /schema version/i],
+    ["unknown root key", { schemaVersion: 1, bots: [], legacyImports: {}, endpoint: "wss://private" }, /unsupported store field/i],
+    ["duplicate bot ID", validStoreDocument([expectedBot(), expectedBot()]), /duplicate bot IDs/i],
+    ["invalid timestamp", validStoreDocument([expectedBot({ updatedAt: "today" })]), /timestamp/i],
+    ["reversed extended-year timestamps", validStoreDocument([expectedBot({
+      createdAt: "+010000-01-01T00:00:00.000Z",
+      updatedAt: NOW,
+    })]), /precede|timestamp/i],
+    ["invalid runtime state", validStoreDocument([expectedBot({ runtime: { state: "local-ready" } })]), /runtime state/i],
+    ["secret runtime key", validStoreDocument([{
+      ...expectedBot(),
+      runtime: { ...expectedBot().runtime, endpoint: "wss://private", authToken: "secret" },
+    }]), /runtime field/i],
+    ["unknown record key", validStoreDocument([{ ...expectedBot(), filesystemPath: "/Users/example" }]), /bot field/i],
+  ];
+
+  for (const [label, document, pattern] of cases) {
+    await t.test(label, async () => {
+      await writeDocument(filePath, document);
+      await assert.rejects(new BotStore({ filePath }).load(), pattern);
+    });
+  }
+
+  await fs.writeFile(filePath, "{not-json", "utf8");
+  await assert.rejects(new BotStore({ filePath }).load(), /malformed/i);
+  await fs.writeFile(filePath, '{"schemaVersion":1,"bots":[],"legacyImports":{},"__proto__":{"polluted":true}}', "utf8");
+  await assert.rejects(new BotStore({ filePath }).load(), /prototype|unsupported store field/i);
+  assert.equal({}.polluted, undefined);
+});
+
+test("canonicalizes bot IDs to lowercase before duplicate and ownership checks", async (t) => {
+  const { filePath } = await temporaryStore(t);
+  const lowercase = expectedBot({ botId: `bot-${BOT_CASE_UUID}` });
+  const uppercase = expectedBot({ botId: `bot-${BOT_CASE_UUID.toUpperCase()}` });
+  await writeDocument(filePath, validStoreDocument([lowercase, uppercase]));
+  await assert.rejects(new BotStore({ filePath }).load(), /duplicate bot IDs/i);
+
+  await writeDocument(filePath, validStoreDocument([uppercase]));
+  const store = new BotStore({ filePath });
+  const loaded = await store.load();
+  assert.equal(loaded[0].botId, `bot-${BOT_CASE_UUID}`);
+  assert.equal((await store.read(`bot-${BOT_CASE_UUID.toUpperCase()}`)).botId, `bot-${BOT_CASE_UUID}`);
+});
+
+test("load rejects duplicate remote runtimes and conversation ownership", async (t) => {
+  const { filePath } = await temporaryStore(t);
+  const first = expectedBot({
+    runtime: { provider: "openai", remoteRuntimeId: "runtime-shared", state: "ready", lastConfirmedAt: NOW },
+    conversations: [
+      { source: "chatgpt", conversationId: "chat-shared" },
+      { source: "codex", threadId: "thread-a" },
+    ],
+  });
+  const second = expectedBot({
+    botId: `bot-${BOT_B_UUID}`,
+    runtime: { provider: "openai", remoteRuntimeId: "runtime-shared", state: "ready", lastConfirmedAt: NOW },
+    conversations: [{ source: "codex", threadId: "thread-b" }],
+  });
+  await writeDocument(filePath, validStoreDocument([first, second]));
+  await assert.rejects(new BotStore({ filePath }).load(), /duplicate remote runtime/i);
+
+  second.runtime = { ...expectedBot().runtime };
+  second.conversations = [{ source: "chatgpt", conversationId: "chat-shared" }];
+  await writeDocument(filePath, validStoreDocument([first, second]));
+  await assert.rejects(new BotStore({ filePath }).load(), /conversation.*another bot|duplicate conversation/i);
+});
+
+test("adoptLegacy is idempotent, preserves allowed data, and survives later profile changes", async (t) => {
+  const { filePath, store } = await temporaryStore(t, {
+    uuids: [BOT_A_UUID, TEMP_A_UUID, TEMP_B_UUID, TEMP_C_UUID],
+  });
+  const legacy = {
+    migrationKey: "appearance:bot-legacy-1",
+    name: "Existing Bot",
+    appearance: {
+      shape: "pebble",
+      color: "blue",
+      image: "https://images.example.test/avatar.png",
+      title: "Research companion",
+      description: "Finds exact sources",
+    },
+    notifications: false,
+    conversations: [
+      { source: "chatgpt", conversationId: "chat-1" },
+      { source: "codex", threadId: "work-1" },
+    ],
+  };
+
+  const first = await store.adoptLegacy(legacy);
+  const repeated = await store.adoptLegacy({
+    ...legacy,
+    appearance: { ...legacy.appearance },
+    conversations: legacy.conversations.map((ref) => ({ ...ref })),
+  });
+  assert.equal(repeated.botId, first.botId);
+  assert.equal(repeated.name, "Existing Bot");
+  assert.deepEqual(first.appearance, legacy.appearance);
+  assert.equal(first.notifications, false);
+  assert.deepEqual(first.conversations, legacy.conversations);
+  assert.equal((await store.list()).length, 1);
+
+  await store.rename(first.botId, "Renamed later");
+  await store.updateProfile(first.botId, { appearance: { title: "Changed later" } });
+  const afterChanges = await store.adoptLegacy(legacy);
+  assert.equal(afterChanges.botId, first.botId);
+  assert.equal(afterChanges.name, "Renamed later");
+  assert.equal(afterChanges.appearance.title, "Changed later");
+
+  const document = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.equal(document.bots.length, 1);
+  assert.equal(document.legacyImports[legacy.migrationKey].botId, first.botId);
+  assert.match(document.legacyImports[legacy.migrationKey].fingerprint, /^[0-9a-f]{64}$/);
+
+  const reloaded = new BotStore({ filePath });
+  const restarted = await reloaded.adoptLegacy(legacy);
+  assert.equal(restarted.botId, first.botId);
+  assert.equal(restarted.name, "Renamed later");
+  assert.equal((await reloaded.list()).length, 1);
+});
+
+test("rejects prototype-sensitive migration keys on adoption and reload", async (t) => {
+  for (const migrationKey of ["toString", "hasOwnProperty", "constructor", "prototype"]) {
+    await t.test(migrationKey, async (subtest) => {
+      const { filePath, store } = await temporaryStore(subtest);
+      const legacy = { migrationKey, name: "Existing Bot" };
+      await assert.rejects(store.adoptLegacy(legacy), /migration key/i);
+      assert.deepEqual(await store.list(), []);
+
+      const poisonedImports = JSON.parse(`{"${migrationKey}":{"botId":"bot-${BOT_A_UUID}","fingerprint":"${"a".repeat(64)}"}}`);
+      await writeDocument(filePath, validStoreDocument([expectedBot()], poisonedImports));
+      await assert.rejects(new BotStore({ filePath }).load(), /migration key|prototype field/i);
+    });
+  }
+});
+
+test("adoptLegacy rejects conflicting retries without mutating the original", async (t) => {
+  const { store } = await temporaryStore(t);
+  const first = await store.adoptLegacy({
+    migrationKey: "appearance:bot-legacy-1",
+    name: "Existing Bot",
+    appearance: { shape: "pebble", color: "blue" },
+    conversations: [{ source: "chatgpt", conversationId: "chat-1" }],
+  });
+  await assert.rejects(store.adoptLegacy({
+    migrationKey: "appearance:bot-legacy-1",
+    name: "Different Bot",
+    appearance: { shape: "pebble", color: "blue" },
+    conversations: [{ source: "chatgpt", conversationId: "chat-1" }],
+  }), /conflicting legacy import/i);
+  assert.equal((await store.list()).length, 1);
+  assert.equal((await store.read(first.botId)).name, "Existing Bot");
+});
+
+test("adoptLegacy rejects invalid keys, forged ownership, secrets, paths, and invalid avatars", async (t) => {
+  const { store } = await temporaryStore(t);
+  const base = {
+    migrationKey: "appearance:bot-legacy-1",
+    name: "Existing Bot",
+    appearance: { shape: "pebble", color: "blue" },
+    conversations: [{ source: "chatgpt", conversationId: "chat-1" }],
+  };
+  const invalid = [
+    [{ ...base, migrationKey: "../Library/escape" }, /migration key/i],
+    [{ ...base, runtime: { provider: "forged", remoteRuntimeId: "runtime-1" } }, /legacy field/i],
+    [{ ...base, provider: "forged" }, /legacy field/i],
+    [{ ...base, endpoint: "wss://private.example.test" }, /legacy field/i],
+    [{ ...base, authToken: "secret" }, /legacy field/i],
+    [{ ...base, filesystemPath: "/Users/example" }, /legacy field/i],
+    [{ ...base, appearance: { ...base.appearance, unknown: true } }, /appearance field/i],
+    [{ ...base, appearance: { ...base.appearance, image: "file:///tmp/avatar.png" } }, /avatar image/i],
+    [{ ...base, appearance: { ...base.appearance, image: "http://images.example.test/avatar.png" } }, /avatar image/i],
+    [{ ...base, appearance: { ...base.appearance, image: `data:image/png;base64,${"a".repeat(2_100_000)}` } }, /avatar image/i],
+    [{ ...base, conversations: [{ source: "chatgpt", conversationId: "chat-1", botId: "forged" }] }, /conversation field/i],
+  ];
+  for (const [record, pattern] of invalid) await assert.rejects(store.adoptLegacy(record), pattern);
+
+  const polluted = JSON.parse('{"migrationKey":"appearance:bot-legacy-1","name":"Existing Bot","appearance":{"shape":"pebble","color":"blue","__proto__":{"polluted":true}},"conversations":[]}');
+  await assert.rejects(store.adoptLegacy(polluted), /prototype|appearance field/i);
+  assert.equal({}.polluted, undefined);
+  assert.deepEqual(await store.list(), []);
+});
+
+test("adoptLegacy enforces unique conversation ownership and create remains New Bot", async (t) => {
+  const { store } = await temporaryStore(t);
+  const first = await store.adoptLegacy({
+    migrationKey: "appearance:bot-legacy-1",
+    name: "Existing Bot",
+    conversations: [{ source: "chatgpt", conversationId: "chat-owned" }],
+  });
+  await assert.rejects(store.adoptLegacy({
+    migrationKey: "appearance:bot-legacy-2",
+    name: "Other Bot",
+    conversations: [{ source: "chatgpt", conversationId: "chat-owned" }],
+  }), /conversation.*another bot|duplicate conversation/i);
+  assert.equal((await store.read(first.botId)).name, "Existing Bot");
+  const created = await store.create({ name: "Still ignored" });
+  assert.equal(created.name, "New Bot");
+});
+
+test("attachConversation accepts only canonical refs and uniquely owns them", async (t) => {
+  const { store } = await temporaryStore(t);
+  const first = await store.create();
+  const second = await store.create();
+  const chat = { source: "chatgpt", conversationId: "chat-1" };
+  const work = { source: "codex", threadId: "thread-1" };
+
+  assert.deepEqual((await store.attachConversation(first.botId, chat)).conversations, [chat]);
+  assert.deepEqual((await store.attachConversation(first.botId, work)).conversations, [chat, work]);
+  await assert.rejects(store.attachConversation(first.botId, { ...chat }), /duplicate conversation/i);
+  await assert.rejects(store.attachConversation(second.botId, chat), /conversation.*another bot/i);
+  await assert.rejects(store.attachConversation(first.botId, { source: "chatgpt", threadId: "wrong" }), /conversation field|canonical/i);
+  await assert.rejects(store.attachConversation(first.botId, { source: "codex", conversationId: "wrong" }), /conversation field|canonical/i);
+  await assert.rejects(store.attachConversation(first.botId, { source: "codex", threadId: "thread-2", endpoint: "wss://private" }), /conversation field/i);
+  assert.equal((await store.read(second.botId)).conversations.length, 0);
+});
+
+test("updateRuntime persists sanitized metadata and rejects duplicate IDs or secret fields", async (t) => {
+  const { store } = await temporaryStore(t);
+  const first = await store.create();
+  const second = await store.create();
+  const ready = await store.updateRuntime(first.botId, {
+    provider: "openai",
+    remoteRuntimeId: "runtime-1",
+    state: "ready",
+    lastConfirmedAt: NOW,
+    lastErrorCode: null,
+  });
+  assert.deepEqual(ready.runtime, {
+    provider: "openai",
+    remoteRuntimeId: "runtime-1",
+    state: "ready",
+    lastConfirmedAt: NOW,
+    lastErrorCode: null,
+  });
+  await assert.rejects(store.updateRuntime(second.botId, {
+    provider: "openai",
+    remoteRuntimeId: "runtime-1",
+    state: "ready",
+    lastConfirmedAt: NOW,
+  }), /remote runtime.*another bot|duplicate remote runtime/i);
+  await assert.rejects(store.updateRuntime(first.botId, { endpoint: "wss://private.example.test" }), /runtime field/i);
+  await assert.rejects(store.updateRuntime(first.botId, { authToken: "secret" }), /runtime field/i);
+  await assert.rejects(store.updateRuntime(first.botId, { state: "local-ready" }), /runtime state/i);
+  assert.equal((await store.read(second.botId)).runtime.remoteRuntimeId, null);
+  assert.equal(JSON.stringify(await store.list()).includes("private.example"), false);
+});
+
+test("rejects hostile non-plain inputs and unknown bot reads", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create();
+  const inherited = Object.create({ name: "Prototype rename" });
+  inherited.notifications = false;
+  await assert.rejects(store.updateProfile(created.botId, inherited), /plain object|prototype/i);
+  const accessor = {};
+  Object.defineProperty(accessor, "notifications", { enumerable: true, get() { throw new Error("secret getter"); } });
+  await assert.rejects(store.updateProfile(created.botId, accessor), /accessor|plain data/i);
+  const pollutedCreate = JSON.parse('{"appearance":{"shape":"blob","__proto__":{"polluted":true}}}');
+  const ignoredPollution = await store.create(pollutedCreate);
+  assert.equal(ignoredPollution.appearance.shape, "blob");
+  await assert.rejects(store.read("bot-missing"), /bot ID/i);
+  await assert.rejects(store.rename(`bot-${BOT_C_UUID}`, "Missing"), /not found/i);
+  assert.equal({}.polluted, undefined);
+});
