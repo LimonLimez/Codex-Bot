@@ -117,7 +117,7 @@ class PromptSession {
 }
 
 function createBridge({
-  loadConfig = () => loadRuntimeConfig(process.env),
+  loadConfig = (options) => loadRuntimeConfig(process.env, options),
   fetchImpl = globalThis.fetch,
   isCurrent,
 } = {}) {
@@ -130,9 +130,9 @@ function createBridge({
   const bridge = {
     createPromptSession(options, middleware) {
       if (disposed) throw new BridgeDisposedError();
-      const config = loadConfig();
       const normalized = sessionOptions(options);
-      const requestedBotId = normalized.botId ?? normalized.agentId;
+      const config = loadConfig(normalized);
+      const requestedBotId = normalized.botId;
       if (requestedBotId != null && requestedBotId !== config.botId) {
         throw new BridgeSessionError();
       }
@@ -150,7 +150,7 @@ function createBridge({
           ? () => isCurrent(config)
           : () => {
               try {
-                return sameConfig(config, loadConfig());
+                return sameConfig(config, loadConfig(normalized));
               } catch {
                 return false;
               }

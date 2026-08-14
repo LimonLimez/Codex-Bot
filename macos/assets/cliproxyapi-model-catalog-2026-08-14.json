@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-08-14",
+  "source": {
+    "repository": "https://github.com/router-for-me/models",
+    "file": "models.json",
+    "commit": "cbe1e6c59429bc92dd8d6654873670fc0c274cad"
+  },
+  "models": [
+    {
+      "id": "claude-fable-5",
+      "displayName": "Claude Fable 5",
+      "provider": "anthropic",
+      "upstreamReasoningLevels": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "claude-opus-5",
+      "displayName": "Claude Opus 5",
+      "provider": "anthropic",
+      "upstreamReasoningLevels": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "claude-sonnet-5",
+      "displayName": "Claude Sonnet 5",
+      "provider": "anthropic",
+      "upstreamReasoningLevels": ["low", "medium", "high", "xhigh", "max"]
+    }
+  ],
+  "clientModes": {
+    "ultra-code": {
+      "upstreamReasoningEffort": "max",
+      "visualEffect": "ultra"
+    }
+  }
+}

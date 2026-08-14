@@ -192,7 +192,7 @@ test("the auditor rejects missing, added, and renamed stock contract members", (
   );
 });
 
-test("the auditor checks a staged ASAR by its unchanged preload contract", async (t) => {
+test("the auditor checks a staged ASAR by its preserved stock preload contract", async (t) => {
   const contract = loadContract();
   const source = syntheticPreload(contract);
   const stagedContract = {
@@ -204,7 +204,7 @@ test("the auditor checks a staged ASAR by its unchanged preload contract", async
   const tree = path.join(root, "tree");
   const preload = path.join(tree, "dist", "electron-preload", "preload.cjs");
   fs.mkdirSync(path.dirname(preload), { recursive: true });
-  fs.writeFileSync(preload, source);
+  fs.writeFileSync(preload, `${source}\nipcRenderer.invoke("codex-bot:list");\n`);
   fs.writeFileSync(
     path.join(tree, "package.json"),
     '{"name":"sand","version":"0.1.4-macos.1"}\n',

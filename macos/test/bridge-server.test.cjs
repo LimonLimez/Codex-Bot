@@ -47,8 +47,9 @@ function response() {
 
 test("host-facing prompt sessions preserve the Grok executor contract without public secrets", async () => {
   const { createBridge } = require(serverPath);
+  const loadedOptions = [];
   const bridge = createBridge({
-    loadConfig: () => runtime(),
+    loadConfig: (options) => { loadedOptions.push(options); return runtime(); },
     fetchImpl: async () => response(),
     isCurrent: () => true,
   });
@@ -61,6 +62,7 @@ test("host-facing prompt sessions preserve the Grok executor contract without pu
     },
   );
   assert.equal(session.getModelId(), "gpt-5.6-sol");
+  assert.deepEqual(loadedOptions[0], { botId: BOT_ID, modelId: "gpt-5.6-sol" });
   assert.deepEqual(Object.keys(session), []);
   assert.equal(JSON.stringify(session), "{}");
 

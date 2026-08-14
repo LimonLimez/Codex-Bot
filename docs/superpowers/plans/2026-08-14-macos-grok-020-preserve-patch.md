@@ -266,7 +266,9 @@ navigation remains reachable.
 **GREEN:** Integrate the prior accepted controls as small injected modules/styles
 using 0.20-specific unique anchors. Preserve Max blue, Ultra animated
 purple/blue, Sol/Terra six positions, GPT-5.5 four positions, compact dimensions,
-and truthful unavailable copy. Do not replace the stock renderer wholesale.
+truthful unavailable copy, and the reviewed CLIProxyAPI Fable/Opus/Sonnet 5
+catalog. `Ultra Code` reuses the Ultra effect but maps to the provider-supported
+`max` effort. Do not replace the stock renderer wholesale.
 
 **Verify:**
 

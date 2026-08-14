@@ -1,19 +1,19 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const BOT_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const MODEL_IDS = new Set(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"]);
-const REASONING_EFFORTS = new Set([
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultra",
-]);
+const MODEL_EFFORTS = Object.freeze({
+  "gpt-5.6-sol": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+  "gpt-5.6-terra": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+  "gpt-5.5": Object.freeze(["low", "medium", "high", "xhigh"]),
+  "claude-fable-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+  "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+  "claude-sonnet-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+});
 const CONFIG_KEYS = Object.freeze([
   "botId",
   "generation",
@@ -103,10 +103,11 @@ function createRuntimeConfig(value) {
   exactPlainObject(value);
   if (typeof value.botId !== "string" || !BOT_UUID.test(value.botId)) fail();
   if (!Number.isSafeInteger(value.generation) || value.generation < 1) fail();
-  if (typeof value.model !== "string" || !MODEL_IDS.has(value.model)) fail();
+  const efforts = typeof value.model === "string" ? MODEL_EFFORTS[value.model] : null;
+  if (!efforts) fail();
   if (
     typeof value.reasoningEffort !== "string" ||
-    !REASONING_EFFORTS.has(value.reasoningEffort)
+    (value.reasoningEffort !== "none" && !efforts.includes(value.reasoningEffort))
   ) {
     fail();
   }
@@ -115,7 +116,7 @@ function createRuntimeConfig(value) {
     botId: value.botId,
     generation: value.generation,
     model: value.model,
-    reasoningEffort: value.reasoningEffort,
+    reasoningEffort: value.reasoningEffort === "ultra-code" ? "max" : value.reasoningEffort,
   };
   Object.defineProperties(config, {
     endpoint: {
@@ -136,6 +137,39 @@ function createRuntimeConfig(value) {
 
 function loadRuntimeConfig(environment = process.env) {
   if (environment == null || typeof environment !== "object") fail();
+  if (environment.CODEX_BOT_MODEL_SELECTIONS != null) {
+    let file;
+    let stat;
+    let registry;
+    try {
+      file = environment.CODEX_BOT_MODEL_SELECTIONS;
+      if (typeof file !== "string" || !path.isAbsolute(file) || file.length > 4096) fail();
+      stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 1024 * 1024
+        || (stat.mode & 0o077) !== 0) fail();
+      registry = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch (error) {
+      if (error instanceof BridgeConfigError) throw error;
+      fail();
+    }
+    const activeBotId = registry?.activeBotId;
+    const selection = registry?.selections?.[activeBotId];
+    if (registry?.schemaVersion !== 1
+      || typeof activeBotId !== "string"
+      || !activeBotId.startsWith("bot-")
+      || !BOT_UUID.test(activeBotId.slice(4))
+      || !selection || typeof selection !== "object" || Array.isArray(selection)) {
+      fail();
+    }
+    return createRuntimeConfig({
+      botId: activeBotId.slice(4),
+      generation: selection.generation,
+      endpoint: environment.CODEX_BOT_CLIPROXY_URL,
+      credential: environment.CODEX_BOT_CLIPROXY_TOKEN,
+      model: selection.model,
+      reasoningEffort: selection.reasoningEffort,
+    });
+  }
   const generation = Number(environment.CODEX_BOT_RUNTIME_GENERATION);
   return createRuntimeConfig({
     botId: environment.CODEX_BOT_ID,

@@ -307,7 +307,9 @@ function auditAppContract(appPath, contract) {
 }
 
 function auditAsarContract(asarPath, contract) {
-  return auditPreloadContract(readPreloadFromAsar(asarPath), contract);
+  return auditPreloadContract(readPreloadFromAsar(asarPath), contract, {
+    checkSourceHash: false,
+  });
 }
 
 function generateContract(appPath) {

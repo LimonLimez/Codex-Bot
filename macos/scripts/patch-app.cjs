@@ -9,13 +9,30 @@ const path = require("node:path");
 const asar = require("@electron/asar");
 const { auditTreeDiff, snapshotTree } = require("../src/patch/diff-audit.cjs");
 const { patchHostInference } = require("../src/patch/host-inference.cjs");
+const { patchDesktop } = require("../src/patch/desktop.cjs");
+const { patchRenderer } = require("../src/patch/renderer.cjs");
 
 const VENDOR_APP_ASAR_SHA256 =
   "1e41f9da52be5d2ff24892b150a74d3d0145659cf6cbd83e9476d025865fb997";
 const VENDOR_VERSION = "0.20.0";
 const RELEASE_VERSION = "0.1.4-macos.1";
 const ALLOWED_MUTATIONS = Object.freeze([
+  "dist/codex/bots/bot-store.cjs",
+  "dist/codex/bots/chatgpt-relay-codec.cjs",
+  "dist/codex/bots/conversation-router.cjs",
+  "dist/codex/bots/remote-app-server-client.cjs",
+  "dist/codex/bots/runtime-controller.cjs",
+  "dist/codex/bots/runtime-provider.cjs",
+  "dist/codex/desktop/model-selection-store.cjs",
+  "dist/codex/desktop/runtime.cjs",
+  "dist/electron-main/main.cjs",
+  "dist/electron-preload/preload.cjs",
   "dist/host/host-main.cjs",
+  "dist/renderer/codex/bot-runtime-ui.js",
+  "dist/renderer/codex/codex-ui.css",
+  "dist/renderer/codex/model-controls.js",
+  "dist/renderer/codex/reasoning-control.js",
+  "dist/renderer/index.html",
   "package.json",
 ]);
 
@@ -115,8 +132,10 @@ async function patchAsar({
   try {
     asar.extractAll(source, extracted);
     const before = snapshotTree(extracted);
-    patchHostInference(extracted);
     patchPackage(extracted, sourceSha256);
+    patchHostInference(extracted);
+    patchDesktop(extracted);
+    patchRenderer(extracted);
     const after = snapshotTree(extracted);
     const mutations = auditTreeDiff(before, after, ALLOWED_MUTATIONS);
     await asar.createPackageWithOptions(extracted, partial, {

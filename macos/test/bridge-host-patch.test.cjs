@@ -34,7 +34,7 @@ test("the Grok 0.20 host inference path is exclusively routed through the Codex 
   assert.match(inference, /require\(bridgePath\)/);
   assert.match(
     inference,
-    /createPromptSession\(\{\.\.\.s,onRequestId:o\},ETn\)/,
+    /createPromptSession\(\{\.\.\.s,onRequestId:o,botId:void 0,modelId:void 0\},ETn\)/,
   );
   assert.match(inference, /qt\.NO_TRAINING/);
   assert.doesNotMatch(

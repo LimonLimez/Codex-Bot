@@ -191,9 +191,14 @@ The approved controls are preserved exactly at both 1024x680 and 1920x1080:
 - The model picker contains the capability-aware Codex catalog only.
 - GPT-5.6 Sol and GPT-5.6 Terra expose six reasoning positions.
 - GPT-5.5 exposes four positions.
+- Reviewed CLIProxyAPI models Claude Fable 5, Claude Opus 5, and Claude Sonnet
+  5 expose their published low/medium/high/xhigh/max reasoning levels plus an
+  `Ultra Code` client mode that maps to upstream `max`.
 - Max is a stable blue state.
 - Ultra uses the accepted animated purple/blue state and its established warning
   and steady transitions.
+- Ultra Code reuses the same Ultra visual effect while retaining its distinct
+  selected-mode label in main-owned state.
 - Changing model recomputes the valid effort set and never retains an invalid
   hidden value.
 - In-flight sends remain bound to their captured model/effort/bot/thread tuple.

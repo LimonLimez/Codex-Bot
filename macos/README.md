@@ -27,6 +27,13 @@ authorized remote runtime. When that provider is unavailable, the app reports
 that state and disables the affected action; there is no local computer,
 on-device browser, or shared-machine fallback.
 
+The bridge uses the pinned macOS arm64 CLIProxyAPI sidecar. Its reviewed model
+catalog includes the Codex models plus Claude Fable 5, Claude Opus 5, and Claude
+Sonnet 5 when the user's CLIProxyAPI provider/account actually exposes them.
+The Claude choices add a local `Ultra Code` presentation mode that reuses the
+approved Ultra animation and maps explicitly to the upstream `max` reasoning
+level; it is not sent as an invented provider value.
+
 ## Development
 
 Run macOS commands from the repository root:

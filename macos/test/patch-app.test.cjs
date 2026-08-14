@@ -35,6 +35,7 @@ async function syntheticAsar(t, overrides = {}) {
   const tree = path.join(root, "tree");
   const source = path.join(root, "source.asar");
   fs.mkdirSync(path.join(tree, "dist", "electron-preload"), { recursive: true });
+  fs.mkdirSync(path.join(tree, "dist", "electron-main"), { recursive: true });
   fs.mkdirSync(path.join(tree, "dist", "host"), { recursive: true });
   fs.mkdirSync(path.join(tree, "dist", "native"), { recursive: true });
   fs.mkdirSync(path.join(tree, "dist", "renderer"), { recursive: true });
@@ -56,7 +57,11 @@ async function syntheticAsar(t, overrides = {}) {
   );
   fs.writeFileSync(
     path.join(tree, "dist", "electron-preload", "preload.cjs"),
-    '"use strict";\nconst stock = "unchanged preload";\n',
+    'const stock="kept";s.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>{});\n',
+  );
+  fs.writeFileSync(
+    path.join(tree, "dist", "electron-main", "main.cjs"),
+    'const setup="kept";\n"use strict";var fjn=Object.create;const stockFeature="kept";\n',
   );
   fs.writeFileSync(
     path.join(tree, "dist", "host", "host-main.cjs"),
@@ -64,7 +69,7 @@ async function syntheticAsar(t, overrides = {}) {
   );
   fs.writeFileSync(
     path.join(tree, "dist", "renderer", "index.html"),
-    "<!doctype html><title>Grok Bot</title>\n",
+    '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>Grok Bot</title>\n    <script type="module" crossorigin src="./assets/index-CphCyQnY.js"></script>\n    <link rel="stylesheet" crossorigin href="./assets/index-DTIy1z2L.css">\n  </head>\n  <body>\n    <div id="root"></div>\n  </body>\n</html>\n',
   );
   const nativeBytes = Buffer.from("synthetic native helper\n");
   const nativePath = path.join(tree, "dist", "native", "sand-helper");
@@ -107,7 +112,25 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
       targetSha256: sha256File(target),
       vendorVersion: "0.20.0",
       releaseVersion: "0.1.4-macos.1",
-      mutations: ["dist/host/host-main.cjs", "package.json"],
+      mutations: [
+        "dist/codex/bots/bot-store.cjs",
+        "dist/codex/bots/chatgpt-relay-codec.cjs",
+        "dist/codex/bots/conversation-router.cjs",
+        "dist/codex/bots/remote-app-server-client.cjs",
+        "dist/codex/bots/runtime-controller.cjs",
+        "dist/codex/bots/runtime-provider.cjs",
+        "dist/codex/desktop/model-selection-store.cjs",
+        "dist/codex/desktop/runtime.cjs",
+        "dist/electron-main/main.cjs",
+        "dist/electron-preload/preload.cjs",
+        "dist/host/host-main.cjs",
+        "dist/renderer/codex/bot-runtime-ui.js",
+        "dist/renderer/codex/codex-ui.css",
+        "dist/renderer/codex/model-controls.js",
+        "dist/renderer/codex/reasoning-control.js",
+        "dist/renderer/index.html",
+        "package.json",
+      ],
     },
   );
   assert.notEqual(receipt.targetSha256, sourceHash);
@@ -144,13 +167,32 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
       },
     },
   );
-  assert.equal(
-    fs.readFileSync(
-      path.join(extracted, "dist", "electron-preload", "preload.cjs"),
-      "utf8",
-    ),
-    '"use strict";\nconst stock = "unchanged preload";\n',
+  const patchedPreload = fs.readFileSync(
+    path.join(extracted, "dist", "electron-preload", "preload.cjs"),
+    "utf8",
   );
+  assert.match(patchedPreload, /stock="kept"/);
+  assert.match(patchedPreload, /exposeInMainWorld\("desktop",Q\)/);
+  assert.match(patchedPreload, /exposeInMainWorld\("codexBots"/);
+  assert.match(patchedPreload, /exposeInMainWorld\("codexRuntime"/);
+  const patchedMain = fs.readFileSync(
+    path.join(extracted, "dist", "electron-main", "main.cjs"),
+    "utf8",
+  );
+  assert.match(patchedMain, /stockFeature="kept"/);
+  assert.match(patchedMain, /codex\/desktop\/runtime\.cjs/);
+  for (const relative of [
+    "desktop/runtime.cjs",
+    "desktop/model-selection-store.cjs",
+    "bots/bot-store.cjs",
+    "bots/runtime-controller.cjs",
+    "bots/runtime-provider.cjs",
+    "bots/remote-app-server-client.cjs",
+    "bots/conversation-router.cjs",
+    "bots/chatgpt-relay-codec.cjs",
+  ]) {
+    assert.equal(fs.lstatSync(path.join(extracted, "dist", "codex", relative)).isFile(), true);
+  }
   const patchedHost = fs.readFileSync(
     path.join(extracted, "dist", "host", "host-main.cjs"),
     "utf8",
