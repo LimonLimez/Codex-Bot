@@ -52,6 +52,20 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     async write(selection) { calls.push(["select-model", selection]); return selection; },
     async read(botId) { calls.push(["read-model", botId]); return null; },
   };
+  const sidecarManager = {
+    async connectProvider(provider) { calls.push(["connect-provider", provider]); return undefined; },
+    async start() {
+      calls.push(["sidecar-start"]);
+      const session = { endpoint: "http://127.0.0.1:54321/v1" };
+      Object.defineProperty(session, "credential", { value: "f".repeat(64), enumerable: false });
+      return Object.freeze(session);
+    },
+    stop() { calls.push(["sidecar-stop"]); },
+  };
+  t.after(() => {
+    delete process.env.CODEX_BOT_CLIPROXY_URL;
+    delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
+  });
   const electron = {
     app: { once() {} },
     ipcMain: {
@@ -67,12 +81,12 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
       },
     },
   };
-  const installed = installDesktopRuntime(electron, { controller, selectionStore });
+  const installed = installDesktopRuntime(electron, { controller, selectionStore, sidecarManager });
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
-    "adoptLegacy", "create", "list", "read", "readModel", "rename", "retryRuntime",
+    "adoptLegacy", "connectProvider", "create", "list", "read", "readModel", "rename", "retryRuntime",
     "selectBot", "selectModel", "updateProfile",
   ]);
-  assert.equal(handlers.size, 10);
+  assert.equal(handlers.size, 11);
   assert.equal(Object.isFrozen(installed), true);
 
   await handlers.get(IPC_CHANNELS.create)({ sender: {} });
@@ -94,6 +108,11 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     generation: 7,
   });
   assert.doesNotMatch(JSON.stringify(selected), /endpoint|authToken|opaque-private|runtime-a/);
+  assert.equal(await handlers.get(IPC_CHANNELS.connectProvider)({}, "claude"), undefined);
+  assert.deepEqual(calls.find(([name]) => name === "connect-provider"), ["connect-provider", "claude"]);
+  assert.deepEqual(calls.find(([name]) => name === "sidecar-start"), ["sidecar-start"]);
+  assert.equal(process.env.CODEX_BOT_CLIPROXY_URL, "http://127.0.0.1:54321/v1");
+  assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, "f".repeat(64));
   listeners.get("bot-changed")({ botId: BOT_A, bot });
   assert.deepEqual(sends, [["codex-bot:changed", bot]]);
   listeners.get("runtime-changed")({
@@ -104,8 +123,10 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(sends.at(-1), ["codex-bot:changed", bot]);
   installed.dispose();
+  assert.equal(process.env.CODEX_BOT_CLIPROXY_URL, undefined);
+  assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, undefined);
   assert.equal(handlers.size, 0);
-  assert.deepEqual(calls.at(-1), ["dispose"]);
+  assert.deepEqual(calls.slice(-2), [["sidecar-stop"], ["dispose"]]);
 });
 
 test("selecting a bot refreshes a retained model selection to the current runtime generation", async () => {

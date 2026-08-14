@@ -22,6 +22,7 @@ const CONFIG_KEYS = Object.freeze([
   "model",
   "reasoningEffort",
 ]);
+const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 class BridgeConfigError extends Error {
   constructor() {
@@ -135,7 +136,72 @@ function createRuntimeConfig(value) {
   return Object.freeze(config);
 }
 
-function loadRuntimeConfig(environment = process.env) {
+function readConversationBindings(file) {
+  if (typeof file !== "string" || !path.isAbsolute(file) || file.length > 4096) fail();
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 1024 * 1024
+      || (stat.mode & 0o077) !== 0) fail();
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (parsed?.schemaVersion !== 1 || !parsed.bindings || typeof parsed.bindings !== "object"
+      || Array.isArray(parsed.bindings)) fail();
+    const bindings = Object.create(null);
+    for (const [conversationId, botId] of Object.entries(parsed.bindings)) {
+      if (!CONVERSATION_ID.test(conversationId) || typeof botId !== "string"
+        || !botId.startsWith("bot-") || !BOT_UUID.test(botId.slice(4))) fail();
+      bindings[conversationId] = botId;
+    }
+    return { schemaVersion: 1, bindings };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { schemaVersion: 1, bindings: Object.create(null) };
+    if (error instanceof BridgeConfigError) throw error;
+    fail();
+  }
+}
+
+function writeConversationBindings(file, state) {
+  const directory = path.dirname(file);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const directoryStat = fs.lstatSync(directory);
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) fail();
+  fs.chmodSync(directory, 0o700);
+  const temporary = path.join(
+    directory,
+    `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+  );
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, "wx", 0o600);
+    fs.writeFileSync(descriptor, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, file);
+    fs.chmodSync(file, 0o600);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+    try { fs.rmSync(temporary, { force: true }); } catch {}
+    if (error instanceof BridgeConfigError) throw error;
+    fail();
+  }
+}
+
+function selectedBotId(environment, registry, options) {
+  const conversationId = options?.conversationId;
+  if (conversationId == null) return registry.activeBotId;
+  if (typeof conversationId !== "string" || !CONVERSATION_ID.test(conversationId)) fail();
+  const file = environment.CODEX_BOT_CONVERSATION_BINDINGS;
+  const state = readConversationBindings(file);
+  const retained = state.bindings[conversationId];
+  if (retained) return retained;
+  state.bindings[conversationId] = registry.activeBotId;
+  writeConversationBindings(file, state);
+  return registry.activeBotId;
+}
+
+function loadRuntimeConfig(environment = process.env, options = {}) {
   if (environment == null || typeof environment !== "object") fail();
   if (environment.CODEX_BOT_MODEL_SELECTIONS != null) {
     let file;
@@ -153,16 +219,19 @@ function loadRuntimeConfig(environment = process.env) {
       fail();
     }
     const activeBotId = registry?.activeBotId;
-    const selection = registry?.selections?.[activeBotId];
     if (registry?.schemaVersion !== 1
       || typeof activeBotId !== "string"
       || !activeBotId.startsWith("bot-")
       || !BOT_UUID.test(activeBotId.slice(4))
-      || !selection || typeof selection !== "object" || Array.isArray(selection)) {
+      || !registry.selections || typeof registry.selections !== "object"
+      || Array.isArray(registry.selections)) {
       fail();
     }
+    const selectedBot = selectedBotId(environment, registry, options);
+    const selection = registry.selections[selectedBot];
+    if (!selection || typeof selection !== "object" || Array.isArray(selection)) fail();
     return createRuntimeConfig({
-      botId: activeBotId.slice(4),
+      botId: selectedBot.slice(4),
       generation: selection.generation,
       endpoint: environment.CODEX_BOT_CLIPROXY_URL,
       credential: environment.CODEX_BOT_CLIPROXY_TOKEN,

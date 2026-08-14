@@ -5,12 +5,14 @@ const path = require("node:path");
 const { BotStore } = require("../bots/bot-store.cjs");
 const { BotRuntimeController } = require("../bots/runtime-controller.cjs");
 const { unavailableProvider, validateProvider } = require("../bots/runtime-provider.cjs");
+const { CLIProxyManager } = require("./cliproxy-manager.cjs");
 const { ModelSelectionStore, normalizeSelectionRequest } = require("./model-selection-store.cjs");
 
 const IPC_CHANNELS = Object.freeze({
   list: "codex-bot:list",
   create: "codex-bot:create",
   adoptLegacy: "codex-bot:adopt-legacy",
+  connectProvider: "codex-bot:connect-provider",
   read: "codex-bot:read",
   rename: "codex-bot:rename",
   updateProfile: "codex-bot:update-profile",
@@ -27,6 +29,21 @@ function sanitizedFailure() {
   const error = new Error("Codex bot operation failed.");
   error.code = "CODEX_BOT_OPERATION_FAILED";
   return error;
+}
+
+function setSidecarEnvironment(session) {
+  if (
+    !session ||
+    typeof session.endpoint !== "string" ||
+    !/^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(session.endpoint) ||
+    typeof session.credential !== "string" ||
+    session.credential.length < 32 ||
+    session.credential.length > 256
+  ) {
+    throw sanitizedFailure();
+  }
+  process.env.CODEX_BOT_CLIPROXY_URL = session.endpoint;
+  process.env.CODEX_BOT_CLIPROXY_TOKEN = session.credential;
 }
 
 function loadConfiguredProvider() {
@@ -49,10 +66,27 @@ function productionDependencies(electron) {
   const botStore = new BotStore({ filePath: path.join(stateRoot, "bots.v1.json") });
   const controller = new BotRuntimeController({ store: botStore, provider: loadConfiguredProvider() });
   const modelSelectionsPath = path.join(stateRoot, "model-selections.v1.json");
+  const conversationBindingsPath = path.join(stateRoot, "conversation-bindings.v1.json");
   const selectionStore = new ModelSelectionStore({ filePath: modelSelectionsPath });
+  const sidecarManager = new CLIProxyManager({
+    binaryPath: path.join(process.resourcesPath, "codex", "cliproxy", "cli-proxy-api"),
+    stateRoot: path.join(stateRoot, "cliproxy"),
+    expectedBinaryBytes: 58509266,
+    expectedBinarySha256: "1d7a12c5a1974b492dd2f21e3ecfb39db66d3465a67fd7039a844ce2c40e55df",
+  });
+  process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
+  process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
   process.env.CODEX_BOT_MODEL_SELECTIONS = modelSelectionsPath;
+  delete process.env.CODEX_BOT_CLIPROXY_URL;
+  delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
+  void sidecarManager.start().then((session) => {
+    setSidecarEnvironment(session);
+  }).catch(() => {
+    delete process.env.CODEX_BOT_CLIPROXY_URL;
+    delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
+  });
   void controller.reconcile().catch(() => {});
-  return { controller, selectionStore, store: botStore };
+  return { controller, selectionStore, sidecarManager, store: botStore };
 }
 
 function installDesktopRuntime(electron, injected = {}) {
@@ -64,6 +98,10 @@ function installDesktopRuntime(electron, injected = {}) {
     ? injected
     : productionDependencies(electron);
   const { controller, selectionStore, store } = dependencies;
+  const sidecarManager = dependencies.sidecarManager || Object.freeze({
+    async connectProvider() { throw sanitizedFailure(); },
+    stop() {},
+  });
   const registered = [];
   let disposed = false;
 
@@ -104,6 +142,10 @@ function installDesktopRuntime(electron, injected = {}) {
     if (!store || typeof store.adoptLegacy !== "function") throw sanitizedFailure();
     const adopted = await store.adoptLegacy(value);
     return controller.ensureRuntime(adopted.botId);
+  });
+  handle(IPC_CHANNELS.connectProvider, async (provider) => {
+    await sidecarManager.connectProvider(provider);
+    setSidecarEnvironment(await sidecarManager.start());
   });
   handle(IPC_CHANNELS.read, (botId) => controller.readBot(botId));
   handle(IPC_CHANNELS.rename, (botId, name) => controller.renameBot(botId, name));
@@ -154,6 +196,9 @@ function installDesktopRuntime(electron, injected = {}) {
       controller.off?.("bot-changed", onBotChanged);
       controller.off?.("runtime-changed", onRuntimeChanged);
       controller.off?.("runtime-event", onRuntimeEvent);
+      sidecarManager.stop();
+      delete process.env.CODEX_BOT_CLIPROXY_URL;
+      delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
       controller.dispose();
       try { delete electron.app[INSTALLED]; } catch {}
     },

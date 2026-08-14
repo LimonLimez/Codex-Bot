@@ -9,6 +9,13 @@ const INFERENCE_END = "function T4i(t){";
 const STOCK_READINESS =
   "isReady:async()=>process.env.SAND_AGENT_MOCK_RESPONSE!=null||n.peekAccessToken()!==null";
 const CODEX_READINESS = "isReady:async()=>!0";
+const PRIMARY_SESSION_OPTIONS = "ye={modelId:t.subagentModelId,inferenceReason:";
+const CODEX_PRIMARY_SESSION_OPTIONS =
+  "ye={conversationId:t.getConversationId(),modelId:t.subagentModelId,inferenceReason:";
+const SUMMARY_SESSION_OPTIONS =
+  't.inference.createSession(pn=>{t.emitUpdate({type:"request-id",requestId:pn})},{modelId:dXt,isSummarizationSession:!0';
+const CODEX_SUMMARY_SESSION_OPTIONS =
+  't.inference.createSession(pn=>{t.emitUpdate({type:"request-id",requestId:pn})},{conversationId:t.getConversationId(),modelId:dXt,isSummarizationSession:!0';
 const MAX_HOST_BYTES = 32 * 1024 * 1024;
 
 const CODEX_INFERENCE =
@@ -40,6 +47,18 @@ function patchHostInferenceSource(source) {
     CODEX_READINESS,
     "Grok 0.20 inference readiness",
   );
+  patched = replaceUnique(
+    patched,
+    PRIMARY_SESSION_OPTIONS,
+    CODEX_PRIMARY_SESSION_OPTIONS,
+    "Grok 0.20 primary conversation session",
+  );
+  patched = replaceUnique(
+    patched,
+    SUMMARY_SESSION_OPTIONS,
+    CODEX_SUMMARY_SESSION_OPTIONS,
+    "Grok 0.20 summary conversation session",
+  );
   return patched;
 }
 
@@ -61,7 +80,9 @@ function patchHostInference(extractedRoot) {
 
 module.exports = {
   CODEX_INFERENCE,
+  CODEX_PRIMARY_SESSION_OPTIONS,
   CODEX_READINESS,
+  CODEX_SUMMARY_SESSION_OPTIONS,
   INFERENCE_END,
   INFERENCE_START,
   STOCK_READINESS,

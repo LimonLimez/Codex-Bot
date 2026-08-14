@@ -65,7 +65,7 @@ async function syntheticAsar(t, overrides = {}) {
   );
   fs.writeFileSync(
     path.join(tree, "dist", "host", "host-main.cjs"),
-    '"use strict";function E4i(t){let e,n=qdi({getAccessToken:t.getAccessToken,getMachineId:t.getMachineId});return{resolvePrivacyMode:()=>Jdi({getAccessToken:t.getAccessToken,getMachineId:t.getMachineId}),createSession(o,s){return Qdi({getAccessToken:t.getAccessToken,onRequestId:o})},recordPostTurnLabeling(o){}}}function T4i(t){return E4i(t)}var b4i={start:t=>{let e=new Set,n=t.deps.auth;return{isReady:async()=>process.env.SAND_AGENT_MOCK_RESPONSE!=null||n.peekAccessToken()!==null,port:T4i(t)}}};\n',
+    '"use strict";function E4i(t){let e,n=qdi({getAccessToken:t.getAccessToken,getMachineId:t.getMachineId});return{resolvePrivacyMode:()=>Jdi({getAccessToken:t.getAccessToken,getMachineId:t.getMachineId}),createSession(o,s){return Qdi({getAccessToken:t.getAccessToken,onRequestId:o})},recordPostTurnLabeling(o){}}}function T4i(t){return E4i(t)}ye={modelId:t.subagentModelId,inferenceReason:t.subagentType};t.inference.createSession(pn=>{t.emitUpdate({type:"request-id",requestId:pn})},{modelId:dXt,isSummarizationSession:!0);var b4i={start:t=>{let e=new Set,n=t.deps.auth;return{isReady:async()=>process.env.SAND_AGENT_MOCK_RESPONSE!=null||n.peekAccessToken()!==null,port:T4i(t)}}};\n',
   );
   fs.writeFileSync(
     path.join(tree, "dist", "renderer", "index.html"),
@@ -119,6 +119,12 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/bots/remote-app-server-client.cjs",
         "dist/codex/bots/runtime-controller.cjs",
         "dist/codex/bots/runtime-provider.cjs",
+        "dist/codex/bridge/codex-client.cjs",
+        "dist/codex/bridge/message-codec.cjs",
+        "dist/codex/bridge/redaction.cjs",
+        "dist/codex/bridge/runtime-config.cjs",
+        "dist/codex/bridge/server.cjs",
+        "dist/codex/desktop/cliproxy-manager.cjs",
         "dist/codex/desktop/model-selection-store.cjs",
         "dist/codex/desktop/runtime.cjs",
         "dist/electron-main/main.cjs",

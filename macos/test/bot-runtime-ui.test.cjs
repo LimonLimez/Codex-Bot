@@ -290,3 +290,23 @@ test("runtime events remain scoped to the selected bot and detach on disposal", 
   controller.dispose();
   assert.equal(runtimeUnsubscribed, 1);
 });
+
+test("provider connection uses only the fixed CLIProxyAPI provider facade", async () => {
+  const { createBotUiController } = require(uiPath);
+  const calls = [];
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot(botId) { return botId; },
+      async connectProvider(provider) { calls.push(provider); },
+    },
+  });
+  await controller.initialize();
+  await controller.connectProvider("claude");
+  assert.deepEqual(calls, ["claude"]);
+  await assert.rejects(() => controller.connectProvider("xai"), /provider/i);
+  assert.deepEqual(calls, ["claude"]);
+});

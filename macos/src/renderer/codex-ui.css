@@ -34,6 +34,7 @@
 
 .codex-bot-header,
 .codex-bot-rename-row,
+.codex-provider-row,
 .codex-runtime-row,
 .codex-model-row {
   display: grid;
@@ -46,6 +47,11 @@
 }
 
 .codex-bot-rename-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin-top: 6px;
+}
+
+.codex-provider-row {
   grid-template-columns: minmax(0, 1fr) auto;
   margin-top: 6px;
 }

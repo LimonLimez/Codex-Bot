@@ -227,6 +227,18 @@
       return record;
     }
 
+    async function connectProvider(provider) {
+      if (
+        disposed ||
+        !new Set(["codex", "claude", "kimi"]).has(provider) ||
+        runtimeFacade == null ||
+        typeof runtimeFacade.connectProvider !== "function"
+      ) {
+        throw new Error("Provider connection is unavailable.");
+      }
+      return runtimeFacade.connectProvider(provider);
+    }
+
     async function renameActive(name) {
       const bot = activeBot();
       const nextName = typeof name === "string" ? name.trim() : "";
@@ -295,6 +307,7 @@
 
     return Object.freeze({
       applyBot,
+      connectProvider,
       createBot,
       dispose,
       initialize,
@@ -429,6 +442,17 @@
     retry.type = "button";
     statusRow.append(status, retry);
     const modelRow = element(documentRef, "div", "codex-model-row");
+    const providerRow = element(documentRef, "div", "codex-provider-row");
+    const providerSelect = element(documentRef, "select", "codex-provider-select");
+    providerSelect.setAttribute("aria-label", "CLIProxyAPI provider");
+    for (const [value, label] of [["codex", "Codex"], ["claude", "Claude"], ["kimi", "Kimi"]]) {
+      const option = element(documentRef, "option", "", label);
+      option.value = value;
+      providerSelect.append(option);
+    }
+    const connectProvider = element(documentRef, "button", "codex-provider-connect", "Connect account");
+    connectProvider.type = "button";
+    providerRow.append(providerSelect, connectProvider);
     const modelSelect = element(documentRef, "select", "codex-model-select");
     modelSelect.setAttribute("aria-label", "Codex model");
     for (const entry of MODEL_CATALOG) {
@@ -440,7 +464,7 @@
     const reasoning = reasoningView.input;
     const reasoningLabel = element(documentRef, "output", "codex-reasoning-label");
     modelRow.append(modelSelect, reasoningView.control, reasoningLabel);
-    panel.append(header, renameRow, statusRow, modelRow, reasoningView.warning);
+    panel.append(header, renameRow, providerRow, statusRow, modelRow, reasoningView.warning);
     documentRef.body.append(panel);
 
     let lastSnapshot = null;
@@ -513,6 +537,12 @@
       }
     });
     retry.addEventListener("click", () => void controller.retryActive().catch(() => {}));
+    connectProvider.addEventListener("click", () => {
+      connectProvider.disabled = true;
+      void controller.connectProvider(providerSelect.value).catch(() => {}).finally(() => {
+        connectProvider.disabled = false;
+      });
+    });
     const submitModel = () => {
       const model = MODEL_CATALOG.find((entry) => entry.model === modelSelect.value);
       const effort = model?.efforts[Number(reasoning.value)];

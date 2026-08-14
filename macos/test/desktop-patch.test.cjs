@@ -23,6 +23,7 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /codex-bot:changed/);
   assert.match(preload, /codex-runtime:event/);
   assert.match(preload, /onEvent:callback/);
+  assert.match(preload, /connectProvider:provider/);
   assert.match(preload, /create:\(\)=>__codexInvoke\("create"\)/);
   assert.throws(() => patchMainSource(main), /already|anchor/i);
   assert.throws(() => patchPreloadSource(preload), /already|anchor/i);

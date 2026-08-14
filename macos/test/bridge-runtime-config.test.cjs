@@ -19,6 +19,7 @@ const modelCatalogPath = path.join(
 );
 
 const BOT_ID = "11111111-1111-4111-8111-111111111111";
+const BOT_ID_B = "22222222-2222-4222-8222-222222222222";
 const TOKEN = "runtime-secret-".padEnd(48, "x");
 
 function temporaryRegistry(t) {
@@ -46,6 +47,8 @@ test("pins the reviewed CLIProxyAPI 7.2.130 macOS arm64 release", () => {
       name: "cli-proxy-api",
       platform: "darwin",
       architecture: "arm64",
+      bytes: 58509266,
+      sha256: "1d7a12c5a1974b492dd2f21e3ecfb39db66d3465a67fd7039a844ce2c40e55df",
       reportedCommit: "f43aad76",
       reportedBuiltAt: "2026-08-12T10:31:20Z",
     },
@@ -212,4 +215,45 @@ test("CLIProxyAPI-backed Fable Ultra Code stays distinct in UI storage and maps 
   assert.equal(config.model, "claude-fable-5");
   assert.equal(config.reasoningEffort, "max");
   assert.match(fs.readFileSync(registry, "utf8"), /"reasoningEffort":"ultra-code"/);
+});
+
+test("stock Grok conversations stay bound to their original bot across active-bot switches and restarts", (t) => {
+  const { loadRuntimeConfig } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  const bindings = path.join(path.dirname(registry), "conversation-bindings.v1.json");
+  const writeRegistry = (activeBotId) => fs.writeFileSync(registry, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId,
+    selections: {
+      [`bot-${BOT_ID}`]: {
+        model: "gpt-5.6-sol", reasoningEffort: "high", generation: 21, updatedAt: null,
+      },
+      [`bot-${BOT_ID_B}`]: {
+        model: "claude-fable-5", reasoningEffort: "ultra-code", generation: 22, updatedAt: null,
+      },
+    },
+  })}\n`, { mode: 0o600 });
+  const environment = {
+    CODEX_BOT_MODEL_SELECTIONS: registry,
+    CODEX_BOT_CONVERSATION_BINDINGS: bindings,
+    CODEX_BOT_CLIPROXY_URL: "http://127.0.0.1:43123/v1",
+    CODEX_BOT_CLIPROXY_TOKEN: TOKEN,
+  };
+
+  writeRegistry(`bot-${BOT_ID}`);
+  const first = loadRuntimeConfig(environment, { conversationId: "stock-conversation-a" });
+  assert.equal(first.botId, BOT_ID);
+  writeRegistry(`bot-${BOT_ID_B}`);
+  const retained = loadRuntimeConfig(environment, { conversationId: "stock-conversation-a" });
+  const second = loadRuntimeConfig(environment, { conversationId: "stock-conversation-b" });
+  assert.equal(retained.botId, BOT_ID);
+  assert.equal(retained.generation, 21);
+  assert.equal(second.botId, BOT_ID_B);
+  assert.equal(second.generation, 22);
+  assert.equal(second.reasoningEffort, "max");
+  const persisted = fs.readFileSync(bindings, "utf8");
+  assert.match(persisted, new RegExp(`"stock-conversation-a": "bot-${BOT_ID}"`));
+  assert.match(persisted, new RegExp(`"stock-conversation-b": "bot-${BOT_ID_B}"`));
+  assert.doesNotMatch(persisted, /43123|runtime-secret|endpoint|credential|model/i);
+  assert.equal(fs.statSync(bindings).mode & 0o077, 0);
 });
