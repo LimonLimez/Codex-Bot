@@ -1,5 +1,6 @@
 param(
-    [string]$InnoCompiler = ''
+    [string]$InnoCompiler = '',
+    [switch]$AllowDirtyDevelopmentBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,7 +15,43 @@ $packageVersion = [string]$package.version
 if ($packageVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
     throw "package.json contains an invalid release version: $packageVersion"
 }
-$installerName = "CodexBot-Setup-$packageVersion.exe"
+$canonicalInstallerName = "CodexBot-Setup-$packageVersion.exe"
+
+$requiredBootstrapInputs = @(
+    (Join-Path $projectRoot 'scripts\Verify-GrokBotInstaller.ps1'),
+    (Join-Path $projectRoot 'scripts\Verify-GrokBotRuntime.ps1'),
+    (Join-Path $projectRoot 'assets\grok-bot-0.18.0-windows-x64.manifest.json')
+)
+foreach ($requiredInput in $requiredBootstrapInputs) {
+    if (-not (Test-Path -LiteralPath $requiredInput -PathType Leaf)) {
+        throw "Required fail-closed Grok Bot bootstrap input is missing: $requiredInput"
+    }
+}
+
+$gitStatus = & git -C $projectRoot status --porcelain=v1 --untracked-files=all
+if ($LASTEXITCODE -ne 0) {
+    throw 'Git could not verify the release source tree.'
+}
+if ($gitStatus -and -not $AllowDirtyDevelopmentBuild) {
+    throw 'Release builds require a clean Git worktree so every packaged source file is committed. Commit or stash all tracked and untracked changes, or pass -AllowDirtyDevelopmentBuild only for a local test build that will not be published.'
+}
+
+$isDevelopmentBuild = [bool]$AllowDirtyDevelopmentBuild
+$developmentBuildId = $null
+if ($isDevelopmentBuild) {
+    $gitRevision = [string](& git -C $projectRoot rev-parse --short=12 HEAD)
+    if ($LASTEXITCODE -ne 0 -or $gitRevision.Trim() -notmatch '^[0-9A-Fa-f]{7,12}$') {
+        throw 'Git could not determine the development-build revision.'
+    }
+    $gitRevision = $gitRevision.Trim().ToLowerInvariant()
+    $developmentTimestamp = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+    $developmentBuildId = "$developmentTimestamp-$gitRevision"
+    $installerName = "CodexBot-Setup-$packageVersion-DEVELOPMENT-$developmentBuildId.exe"
+    Write-Warning "DEVELOPMENT TEST BUILD: $installerName is non-publishable and cannot replace the canonical release installer."
+} else {
+    $installerName = $canonicalInstallerName
+}
+$installerBaseName = [IO.Path]::GetFileNameWithoutExtension($installerName)
 $installerPath = Join-Path $artifactsRoot $installerName
 New-Item -ItemType Directory -Force -Path $vendorRoot, $artifactsRoot | Out-Null
 
@@ -22,6 +59,13 @@ Push-Location $projectRoot
 try {
     npm ci --omit=dev
     if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
+
+    foreach ($releaseGate in @('check', 'test', 'audit:release')) {
+        & npm run $releaseGate
+        if ($LASTEXITCODE -ne 0) {
+            throw "The mandatory release gate 'npm run $releaseGate' failed."
+        }
+    }
 
     $headers = @{ 'User-Agent' = 'Codex-Bot-Release-Builder' }
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v$cliProxyVersion" -Headers $headers
@@ -69,8 +113,22 @@ try {
     if (-not $InnoCompiler -or -not (Test-Path -LiteralPath $InnoCompiler)) {
         throw 'Inno Setup 6 was not found. Install JRSoftware.InnoSetup or pass -InnoCompiler.'
     }
-    & $InnoCompiler (Join-Path $projectRoot 'installer\CodexBot.iss')
-    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+    foreach ($staleOutput in @($installerPath, "$installerPath.sha256")) {
+        if (Test-Path -LiteralPath $staleOutput) {
+            Remove-Item -LiteralPath $staleOutput -Force
+        }
+    }
+    $previousDevelopmentFlag = [Environment]::GetEnvironmentVariable('CODEX_BOT_INSTALLER_DEVELOPMENT', 'Process')
+    $previousOutputBaseName = [Environment]::GetEnvironmentVariable('CODEX_BOT_INSTALLER_OUTPUT_BASENAME', 'Process')
+    try {
+        [Environment]::SetEnvironmentVariable('CODEX_BOT_INSTALLER_DEVELOPMENT', $(if ($isDevelopmentBuild) { '1' } else { '0' }), 'Process')
+        [Environment]::SetEnvironmentVariable('CODEX_BOT_INSTALLER_OUTPUT_BASENAME', $installerBaseName, 'Process')
+        & $InnoCompiler "/F$installerBaseName" (Join-Path $projectRoot 'installer\CodexBot.iss')
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+    } finally {
+        [Environment]::SetEnvironmentVariable('CODEX_BOT_INSTALLER_DEVELOPMENT', $previousDevelopmentFlag, 'Process')
+        [Environment]::SetEnvironmentVariable('CODEX_BOT_INSTALLER_OUTPUT_BASENAME', $previousOutputBaseName, 'Process')
+    }
     if (-not (Test-Path -LiteralPath $installerPath -PathType Leaf)) {
         throw "Inno Setup did not produce the expected current-version installer: $installerName"
     }
@@ -83,7 +141,16 @@ try {
     if ($actualSidecar -cne $expectedSidecar) {
         throw "The checksum sidecar could not be verified for $installerName."
     }
-    [pscustomobject]@{ Name = $installer.Name; Length = $installer.Length; SHA256 = $hash; HashFile = $hashFile }
+    [pscustomobject]@{
+        Name = $installer.Name
+        Length = $installer.Length
+        SHA256 = $hash
+        HashFile = $hashFile
+        BuildKind = if ($isDevelopmentBuild) { 'development' } else { 'release' }
+        Publishable = -not $isDevelopmentBuild
+        BuildId = $developmentBuildId
+        CanonicalName = $canonicalInstallerName
+    }
 } finally {
     Pop-Location
 }

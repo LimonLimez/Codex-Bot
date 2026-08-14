@@ -16,8 +16,8 @@ const PAYMENT_WORDS =
 const SENSITIVE_AUTOCOMPLETE =
   /^(?:current-password|new-password|one-time-code|cc-(?:name|given-name|additional-name|family-name|number|exp|exp-month|exp-year|csc|type)|transaction-(?:currency|amount))$/i;
 const SAFE_FOCUS_KEYS = /^(?:TAB|SHIFT\+TAB|ESC|ESCAPE)$/i;
-const ADDRESS_FOCUS_KEY = /^(?:(?:CTRL|CONTROL|CMD|META)\+L)$/i;
-const ADDRESS_SELECT_KEY = /^(?:(?:CTRL|CONTROL|CMD|META)\+A)$/i;
+const ADDRESS_FOCUS_KEY = /^(?:(?:CTRL|CONTROL)\+L)$/i;
+const ADDRESS_SELECT_KEY = /^(?:(?:CTRL|CONTROL)\+A)$/i;
 const PRESENTATION_KINDS = new Set([
   "click",
   "drag",
@@ -389,7 +389,10 @@ function sanitizePresentationUrl(value, baseOrigin, typedValues = []) {
     return "";
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-  return redactTypedEcho(`${parsed.origin}${parsed.pathname || "/"}`, typedValues);
+  return redactTypedEcho(
+    `${parsed.origin}${parsed.pathname || "/"}`,
+    typedValues,
+  );
 }
 
 function presentationKind(action) {
@@ -441,9 +444,8 @@ function typedContentPresentation(action, context) {
   if (normalizedToken(action?.kind) !== "type") return null;
   const text = String(action?.text || "");
   const sensitiveClass = sensitiveFieldClass(action, context);
-  const target = context?.target && typeof context.target === "object"
-    ? context.target
-    : {};
+  const target =
+    context?.target && typeof context.target === "object" ? context.target : {};
   const inputType = safeToken(target.inputType || target.type);
   const autocomplete = safeToken(target.autocomplete);
   let category = sensitiveClass;
@@ -464,9 +466,10 @@ function addressCandidate(action, target) {
   const current = String(target?.href || "");
   let value = current;
   if (kind === "type") {
-    value = target?.selected === true
-      ? String(action?.text || "")
-      : current + String(action?.text || "");
+    value =
+      target?.selected === true
+        ? String(action?.text || "")
+        : current + String(action?.text || "");
   }
   value = value.trim();
   if (!value) return "";
@@ -479,9 +482,8 @@ function addressCandidate(action, target) {
 }
 
 function actionDestination(action, context, origin, typedValues) {
-  const target = context?.target && typeof context.target === "object"
-    ? context.target
-    : {};
+  const target =
+    context?.target && typeof context.target === "object" ? context.target : {};
   const kind = presentationKind(action);
   const surface = normalizedToken(context?.surface || target.surface);
   let candidate = "";
@@ -495,11 +497,13 @@ function actionDestination(action, context, origin, typedValues) {
 
 function formPresentation(target, origin, typedValues) {
   if (!target || typeof target !== "object") return null;
-  const destination = sanitizePresentationUrl(target.formAction, origin, typedValues);
+  const destination = sanitizePresentationUrl(
+    target.formAction,
+    origin,
+    typedValues,
+  );
   const rawMethod = safeToken(target.formMethod).toUpperCase();
-  const method = ["GET", "POST", "DIALOG"].includes(rawMethod)
-    ? rawMethod
-    : "";
+  const method = ["GET", "POST", "DIALOG"].includes(rawMethod) ? rawMethod : "";
   if (!method && !destination) return null;
   return Object.freeze({
     ...(method ? { method } : {}),
@@ -511,15 +515,11 @@ function buildApprovalPresentation(actions, trustedContext = {}, origin) {
   const typedValues = typedValuesFor(actions);
   const items = actions.map((action, index) => {
     const context = trustedContext?.actions?.[index] || {};
-    const trustedTarget = context?.target && typeof context.target === "object"
-      ? context.target
-      : {};
-    const destination = actionDestination(
-      action,
-      context,
-      origin,
-      typedValues,
-    );
+    const trustedTarget =
+      context?.target && typeof context.target === "object"
+        ? context.target
+        : {};
+    const destination = actionDestination(action, context, origin, typedValues);
     const target = targetPresentation(trustedTarget, typedValues);
     const form = formPresentation(trustedTarget, origin, typedValues);
     const typedContent = typedContentPresentation(action, context);

@@ -253,6 +253,20 @@ test("Chromium hardening arguments are frozen and disable QUIC and permission pr
   assert.equal(Object.isFrozen(CHROMIUM_HARDENING_ARGS), true);
   assert.equal(CHROMIUM_HARDENING_ARGS.includes("--disable-quic"), true);
   assert.equal(
+    CHROMIUM_HARDENING_ARGS.includes("--disable-background-networking"),
+    true,
+  );
+  assert.equal(
+    CHROMIUM_HARDENING_ARGS.includes("--disable-domain-reliability"),
+    true,
+  );
+  assert.equal(
+    CHROMIUM_HARDENING_ARGS.includes(
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    ),
+    true,
+  );
+  assert.equal(
     CHROMIUM_HARDENING_ARGS.includes("--deny-permission-prompts"),
     true,
   );

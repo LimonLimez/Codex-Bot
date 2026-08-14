@@ -9,7 +9,9 @@ const { once } = require("node:events");
 const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
-const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-privacy-test-"));
+const stateRoot = fs.mkdtempSync(
+  path.join(os.tmpdir(), "codex-bot-privacy-test-"),
+);
 process.env.CODEX_BOT_STATE_ROOT = stateRoot;
 process.env.GROK_BOT_BROWSER_SEAT_DATA = path.join(stateRoot, "browser-seats");
 process.env.GROK_BOT_BROWSER_VIEW_TOKEN = "test-view-token-".padEnd(32, "x");
@@ -23,14 +25,21 @@ test.after(() => {
 });
 
 test("central log redaction removes URL secrets and credential-shaped values", () => {
-  const credentialUrl = "https://alice" + ":password@example.com/private/path?token=query-secret#fragment";
+  const credentialUrl =
+    "https://alice" +
+    ":password@example.com/private/path?token=query-secret#fragment";
   const apiKey = "sk-proj-" + "a".repeat(32);
-  const jwt = ["eyJ" + "a".repeat(32), "b".repeat(32), "c".repeat(24)].join(".");
+  const jwt = ["eyJ" + "a".repeat(32), "b".repeat(32), "c".repeat(24)].join(
+    ".",
+  );
   const input = `request ${credentialUrl} Authorization: Bearer bearer-secret api_key=${apiKey} jwt=${jwt} device code ABCD-EFGH`;
   const redacted = connection.redactSensitiveText(input);
 
   assert.match(redacted, /https:\/\/example\.com/);
-  assert.doesNotMatch(redacted, /alice|password|private\/path|query-secret|fragment|bearer-secret/);
+  assert.doesNotMatch(
+    redacted,
+    /alice|password|private\/path|query-secret|fragment|bearer-secret/,
+  );
   assert.doesNotMatch(redacted, new RegExp(apiKey.replaceAll("-", "\\-")));
   assert.doesNotMatch(redacted, new RegExp(jwt.replaceAll(".", "\\.")));
   assert.doesNotMatch(redacted, /ABCD-EFGH/);
@@ -47,15 +56,20 @@ test("central log redaction removes URL secrets and credential-shaped values", (
 });
 
 test("browser bridge returns and logs redacted tool errors", async () => {
-  const credentialUrl = "https://user" + ":pass@example.net/account?access_token=secret#private";
+  const credentialUrl =
+    "https://user" + ":pass@example.net/account?access_token=secret#private";
   const apiKey = "sk-" + "z".repeat(36);
-  const original = seatBridge.manager.executeSeatActions;
-  seatBridge.manager.executeSeatActions = async () => {
-    throw new Error(`Navigation failed at ${credentialUrl}; Authorization: Bearer ${apiKey}`);
+  const original = seatBridge.privateManager.executeSeatActions;
+  seatBridge.privateManager.executeSeatActions = async () => {
+    throw new Error(
+      `Navigation failed at ${credentialUrl}; Authorization: Bearer ${apiKey}`,
+    );
   };
 
   class Value {
-    constructor(value) { Object.assign(this, value); }
+    constructor(value) {
+      Object.assign(this, value);
+    }
   }
 
   try {
@@ -66,15 +80,21 @@ test("browser bridge returns and logs redacted tool errors", async () => {
       ComputerUseError: Value,
       Coordinate: Value,
     });
-    const result = await executor.execute(null, { actions: [], toolCallId: "privacy-test-call" });
+    const result = await executor.execute(null, {
+      actions: [],
+      toolCallId: "privacy-test-call",
+    });
     const returned = result.result.value.error;
     assert.match(returned, /https:\/\/example\.net/);
     assert.doesNotMatch(returned, /user|pass|account|access_token|secret|sk-/i);
 
-    const log = fs.readFileSync(path.join(stateRoot, "logs", "browser-seats.jsonl"), "utf8");
+    const log = fs.readFileSync(
+      path.join(stateRoot, "logs", "browser-seats.jsonl"),
+      "utf8",
+    );
     assert.doesNotMatch(log, /user|pass|account|access_token|secret|sk-/i);
   } finally {
-    seatBridge.manager.executeSeatActions = original;
+    seatBridge.privateManager.executeSeatActions = original;
   }
 });
 
@@ -96,17 +116,23 @@ test("seat-control JSON parsing accepts normal bodies and drains oversized bodie
 
 test("SSE parsing accepts split events and aborts an oversized event line", async () => {
   const events = [];
-  for await (const event of bridge.sseEvents(Readable.from([
-    Buffer.from('data: {"choices":[', "utf8"),
-    Buffer.from('{"delta":{"content":"ok"}}]}\n\n', "utf8"),
-    Buffer.from("data: [DONE]\n", "utf8"),
-  ]))) events.push(event);
+  for await (const event of bridge.sseEvents(
+    Readable.from([
+      Buffer.from('data: {"choices":[', "utf8"),
+      Buffer.from('{"delta":{"content":"ok"}}]}\n\n', "utf8"),
+      Buffer.from("data: [DONE]\n", "utf8"),
+    ]),
+  ))
+    events.push(event);
   assert.deepEqual(events, [{ choices: [{ delta: { content: "ok" } }] }]);
 
   let iteratorClosed = false;
   async function* oversizedBody() {
     try {
-      yield Buffer.from(`data: ${"x".repeat(bridge.MAX_SSE_LINE_BYTES + 1)}`, "utf8");
+      yield Buffer.from(
+        `data: ${"x".repeat(bridge.MAX_SSE_LINE_BYTES + 1)}`,
+        "utf8",
+      );
     } finally {
       iteratorClosed = true;
     }

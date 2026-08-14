@@ -3,8 +3,14 @@
 const path = require("node:path");
 
 const CHROMIUM_HARDENING_ARGS = Object.freeze([
+  "--disable-background-networking",
+  "--disable-component-update",
+  "--disable-domain-reliability",
   "--disable-quic",
+  "--disable-sync",
   "--deny-permission-prompts",
+  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+  "--no-pings",
 ]);
 
 /**

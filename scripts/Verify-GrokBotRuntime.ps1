@@ -9,10 +9,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $expectedSchemaVersion = 1
 $expectedProduct = 'Grok Bot'
-$expectedVersion = '0.16.0'
+$expectedVersion = '0.18.0'
 $expectedPlatform = 'windows-x64'
 $expectedSignerSubject = 'CN="Anysphere, Inc.", O="Anysphere, Inc.", L=San Francisco, S=California, C=US'
-$expectedSignerThumbprint = '786DA5811DB0A4B3C1AD4754B4CC06BF76C97827'
+$expectedSignerThumbprint = '67E878CBE262D364A6D059B77DAC002E2C064F0E'
 
 function Get-RequiredProperty($Value, [string]$Name) {
     if ($null -eq $Value -or $null -eq $Value.PSObject.Properties[$Name]) {
@@ -76,7 +76,7 @@ if ([int](Get-RequiredProperty $manifest 'schemaVersion') -ne $expectedSchemaVer
     [string](Get-RequiredProperty $manifest 'product') -cne $expectedProduct -or
     [string](Get-RequiredProperty $manifest 'version') -cne $expectedVersion -or
     [string](Get-RequiredProperty $manifest 'platform') -cne $expectedPlatform) {
-    throw 'The supported-runtime manifest identity is not the pinned Grok Bot 0.16.0 Windows x64 identity.'
+    throw 'The supported-runtime manifest identity is not the pinned Grok Bot 0.18.0 Windows x64 identity.'
 }
 
 $signer = Get-RequiredProperty $manifest 'signer'

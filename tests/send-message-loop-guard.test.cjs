@@ -13,7 +13,9 @@ const tools = ["SendMessage", "Shell", "Computer"].map((name) => ({
 }));
 
 function names(messages) {
-  return bridge.convertToolsForStep(tools, messages).map((tool) => tool.function.name);
+  return bridge
+    .convertToolsForStep(tools, messages)
+    .map((tool) => tool.function.name);
 }
 
 function completedBatch(calls) {
@@ -41,11 +43,28 @@ function completedBatch(calls) {
 
 test("SendMessage is available on the first inference step", () => {
   const messages = [{ role: "user", content: "hello" }];
-  assert.equal(bridge.trailingCompletedToolBatchHasSendMessage(messages), false);
+  assert.equal(
+    bridge.trailingCompletedToolBatchHasSendMessage(messages),
+    false,
+  );
   assert.deepEqual(names(messages), ["SendMessage", "Shell", "Computer"]);
 });
 
-test("only SendMessage is hidden immediately after its completed tool batch", () => {
+test("SendMessage is hidden for one step after a completed message-only batch", () => {
+  const messages = [
+    { role: "user", content: "do the work" },
+    ...completedBatch([{ id: "send-1", name: "SendMessage" }]),
+  ];
+
+  assert.equal(
+    bridge.trailingCompletedToolBatchMessageMode(messages),
+    "message-only",
+  );
+  assert.equal(bridge.trailingCompletedToolBatchHasSendMessage(messages), true);
+  assert.deepEqual(names(messages), ["Shell", "Computer"]);
+});
+
+test("SendMessage remains available after a completed mixed message and work batch", () => {
   const messages = [
     { role: "user", content: "do the work" },
     ...completedBatch([
@@ -54,8 +73,12 @@ test("only SendMessage is hidden immediately after its completed tool batch", ()
     ]),
   ];
 
+  assert.equal(
+    bridge.trailingCompletedToolBatchMessageMode(messages),
+    "message-with-work",
+  );
   assert.equal(bridge.trailingCompletedToolBatchHasSendMessage(messages), true);
-  assert.deepEqual(names(messages), ["Shell", "Computer"]);
+  assert.deepEqual(names(messages), ["SendMessage", "Shell", "Computer"]);
 });
 
 test("an incomplete SendMessage batch does not suppress the delivery tool", () => {
@@ -63,11 +86,22 @@ test("an incomplete SendMessage batch does not suppress the delivery tool", () =
     { role: "user", content: "hello" },
     {
       role: "assistant",
-      content: [{ type: "tool-call", toolCallId: "send-1", toolName: "SendMessage", args: {} }],
+      content: [
+        {
+          type: "tool-call",
+          toolCallId: "send-1",
+          toolName: "SendMessage",
+          args: {},
+        },
+      ],
     },
   ];
 
-  assert.equal(bridge.trailingCompletedToolBatchHasSendMessage(messages), false);
+  assert.equal(bridge.trailingCompletedToolBatchMessageMode(messages), "none");
+  assert.equal(
+    bridge.trailingCompletedToolBatchHasSendMessage(messages),
+    false,
+  );
   assert.deepEqual(names(messages), ["SendMessage", "Shell", "Computer"]);
 });
 
@@ -78,6 +112,10 @@ test("SendMessage returns after a subsequent completed non-message batch", () =>
     ...completedBatch([{ id: "shell-1", name: "Shell" }]),
   ];
 
-  assert.equal(bridge.trailingCompletedToolBatchHasSendMessage(messages), false);
+  assert.equal(bridge.trailingCompletedToolBatchMessageMode(messages), "none");
+  assert.equal(
+    bridge.trailingCompletedToolBatchHasSendMessage(messages),
+    false,
+  );
   assert.deepEqual(names(messages), ["SendMessage", "Shell", "Computer"]);
 });

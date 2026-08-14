@@ -1,31 +1,97 @@
-﻿const GB_SEAT_VIEW_URL = "http://127.0.0.1:__CODEX_VIEW_PORT__",
+const GB_SEAT_VIEW_URL = "http://127.0.0.1:__CODEX_VIEW_PORT__",
   GB_SEAT_REQUEST = globalThis.__CODEX_BOT_VIEW_REQUEST__;
 function GBApprovalDetailLines(presentation) {
   const lines = [];
   for (const action of presentation?.actions ?? []) {
-    const kind = String(action?.kind || "interactive action").replace(/(^|\s)([a-z])/g, (_m, lead, letter) => `${lead}${letter.toUpperCase()}`);
+    const kind = String(action?.kind || "interactive action").replace(
+      /(^|\s)([a-z])/g,
+      (_m, lead, letter) => `${lead}${letter.toUpperCase()}`,
+    );
     lines.push(`Action: ${kind}`);
     action?.destination && lines.push(`Destination: ${action.destination}`);
     if (action?.target) {
       const target = [
-        action.target.name ? `“${action.target.name}”` : "",
+        action.target.name ? `"${action.target.name}"` : "",
         action.target.role || "",
         action.target.fieldType || "",
-      ].filter(Boolean).join(" · ");
+      ]
+        .filter(Boolean)
+        .join(" - ");
       target && lines.push(`Target: ${target}`);
     }
     if (action?.form) {
       const form = [
         action.form.method || "Form",
-        action.form.destination ? `→ ${action.form.destination}` : "",
-      ].filter(Boolean).join(" ");
+        action.form.destination ? `-> ${action.form.destination}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
       lines.push(`Form: ${form}`);
     }
-    action?.typedContent && lines.push(
-      `Content: ${action.typedContent.category} · ${action.typedContent.length} character${action.typedContent.length === 1 ? "" : "s"}`,
-    );
+    action?.typedContent &&
+      lines.push(
+        `Content: ${action.typedContent.category} - ${action.typedContent.length} character${action.typedContent.length === 1 ? "" : "s"}`,
+      );
   }
   return lines;
+}
+function GBApprovalFrameBinding(frame) {
+  const generation = Number(frame?.generation),
+    sequence = Number(frame?.sequence),
+    sha256 = String(frame?.sha256 || "");
+  return Number.isSafeInteger(generation) &&
+    generation >= 0 &&
+    Number.isSafeInteger(sequence) &&
+    sequence >= 1 &&
+    /^[0-9a-f]{64}$/.test(sha256)
+    ? { generation, sequence, sha256 }
+    : null;
+}
+function GBApprovalFrameKey(frame) {
+  const binding = GBApprovalFrameBinding(frame);
+  return binding
+    ? `${binding.generation}:${binding.sequence}:${binding.sha256}`
+    : "";
+}
+function GBSeatProvider(value) {
+  const provider = value?.provider ?? value?.officialComputer?.mode;
+  return provider === "official" || provider === "private" ? provider : null;
+}
+function GBUnavailableSeatState(previous, provider, error) {
+  return {
+    ...previous,
+    ...(GBSeatProvider({ provider }) ? { provider } : {}),
+    pageState: "unavailable",
+    error: String(error?.message ?? error),
+  };
+}
+function GBSeatFrameStyle(expanded) {
+  return {
+    position: "absolute",
+    ...(expanded
+      ? {
+          left: "50%",
+          top: "50%",
+          width: "min(calc(100vw - 24px), calc(160vh - 38.4px))",
+          height: "min(calc(100vh - 24px), calc(62.5vw - 15px))",
+          transform: "translate(-50%, -50%)",
+        }
+      : {
+          inset: 0,
+          width: "100%",
+          height: "100%",
+        }),
+  };
+}
+function GBSeatEventIsInsideFrame(event, frame) {
+  const bounds = frame?.getBoundingClientRect?.();
+  return (
+    !bounds ||
+    (event.clientX >= bounds.left &&
+      event.clientX <= bounds.right &&
+      event.clientY >= bounds.top &&
+      event.clientY <= bounds.bottom)
+  );
 }
 function GBLiveSeat({ agentId: n, subjectLabel: e }) {
   const [t, s] = T.useState(null),
@@ -33,32 +99,83 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
     [o, l] = T.useState(!1),
     [q, Q] = T.useState(null),
     [c, u] = T.useState(""),
+    [zP, zS] = T.useState(""),
     d = T.useRef(null),
     m = T.useRef(null),
     f = T.useRef(null),
-    p = T.useRef(!1),
+    aF = T.useRef(!1),
     aP = T.useRef(!1),
+    aI = T.useRef(null),
+    aT = T.useRef(null),
+    aR = T.useRef(null),
     yC = T.useRef(globalThis.crypto.randomUUID());
-  const g = T.useCallback(async () => {
-    if (p.current) return;
-    p.current = !0;
+  const X = T.useCallback(async () => {
+    l(!1);
     try {
-      const v = await GB_SEAT_REQUEST(`/api/frame?seatKey=${encodeURIComponent(n)}`);
-      (s(`data:image/png;base64,${v.screenshotBase64}`),
-        i(v),
-        document.activeElement !== m.current && u(v.url ?? ""));
+      await GB_SEAT_REQUEST("/api/control", {
+        seatKey: n,
+        controlId: yC.current,
+        action: "release",
+      });
+      return null;
     } catch (a) {
-      i({ pageState: "unavailable", error: String(a?.message ?? a) });
-    } finally {
-      p.current = !1;
+      i((v) => GBUnavailableSeatState(v, aI.current, a));
+      return a;
     }
   }, [n]);
+  const g = T.useCallback(async () => {
+    if (aF.current) return;
+    aF.current = !0;
+    let v = aI.current,
+      B = !1;
+    try {
+      if (!v) {
+        const x = await GB_SEAT_REQUEST(
+          `/api/codex/status?agentId=${encodeURIComponent(n)}`,
+        );
+        v = GBSeatProvider(x);
+        if (!v) throw new Error("The computer provider mode is unavailable.");
+        ((aI.current = v), i((A) => ({ ...A, provider: v })), (B = !0));
+      }
+      const x = await GB_SEAT_REQUEST(
+        `/api/frame?seatKey=${encodeURIComponent(n)}`,
+      );
+      const A = GBSeatProvider(x) ?? v;
+      if (o && v && A !== v) await X();
+      ((aI.current = A),
+        s(`data:image/png;base64,${x.screenshotBase64}`),
+        i({ ...x, provider: A }),
+        document.activeElement !== m.current && u(x.url ?? ""));
+    } catch (a) {
+      if (v && !B) {
+        try {
+          const x = await GB_SEAT_REQUEST(
+              `/api/codex/status?agentId=${encodeURIComponent(n)}`,
+            ),
+            A = GBSeatProvider(x);
+          if (A) {
+            ((v = A), (aI.current = A));
+          }
+        } catch {}
+      }
+      if (o) await X();
+      i((x) => GBUnavailableSeatState(x, v, a));
+    } finally {
+      aF.current = !1;
+    }
+  }, [n, o, X]);
   const j = T.useCallback(async () => {
     if (aP.current) return;
+    if (aI.current !== "private") {
+      Q(null);
+      return;
+    }
     aP.current = !0;
     try {
-      const B = await GB_SEAT_REQUEST(`/api/approval?seatKey=${encodeURIComponent(n)}`);
-      Q(B.pending ?? null);
+      const B = await GB_SEAT_REQUEST(
+        `/api/approval?seatKey=${encodeURIComponent(n)}`,
+      );
+      Q(aI.current === "private" ? (B.pending ?? null) : null);
     } catch {
       // Approval polling is independent from the live frame. A temporarily
       // delayed screenshot must never hide or deadlock a pending decision.
@@ -83,8 +200,41 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
     };
   }, [j]);
   T.useEffect(() => {
-    o && setTimeout(() => d.current?.focus(), 0);
-  }, [o]);
+    if (!o) return;
+    const a = document.body,
+      v = a?.style?.overflow ?? "",
+      B = aR.current,
+      O = d.current,
+      x = (A) => {
+        if (A.key !== "Escape") return;
+        (A.preventDefault(), A.stopPropagation(), X());
+      },
+      y = (A) => {
+        const O = d.current;
+        O && !O.contains?.(A.target) && O.focus?.();
+      };
+    try {
+      O?.showModal && !O.open ? O.showModal() : O?.setAttribute?.("open", "");
+    } catch {
+      O?.setAttribute?.("open", "");
+    }
+    (a?.style && (a.style.overflow = "hidden"),
+      document.addEventListener?.("keydown", x, !0),
+      document.addEventListener?.("focusin", y, !0),
+      setTimeout(() => d.current?.focus(), 0));
+    return () => {
+      (document.removeEventListener?.("keydown", x, !0),
+        document.removeEventListener?.("focusin", y, !0));
+      if (a?.style) a.style.overflow = v;
+      try {
+        O?.open ? O.close?.() : O?.removeAttribute?.("open");
+      } catch {}
+      setTimeout(() => {
+        const A = aT.current ?? B;
+        ((aR.current = null), A?.isConnected !== !1 && A?.focus?.());
+      }, 0);
+    };
+  }, [o, X]);
   T.useEffect(() => {
     if (!o) return;
     let a = !0;
@@ -96,13 +246,13 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
           action: "heartbeat",
         });
       } catch {
-        a && l(!1);
+        a && X();
       }
     }, 5000);
     return () => {
       ((a = !1), clearInterval(v));
     };
-  }, [n, o]);
+  }, [n, o, X]);
   T.useEffect(
     () => () => {
       GB_SEAT_REQUEST("/api/control", {
@@ -124,6 +274,7 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
           });
           (i((x) => ({ ...x, ...y })), u(y.url ?? c), g());
         } catch (v) {
+          X();
           i((y) => ({
             ...y,
             pageState: "unavailable",
@@ -131,19 +282,15 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
           }));
         }
       },
-      [n, c, g, o],
+      [n, c, g, o, X],
     ),
     H = T.useCallback(async () => {
       try {
         if (o) {
-          await GB_SEAT_REQUEST("/api/control", {
-            seatKey: n,
-            controlId: yC.current,
-            action: "release",
-          });
-          l(!1);
+          await X();
           return;
         }
+        aR.current = aT.current ?? document.activeElement ?? d.current;
         await GB_SEAT_REQUEST("/api/control", {
           seatKey: n,
           controlId: yC.current,
@@ -151,9 +298,14 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
         });
         (Q(null), l(!0), setTimeout(() => d.current?.focus(), 0));
       } catch (a) {
-        i((v) => ({ ...v, pageState: "unavailable", error: String(a?.message ?? a) }));
+        l(!1);
+        i((v) => ({
+          ...v,
+          pageState: "unavailable",
+          error: String(a?.message ?? a),
+        }));
       }
-    }, [n, o]),
+    }, [n, o, X]),
     w = T.useCallback((a) => {
       const v = f.current?.getBoundingClientRect();
       return v
@@ -175,11 +327,29 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
     R = T.useCallback(
       async (a) => {
         if (!q) return;
-        await GB_SEAT_REQUEST("/api/approval", { seatKey: n, decision: a, binding: q });
-        Q(null);
-        (j(), g());
+        const v = GBApprovalFrameBinding(q.frame),
+          x = GBApprovalFrameKey(q.frame);
+        if (a === "allow-once" && q.frame && (!v || zP !== x)) return;
+        try {
+          await GB_SEAT_REQUEST("/api/approval", {
+            seatKey: n,
+            decision: a,
+            binding: {
+              requestId: q.requestId,
+              seatId: q.seatId,
+              origin: q.origin,
+              actionDigest: q.actionDigest,
+              ...(a === "allow-once" && v ? { presentedFrame: v } : {}),
+            },
+          });
+          Q(null);
+          (j(), g());
+        } catch (A) {
+          X();
+          i((O) => GBUnavailableSeatState(O, aI.current, A));
+        }
       },
-      [n, q, j, g],
+      [n, q, j, g, zP, X],
     ),
     b = T.useCallback(
       (a) => {
@@ -189,6 +359,7 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
           return;
         }
         (a.preventDefault(), d.current?.focus());
+        if (!GBSeatEventIsInsideFrame(a, f.current)) return;
         const v = w(a);
         ((f.current.__gbDrag = {
           start: v,
@@ -199,7 +370,7 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
       },
       [o, w, H],
     ),
-    S = T.useCallback(
+    zM = T.useCallback(
       (a) => {
         const v = f.current?.__gbDrag;
         if (!v) return;
@@ -236,6 +407,7 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
       (a) => {
         if (!o || a.target.closest?.('[data-gb-overlay="1"]')) return;
         a.preventDefault();
+        if (!GBSeatEventIsInsideFrame(a, f.current)) return;
         const v = w(a),
           y = Math.abs(a.deltaX) > Math.abs(a.deltaY),
           x = y ? (a.deltaX < 0 ? 3 : 4) : a.deltaY < 0 ? 1 : 2,
@@ -249,7 +421,12 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
     ),
     A = T.useCallback(
       (a) => {
-        if (!o || a.target.closest?.('[data-gb-overlay="1"]')) return;
+        if (!o) return;
+        if (a.key === "Escape") {
+          (a.preventDefault(), a.stopPropagation(), X());
+          return;
+        }
+        if (a.target.closest?.('[data-gb-overlay="1"]')) return;
         if (["Control", "Alt", "Shift", "Meta"].includes(a.key)) return;
         if (a.ctrlKey && a.key.toLowerCase() === "v") return;
         (a.preventDefault(), a.stopPropagation());
@@ -265,7 +442,7 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
         const y = a.key === " " ? "SPACE" : a.key;
         (v.push(y), k([{ kind: "key", key: v.join("+") }]));
       },
-      [o, k],
+      [o, k, X],
     ),
     C = T.useCallback(
       (a) => {
@@ -278,6 +455,12 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
       },
       [o, k],
     ),
+    zB = GBApprovalFrameBinding(q?.frame),
+    zK = GBApprovalFrameKey(q?.frame),
+    zU = q?.frame ? `data:image/png;base64,${q.frame.screenshotBase64}` : "",
+    zR = !q?.frame || (Boolean(zB) && zP === zK),
+    I = r?.provider === "official",
+    W = r?.provider === "private",
     P = r?.pageState === "challenge",
     _ = r?.pageState === "unavailable",
     L = P
@@ -286,44 +469,63 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
         ? "View unavailable"
         : o
           ? "You have control"
-          : "Live";
-  return h.jsxs("div", {
+          : "Live",
+    V = I
+      ? `Vendor cloud \u00b7 Experimental \u00b7 billing possible \u00b7 ${L}`
+      : L;
+  return h.jsxs(o ? "dialog" : "div", {
     ref: d,
     role: "application",
+    ...(o ? { role: "dialog", "aria-modal": !0 } : {}),
     tabIndex: 0,
-    "aria-label": `${e}'s live browser. ${L}`,
-    title: o
-      ? "Your mouse and keyboard now control this employee's private browser"
-      : "Click the view or Take control to interact",
+    "aria-keyshortcuts": o ? "Escape" : void 0,
+    "aria-label": `${o ? "Expanded control of " : ""}${e}'s ${I ? "shared official vendor cloud computer" : "live browser"}. ${L}${o ? ". Press Escape to release control and return to chat." : ""}`,
+    title: I
+      ? o
+        ? "Your mouse and keyboard now control the shared official vendor cloud computer"
+        : "Click the view or Take control to interact with the shared official vendor cloud computer"
+      : o
+        ? "Your mouse and keyboard now control this employee's private browser"
+        : "Click the view or Take control to interact",
     onPointerDown: b,
-    onPointerMove: S,
+    onPointerMove: zM,
     onPointerUp: E,
     onWheel: N,
     onKeyDown: A,
     onPaste: C,
     onContextMenu: (a) => o && a.preventDefault(),
+    onCancel: (a) => {
+      if (!o) return;
+      (a.preventDefault(), a.stopPropagation(), X());
+    },
     style: {
-      position: "absolute",
+      position: o ? "fixed" : "absolute",
       inset: 0,
-      zIndex: 50,
+      zIndex: o ? 2147483000 : 50,
       overflow: "hidden",
       outline: o ? "2px solid #2f81f7" : "none",
       outlineOffset: "-2px",
-      background: "#090909",
+      background: o ? "#050505" : "#090909",
       cursor: o ? "default" : "pointer",
+      isolation: "isolate",
+      boxSizing: "border-box",
+      width: o ? "100vw" : void 0,
+      height: o ? "100vh" : void 0,
+      maxWidth: o ? "none" : void 0,
+      maxHeight: o ? "none" : void 0,
+      margin: o ? 0 : void 0,
+      padding: o ? 0 : void 0,
+      border: o ? 0 : void 0,
     },
     children: [
       t
         ? h.jsx("img", {
             ref: f,
             src: t,
-            alt: `${e}'s live browser`,
+            alt: `${e}'s ${I ? "shared official vendor cloud computer" : "live browser"}`,
             draggable: !1,
             style: {
-              position: "absolute",
-              inset: 0,
-              width: "100%",
-              height: "100%",
+              ...GBSeatFrameStyle(o),
               objectFit: "fill",
               userSelect: "none",
               pointerEvents: "none",
@@ -332,30 +534,37 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
         : h.jsx("div", {
             ref: f,
             style: {
-              position: "absolute",
-              inset: 0,
+              ...GBSeatFrameStyle(o),
               display: "grid",
               placeItems: "center",
               color: "#a8a8a8",
               fontSize: 12,
             },
-            children: `Starting ${e}'s browser…`,
+            children: _
+              ? `${I ? "Official computer" : "Browser"} view unavailable`
+              : `Starting ${e}'s ${I ? "official computer" : "browser"}...`,
           }),
       h.jsxs("div", {
         "data-gb-overlay": "1",
         style: {
           position: "absolute",
-          left: 6,
-          right: 6,
-          top: 6,
+          left: o ? 12 : 6,
+          right: o ? 12 : 6,
+          top: o ? 12 : 6,
           display: "flex",
           alignItems: "center",
-          gap: 6,
+          gap: o ? 8 : 6,
           pointerEvents: "none",
         },
         children: [
           h.jsx("button", {
+            ref: aT,
             type: "button",
+            "aria-pressed": o,
+            "aria-keyshortcuts": o ? "Escape" : void 0,
+            title: o
+              ? "Release control and return to chat (Escape)"
+              : "Expand this computer and take control",
             onPointerDown: (a) => a.stopPropagation(),
             onClick: (a) => {
               (a.stopPropagation(), H());
@@ -366,13 +575,15 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
               borderRadius: 999,
               background: o ? "#2f81f7" : "rgba(20,20,20,.88)",
               color: "white",
-              padding: "5px 9px",
-              fontSize: 11,
+              minHeight: o ? 44 : void 0,
+              padding: o ? "10px 14px" : "5px 9px",
+              fontSize: o ? 13 : 11,
               fontWeight: 600,
+              cursor: "pointer",
             },
             children: o ? "Release control" : "Take control",
           }),
-          o
+          o && W
             ? h.jsx("input", {
                 ref: m,
                 value: c,
@@ -402,41 +613,64 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
                   borderRadius: 999,
                   background: "rgba(20,20,20,.88)",
                   color: "white",
-                  padding: "5px 9px",
-                  fontSize: 11,
+                  minHeight: 44,
+                  padding: "10px 14px",
+                  fontSize: 13,
                   outline: "none",
                 },
               })
             : null,
           h.jsxs("span", {
+            "aria-label": I
+              ? `Vendor cloud, experimental, billing possible. ${L}`
+              : L,
+            title: I
+              ? "Vendor-managed shared computer. Billing and vendor background services may apply."
+              : L,
             style: {
               marginLeft: "auto",
               flex: "none",
+              maxWidth: "72%",
               borderRadius: 999,
-              background: "rgba(20,20,20,.88)",
-              color: P ? "#ffd866" : _ ? "#ff7b72" : "#d5d5d5",
-              padding: "5px 8px",
-              fontSize: 10,
+              border: I
+                ? "1px solid rgba(235,179,87,.5)"
+                : "1px solid transparent",
+              background: I ? "rgba(68,45,13,.92)" : "rgba(20,20,20,.88)",
+              color: P ? "#ffd866" : _ ? "#ff9b95" : I ? "#f3d49b" : "#d5d5d5",
+              minHeight: o ? 44 : void 0,
+              padding: o ? "10px 12px" : "5px 8px",
+              fontSize: o ? 12 : 10,
               fontWeight: 600,
-              whiteSpace: "nowrap",
+              lineHeight: 1.25,
+              textAlign: "end",
+              whiteSpace: "normal",
+              overflowWrap: "anywhere",
+              display: "grid",
+              placeItems: "center end",
+              boxSizing: "border-box",
             },
-            children: ["● ", L],
+            children: V,
           }),
         ],
       }),
-      q
+      q && W
         ? h.jsxs("div", {
             "data-gb-overlay": "1",
             role: "dialog",
             "aria-label": "Browser action approval",
             style: {
               position: "absolute",
-              left: 12,
-              right: 12,
+              left: o ? "50%" : 12,
+              right: o ? "auto" : 12,
               bottom: 12,
+              width: o ? "min(calc(100vw - 24px), 560px)" : void 0,
+              maxHeight: o ? "calc(100vh - 84px)" : "calc(100% - 24px)",
+              transform: o ? "translateX(-50%)" : void 0,
               display: "grid",
               gap: 8,
               padding: 12,
+              overflowY: "auto",
+              boxSizing: "border-box",
               border: "1px solid rgba(255,255,255,.24)",
               borderRadius: 12,
               background: "rgba(18,18,18,.97)",
@@ -444,23 +678,103 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
               boxShadow: "0 10px 32px rgba(0,0,0,.45)",
             },
             onPointerDown: (a) => a.stopPropagation(),
-            onKeyDown: (a) => a.stopPropagation(),
+            onKeyDown: (a) => {
+              if (a.key === "Escape" && o) {
+                (a.preventDefault(), a.stopPropagation(), X());
+                return;
+              }
+              a.stopPropagation();
+            },
             onPaste: (a) => a.stopPropagation(),
             children: [
               h.jsx("strong", { children: "Approval needed" }),
-              h.jsx("span", { style: { fontSize: 12, color: "#d5d5d5" }, children: `${q.summary} on ${q.origin}` }),
-              ...GBApprovalDetailLines(q.presentation).map((a, v) => h.jsx("span", {
-                style: { fontSize: 11, color: "#b8b8b8", overflowWrap: "anywhere" },
-                children: a,
-              }, `approval-detail-${v}`)),
+              h.jsx("span", {
+                style: { fontSize: 12, color: "#d5d5d5" },
+                children: `${q.summary} on ${q.origin}`,
+              }),
+              q.frame
+                ? h.jsxs("div", {
+                    style: { display: "grid", gap: 6 },
+                    children: [
+                      h.jsx("span", {
+                        style: { fontSize: 11, color: "#f3d49b" },
+                        children:
+                          "Review this exact screen. The action can run only while it remains current.",
+                      }),
+                      h.jsx(
+                        "img",
+                        {
+                          src: zU,
+                          alt: "Screen approved action will use",
+                          "aria-label": "Screen approved action will use",
+                          draggable: !1,
+                          onLoad: (a) => {
+                            const v =
+                              a.currentTarget?.getAttribute?.("src") ||
+                              a.currentTarget?.src ||
+                              "";
+                            v === zU && zK && zS(zK);
+                          },
+                          onError: (a) => {
+                            const v =
+                              a.currentTarget?.getAttribute?.("src") ||
+                              a.currentTarget?.src ||
+                              "";
+                            v === zU && zS((x) => (x === zK ? "" : x));
+                          },
+                          style: {
+                            display: "block",
+                            width: "100%",
+                            maxHeight: 220,
+                            objectFit: "contain",
+                            border: "1px solid rgba(255,255,255,.2)",
+                            borderRadius: 8,
+                            background: "#090909",
+                          },
+                        },
+                        zK,
+                      ),
+                    ],
+                  })
+                : null,
+              ...GBApprovalDetailLines(q.presentation).map((a, v) =>
+                h.jsx(
+                  "span",
+                  {
+                    style: {
+                      fontSize: 11,
+                      color: "#b8b8b8",
+                      overflowWrap: "anywhere",
+                    },
+                    children: a,
+                  },
+                  `approval-detail-${v}`,
+                ),
+              ),
               h.jsxs("div", {
                 style: { display: "flex", gap: 8, flexWrap: "wrap" },
                 children: [
-                  h.jsx("button", { type: "button", onClick: () => R("allow-once"), children: "Allow once" }),
+                  h.jsx("button", {
+                    type: "button",
+                    disabled: !zR,
+                    title: zR
+                      ? "Allow this action once"
+                      : "Waiting for the exact approval screen to load",
+                    onClick: () => zR && R("allow-once"),
+                    children: "Allow once",
+                  }),
                   q.siteLeaseAvailable
-                    ? h.jsx("button", { type: "button", onClick: () => R("allow-site"), children: "Allow this site briefly" })
+                    ? h.jsx("button", {
+                        type: "button",
+                        onClick: () => R("allow-site"),
+                        children: "Allow this site briefly",
+                      })
                     : null,
-                  h.jsx("button", { type: "button", onClick: () => R("deny"), children: "Deny" }),
+                  h.jsx("button", {
+                    type: "button",
+                    onClick: () => R("deny"),
+                    children: "Deny",
+                  }),
                 ],
               }),
             ],

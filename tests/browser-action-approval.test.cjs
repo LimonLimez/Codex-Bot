@@ -100,6 +100,10 @@ test("deterministic classification keeps only observation, view, and focus actio
     { kind: "navigate", url: "https://example.com/" },
     { kind: "type", text: "https://example.com/", surface: "address" },
     { kind: "key", key: "ENTER", surface: "address" },
+    { kind: "key", key: "META+L" },
+    { kind: "key", key: "CMD+L" },
+    { kind: "key", key: "META+A", surface: "address" },
+    { kind: "key", key: "CMD+A", surface: "address" },
     {
       kind: "click",
       target: { tagName: "a", href: "https://example.com/page" },
@@ -414,16 +418,18 @@ test("approval presentation identifies safe destination, live target, form, and 
       actions: [{ kind: "type", text: secret }],
     },
     {
-      actions: [{
-        target: {
-          tagName: "input",
-          role: "textbox",
-          inputType: "password",
-          accessibleName: `Account password ${secret}`,
-          formMethod: "post",
-          formAction: credentialedFormAction.href,
+      actions: [
+        {
+          target: {
+            tagName: "input",
+            role: "textbox",
+            inputType: "password",
+            accessibleName: `Account password ${secret}`,
+            formMethod: "post",
+            formAction: credentialedFormAction.href,
+          },
         },
-      }],
+      ],
     },
   );
   const passwordStatus = coordinator.getPendingStatus("seat-informed-password");
@@ -443,7 +449,10 @@ test("approval presentation identifies safe destination, live target, form, and 
       length: Array.from(secret).length,
     },
   });
-  assert.doesNotMatch(JSON.stringify(passwordStatus.presentation), new RegExp(secret));
+  assert.doesNotMatch(
+    JSON.stringify(passwordStatus.presentation),
+    new RegExp(secret),
+  );
   approver.deny(passwordStatus);
   await passwordPromise;
 
@@ -456,19 +465,26 @@ test("approval presentation identifies safe destination, live target, form, and 
     {
       seatId: "seat-informed-navigation",
       origin: "https://source.example/",
-      actions: [{
-        kind: "navigate",
-        url: credentialedDestination.href,
-      }],
+      actions: [
+        {
+          kind: "navigate",
+          url: credentialedDestination.href,
+        },
+      ],
     },
     { actions: [{}] },
   );
-  const navigationStatus = coordinator.getPendingStatus("seat-informed-navigation");
+  const navigationStatus = coordinator.getPendingStatus(
+    "seat-informed-navigation",
+  );
   assert.deepEqual(navigationStatus.presentation.actions[0], {
     kind: "navigate",
     destination: "https://destination.example/work/item",
   });
-  assert.doesNotMatch(JSON.stringify(navigationStatus.presentation), /operator|access_token|section|private/);
+  assert.doesNotMatch(
+    JSON.stringify(navigationStatus.presentation),
+    /operator|access_token|section|private/,
+  );
   approver.deny(navigationStatus);
   await navigationPromise;
 
@@ -479,16 +495,19 @@ test("approval presentation identifies safe destination, live target, form, and 
       actions: [{ kind: "click", coordinate: { x: 25, y: 40 } }],
     },
     {
-      actions: [{
-        target: {
-          tagName: "a",
-          role: "link",
-          accessibleName: "Review checkout",
-          href: "https://shop.example/checkout/review?cart=private#payment",
-          formMethod: "get",
-          formAction: "https://shop.example/checkout/submit?cart=private#payment",
+      actions: [
+        {
+          target: {
+            tagName: "a",
+            role: "link",
+            accessibleName: "Review checkout",
+            href: "https://shop.example/checkout/review?cart=private#payment",
+            formMethod: "get",
+            formAction:
+              "https://shop.example/checkout/submit?cart=private#payment",
+          },
         },
-      }],
+      ],
     },
   );
   const clickStatus = coordinator.getPendingStatus("seat-informed-click");

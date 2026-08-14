@@ -3,13 +3,15 @@
 async function main() {
   const executable = process.argv[2];
   const icon = process.argv[3];
-  if (!executable) throw new Error("Usage: brand-executable.cjs <Codex Bot.exe>");
+  if (!executable)
+    throw new Error("Usage: brand-executable.cjs <Codex Bot.exe>");
   const imported = await import("rcedit");
   const rcedit = imported.rcedit || imported.default;
-  if (typeof rcedit !== "function") throw new Error("The installed rcedit package did not expose its API.");
+  if (typeof rcedit !== "function")
+    throw new Error("The installed rcedit package did not expose its API.");
   await rcedit(executable, {
-    "file-version": "0.1.1.0",
-    "product-version": "0.1.1.0",
+    "file-version": "0.1.4.0",
+    "product-version": "0.1.4.0",
     "version-string": {
       CompanyName: "Codex Bot contributors",
       FileDescription: "Codex Bot",

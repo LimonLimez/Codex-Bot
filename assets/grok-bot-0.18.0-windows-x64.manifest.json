@@ -1,16 +1,16 @@
 {
     "schemaVersion":  1,
     "product":  "Grok Bot",
-    "version":  "0.16.0",
+    "version":  "0.18.0",
     "platform":  "windows-x64",
     "signer":  {
                    "subject":  "CN=\"Anysphere, Inc.\", O=\"Anysphere, Inc.\", L=San Francisco, S=California, C=US",
-                   "thumbprint":  "786DA5811DB0A4B3C1AD4754B4CC06BF76C97827"
+                   "thumbprint":  "67E878CBE262D364A6D059B77DAC002E2C064F0E"
                },
     "files":  [
                   {
                       "path":  "Grok Bot.exe",
-                      "sha256":  "bb0ac93d4853e92dd26155034a5b42673835f5b908abb60e2915e01d1ebede80"
+                      "sha256":  "86719c9dcbfc580b7bc29ece62302401a7622ae577e2cff42b4c525db674f1ca"
                   },
                   {
                       "path":  "LICENSE.electron.txt",
@@ -22,7 +22,7 @@
                   },
                   {
                       "path":  "Uninstall Grok Bot.exe",
-                      "sha256":  "d77526f8c644a451e7f19c7e67729f270afdb653c2bd63b4c620fefa5ed06f49"
+                      "sha256":  "4e4045884146e852beb42b22d95c509d6a5439e362236410eb5d45cc9cfe380a"
                   },
                   {
                       "path":  "chrome_100_percent.pak",
@@ -34,19 +34,19 @@
                   },
                   {
                       "path":  "d3dcompiler_47.dll",
-                      "sha256":  "1223345db1daa12ad07386bf849c2782a134bf198382269ffcd617ca7c0ad4b6"
+                      "sha256":  "ab11163f232a55852a45d6c08cbe81c39b59d30f9a8e255e63d3a4ddde9c03ce"
                   },
                   {
                       "path":  "dxcompiler.dll",
-                      "sha256":  "b4f624607bdde2938cdbf87412622d343b3ba8d4198919059c87c6e3da64547a"
+                      "sha256":  "ee8353842e36036d36e081f22216df354b2b578abf3502c2120cd63f3f307def"
                   },
                   {
                       "path":  "dxil.dll",
-                      "sha256":  "9330d38eec6832b2e3832ba6cb2be5491205d24adbd040d144dbbfca0090afd1"
+                      "sha256":  "0476b726d3e0a64ebd26c3e15d11e6767f51d408030d0e705b7f0ae0157abc51"
                   },
                   {
                       "path":  "ffmpeg.dll",
-                      "sha256":  "efd67583fc518c395d7eb3998e43416d35c8729b49a29efa9688bc3b4536b019"
+                      "sha256":  "2a923457156cd43dea99c035a755d01c6a4e4acb39e016472d646655c0f6f233"
                   },
                   {
                       "path":  "icudtl.dat",
@@ -54,11 +54,11 @@
                   },
                   {
                       "path":  "libEGL.dll",
-                      "sha256":  "788a10dd1cba44e7a331f51564e6daea7af9f3880d76c1613439674acbd3bde5"
+                      "sha256":  "bbd83d94d6b4541cb34b3e23b6247438d6732cb7a2f7c977e85f7ecf4a07f4ac"
                   },
                   {
                       "path":  "libGLESv2.dll",
-                      "sha256":  "28f903ff0f2b49d8170744fda121cc2d8db86ced376c71934a43f2824515fb34"
+                      "sha256":  "4558b61130bf83deaaf522419b4b5ec0c9ea16df3a58afb7cb72339382dc0bdd"
                   },
                   {
                       "path":  "locales/af.pak",
@@ -286,7 +286,7 @@
                   },
                   {
                       "path":  "resources/app.asar",
-                      "sha256":  "955fb24e72ec85729cac2f921758a93a85089a0fc659e712125d6650b364d20e"
+                      "sha256":  "38e85c0e5042c0257db7925e1e55709d6d155d90d92fe26ad654127d509766e0"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/@anysphere/tree-chunk-napi/index.js",
@@ -298,7 +298,7 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/@anysphere/tree-chunk-napi/tree-chunk-napi.win32-x64-msvc.node",
-                      "sha256":  "ff026875647aa23e4d9312ff93318e4e26f910e62fd3d7b243d57601fab960a4"
+                      "sha256":  "a6dda73324533f735c1a04029ef02e87620c942bfb93d0404c8a2f773a368ea7"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/base64-js/LICENSE",
@@ -334,7 +334,7 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/better-sqlite3/build/Release/better_sqlite3.node",
-                      "sha256":  "6a353f9d3acdf15520d649ecca05658217e338fcbbd58e7af946bb9a13f9c1c3"
+                      "sha256":  "6b1e93f0685dde0aa3362befd1cf3e7883e0e50e5d4b7a139e9c8b282cb341fb"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/better-sqlite3/deps/common.gypi",
@@ -430,15 +430,15 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/better-sqlite3/node_modules/.bin/prebuild-install",
-                      "sha256":  "386e85c300dd8746d44be87ef1933c7198057e2d5a48a95ca6905dd157ae282b"
+                      "sha256":  "9d9557a8d44b27e418539715ace80ff8946b6d2bfd8696b6d6c1e1140f20f33f"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/better-sqlite3/node_modules/.bin/prebuild-install.CMD",
-                      "sha256":  "bcb2e44689fcb68670ab98efa852129f3001032a0da0175637d756e284647dd9"
+                      "sha256":  "7edec68e87de94d677e748084c3459aa977b3799732de7e5ec5037f20039bdbf"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/better-sqlite3/node_modules/.bin/prebuild-install.ps1",
-                      "sha256":  "07227c2e0b3d8bcd195e0fc3fc50418f2b11da7a5cdebb72c68c79a96530a4eb"
+                      "sha256":  "813b3f9dc59bb8312aa46bfc0ec75e3c92f81759dfc353428dcdb32ee1371af0"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/better-sqlite3/package.json",
@@ -630,15 +630,15 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/cursor_proclist.exp",
-                      "sha256":  "ce60f000229525b7f4735c1c36ac65cd20e12f4b5d2ccb9af674daff9c26e39d"
+                      "sha256":  "fd574a26211bb350482634ed8576669e78bf4f7d00ecbf89ca456f007724fad3"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/cursor_proclist.iobj",
-                      "sha256":  "c06ab9c227ea9ce9329c7d788f665d89bae3f3ce5fc3d6a6aa4647a6961de107"
+                      "sha256":  "2f47f92c27b8a89094a13be4330ca3974ab911de43d395d66872169b534d9305"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/cursor_proclist.ipdb",
-                      "sha256":  "f1b5d5ef0059892a559bd557f1299b2b8acacf65db6968280a58615f835e730d"
+                      "sha256":  "5b693abccbcf97e346cffc69d11e1652c6af5acf9768cfee89c574963b95e719"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/cursor_proclist.lib",
@@ -646,59 +646,59 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/cursor_proclist.node",
-                      "sha256":  "3e6f010543baea0d0e374e3b743f09a906f38f9a4ab7506f8be5c463a506924d"
+                      "sha256":  "956de50c845cb929b49232bb71aafddc48881cffcf6caa38ab5631ab9eced261"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/nothing.lib",
-                      "sha256":  "027a108912707fb6a9b9988f768d23ac637978ce6b06cc1ea7af6706d628788b"
+                      "sha256":  "9c3ce89d150775a8826e9753c15797667a27dac58f600e757846f1b19cb5fef0"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.node.recipe",
-                      "sha256":  "fc9ecb3958fa4d1ac6f5dd831004e4a443edbe23f76c933140989ded3bb99e5b"
+                      "sha256":  "cf7e017dc20ea479753b27f079881ef69f749b99ead958fceb9515ef49d9831f"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/CL.command.1.tlog",
-                      "sha256":  "49b1368280f8b9a5357054810ae72275813d5a5a02328b04e272e60a073375fe"
+                      "sha256":  "5c06b5af239c59a6d6e8684d9daa4e711cbfca4322c29b20157d4af570b54e65"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/CL.read.1.tlog",
-                      "sha256":  "e888b8a1af54a7b56a3c3e96c5695a5e3de31c23960b009b9c1e580ca146e6a8"
+                      "sha256":  "d4f996cdd342a4d5f2e7ab2318d5e5024ff5d02637a120c74daff8342a1a8698"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/CL.write.1.tlog",
-                      "sha256":  "18db1c89bf4663ec830aebdfda02995fe33378e8f95c1cc487fc831df6f02742"
+                      "sha256":  "594d75e2a7da2eb42428f4de1c32c479c8105892c20b488b0b36f57e5ad892fb"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/Cl.items.tlog",
-                      "sha256":  "edff26b5279caa9f81ddec58dd588325731cb07450055d0bd908ef152082ecd9"
+                      "sha256":  "60d85e14c12f5f67da174fa4632033e6b1c046fe2c8bfeb89b7a69e1610f462f"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/cursor_proclist.lastbuildstate",
-                      "sha256":  "1bdd7dffd14c15893cd3ff5a4c61930006fc853d82694a522e1a4bc4e8529c60"
+                      "sha256":  "81efec25d027e215e60c1217e482a175dc6b7d966904de7cd65a30c9f2c8a5be"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/link.command.1.tlog",
-                      "sha256":  "da2eebb6395de0520537259156dd2952ded44ec18c1cb4e7ae36731e7b062afa"
+                      "sha256":  "ccc8c6512358446e421c59d5f15123399a172894f20bd3c31f19bfe3d77bff3c"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/link.read.1.tlog",
-                      "sha256":  "24ceb092c917f9670c3cd6ae901688a0d056c1a7cd736a5f4f50f38dd815b0f2"
+                      "sha256":  "04429fdc341cadf8e269cde529e3e11d5c96af987c51f3ac58b11fd50d7e36ed"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/link.secondary.1.tlog",
-                      "sha256":  "2d891898975600f0ba2cf4efd4e9b54c59c3670f7b5901584b027f007316bf0c"
+                      "sha256":  "9a3848197bdb77c0a4b9437159682925fa2062f94a71ff8d955918b30801ed11"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/Release/obj/cursor_proclist/cursor_proclist.tlog/link.write.1.tlog",
-                      "sha256":  "1c6335ef1ce8a0c150317f2f429c10ba14476e533b7fa74331dcf8e444067aed"
+                      "sha256":  "8207b15678d30a6e3c1f1090e25a04df2a08427384155ab3ff74f23044031881"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/config.gypi",
-                      "sha256":  "3c79a9b7eaaa710059f5c716ad04d98aa01d87cb05e168d26b924c32b1585cb9"
+                      "sha256":  "faa18aa3e993ee672440735911a077910bf0c2c742f9accec94d6b0b58ba4db0"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/cursor_proclist.vcxproj",
-                      "sha256":  "6a3a0364cc647b5be7b9ff6ab085fd30a1d20671c76a2cc0fefb5ca3d1c405ce"
+                      "sha256":  "b4d2e20101844a6941b247223c4179590eadc4a44138ef3b4ab6e59886bbf93f"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/cursor-proclist/build/cursor_proclist.vcxproj.filters",
@@ -1130,15 +1130,15 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/node-abi/node_modules/.bin/semver",
-                      "sha256":  "7b2d6d4b6575e86525194cea0d5c48f5872ec66788301801c3dfdfed5e36beed"
+                      "sha256":  "7a9ec168ad32ce6dc4ab845bcf641fc871a6ee2e00807e5f873dcfba14f8af5f"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/node-abi/node_modules/.bin/semver.CMD",
-                      "sha256":  "afecacbb346ef663117376980006d69b1a4b80f5c22f0fbca0e32ee797518136"
+                      "sha256":  "67c6f694a6c0a75cf458d8bd498f7224df0eaeaf30d07497560f28fce62d2269"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/node-abi/node_modules/.bin/semver.ps1",
-                      "sha256":  "2c92b674d33448f2435d69ff57decfcacad5a7b430c11d8e3fdacb2b259cba09"
+                      "sha256":  "40dc828a6cc85c35d4d8cb48c15f631ad17e03a25d231dfeaec3e3ef514ef194"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/node-abi/package.json",
@@ -1314,15 +1314,15 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/prebuild-install/node_modules/.bin/rc",
-                      "sha256":  "363c20244f7be945ee0ed5bbacad713552cec31ebb64d705a4bce5c6d2795040"
+                      "sha256":  "2fc52cb3b3f4097731750309cff6c0ccf2383472e88f0e0bd0ea76918e7b81fc"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/prebuild-install/node_modules/.bin/rc.CMD",
-                      "sha256":  "7a904a8cf44cedc41b50d2df82003f878461a71ea2175a9f9256d3872e0c8810"
+                      "sha256":  "94857e27dd45247757ed069d0afb9dd5e8cd5c27b67ee698403d0b078dd9f4f6"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/prebuild-install/node_modules/.bin/rc.ps1",
-                      "sha256":  "72b4e4ec9eefb1cc5e5539529e9b7d7cc03ff5d916a5c767564c4729cf3b945f"
+                      "sha256":  "53977944e1915d80f3f19c86acae8305bf4782eec617573655850454282db43c"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/prebuild-install/package.json",
@@ -1930,39 +1930,39 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build",
-                      "sha256":  "e97c025eba81fd0746302e8fcb93a5f61f9f6dfd89229d1376df4b3fcb6419d8"
+                      "sha256":  "dbfa4092377c3935747969fbd5c6fb7b5ee16d916bd020f7bcb546ca84563718"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build-optional",
-                      "sha256":  "609c4a2f32859071d9ec08f1b4f25f66f4fe4355b25bedbee9673ad8a757e390"
+                      "sha256":  "37b5cfad526bdec411a5cedfc6021ed22641833dafeb21e2f0a72a68972f175d"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build-optional.CMD",
-                      "sha256":  "49d7796abd96dce123102024d20020ba822bf0beaf541fd7d37d5e3d88447224"
+                      "sha256":  "b32a1c9c7a40f2aac44627c405d987c3c9fd118cb676f675119a8b1f1f52ca4b"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build-optional.ps1",
-                      "sha256":  "c3e0fb0ad7561d60cf0426d981a3efa2b72dcd3253101a8f41511a694adb3870"
+                      "sha256":  "75b821f2a8fab295e6addd9b3d6c9fb6920c0b2fc440663b3503667a945a8385"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build-test",
-                      "sha256":  "f2b968820c7809b6478c33850a3da655e1bc6adb136279fd8924e00436c8f3a2"
+                      "sha256":  "8d546c0dc069997be79edcd07d7372cde853d7cdc951e4cf568d889536085116"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build-test.CMD",
-                      "sha256":  "7e17566f0cda52cf070c3aee6033848a99d8b7a71f813d3ae8b386c07d1f8c2b"
+                      "sha256":  "3d716733652e358cbc1f0877ac8c70af78c488eb269a47ad63b4882f8b1233f5"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build-test.ps1",
-                      "sha256":  "bd774e8b441f4d965f7d717bd92650a0af72ab4d30d409283c00008b6f9814f9"
+                      "sha256":  "29f5a779fe356aa19c871d4863d19419e0b957d6f61bf3b72ce1b0f2f7379c09"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build.CMD",
-                      "sha256":  "e63af2295176bcd1ecf886ead9378b33f01e8ff4a301907965a7f84fe0c40457"
+                      "sha256":  "87eadce34c9f8eff8ca259bea67a403406e8518ca71a8127f530dc146a38aca1"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/node_modules/.bin/node-gyp-build.ps1",
-                      "sha256":  "e4bbb26f5320bed8ee18754a787b3740570b9d2146dc347b7e5c46bb30582225"
+                      "sha256":  "96920cd1c926ef7c725967291634bac35f8b08304ef4f4c6192ce003ab0c7114"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/package.json",
@@ -1970,7 +1970,7 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/prebuilds/win32-x64/tree-sitter-bash.node",
-                      "sha256":  "716168b2b8a9c87aa7d634d68aea0fd60d46314da4c94b0c20549093e94cf251"
+                      "sha256":  "a5ee16a2b5acc2d79a74442a27cffc84d29844153dd0f699a87dba386d6f5b87"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter-bash/queries/highlights.scm",
@@ -2158,7 +2158,7 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/build/Release/tree_sitter_runtime_binding.node",
-                      "sha256":  "ec34752bd570bbcc38b4ba4e61c98e4af65d498fdbd0cad6f2e36fb55d28b5fe"
+                      "sha256":  "934073ac20d6da591a518e4f1881f9011c5a65563541ff0ffbfd1a9a0fd313b0"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/build/config.gypi",
@@ -2210,39 +2210,39 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build",
-                      "sha256":  "e97c025eba81fd0746302e8fcb93a5f61f9f6dfd89229d1376df4b3fcb6419d8"
+                      "sha256":  "dbfa4092377c3935747969fbd5c6fb7b5ee16d916bd020f7bcb546ca84563718"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build-optional",
-                      "sha256":  "609c4a2f32859071d9ec08f1b4f25f66f4fe4355b25bedbee9673ad8a757e390"
+                      "sha256":  "37b5cfad526bdec411a5cedfc6021ed22641833dafeb21e2f0a72a68972f175d"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build-optional.CMD",
-                      "sha256":  "49d7796abd96dce123102024d20020ba822bf0beaf541fd7d37d5e3d88447224"
+                      "sha256":  "b32a1c9c7a40f2aac44627c405d987c3c9fd118cb676f675119a8b1f1f52ca4b"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build-optional.ps1",
-                      "sha256":  "c3e0fb0ad7561d60cf0426d981a3efa2b72dcd3253101a8f41511a694adb3870"
+                      "sha256":  "75b821f2a8fab295e6addd9b3d6c9fb6920c0b2fc440663b3503667a945a8385"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build-test",
-                      "sha256":  "f2b968820c7809b6478c33850a3da655e1bc6adb136279fd8924e00436c8f3a2"
+                      "sha256":  "8d546c0dc069997be79edcd07d7372cde853d7cdc951e4cf568d889536085116"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build-test.CMD",
-                      "sha256":  "7e17566f0cda52cf070c3aee6033848a99d8b7a71f813d3ae8b386c07d1f8c2b"
+                      "sha256":  "3d716733652e358cbc1f0877ac8c70af78c488eb269a47ad63b4882f8b1233f5"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build-test.ps1",
-                      "sha256":  "bd774e8b441f4d965f7d717bd92650a0af72ab4d30d409283c00008b6f9814f9"
+                      "sha256":  "29f5a779fe356aa19c871d4863d19419e0b957d6f61bf3b72ce1b0f2f7379c09"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build.CMD",
-                      "sha256":  "e63af2295176bcd1ecf886ead9378b33f01e8ff4a301907965a7f84fe0c40457"
+                      "sha256":  "87eadce34c9f8eff8ca259bea67a403406e8518ca71a8127f530dc146a38aca1"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/node_modules/.bin/node-gyp-build.ps1",
-                      "sha256":  "e4bbb26f5320bed8ee18754a787b3740570b9d2146dc347b7e5c46bb30582225"
+                      "sha256":  "96920cd1c926ef7c725967291634bac35f8b08304ef4f4c6192ce003ab0c7114"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/tree-sitter/package.json",
@@ -2574,7 +2574,7 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/whichlang-node-win32-x64-msvc/whichlang-node.win32-x64-msvc.node",
-                      "sha256":  "15a5f8787108e50125571b4fd09242d37870bb3cea0718bc2b509d356ef900ea"
+                      "sha256":  "2fa98565fa2d562f0db9845fae350a05e8f3bae0373da9aad6104d2f86151971"
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/deps/whichlang-node/LICENSE",
@@ -2610,11 +2610,11 @@
                   },
                   {
                       "path":  "resources/app.asar.unpacked/dist/native/sand-webauthn-signer.exe",
-                      "sha256":  "ecef7035e7f91c7b5d6d4e46785a2b7f09fd6a1071f9c55a917dd5be822c9438"
+                      "sha256":  "bb19d025e7d14884fd9fbaf81ca3627cdf825710aceb206bce1e753b142b6aeb"
                   },
                   {
                       "path":  "resources/elevate.exe",
-                      "sha256":  "30d868b6cf06018c7eeaea2b799bb7bb7978a5df038a0e1f3a40bf48c851f397"
+                      "sha256":  "44d8cc46509ecf848762244f5574a4c94ecf9e727d81ead1ed372885d8ba5883"
                   },
                   {
                       "path":  "snapshot_blob.bin",
@@ -2626,7 +2626,7 @@
                   },
                   {
                       "path":  "vk_swiftshader.dll",
-                      "sha256":  "0a8e5b3ab4f6b8a13503091e4afd706742d8fe9de4ec5bd4b05f313968b06275"
+                      "sha256":  "0a702950e5330fe11a4960f0e4a61dc23d1fb62e926026fe5785ad08611c5ff4"
                   },
                   {
                       "path":  "vk_swiftshader_icd.json",
@@ -2634,7 +2634,7 @@
                   },
                   {
                       "path":  "vulkan-1.dll",
-                      "sha256":  "d2207c687d1a4a63af8e7b9fc514613b41f6313c1a6c4a181af9cd20ccd4060e"
+                      "sha256":  "aae8b1835d0aa08dce6d8ae8346da31f760de776795ab1c4fbe9d15547d54515"
                   }
               ]
 }

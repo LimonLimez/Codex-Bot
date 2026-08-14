@@ -17,12 +17,16 @@ $patcher = Join-Path $toolsRoot 'scripts\patch-app.cjs'
 $brandScript = Join-Path $toolsRoot 'scripts\brand-executable.cjs'
 $brandIcon = Join-Path $toolsRoot 'assets\codex-bot.ico'
 $proxyExe = Join-Path $toolsRoot 'cliproxyapi\cli-proxy-api.exe'
+$officialComputerClient = Join-Path $toolsRoot 'src\official-computer-client.cjs'
+$officialComputerHelper = Join-Path $toolsRoot 'src\official-computer-helper.cjs'
+$noVncPackage = Join-Path $toolsRoot 'node_modules\@novnc\novnc\package.json'
+$webSocketPackage = Join-Path $toolsRoot 'node_modules\ws\package.json'
 $runtimeVerifier = Join-Path $toolsRoot 'integrity\Verify-GrokBotRuntime.ps1'
-$runtimeManifest = Join-Path $toolsRoot 'integrity\grok-bot-0.16.0-windows-x64.manifest.json'
+$runtimeManifest = Join-Path $toolsRoot 'integrity\grok-bot-0.18.0-windows-x64.manifest.json'
 $disableAlwaysOn = Join-Path $toolsRoot 'runtime\Disable-Always-On.ps1'
 $enableAlwaysOn = Join-Path $toolsRoot 'runtime\Enable-Always-On.ps1'
 
-foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandIcon, $proxyExe, $runtimeVerifier, $runtimeManifest, $disableAlwaysOn, $enableAlwaysOn)) {
+foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandIcon, $proxyExe, $officialComputerClient, $officialComputerHelper, $noVncPackage, $webSocketPackage, $runtimeVerifier, $runtimeManifest, $disableAlwaysOn, $enableAlwaysOn)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Installer input is missing: $required" }
 }
 
@@ -147,6 +151,31 @@ remote-management:
   disable-control-panel: true
 plugins:
   enabled: false
+oauth-model-alias:
+  codex:
+    - name: "gpt-5.6-sol"
+      alias: "gpt-5.6-sol-fast"
+      fork: true
+      force-mapping: true
+    - name: "gpt-5.6-terra"
+      alias: "gpt-5.6-terra-fast"
+      fork: true
+      force-mapping: true
+    - name: "gpt-5.6-luna"
+      alias: "gpt-5.6-luna-fast"
+      fork: true
+      force-mapping: true
+payload:
+  override:
+    - models:
+        - name: "gpt-5.6-sol-fast"
+          protocol: "codex"
+        - name: "gpt-5.6-terra-fast"
+          protocol: "codex"
+        - name: "gpt-5.6-luna-fast"
+          protocol: "codex"
+      params:
+        service_tier: priority
 "@
 $configYaml | Set-Content -LiteralPath $proxyConfig -Encoding UTF8
 

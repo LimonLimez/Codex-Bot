@@ -8,7 +8,8 @@ const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
 const helper = path.join(root, "src", "runtime", "Local-Service-Identity.ps1");
-const read = (relativePath) => fs.readFileSync(path.join(root, ...relativePath.split("/")), "utf8");
+const read = (relativePath) =>
+  fs.readFileSync(path.join(root, ...relativePath.split("/")), "utf8");
 
 function extractPowerShellFunction(source, name) {
   const start = source.indexOf(`function ${name}`);
@@ -36,7 +37,11 @@ function firstLine(stream) {
     };
     const onExit = (code) => {
       cleanup();
-      reject(new Error(`listener process exited before reporting its port (${code})`));
+      reject(
+        new Error(
+          `listener process exited before reporting its port (${code})`,
+        ),
+      );
     };
     const cleanup = () => {
       stream.off("data", onData);
@@ -57,10 +62,14 @@ test("listener identity requires the current user, exact executable, and expecte
     "[Console]::Out.Flush()",
     "Start-Sleep -Seconds 30",
   ].join("; ");
-  const child = spawn("powershell.exe", ["-NoProfile", "-Command", listenerScript], {
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  const child = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-Command", listenerScript],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
   child.stdout.__ownerProcess = child;
   t.after(() => child.kill());
 
@@ -75,8 +84,16 @@ test("listener identity requires the current user, exact executable, and expecte
     `$wrongPid = Test-ExpectedLoopbackListener -Port ${port} -ExpectedExecutable $expected -ExpectedProcessId ${process.pid}`,
     "[pscustomobject]@{ accepted = $accepted; wrongPath = $wrongPath; wrongPid = $wrongPid } | ConvertTo-Json -Compress",
   ].join("; ");
-  const result = JSON.parse(execFileSync("powershell.exe", ["-NoProfile", "-Command", probeScript], { encoding: "utf8" }));
-  assert.deepEqual(result, { accepted: true, wrongPath: false, wrongPid: false });
+  const result = JSON.parse(
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", probeScript], {
+      encoding: "utf8",
+    }),
+  );
+  assert.deepEqual(result, {
+    accepted: true,
+    wrongPath: false,
+    wrongPid: false,
+  });
 });
 
 test("supervisor adoption accepts a verified listener when another same-install process wins the bind", async (t) => {
@@ -87,10 +104,14 @@ test("supervisor adoption accepts a verified listener when another same-install 
     "[Console]::Out.Flush()",
     "Start-Sleep -Seconds 30",
   ].join("; ");
-  const child = spawn("powershell.exe", ["-NoProfile", "-Command", listenerScript], {
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
-  });
+  const child = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-Command", listenerScript],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
   child.stdout.__ownerProcess = child;
   t.after(() => child.kill());
 
@@ -106,25 +127,47 @@ test("supervisor adoption accepts a verified listener when another same-install 
     `$adopted = Get-VerifiedLoopbackListenerProcessId -Port ${port} -ExpectedExecutable $expected -ExpectedProcessId ${process.pid}`,
     "[Console]::Out.WriteLine($adopted)",
   ].join("; ");
-  const adopted = Number(execFileSync("powershell.exe", ["-NoProfile", "-Command", probeScript], { encoding: "utf8" }).trim());
+  const adopted = Number(
+    execFileSync("powershell.exe", ["-NoProfile", "-Command", probeScript], {
+      encoding: "utf8",
+    }).trim(),
+  );
   assert.equal(adopted, child.pid);
 });
 
 test("credentialed probes establish listener identity before constructing bearer headers", () => {
-  for (const relativePath of ["src/runtime/Launch-Codex-Bot.ps1", "src/runtime/CodexBot-Watchdog.ps1"]) {
+  for (const relativePath of [
+    "src/runtime/Launch-Codex-Bot.ps1",
+    "src/runtime/CodexBot-Watchdog.ps1",
+  ]) {
     const source = read(relativePath);
     assert.match(source, /Local-Service-Identity\.ps1/);
-    assert.match(source, /function Get-VerifiedLoopbackListenerProcessId[\s\S]*?Test-ExpectedLoopbackListener/);
-    assert.match(source, /function Test-CLIProxyAPI[\s\S]*?Get-VerifiedLoopbackListenerProcessId[\s\S]*?Authorization = "Bearer \$\(\$runtime\.proxyKey\)"/);
-    assert.match(source, /function Test-CoworkerGateway[\s\S]*?Get-VerifiedLoopbackListenerProcessId[\s\S]*?Authorization = "Bearer \$\(\$runtime\.gatewayToken\)"/);
-    assert.match(source, /function Test-BrowserView[\s\S]*?Get-VerifiedLoopbackListenerProcessId[\s\S]*?X-Codex-Seat-Token/);
+    assert.match(
+      source,
+      /function Get-VerifiedLoopbackListenerProcessId[\s\S]*?Test-ExpectedLoopbackListener/,
+    );
+    assert.match(
+      source,
+      /function Test-CLIProxyAPI[\s\S]*?Get-VerifiedLoopbackListenerProcessId[\s\S]*?Authorization = "Bearer \$\(\$runtime\.proxyKey\)"/,
+    );
+    assert.match(
+      source,
+      /function Test-CoworkerGateway[\s\S]*?Get-VerifiedLoopbackListenerProcessId[\s\S]*?Authorization = "Bearer \$\(\$runtime\.gatewayToken\)"/,
+    );
+    assert.match(
+      source,
+      /function Test-BrowserView[\s\S]*?Get-VerifiedLoopbackListenerProcessId[\s\S]*?X-Codex-Seat-Token/,
+    );
   }
   const installer = read("scripts/Install-CodexBot.ps1");
   assert.match(installer, /New-CryptoRandomLoopbackPort/);
   assert.match(installer, /gatewayPort = New-CryptoRandomLoopbackPort/);
   assert.match(installer, /viewPort = New-CryptoRandomLoopbackPort/);
   assert.match(installer, /proxyPort = New-CryptoRandomLoopbackPort/);
-  assert.doesNotMatch(installer, /gatewayPort = 18317|viewPort = 18318|proxyPort = 8317/);
+  assert.doesNotMatch(
+    installer,
+    /gatewayPort = 18317|viewPort = 18318|proxyPort = 8317/,
+  );
 });
 
 test("browser-view port collisions fail closed", () => {
@@ -136,7 +179,10 @@ test("browser-view port collisions fail closed", () => {
   assert.match(bridge, /\/api\/identity/);
   assert.match(bridge, /createHmac\("sha256", VIEW_TOKEN\)/);
   assert.match(ui, /const headers = \{ "X-Codex-Seat-Token": CODEX_TOKEN \}/);
-  assert.match(ui, /async function request\(path, body\) \{[\s\S]*?await verifyCodexViewServer\(\);[\s\S]*?await fetch/);
+  assert.match(
+    ui,
+    /async function request\(path, body\) \{[\s\S]*?await verifyCodexViewServer\(\);[\s\S]*?await fetch/,
+  );
   assert.match(component, /__CODEX_BOT_VIEW_REQUEST__/);
   assert.doesNotMatch(component, /X-Codex-Seat-Token/);
   assert.doesNotMatch(bridge, /view_server_already_running/);

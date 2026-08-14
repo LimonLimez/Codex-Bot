@@ -7,7 +7,9 @@ const path = require("node:path");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
 
-const proxyModule = require(path.resolve(__dirname, "..", "src", "browser-seats", "public-web-proxy.cjs"));
+const proxyModule = require(
+  path.resolve(__dirname, "..", "src", "browser-seats", "public-web-proxy.cjs"),
+);
 
 function listen(server, host = "127.0.0.1") {
   return new Promise((resolve, reject) => {
@@ -20,18 +22,29 @@ function listen(server, host = "127.0.0.1") {
 }
 
 function closeServer(server) {
-  return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return new Promise((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
 }
 
 function connectRequest(endpoint, authority, authorization) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
+    const socket = net.createConnection({
+      host: endpoint.host,
+      port: endpoint.port,
+    });
     let response = "";
-    socket.setTimeout(3000, () => socket.destroy(new Error("proxy test timed out")));
+    socket.setTimeout(3000, () =>
+      socket.destroy(new Error("proxy test timed out")),
+    );
     socket.once("error", reject);
     socket.once("connect", () => {
-      const authLine = authorization ? `Proxy-Authorization: ${authorization}\r\n` : "";
-      socket.write(`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${authLine}\r\n`);
+      const authLine = authorization
+        ? `Proxy-Authorization: ${authorization}\r\n`
+        : "";
+      socket.write(
+        `CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${authLine}\r\n`,
+      );
     });
     socket.on("data", (chunk) => {
       response += chunk.toString("latin1");
@@ -45,12 +58,19 @@ function connectRequest(endpoint, authority, authorization) {
 
 function rawProxyRequest(endpoint, payload) {
   return new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
+    const socket = net.createConnection({
+      host: endpoint.host,
+      port: endpoint.port,
+    });
     let response = "";
-    socket.setTimeout(3000, () => socket.destroy(new Error("raw proxy test timed out")));
+    socket.setTimeout(3000, () =>
+      socket.destroy(new Error("raw proxy test timed out")),
+    );
     socket.once("error", reject);
     socket.once("connect", () => socket.write(payload));
-    socket.on("data", (chunk) => { response += chunk.toString("latin1"); });
+    socket.on("data", (chunk) => {
+      response += chunk.toString("latin1");
+    });
     socket.once("close", () => resolve(response));
   });
 }
@@ -111,9 +131,18 @@ test("mixed DNS answers and a later rebinding answer fail closed", async () => {
       ? [{ address: "93.184.216.34", family: 4 }]
       : [{ address: "127.0.0.1", family: 4 }];
   };
-  assert.equal((await proxyModule.resolvePublicAddresses("rebind.example", { lookup: rebindingLookup })).selected.address, "93.184.216.34");
+  assert.equal(
+    (
+      await proxyModule.resolvePublicAddresses("rebind.example", {
+        lookup: rebindingLookup,
+      })
+    ).selected.address,
+    "93.184.216.34",
+  );
   await assert.rejects(
-    proxyModule.resolvePublicAddresses("rebind.example", { lookup: rebindingLookup }),
+    proxyModule.resolvePublicAddresses("rebind.example", {
+      lookup: rebindingLookup,
+    }),
     (error) => error.code === "ERR_PRIVATE_ADDRESS",
   );
 });
@@ -123,7 +152,9 @@ test("authenticated CONNECT pins the validated IP and transparently carries a We
   let connectOptions;
   let tunneled = "";
   const upstream = new PassThrough();
-  upstream.on("data", (chunk) => { tunneled += chunk.toString("latin1"); });
+  upstream.on("data", (chunk) => {
+    tunneled += chunk.toString("latin1");
+  });
   const proxy = proxyModule.createPublicWebProxy({
     password: "test-password-that-is-long-enough-123",
     lookup: async () => {
@@ -141,24 +172,36 @@ test("authenticated CONNECT pins the validated IP and transparently carries a We
   const endpoint = await proxy.listen();
   t.after(() => proxy.close());
 
-  const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
+  const socket = net.createConnection({
+    host: endpoint.host,
+    port: endpoint.port,
+  });
   t.after(() => socket.destroy());
-  const authorization = proxyModule.expectedAuthorization(endpoint.username, endpoint.password);
-  const websocketHandshake = "GET /socket HTTP/1.1\r\nHost: rebind.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
+  const authorization = proxyModule.expectedAuthorization(
+    endpoint.username,
+    endpoint.password,
+  );
+  const websocketHandshake =
+    "GET /socket HTTP/1.1\r\nHost: rebind.example\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n";
   let response = "";
   await new Promise((resolve, reject) => {
-    socket.setTimeout(3000, () => reject(new Error("CONNECT tunnel test timed out")));
+    socket.setTimeout(3000, () =>
+      reject(new Error("CONNECT tunnel test timed out")),
+    );
     socket.once("error", reject);
     socket.once("connect", () => {
       socket.write(
         "CONNECT rebind.example:443 HTTP/1.1\r\n" +
-        "Host: rebind.example:443\r\n" +
-        `Proxy-Authorization: ${authorization}\r\n\r\n`,
+          "Host: rebind.example:443\r\n" +
+          `Proxy-Authorization: ${authorization}\r\n\r\n`,
       );
     });
     socket.on("data", (chunk) => {
       response += chunk.toString("latin1");
-      if (response.includes("\r\n\r\n") && !response.includes(websocketHandshake)) {
+      if (
+        response.includes("\r\n\r\n") &&
+        !response.includes(websocketHandshake)
+      ) {
         socket.write(websocketHandshake);
       }
       if (tunneled.includes(websocketHandshake)) resolve();
@@ -169,9 +212,20 @@ test("authenticated CONNECT pins the validated IP and transparently carries a We
   });
 
   assert.match(response, /^HTTP\/1\.1 200 Connection Established/);
-  assert.deepEqual(connectOptions, { host: "93.184.216.34", family: 4, port: 443 });
-  assert.equal(lookupCount, 1, "the connector must not perform a second hostname lookup");
-  assert.ok(tunneled.includes(websocketHandshake), "CONNECT must not rewrite Host or WebSocket bytes");
+  assert.deepEqual(connectOptions, {
+    host: "93.184.216.34",
+    family: 4,
+    port: 443,
+  });
+  assert.equal(
+    lookupCount,
+    1,
+    "the connector must not perform a second hostname lookup",
+  );
+  assert.ok(
+    tunneled.includes(websocketHandshake),
+    "CONNECT must not rewrite Host or WebSocket bytes",
+  );
 });
 
 test("an established CONNECT tunnel remains usable after the connection deadline", async (t) => {
@@ -194,23 +248,37 @@ test("an established CONNECT tunnel remains usable after the connection deadline
     lookup: async () => [{ address: "93.184.216.34", family: 4 }],
     // The injected connector lets the test exercise a real socket without
     // weakening the production destination validation path.
-    connect: () => net.createConnection({ host: "127.0.0.1", port: destinationAddress.port }),
+    connect: () =>
+      net.createConnection({
+        host: "127.0.0.1",
+        port: destinationAddress.port,
+      }),
   });
   const endpoint = await proxy.listen();
   t.after(() => proxy.close());
 
-  const client = net.createConnection({ host: endpoint.host, port: endpoint.port });
+  const client = net.createConnection({
+    host: endpoint.host,
+    port: endpoint.port,
+  });
   t.after(() => client.destroy());
-  const authorization = proxyModule.expectedAuthorization(endpoint.username, endpoint.password);
+  const authorization = proxyModule.expectedAuthorization(
+    endpoint.username,
+    endpoint.password,
+  );
   let received = "";
   await new Promise((resolve, reject) => {
-    client.setTimeout(3000, () => reject(new Error("established tunnel test timed out")));
+    client.setTimeout(3000, () =>
+      reject(new Error("established tunnel test timed out")),
+    );
     client.once("error", reject);
-    client.once("connect", () => client.write(
-      "CONNECT idle.example:443 HTTP/1.1\r\n" +
-      "Host: idle.example:443\r\n" +
-      `Proxy-Authorization: ${authorization}\r\n\r\n`,
-    ));
+    client.once("connect", () =>
+      client.write(
+        "CONNECT idle.example:443 HTTP/1.1\r\n" +
+          "Host: idle.example:443\r\n" +
+          `Proxy-Authorization: ${authorization}\r\n\r\n`,
+      ),
+    );
     const onHeaderData = (chunk) => {
       received += chunk.toString("latin1");
       if (!received.includes("\r\n\r\n")) return;
@@ -222,12 +290,19 @@ test("an established CONNECT tunnel remains usable after the connection deadline
   assert.match(received, /^HTTP\/1\.1 200 Connection Established/);
 
   await new Promise((resolve) => setTimeout(resolve, connectTimeoutMs * 3));
-  assert.equal(client.destroyed, false, "an established idle tunnel must not inherit the connect timeout");
+  assert.equal(
+    client.destroyed,
+    false,
+    "an established idle tunnel must not inherit the connect timeout",
+  );
 
   received = "";
   client.write("post-timeout-ping");
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("the established tunnel stopped forwarding")), 1000);
+    const timer = setTimeout(
+      () => reject(new Error("the established tunnel stopped forwarding")),
+      1000,
+    );
     const onData = (chunk) => {
       received += chunk.toString("latin1");
       if (!received.includes("post-timeout-ping")) return;
@@ -248,22 +323,34 @@ test("per-seat proxy rejects excess aggregate client connections without disturb
   const endpoint = await proxy.listen();
   t.after(() => proxy.close());
 
-  const accepted = net.createConnection({ host: endpoint.host, port: endpoint.port });
+  const accepted = net.createConnection({
+    host: endpoint.host,
+    port: endpoint.port,
+  });
   t.after(() => accepted.destroy());
   await new Promise((resolve, reject) => {
     accepted.once("connect", resolve);
     accepted.once("error", reject);
   });
 
-  const rejected = await rawProxyRequest(endpoint, "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n");
+  const rejected = await rawProxyRequest(
+    endpoint,
+    "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n",
+  );
   assert.match(rejected, /^HTTP\/1\.1 503 Service Unavailable/);
-  assert.equal(accepted.destroyed, false, "the connection already inside the seat ceiling must remain open");
+  assert.equal(
+    accepted.destroyed,
+    false,
+    "the connection already inside the seat ceiling must remain open",
+  );
 });
 
 test("per-seat pending-upstream ceiling rejects excess work and releases capacity after establishment", async (t) => {
   let lookupCalls = 0;
   let releaseFirstLookup;
-  const firstLookup = new Promise((resolve) => { releaseFirstLookup = resolve; });
+  const firstLookup = new Promise((resolve) => {
+    releaseFirstLookup = resolve;
+  });
   const proxy = proxyModule.createPublicWebProxy({
     password: "test-password-that-is-long-enough-123",
     maxPendingUpstreams: 1,
@@ -280,13 +367,25 @@ test("per-seat pending-upstream ceiling rejects excess work and releases capacit
   });
   const endpoint = await proxy.listen();
   t.after(() => proxy.close());
-  const authorization = proxyModule.expectedAuthorization(endpoint.username, endpoint.password);
+  const authorization = proxyModule.expectedAuthorization(
+    endpoint.username,
+    endpoint.password,
+  );
 
   const first = connectRequest(endpoint, "first.example:443", authorization);
-  while (lookupCalls === 0) await new Promise((resolve) => setImmediate(resolve));
-  const excess = await connectRequest(endpoint, "excess.example:443", authorization);
+  while (lookupCalls === 0)
+    await new Promise((resolve) => setImmediate(resolve));
+  const excess = await connectRequest(
+    endpoint,
+    "excess.example:443",
+    authorization,
+  );
   assert.match(excess, /^HTTP\/1\.1 503 Service Unavailable/);
-  assert.equal(lookupCalls, 1, "capacity must be checked before another DNS lookup or connection attempt");
+  assert.equal(
+    lookupCalls,
+    1,
+    "capacity must be checked before another DNS lookup or connection attempt",
+  );
 
   releaseFirstLookup([{ address: "93.184.216.34", family: 4 }]);
   assert.match(await first, /^HTTP\/1\.1 200 Connection Established/);
@@ -310,7 +409,10 @@ test("proxy rejects excessive header count and bytes before resolving an upstrea
   });
   const endpoint = await proxy.listen();
   t.after(() => proxy.close());
-  const authorization = proxyModule.expectedAuthorization(endpoint.username, endpoint.password);
+  const authorization = proxyModule.expectedAuthorization(
+    endpoint.username,
+    endpoint.password,
+  );
 
   const tooMany = await rawProxyRequest(
     endpoint,
@@ -345,16 +447,29 @@ test("an unestablished CONNECT destination is terminated at the connection deadl
   });
   const endpoint = await proxy.listen();
   t.after(() => proxy.close());
-  const authorization = proxyModule.expectedAuthorization(endpoint.username, endpoint.password);
+  const authorization = proxyModule.expectedAuthorization(
+    endpoint.username,
+    endpoint.password,
+  );
 
   const startedAt = Date.now();
-  const response = await connectRequest(endpoint, "stalled.example:443", authorization);
+  const response = await connectRequest(
+    endpoint,
+    "stalled.example:443",
+    authorization,
+  );
   const elapsedMs = Date.now() - startedAt;
 
   assert.match(response, /^HTTP\/1\.1 502 Bad Gateway/);
   assert.equal(connectorCalls, 1);
-  assert.ok(elapsedMs >= 20, `the stalled connector failed before its timeout (${elapsedMs} ms)`);
-  assert.ok(elapsedMs < 1000, `the stalled connector exceeded its bounded timeout (${elapsedMs} ms)`);
+  assert.ok(
+    elapsedMs >= 20,
+    `the stalled connector failed before its timeout (${elapsedMs} ms)`,
+  );
+  assert.ok(
+    elapsedMs < 1000,
+    `the stalled connector exceeded its bounded timeout (${elapsedMs} ms)`,
+  );
 });
 
 test("private CONNECT is rejected without reaching the destination", async (t) => {
@@ -377,8 +492,15 @@ test("private CONNECT is rejected without reaching the destination", async (t) =
   });
   const endpoint = await proxy.listen();
   t.after(() => proxy.close());
-  const authorization = proxyModule.expectedAuthorization(endpoint.username, endpoint.password);
-  const response = await connectRequest(endpoint, `private.example:${destinationAddress.port}`, authorization);
+  const authorization = proxyModule.expectedAuthorization(
+    endpoint.username,
+    endpoint.password,
+  );
+  const response = await connectRequest(
+    endpoint,
+    `private.example:${destinationAddress.port}`,
+    authorization,
+  );
 
   assert.match(response, /^HTTP\/1\.1 403 Forbidden/);
   assert.equal(connectorCalls, 0);
@@ -404,17 +526,23 @@ test("proxy authentication is required before DNS resolution or connection", asy
 
   const response = await connectRequest(endpoint, "public.example:443", null);
   assert.match(response, /^HTTP\/1\.1 407 Proxy Authentication Required/);
-  assert.match(response, /Proxy-Authenticate: Basic realm="Codex Bot Public Web"/i);
+  assert.match(
+    response,
+    /Proxy-Authenticate: Basic realm="Codex Bot Public Web"/i,
+  );
   const httpStatus = await new Promise((resolve, reject) => {
-    const request = http.request({
-      host: endpoint.host,
-      port: endpoint.port,
-      path: "http://public.example/",
-      headers: { Host: "public.example" },
-    }, (httpResponse) => {
-      httpResponse.resume();
-      httpResponse.once("end", () => resolve(httpResponse.statusCode));
-    });
+    const request = http.request(
+      {
+        host: endpoint.host,
+        port: endpoint.port,
+        path: "http://public.example/",
+        headers: { Host: "public.example" },
+      },
+      (httpResponse) => {
+        httpResponse.resume();
+        httpResponse.once("end", () => resolve(httpResponse.statusCode));
+      },
+    );
     request.once("error", reject);
     request.end();
   });
@@ -428,7 +556,9 @@ test("proxy lifecycle is loopback-only and safely idempotent", async () => {
     () => proxyModule.createPublicWebProxy({ host: "0.0.0.0" }),
     /only on an explicit loopback address/,
   );
-  const proxy = proxyModule.createPublicWebProxy({ password: "test-password-that-is-long-enough-123" });
+  const proxy = proxyModule.createPublicWebProxy({
+    password: "test-password-that-is-long-enough-123",
+  });
   const endpoint = await proxy.listen();
   assert.equal(endpoint.host, "127.0.0.1");
   await Promise.all([proxy.close(), proxy.close()]);
@@ -438,7 +568,11 @@ test("proxy lifecycle is loopback-only and safely idempotent", async () => {
 test("HTTP forwarding keeps the original target Host and strips proxy credentials", () => {
   const target = proxyModule.parseHttpProxyTarget({
     url: "http://public.example:8080/path?q=1",
-    headers: { host: "ignored.example", "proxy-authorization": "secret", "x-test": "kept" },
+    headers: {
+      host: "ignored.example",
+      "proxy-authorization": "secret",
+      "x-test": "kept",
+    },
   });
   const headers = proxyModule.removeHopByHopHeaders({
     host: "ignored.example",

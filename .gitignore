@@ -32,6 +32,7 @@ connection.json
 config.yaml
 **/cliproxy/auth/
 **/auth/
+**/official-computer/credentials.json
 codex-*.json
 host-secrets.json
 box-secrets.json

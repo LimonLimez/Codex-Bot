@@ -31,7 +31,8 @@ for (const [network, prefix] of [
   ["203.0.113.0", 24],
   ["224.0.0.0", 4],
   ["240.0.0.0", 4],
-]) BLOCKED_IPV4.addSubnet(network, prefix, "ipv4");
+])
+  BLOCKED_IPV4.addSubnet(network, prefix, "ipv4");
 
 const BLOCKED_IPV6 = new net.BlockList();
 for (const [network, prefix] of [
@@ -48,7 +49,8 @@ for (const [network, prefix] of [
   ["fe80::", 10],
   ["fec0::", 10],
   ["ff00::", 8],
-]) BLOCKED_IPV6.addSubnet(network, prefix, "ipv6");
+])
+  BLOCKED_IPV6.addSubnet(network, prefix, "ipv6");
 
 class PublicWebProxyError extends Error {
   constructor(message, code, statusCode = 403) {
@@ -61,22 +63,37 @@ class PublicWebProxyError extends Error {
 
 function normalizeHostname(value) {
   let hostname = String(value || "").trim();
-  if (hostname.startsWith("[") && hostname.endsWith("]")) hostname = hostname.slice(1, -1);
+  if (hostname.startsWith("[") && hostname.endsWith("]"))
+    hostname = hostname.slice(1, -1);
   hostname = hostname.replace(/\.$/, "").toLowerCase();
   if (!hostname || /[\0\s/?#@]/.test(hostname)) {
-    throw new PublicWebProxyError("The proxy target hostname is invalid.", "ERR_INVALID_HOST", 400);
+    throw new PublicWebProxyError(
+      "The proxy target hostname is invalid.",
+      "ERR_INVALID_HOST",
+      400,
+    );
   }
   if (net.isIP(hostname)) return hostname;
   const ascii = domainToASCII(hostname);
-  if (!ascii || ascii.length > 253 || ascii.split(".").some((label) => !label || label.length > 63)) {
-    throw new PublicWebProxyError("The proxy target hostname is invalid.", "ERR_INVALID_HOST", 400);
+  if (
+    !ascii ||
+    ascii.length > 253 ||
+    ascii.split(".").some((label) => !label || label.length > 63)
+  ) {
+    throw new PublicWebProxyError(
+      "The proxy target hostname is invalid.",
+      "ERR_INVALID_HOST",
+      400,
+    );
   }
   return ascii.toLowerCase();
 }
 
 function ipv4FromMappedIpv6(value) {
   const address = String(value || "").toLowerCase();
-  const match = address.match(/^::ffff:(?:(\d{1,3}(?:\.\d{1,3}){3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/i);
+  const match = address.match(
+    /^::ffff:(?:(\d{1,3}(?:\.\d{1,3}){3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/i,
+  );
   if (!match) return null;
   if (match[1]) return net.isIP(match[1]) === 4 ? match[1] : null;
   const high = Number.parseInt(match[2], 16);
@@ -109,11 +126,19 @@ function normalizeLookupResults(results) {
     try {
       address = normalizeHostname(rawAddress);
     } catch {
-      throw new PublicWebProxyError("DNS returned an invalid address.", "ERR_INVALID_DNS_ANSWER", 502);
+      throw new PublicWebProxyError(
+        "DNS returned an invalid address.",
+        "ERR_INVALID_DNS_ANSWER",
+        502,
+      );
     }
     const family = net.isIP(address);
     if (!family || (entry?.family != null && Number(entry.family) !== family)) {
-      throw new PublicWebProxyError("DNS returned an invalid address.", "ERR_INVALID_DNS_ANSWER", 502);
+      throw new PublicWebProxyError(
+        "DNS returned an invalid address.",
+        "ERR_INVALID_DNS_ANSWER",
+        502,
+      );
     }
     const key = `${family}:${address}`;
     if (!seen.has(key)) {
@@ -122,7 +147,11 @@ function normalizeLookupResults(results) {
     }
   }
   if (normalized.length === 0) {
-    throw new PublicWebProxyError("DNS returned no usable addresses.", "ERR_EMPTY_DNS_ANSWER", 502);
+    throw new PublicWebProxyError(
+      "DNS returned no usable addresses.",
+      "ERR_EMPTY_DNS_ANSWER",
+      502,
+    );
   }
   return normalized;
 }
@@ -131,10 +160,20 @@ async function defaultLookup(hostname, options) {
   return await dns.promises.lookup(hostname, options);
 }
 
-async function resolvePublicAddresses(hostnameValue, { lookup = defaultLookup } = {}) {
+async function resolvePublicAddresses(
+  hostnameValue,
+  { lookup = defaultLookup } = {},
+) {
   const hostname = normalizeHostname(hostnameValue);
-  if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname === "localhost.localdomain") {
-    throw new PublicWebProxyError("Private and local network destinations are blocked.", "ERR_PRIVATE_ADDRESS");
+  if (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "localhost.localdomain"
+  ) {
+    throw new PublicWebProxyError(
+      "Private and local network destinations are blocked.",
+      "ERR_PRIVATE_ADDRESS",
+    );
   }
 
   const literalFamily = net.isIP(hostname);
@@ -142,15 +181,24 @@ async function resolvePublicAddresses(hostnameValue, { lookup = defaultLookup } 
   try {
     addresses = literalFamily
       ? [{ address: hostname, family: literalFamily }]
-      : normalizeLookupResults(await lookup(hostname, { all: true, verbatim: true }));
+      : normalizeLookupResults(
+          await lookup(hostname, { all: true, verbatim: true }),
+        );
   } catch (error) {
     if (error instanceof PublicWebProxyError) throw error;
-    throw new PublicWebProxyError("The public destination could not be resolved.", "ERR_DNS_LOOKUP", 502);
+    throw new PublicWebProxyError(
+      "The public destination could not be resolved.",
+      "ERR_DNS_LOOKUP",
+      502,
+    );
   }
 
   const blocked = addresses.find((entry) => !isPublicAddress(entry.address));
   if (blocked) {
-    throw new PublicWebProxyError("Private and local network destinations are blocked.", "ERR_PRIVATE_ADDRESS");
+    throw new PublicWebProxyError(
+      "Private and local network destinations are blocked.",
+      "ERR_PRIVATE_ADDRESS",
+    );
   }
   return { hostname, addresses, selected: addresses[0] };
 }
@@ -158,7 +206,11 @@ async function resolvePublicAddresses(hostnameValue, { lookup = defaultLookup } 
 function parsePort(value, fallback) {
   const port = value === "" || value == null ? fallback : Number(value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new PublicWebProxyError("The proxy target port is invalid.", "ERR_INVALID_PORT", 400);
+    throw new PublicWebProxyError(
+      "The proxy target port is invalid.",
+      "ERR_INVALID_PORT",
+      400,
+    );
   }
   return port;
 }
@@ -166,13 +218,21 @@ function parsePort(value, fallback) {
 function parseConnectAuthority(value) {
   const authority = String(value || "").trim();
   if (!authority || /[\s/?#@]/.test(authority)) {
-    throw new PublicWebProxyError("The CONNECT authority is invalid.", "ERR_INVALID_AUTHORITY", 400);
+    throw new PublicWebProxyError(
+      "The CONNECT authority is invalid.",
+      "ERR_INVALID_AUTHORITY",
+      400,
+    );
   }
   let parsed;
   try {
     parsed = new URL(`http://${authority}`);
   } catch {
-    throw new PublicWebProxyError("The CONNECT authority is invalid.", "ERR_INVALID_AUTHORITY", 400);
+    throw new PublicWebProxyError(
+      "The CONNECT authority is invalid.",
+      "ERR_INVALID_AUTHORITY",
+      400,
+    );
   }
   const hostname = normalizeHostname(parsed.hostname);
   const port = parsePort(parsed.port, 443);
@@ -190,10 +250,18 @@ function parseHttpProxyTarget(request) {
       parsed = new URL(rawTarget || "/", `http://${host}`);
     }
   } catch {
-    throw new PublicWebProxyError("The HTTP proxy target is invalid.", "ERR_INVALID_TARGET", 400);
+    throw new PublicWebProxyError(
+      "The HTTP proxy target is invalid.",
+      "ERR_INVALID_TARGET",
+      400,
+    );
   }
   if (parsed.protocol !== "http:") {
-    throw new PublicWebProxyError("HTTPS destinations must use CONNECT.", "ERR_CONNECT_REQUIRED", 400);
+    throw new PublicWebProxyError(
+      "HTTPS destinations must use CONNECT.",
+      "ERR_CONNECT_REQUIRED",
+      400,
+    );
   }
   const hostname = normalizeHostname(parsed.hostname);
   const port = parsePort(parsed.port, 80);
@@ -220,7 +288,8 @@ function removeHopByHopHeaders(headers, { preserveUpgrade = false } = {}) {
     "trailer",
     "transfer-encoding",
     ...connectionTokens,
-  ]) delete output[name];
+  ])
+    delete output[name];
   if (!preserveUpgrade) {
     delete output.connection;
     delete output.upgrade;
@@ -240,7 +309,10 @@ function constantTimeStringEqual(left, right) {
 }
 
 function isProxyAuthorized(headers, credentials) {
-  return constantTimeStringEqual(headers?.["proxy-authorization"], expectedAuthorization(credentials.username, credentials.password));
+  return constantTimeStringEqual(
+    headers?.["proxy-authorization"],
+    expectedAuthorization(credentials.username, credentials.password),
+  );
 }
 
 function writeProxyAuthenticationRequired(response) {
@@ -258,8 +330,8 @@ function writeSocketResponse(socket, statusCode, reason) {
   if (socket.destroyed) return;
   socket.end(
     `HTTP/1.1 ${statusCode} ${reason}\r\n` +
-    "Connection: close\r\n" +
-    "Content-Length: 0\r\n\r\n",
+      "Connection: close\r\n" +
+      "Content-Length: 0\r\n\r\n",
   );
 }
 
@@ -275,10 +347,17 @@ function publicErrorReason(error) {
   return "Bad Gateway";
 }
 
-function boundedIntegerOption(value, fallback, name, { min = 1, max = 1048576 } = {}) {
+function boundedIntegerOption(
+  value,
+  fallback,
+  name,
+  { min = 1, max = 1048576 } = {},
+) {
   const candidate = value == null ? fallback : Number(value);
   if (!Number.isInteger(candidate) || candidate < min || candidate > max) {
-    throw new Error(`The public-web proxy ${name} must be an integer from ${min} through ${max}.`);
+    throw new Error(
+      `The public-web proxy ${name} must be an integer from ${min} through ${max}.`,
+    );
   }
   return candidate;
 }
@@ -290,22 +369,42 @@ function hasTooManyHeaders(request, maxHeaderCount) {
 function createPublicWebProxy(options = {}) {
   const listenHost = String(options.host || "127.0.0.1");
   if (listenHost !== "127.0.0.1" && listenHost !== "::1") {
-    throw new Error("The public-web proxy can listen only on an explicit loopback address.");
+    throw new Error(
+      "The public-web proxy can listen only on an explicit loopback address.",
+    );
   }
   const listenPort = options.port == null ? 0 : parsePort(options.port, 0);
   const username = String(options.username || "codex-bot");
-  const password = String(options.password || options.token || crypto.randomBytes(32).toString("base64url"));
+  const password = String(
+    options.password ||
+      options.token ||
+      crypto.randomBytes(32).toString("base64url"),
+  );
   if (!username || username.includes(":") || password.length < 24) {
-    throw new Error("The public-web proxy requires a username and a random password of at least 24 characters.");
+    throw new Error(
+      "The public-web proxy requires a username and a random password of at least 24 characters.",
+    );
   }
   const credentials = Object.freeze({ username, password });
   const lookup = options.lookup || defaultLookup;
-  const connect = options.connect || ((connectOptions) => net.createConnection(connectOptions));
-  const requestedConnectTimeoutMs = Number(options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
-  if (!Number.isFinite(requestedConnectTimeoutMs) || requestedConnectTimeoutMs <= 0) {
-    throw new Error("The public-web proxy connection timeout must be a positive number.");
+  const connect =
+    options.connect ||
+    ((connectOptions) => net.createConnection(connectOptions));
+  const requestedConnectTimeoutMs = Number(
+    options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+  );
+  if (
+    !Number.isFinite(requestedConnectTimeoutMs) ||
+    requestedConnectTimeoutMs <= 0
+  ) {
+    throw new Error(
+      "The public-web proxy connection timeout must be a positive number.",
+    );
   }
-  const connectTimeoutMs = Math.max(25, Math.min(120000, requestedConnectTimeoutMs));
+  const connectTimeoutMs = Math.max(
+    25,
+    Math.min(120000, requestedConnectTimeoutMs),
+  );
   const headerTimeoutMs = boundedIntegerOption(
     options.headerTimeoutMs,
     DEFAULT_HEADER_TIMEOUT_MS,
@@ -360,72 +459,92 @@ function createPublicWebProxy(options = {}) {
     };
   }
 
-  const server = http.createServer({ maxHeaderSize: maxHeaderBytes }, async (request, response) => {
-    if (rejectedSockets.has(request.socket)) {
-      response.destroy();
-      return;
-    }
-    if (hasTooManyHeaders(request, maxHeaderCount)) {
-      response.writeHead(431, { Connection: "close", "Content-Length": "0" });
-      response.end();
-      return;
-    }
-    if (!isProxyAuthorized(request.headers, credentials)) {
-      writeProxyAuthenticationRequired(response);
-      return;
-    }
-
-    let releasePending = null;
-    let upstream = null;
-    try {
-      releasePending = acquirePendingUpstream();
-      const target = parseHttpProxyTarget(request);
-      const resolution = await resolvePublicAddresses(target.hostname, { lookup });
-      if (request.destroyed || response.destroyed) {
-        releasePending();
+  const server = http.createServer(
+    { maxHeaderSize: maxHeaderBytes },
+    async (request, response) => {
+      if (rejectedSockets.has(request.socket)) {
+        response.destroy();
         return;
       }
-      const headers = removeHopByHopHeaders(request.headers);
-      headers.host = target.hostHeader;
-      upstream = http.request({
-        host: resolution.selected.address,
-        family: resolution.selected.family,
-        port: target.port,
-        method: request.method,
-        path: target.path,
-        headers,
-        agent: false,
-      }, (upstreamResponse) => {
-        releasePending();
-        response.writeHead(upstreamResponse.statusCode || 502, removeHopByHopHeaders(upstreamResponse.headers));
-        upstreamResponse.pipe(response);
-      });
-      upstream.once("socket", (socket) => {
-        if (!socket.connecting) releasePending();
-        else {
-          socket.once("connect", releasePending);
-          socket.once("error", releasePending);
-        }
-      });
-      upstream.setTimeout(connectTimeoutMs, () => upstream.destroy(new Error("Public destination timed out.")));
-      upstream.once("error", () => {
-        releasePending();
-        if (!response.headersSent) response.writeHead(502, { Connection: "close", "Content-Length": "0" });
+      if (hasTooManyHeaders(request, maxHeaderCount)) {
+        response.writeHead(431, { Connection: "close", "Content-Length": "0" });
         response.end();
-      });
-      request.once("aborted", () => {
-        releasePending();
-        upstream.destroy();
-      });
-      request.pipe(upstream);
-    } catch (error) {
-      releasePending?.();
-      if (!response.headersSent) {
-        response.writeHead(publicErrorStatus(error), { Connection: "close", "Content-Length": "0" });
+        return;
       }
-      response.end();
-    }
-  });
+      if (!isProxyAuthorized(request.headers, credentials)) {
+        writeProxyAuthenticationRequired(response);
+        return;
+      }
+
+      let releasePending = null;
+      let upstream = null;
+      try {
+        releasePending = acquirePendingUpstream();
+        const target = parseHttpProxyTarget(request);
+        const resolution = await resolvePublicAddresses(target.hostname, {
+          lookup,
+        });
+        if (request.destroyed || response.destroyed) {
+          releasePending();
+          return;
+        }
+        const headers = removeHopByHopHeaders(request.headers);
+        headers.host = target.hostHeader;
+        upstream = http.request(
+          {
+            host: resolution.selected.address,
+            family: resolution.selected.family,
+            port: target.port,
+            method: request.method,
+            path: target.path,
+            headers,
+            agent: false,
+          },
+          (upstreamResponse) => {
+            releasePending();
+            response.writeHead(
+              upstreamResponse.statusCode || 502,
+              removeHopByHopHeaders(upstreamResponse.headers),
+            );
+            upstreamResponse.pipe(response);
+          },
+        );
+        upstream.once("socket", (socket) => {
+          if (!socket.connecting) releasePending();
+          else {
+            socket.once("connect", releasePending);
+            socket.once("error", releasePending);
+          }
+        });
+        upstream.setTimeout(connectTimeoutMs, () =>
+          upstream.destroy(new Error("Public destination timed out.")),
+        );
+        upstream.once("error", () => {
+          releasePending();
+          if (!response.headersSent)
+            response.writeHead(502, {
+              Connection: "close",
+              "Content-Length": "0",
+            });
+          response.end();
+        });
+        request.once("aborted", () => {
+          releasePending();
+          upstream.destroy();
+        });
+        request.pipe(upstream);
+      } catch (error) {
+        releasePending?.();
+        if (!response.headersSent) {
+          response.writeHead(publicErrorStatus(error), {
+            Connection: "close",
+            "Content-Length": "0",
+          });
+        }
+        response.end();
+      }
+    },
+  );
 
   server.on("connect", async (request, clientSocket, head) => {
     if (rejectedSockets.has(clientSocket)) return;
@@ -437,9 +556,9 @@ function createPublicWebProxy(options = {}) {
       if (!clientSocket.destroyed) {
         clientSocket.end(
           "HTTP/1.1 407 Proxy Authentication Required\r\n" +
-          `Proxy-Authenticate: Basic realm="${PROXY_AUTH_REALM}"\r\n` +
-          "Connection: close\r\n" +
-          "Content-Length: 0\r\n\r\n",
+            `Proxy-Authenticate: Basic realm="${PROXY_AUTH_REALM}"\r\n` +
+            "Connection: close\r\n" +
+            "Content-Length: 0\r\n\r\n",
         );
       }
       return;
@@ -451,7 +570,9 @@ function createPublicWebProxy(options = {}) {
     try {
       releasePending = acquirePendingUpstream();
       const target = parseConnectAuthority(request.url);
-      const resolution = await resolvePublicAddresses(target.hostname, { lookup });
+      const resolution = await resolvePublicAddresses(target.hostname, {
+        lookup,
+      });
       if (clientSocket.destroyed) {
         releasePending();
         return;
@@ -465,7 +586,9 @@ function createPublicWebProxy(options = {}) {
         family: resolution.selected.family,
         port: target.port,
       });
-      upstream.setTimeout?.(connectTimeoutMs, () => upstream.destroy(new Error("Public destination timed out.")));
+      upstream.setTimeout?.(connectTimeoutMs, () =>
+        upstream.destroy(new Error("Public destination timed out.")),
+      );
       upstream.setNoDelay?.(true);
       upstream.once("connect", () => {
         releasePending();
@@ -478,7 +601,9 @@ function createPublicWebProxy(options = {}) {
           return;
         }
         established = true;
-        clientSocket.write("HTTP/1.1 200 Connection Established\r\nProxy-Agent: Codex-Bot-Public-Web\r\n\r\n");
+        clientSocket.write(
+          "HTTP/1.1 200 Connection Established\r\nProxy-Agent: Codex-Bot-Public-Web\r\n\r\n",
+        );
         if (head?.length) upstream.write(head);
         clientSocket.pipe(upstream).pipe(clientSocket);
       });
@@ -499,7 +624,11 @@ function createPublicWebProxy(options = {}) {
     } catch (error) {
       releasePending?.();
       if (upstream) upstream.destroy();
-      writeSocketResponse(clientSocket, publicErrorStatus(error), publicErrorReason(error));
+      writeSocketResponse(
+        clientSocket,
+        publicErrorStatus(error),
+        publicErrorReason(error),
+      );
     }
   });
 
@@ -549,7 +678,8 @@ function createPublicWebProxy(options = {}) {
         await listenPromise;
       }
       const address = server.address();
-      const hostForUrl = address.family === "IPv6" ? `[${address.address}]` : address.address;
+      const hostForUrl =
+        address.family === "IPv6" ? `[${address.address}]` : address.address;
       return Object.freeze({
         server: `http://${hostForUrl}:${address.port}`,
         host: address.address,
@@ -563,7 +693,9 @@ function createPublicWebProxy(options = {}) {
       closePromise = (async () => {
         for (const socket of sockets) socket.destroy();
         if (!listening) return;
-        await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+        await new Promise((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
         listening = false;
         listenPromise = null;
       })();
