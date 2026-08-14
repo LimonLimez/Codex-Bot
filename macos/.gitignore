@@ -1,0 +1,14 @@
+node_modules/
+.build/
+.swiftpm/
+build/
+dist/
+artifacts/
+coverage/
+*.dmg
+*.app
+*.asar
+state/
+profiles/
+*.log
+.DS_Store
