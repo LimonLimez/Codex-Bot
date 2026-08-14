@@ -8,12 +8,16 @@ const os = require("node:os");
 const path = require("node:path");
 const asar = require("@electron/asar");
 const { auditTreeDiff, snapshotTree } = require("../src/patch/diff-audit.cjs");
+const { patchHostInference } = require("../src/patch/host-inference.cjs");
 
 const VENDOR_APP_ASAR_SHA256 =
   "1e41f9da52be5d2ff24892b150a74d3d0145659cf6cbd83e9476d025865fb997";
 const VENDOR_VERSION = "0.20.0";
 const RELEASE_VERSION = "0.1.4-macos.1";
-const ALLOWED_MUTATIONS = Object.freeze(["package.json"]);
+const ALLOWED_MUTATIONS = Object.freeze([
+  "dist/host/host-main.cjs",
+  "package.json",
+]);
 
 function sha256File(file) {
   const hash = crypto.createHash("sha256");
@@ -111,6 +115,7 @@ async function patchAsar({
   try {
     asar.extractAll(source, extracted);
     const before = snapshotTree(extracted);
+    patchHostInference(extracted);
     patchPackage(extracted, sourceSha256);
     const after = snapshotTree(extracted);
     const mutations = auditTreeDiff(before, after, ALLOWED_MUTATIONS);

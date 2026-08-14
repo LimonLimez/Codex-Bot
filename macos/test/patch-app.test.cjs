@@ -35,6 +35,7 @@ async function syntheticAsar(t, overrides = {}) {
   const tree = path.join(root, "tree");
   const source = path.join(root, "source.asar");
   fs.mkdirSync(path.join(tree, "dist", "electron-preload"), { recursive: true });
+  fs.mkdirSync(path.join(tree, "dist", "host"), { recursive: true });
   fs.mkdirSync(path.join(tree, "dist", "native"), { recursive: true });
   fs.mkdirSync(path.join(tree, "dist", "renderer"), { recursive: true });
   fs.writeFileSync(
@@ -56,6 +57,10 @@ async function syntheticAsar(t, overrides = {}) {
   fs.writeFileSync(
     path.join(tree, "dist", "electron-preload", "preload.cjs"),
     '"use strict";\nconst stock = "unchanged preload";\n',
+  );
+  fs.writeFileSync(
+    path.join(tree, "dist", "host", "host-main.cjs"),
+    '"use strict";function E4i(t){let e,n=qdi({getAccessToken:t.getAccessToken,getMachineId:t.getMachineId});return{resolvePrivacyMode:()=>Jdi({getAccessToken:t.getAccessToken,getMachineId:t.getMachineId}),createSession(o,s){return Qdi({getAccessToken:t.getAccessToken,onRequestId:o})},recordPostTurnLabeling(o){}}}function T4i(t){return E4i(t)}var b4i={start:t=>{let e=new Set,n=t.deps.auth;return{isReady:async()=>process.env.SAND_AGENT_MOCK_RESPONSE!=null||n.peekAccessToken()!==null,port:T4i(t)}}};\n',
   );
   fs.writeFileSync(
     path.join(tree, "dist", "renderer", "index.html"),
@@ -102,7 +107,7 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
       targetSha256: sha256File(target),
       vendorVersion: "0.20.0",
       releaseVersion: "0.1.4-macos.1",
-      mutations: ["package.json"],
+      mutations: ["dist/host/host-main.cjs", "package.json"],
     },
   );
   assert.notEqual(receipt.targetSha256, sourceHash);
@@ -145,6 +150,19 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
       "utf8",
     ),
     '"use strict";\nconst stock = "unchanged preload";\n',
+  );
+  const patchedHost = fs.readFileSync(
+    path.join(extracted, "dist", "host", "host-main.cjs"),
+    "utf8",
+  );
+  assert.match(patchedHost, /process\.env\.CODEX_BOT_BRIDGE/);
+  assert.match(patchedHost, /createPromptSession/);
+  assert.doesNotMatch(
+    patchedHost.slice(
+      patchedHost.indexOf("function E4i(t){"),
+      patchedHost.indexOf("function T4i(t){"),
+    ),
+    /getAccessToken|SAND_AGENT_MOCK_RESPONSE|Qdi\(/,
   );
   assert.deepEqual(
     fs.readFileSync(

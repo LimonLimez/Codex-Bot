@@ -135,6 +135,15 @@ and reports a bounded, truthful unavailable state. There is no fake success.
 
 ## Codex inference and authentication
 
+- The reviewed bridge transport is CLIProxyAPI `7.2.130`, pinned to the
+  upstream `darwin_aarch64` release archive and SHA-256
+  `a644a75f70cbd045b9f7caa9ff3866353448a7ed67ef8472eacc11c48b1c86f0`.
+  This is the same protocol baseline as the Windows edition, but uses the
+  platform-specific macOS binary and lifecycle implementation.
+- The public DMG may contain that MIT-licensed CLIProxyAPI binary only after its
+  archive, published checksum, executable architecture, version, and license
+  are independently verified. It may not contain its build cache, auth state,
+  config, logs, or any developer-downloaded archive.
 - The bridge binds only to loopback and uses a fresh installer-generated random
   credential.
 - Codex authentication uses the user's supported Codex/OpenAI login route. No
@@ -231,6 +240,8 @@ The final DMG allowlist is small and exact:
 - `Applications` symlink if the chosen layout needs it
 - `README.html` or `README.txt`
 - `LICENSE`, `NOTICE`, `PRIVACY`, and third-party notices
+- the pinned CLIProxyAPI `7.2.130` macOS arm64 executable and its MIT license,
+  nested only inside the signed installer application's resources
 
 It must not contain:
 

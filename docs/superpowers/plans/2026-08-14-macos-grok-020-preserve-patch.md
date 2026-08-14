@@ -11,8 +11,9 @@ containing no vendor binary, personal state, credential, or development residue.
 **Architecture:** A native Swift installer verifies and copies the exact official
 Grok app, then uses the verified vendor Electron executable in Node mode to run a
 bundled open-source ASAR patcher. The patcher makes a reviewed allowlist of
-changes to a staging copy, adds an authenticated loopback Codex bridge, and
-re-signs the separate Codex Bot app. The public DMG contains the installer and
+changes to a staging copy, adds an authenticated loopback Codex bridge backed by
+the pinned MIT-licensed CLIProxyAPI `7.2.130` macOS arm64 sidecar, and re-signs
+the separate Codex Bot app. The public DMG contains the installer and reviewed
 open-source resources only. Stock shell contracts are guarded by a generated
 metadata inventory plus live exact-input integration tests.
 
@@ -180,6 +181,7 @@ node macos/scripts/audit-grok-contract.cjs --asar "$TASK_TEMP/patched.asar"
 - Create: `macos/src/bridge/message-codec.cjs`
 - Create: `macos/src/bridge/redaction.cjs`
 - Create: `macos/src/bridge/runtime-config.cjs`
+- Create: `macos/assets/cliproxyapi-7.2.130-darwin-aarch64.json`
 - Create: `macos/test/bridge-*.test.cjs`
 - Modify: `macos/scripts/patch-app.cjs`
 
@@ -191,8 +193,13 @@ substitution paths must still reach the original stock bridge.
 
 **GREEN:** Adapt reviewed bridge components from the Windows and prior macOS
 implementation, removing Windows-only/local-browser logic and private Companion
-dependencies. Use the current supported Codex transport and pinned `ws`; keep
-provider/account diagnostics private and fail closed.
+dependencies. Pin CLIProxyAPI `7.2.130` to upstream asset
+`CLIProxyAPI_7.2.130_darwin_aarch64.tar.gz` and SHA-256
+`a644a75f70cbd045b9f7caa9ff3866353448a7ed67ef8472eacc11c48b1c86f0`;
+verify its published checksum, arm64 executable, version, and MIT license before
+packaging. Use a random loopback port and credential, the supported Codex OAuth
+device route, and pinned `ws`; keep auth state, provider/account diagnostics,
+and any optional Keychain-stored API key private and fail closed.
 
 **Verify:**
 
