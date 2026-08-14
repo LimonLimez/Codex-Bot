@@ -1,0 +1,349 @@
+{
+  "schemaVersion": 1,
+  "product": "Grok Bot",
+  "version": "0.20.0",
+  "platform": "darwin-arm64",
+  "appAsarSha256": "1e41f9da52be5d2ff24892b150a74d3d0145659cf6cbd83e9476d025865fb997",
+  "preloadSha256": "5cd99b94fb2457622f2a144c6b8eee7b0e770e9b26423a75303c35a8cbec0eb4",
+  "rpcMethods": [
+    "applyFeatureFlagOverride",
+    "attachProdBoxStatus",
+    "authenticateMcpServer",
+    "cancelCursorLogin",
+    "cancelCursorSandTrial",
+    "checkForUpdates",
+    "clearLocalToolApprovals",
+    "closeWindow",
+    "commitStagedAttachments",
+    "devRestart",
+    "discardStagedAttachment",
+    "downloadAttachment",
+    "forceReconnectGateway",
+    "forceRecreateComputer",
+    "generateAgentAvatarImage",
+    "getAgentDefaultModel",
+    "getAutoReviewInstructions",
+    "getAvailableModels",
+    "getBoxMigrationStatus",
+    "getComputerUseModel",
+    "getCursorAuthStatus",
+    "getCursorAvatar",
+    "getCursorPrReviewPreferences",
+    "getCursorPrivacyModeEnabled",
+    "getCursorUsageSummary",
+    "getCursorWeeklyUsage",
+    "getDesktopEnvironment",
+    "getEffectivePlugins",
+    "getEgressTunnelEnabled",
+    "getEgressTunnelStatus",
+    "getExperimentsSnapshot",
+    "getHardwareAcceleration",
+    "getHostPinnedAgents",
+    "getHostSidebarSections",
+    "getLinkMetadata",
+    "getLocalToolPermission",
+    "getLocalToolPermissionCeiling",
+    "getMcpCatalog",
+    "getMcpPluginLogo",
+    "getMcpState",
+    "getMcpTeamPopularity",
+    "getOnboardingSeen",
+    "getSandAccess",
+    "getSandAccessFresh",
+    "getSidebarCollapsed",
+    "getThemeState",
+    "getTimeZone",
+    "getUpdateStatus",
+    "getWebauthnProxyEnabled",
+    "getWindowState",
+    "installEntry",
+    "invokeCursorDashboardAction",
+    "listClientPersistenceKeys",
+    "listMcpServerTools",
+    "listSecrets",
+    "loginCursor",
+    "logoutCursor",
+    "markDeepLinksReady",
+    "migrateClientPersistence",
+    "minimizeWindow",
+    "noteSentryConversation",
+    "openCloudAgent",
+    "openExternal",
+    "pickAvatarFile",
+    "pickAvatarSource",
+    "quitAndInstallUpdate",
+    "readAttachmentBytes",
+    "readAttachmentText",
+    "readClientPersistence",
+    "recordLocalToolApproval",
+    "refreshFeatureFlags",
+    "relaunchDesktop",
+    "removeClientPersistence",
+    "removeMcpAccount",
+    "removeMcpServer",
+    "removeSecrets",
+    "renameMcpAccount",
+    "reportAccessBlocked",
+    "reportAgentLoad",
+    "reportAgentsUnreachable",
+    "reportBoxVisibility",
+    "reportClientFailure",
+    "reportHeapMetrics",
+    "reportOnboardingStep",
+    "reportOpenComputer",
+    "reportReactionAck",
+    "reportRebuildLifecycle",
+    "reportReconciliation",
+    "reportRecoveryAction",
+    "reportRenderStream",
+    "reportRenderTtfr",
+    "reportSendAck",
+    "reportSendLatency",
+    "reportSigninGate",
+    "reportUpdatePrompt",
+    "reportVncLiveness",
+    "reportVncSession",
+    "resizeWindowWidth",
+    "resolveAttachmentMedia",
+    "revealSecret",
+    "setAgentDefaultModel",
+    "setAttachProdBoxEnabled",
+    "setAutoReviewInstructions",
+    "setAutoUpdateWhenIdleOptIn",
+    "setComputerUseModel",
+    "setEgressTunnelEnabled",
+    "setHardwareAccelerationEnabled",
+    "setHostPinnedAgents",
+    "setHostSidebarSections",
+    "setLocalToolPermission",
+    "setMcpCustomInstructions",
+    "setOnboardingSeen",
+    "setSidebarCollapsed",
+    "setThemePreference",
+    "setTimeZoneOverride",
+    "setTitleBarOverlayTone",
+    "setUpdateTrack",
+    "setWebauthnProxyEnabled",
+    "stageAttachmentBytes",
+    "startRpcTraceWindow",
+    "submitFeedback",
+    "toggleMaximizeWindow",
+    "toggleMcpToolDisabled",
+    "transcribeAudio",
+    "uninstallPlugin",
+    "updateComputer",
+    "updateCursorAccountName",
+    "updatePluginInstall",
+    "upsertSecrets",
+    "writeClientPersistence"
+  ],
+  "eventSubscriptions": [
+    "box-migration",
+    "cursor-auth-changed",
+    "deep-link",
+    "dev-box-pull-progress",
+    "dev-box-rebuild",
+    "egress-tunnel-changed",
+    "egress-tunnel-status-changed",
+    "experiments-changed",
+    "focus-agent",
+    "force-onboarding",
+    "mcp-auth-completed",
+    "open-about",
+    "open-feedback",
+    "skip-onboarding",
+    "theme-changed",
+    "update-computer-dispatched",
+    "update-status",
+    "vnc-user-presence",
+    "webauthn-proxy-changed",
+    "widget-gallery",
+    "window-state",
+    "zoom-factor-changed"
+  ],
+  "directIpcChannels": [
+    "sand:coordinator-port",
+    "sand:coordinator-port-request",
+    "sand:egress-tunnel-get-sync",
+    "sand:egress-tunnel-status-get-sync",
+    "sand:experiments-snapshot-sync",
+    "sand:theme-get-sync",
+    "sand:webauthn-proxy-get-sync"
+  ],
+  "features": [
+    {
+      "id": "attachments",
+      "description": "Stage, commit, resolve, read, and download conversation attachments.",
+      "evidence": [
+        "rpc:commitStagedAttachments",
+        "rpc:resolveAttachmentMedia"
+      ]
+    },
+    {
+      "id": "audio-transcription",
+      "description": "Transcribe user audio through the stock desktop method.",
+      "evidence": [
+        "rpc:transcribeAudio"
+      ]
+    },
+    {
+      "id": "authentication",
+      "description": "Expose the account login, cancellation, logout, and status contract.",
+      "evidence": [
+        "rpc:getCursorAuthStatus",
+        "rpc:loginCursor",
+        "smoke:no-vendor-inference"
+      ]
+    },
+    {
+      "id": "background-tasks",
+      "description": "Keep stock background and delegated task lifecycle surfaces.",
+      "evidence": [
+        "smoke:background-tasks"
+      ]
+    },
+    {
+      "id": "bot-profile",
+      "description": "Keep bot profile, avatar source, avatar file, and avatar generation flows.",
+      "evidence": [
+        "rpc:generateAgentAvatarImage",
+        "rpc:pickAvatarFile",
+        "rpc:pickAvatarSource"
+      ]
+    },
+    {
+      "id": "computer",
+      "description": "Keep remote computer update, recovery, connection, presence, and dispatch flows.",
+      "evidence": [
+        "rpc:updateComputer",
+        "event:update-computer-dispatched",
+        "event:vnc-user-presence"
+      ]
+    },
+    {
+      "id": "connectors-mcp",
+      "description": "Keep MCP catalog, accounts, authentication, tools, and connector settings.",
+      "evidence": [
+        "rpc:getMcpCatalog",
+        "rpc:authenticateMcpServer",
+        "event:mcp-auth-completed"
+      ]
+    },
+    {
+      "id": "feedback",
+      "description": "Keep the stock feedback action and feedback window event.",
+      "evidence": [
+        "rpc:submitFeedback",
+        "event:open-feedback"
+      ]
+    },
+    {
+      "id": "group-chat",
+      "description": "Keep one-to-one, bot-to-bot, and multi-bot group conversation flows.",
+      "evidence": [
+        "smoke:group-chat"
+      ]
+    },
+    {
+      "id": "models",
+      "description": "Keep available, default, and computer-use model preference contracts.",
+      "evidence": [
+        "rpc:getAvailableModels",
+        "rpc:getAgentDefaultModel",
+        "rpc:setAgentDefaultModel"
+      ]
+    },
+    {
+      "id": "onboarding",
+      "description": "Keep onboarding state, forced onboarding, skipping, and reporting.",
+      "evidence": [
+        "rpc:getOnboardingSeen",
+        "event:force-onboarding",
+        "event:skip-onboarding"
+      ]
+    },
+    {
+      "id": "plugins",
+      "description": "Keep plugin discovery, install, update, uninstall, and logo flows.",
+      "evidence": [
+        "rpc:getEffectivePlugins",
+        "rpc:installEntry",
+        "rpc:uninstallPlugin"
+      ]
+    },
+    {
+      "id": "routines",
+      "description": "Keep recurring routine creation, schedule, pause, resume, and execution flows.",
+      "evidence": [
+        "smoke:routines"
+      ]
+    },
+    {
+      "id": "secrets",
+      "description": "Keep bounded secret listing, reveal, update, and removal flows.",
+      "evidence": [
+        "rpc:listSecrets",
+        "rpc:revealSecret",
+        "rpc:upsertSecrets",
+        "rpc:removeSecrets"
+      ]
+    },
+    {
+      "id": "settings-theme",
+      "description": "Keep theme, hardware acceleration, time zone, privacy, and settings state.",
+      "evidence": [
+        "rpc:getThemeState",
+        "rpc:getHardwareAcceleration",
+        "event:theme-changed"
+      ]
+    },
+    {
+      "id": "skills",
+      "description": "Keep stock skill discovery, installation, removal, and execution surfaces.",
+      "evidence": [
+        "smoke:skills"
+      ]
+    },
+    {
+      "id": "team-coordination",
+      "description": "Keep team popularity, teammate, subagent, and delegated coordination flows.",
+      "evidence": [
+        "rpc:getMcpTeamPopularity",
+        "smoke:team-coordination"
+      ]
+    },
+    {
+      "id": "updates",
+      "description": "Keep independent update status, track, check, idle, and install controls.",
+      "evidence": [
+        "rpc:getUpdateStatus",
+        "rpc:checkForUpdates",
+        "event:update-status"
+      ]
+    },
+    {
+      "id": "usage",
+      "description": "Keep weekly and summary usage reporting surfaces without leaking credentials.",
+      "evidence": [
+        "rpc:getCursorWeeklyUsage",
+        "rpc:getCursorUsageSummary"
+      ]
+    },
+    {
+      "id": "window-controls",
+      "description": "Keep minimize, maximize, close, resize, state, zoom, and title controls.",
+      "evidence": [
+        "rpc:minimizeWindow",
+        "rpc:toggleMaximizeWindow",
+        "event:window-state"
+      ]
+    },
+    {
+      "id": "workspace-repository",
+      "description": "Keep stock workspace, branch, repository, and code-task flows.",
+      "evidence": [
+        "smoke:workspace-repository"
+      ]
+    }
+  ]
+}
