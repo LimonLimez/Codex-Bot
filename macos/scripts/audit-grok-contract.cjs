@@ -306,6 +306,10 @@ function auditAppContract(appPath, contract) {
   return auditPreloadContract(readPreloadFromAsar(archive), contract);
 }
 
+function auditAsarContract(asarPath, contract) {
+  return auditPreloadContract(readPreloadFromAsar(asarPath), contract);
+}
+
 function generateContract(appPath) {
   const archive = appAsarPath(appPath);
   if (sha256File(archive) !== APP_ASAR_SHA256) {
@@ -355,11 +359,13 @@ function main() {
     "assets",
     "grok-bot-0.20.0-contract.json",
   );
-  if (!args.app) {
-    throw new Error("Usage: audit-grok-contract.cjs --app <Grok Bot.app> [--contract <contract.json>] [--generate --output <contract.json>]");
+  if (!args.app && !args.asar) {
+    throw new Error("Usage: audit-grok-contract.cjs (--app <Grok Bot.app> | --asar <staged.asar>) [--contract <contract.json>] [--generate --output <contract.json>]");
   }
   if (args.generate) {
-    if (!args.output) throw new Error("--generate requires --output");
+    if (!args.app || !args.output || args.asar) {
+      throw new Error("--generate requires --app and --output only");
+    }
     const contract = generateContract(args.app);
     validateContract(contract);
     const output = path.resolve(args.output);
@@ -371,7 +377,11 @@ function main() {
   const contract = JSON.parse(
     fs.readFileSync(path.resolve(args.contract ?? defaultContract), "utf8"),
   );
-  process.stdout.write(`${JSON.stringify(auditAppContract(args.app, contract))}\n`);
+  if (args.app && args.asar) throw new Error("Choose either --app or --asar");
+  const result = args.app
+    ? auditAppContract(args.app, contract)
+    : auditAsarContract(args.asar, contract);
+  process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 if (require.main === module) {
@@ -387,6 +397,7 @@ module.exports = {
   FEATURES,
   APP_ASAR_SHA256,
   auditAppContract,
+  auditAsarContract,
   auditPreloadContract,
   extractPreloadContract,
   generateContract,

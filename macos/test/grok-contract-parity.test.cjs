@@ -1,9 +1,12 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const asar = require("@electron/asar");
 
 const macRoot = path.resolve(__dirname, "..");
 const contractPath = path.join(
@@ -187,6 +190,34 @@ test("the auditor rejects missing, added, and renamed stock contract members", (
     () => auditPreloadContract(missingIpc, contract, { checkSourceHash: false }),
     /IPC.*missing/i,
   );
+});
+
+test("the auditor checks a staged ASAR by its unchanged preload contract", async (t) => {
+  const contract = loadContract();
+  const source = syntheticPreload(contract);
+  const stagedContract = {
+    ...contract,
+    preloadSha256: crypto.createHash("sha256").update(source).digest("hex"),
+  };
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-contract-asar-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const tree = path.join(root, "tree");
+  const preload = path.join(tree, "dist", "electron-preload", "preload.cjs");
+  fs.mkdirSync(path.dirname(preload), { recursive: true });
+  fs.writeFileSync(preload, source);
+  fs.writeFileSync(
+    path.join(tree, "package.json"),
+    '{"name":"sand","version":"0.1.4-macos.1"}\n',
+  );
+  const archive = path.join(root, "staged.asar");
+  await asar.createPackage(tree, archive);
+  const { auditAsarContract } = loadAuditor();
+  assert.deepEqual(auditAsarContract(archive, stagedContract), {
+    ok: true,
+    rpcMethods: 130,
+    eventSubscriptions: 22,
+    directIpcChannels: 7,
+  });
 });
 
 test(
