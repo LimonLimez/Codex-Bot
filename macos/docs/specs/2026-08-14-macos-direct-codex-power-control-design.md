@@ -1,4 +1,4 @@
-# Codex Bot macOS Direct Codex and Native Power Control Design
+# OpenBot macOS Direct Codex and Native Power Control Design
 
 **Status:** Approved for implementation on `macos/codex-bot`
 
@@ -11,14 +11,14 @@
 
 ## Decision
 
-Codex Bot keeps the exact verified Grok Bot 0.20 shell and the already approved
+OpenBot keeps the exact verified Grok Bot 0.20 shell and the already approved
 bot-scoped remote Work runtime. It replaces the current approximate model
 dropdown plus effort-only slider with the native compact Codex Power control,
 and it replaces the mandatory CLIProxyAPI dependency for OpenAI models with a
 pinned official Codex app-server process.
 
 The default OpenAI path reuses the user's official Codex login in `~/.codex`.
-If that login is absent, Codex Bot starts the official ChatGPT browser or device
+If that login is absent, OpenBot starts the official ChatGPT browser or device
 login flow through app-server. The ChatGPT desktop application is not a runtime
 or packaging dependency. CLIProxyAPI remains an optional, explicitly connected
 provider for reviewed non-Codex models such as Claude Fable 5. It is not started
@@ -38,6 +38,13 @@ not a model dropdown beside an independent reasoning slider.
 
 The reference behavior includes:
 
+- a closed ghost trigger in the composer containing the current model, compact
+  effort label, optional Fast mark, and chevron, with no permanently visible
+  full-width model dock;
+- a 224-pixel popover above that trigger; its compact rail occupies the upper
+  32 pixels and the `Advanced` / Fast controls occupy the lower row;
+- an Advanced state that replaces the compact rail in the same popover with
+  Model, Effort, and Speed controls instead of appending a second panel;
 - a 32-pixel compact container, 28-pixel control root, 24-pixel track,
   28-pixel thumb, and 4-pixel tick marks;
 - a blue selected range in ordinary states;
@@ -136,14 +143,14 @@ signature, signer/team, and absence of unexpected files before staging it. The
 repository and public DMG do not contain a developer-machine copy, Codex auth
 state, `~/.codex`, logs, rollouts, configuration, or caches.
 
-The installed path is inside the signed Codex Bot resources. Runtime resolution
+The installed path is inside the signed OpenBot resources. Runtime resolution
 accepts only that verified packaged path in production. `CODEX_BINARY` and a
 developer-installed CLI are test/development inputs and cannot silently replace
 the production binary.
 
 ### Account ownership
 
-Codex Bot launches:
+OpenBot launches:
 
 `<packaged-codex> app-server --stdio`
 
@@ -159,7 +166,7 @@ the device-code flow. Browser URLs and user codes are shown only for the current
 login generation. Cancel, completion, logout, process exit, restart, and stale
 notification races are bounded and generation checked.
 
-Codex Bot does not import ChatGPT desktop tokens, depend on ChatGPT.app's
+OpenBot does not import ChatGPT desktop tokens, depend on ChatGPT.app's
 embedded `codex`, or require the ChatGPT GUI to be running. The standalone
 binary and account protocol are the only supported Codex dependency.
 
@@ -268,7 +275,7 @@ Apple ID or 2FA interaction in Xcode.
 
 Release order:
 
-1. build and verify the installer and staged Codex Bot app;
+1. build and verify the installer and staged OpenBot app;
 2. sign every changed nested executable and bundle in dependency order with
    hardened runtime and timestamp;
 3. validate the packaged OpenAI binary and resulting outer signature;
@@ -278,7 +285,7 @@ Release order:
    provider send, bot switch, remote Computer, and rollback tests;
 6. mount the final DMG read-only and run the release privacy allowlist and
    secret/path scans against every file and archive member;
-7. install only the verified Codex Bot app, never modify Grok Bot;
+7. install only the verified OpenBot app, never modify Grok Bot;
 8. publish only the macOS versioned asset on `macos/codex-bot` after all gates
    pass.
 

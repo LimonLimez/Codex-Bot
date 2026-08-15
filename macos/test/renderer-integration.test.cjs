@@ -10,6 +10,8 @@ const macRoot = path.resolve(__dirname, "..");
 const patchPath = path.join(macRoot, "src", "patch", "renderer.cjs");
 const cssPath = path.join(macRoot, "src", "renderer", "codex-ui.css");
 const botUiPath = path.join(macRoot, "src", "renderer", "bot-runtime-ui.js");
+const visualRuntimePath = path.join(macRoot, "test", "visual", "renderer-panel-runtime.cjs");
+const visualFixturePath = path.join(macRoot, "test", "fixtures", "renderer-panel.html");
 
 const STOCK_INDEX = `<!doctype html>
 <html lang="en">
@@ -71,12 +73,15 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
   }
 });
 
-test("approved CSS docks management in the sidebar and model controls at the composer", () => {
+test("approved CSS docks management in the sidebar and opens native Power from the composer trigger", () => {
   const css = fs.readFileSync(cssPath, "utf8");
   const botUi = fs.readFileSync(botUiPath, "utf8");
   assert.match(css, /\.codex-bot-controls\s*\{[^}]*position:\s*relative[^}]*width:\s*100%/s);
   assert.match(css, /\.codex-bot-controls\s*\{[^}]*color:\s*var\(--codex-text\)[^}]*background:\s*var\(--codex-surface\)/s);
-  assert.match(css, /\.codex-model-dock\s*\{[^}]*position:\s*relative[^}]*width:\s*100%/s);
+  assert.match(css, /\.codex-model-dock\s*\{[^}]*position:\s*relative[^}]*width:\s*max-content/s);
+  assert.match(css, /\.codex-model-trigger\s*\{[^}]*max-width:\s*210px/s);
+  assert.match(css, /\.codex-power-popover\s*\{[^}]*position:\s*absolute[^}]*bottom:\s*calc\(100% \+ 8px\)[^}]*width:\s*224px/s);
+  assert.match(css, /\.codex-power-popover\[hidden\]\s*\{[^}]*display:\s*none/s);
   assert.match(css, /\[data-codex-mount-state="pending"\][^}]*display:\s*none/s);
   assert.doesNotMatch(css, /\.codex-bot-controls\s*\{[^}]*position:\s*fixed/s);
   assert.doesNotMatch(css, /\.codex-bot-controls\s*\{[^}]*top:\s*12px/s);
@@ -91,6 +96,14 @@ test("approved CSS docks management in the sidebar and model controls at the com
   assert.match(css, /\.codex-power-ultra-field[^}]*linear-gradient\([^)]*#2383ff[^)]*(?:#7c3aed|#8b5cf6)[^)]*#2383ff/s);
   assert.match(css, /\.codex-power-control\.is-ultra-entering[^}]*\.codex-power-burst/s);
   assert.match(css, /@keyframes\s+codex-power-ultra-flow/);
+  assert.match(css, /@keyframes\s+codex-power-ultra-particle-drift/);
+  assert.match(
+    css,
+    /\.codex-power-control\.is-ultra:not\(\.is-ultra-entering\)\s+\.codex-power-particle\s*\{[^}]*animation:\s*codex-power-ultra-particle-drift/s,
+  );
+  assert.match(css, /\.codex-power-compact-controls\s*\{[^}]*position:\s*relative[^}]*height:\s*36px/s);
+  assert.match(css, /\.codex-power-warning\s*\{[^}]*position:\s*absolute[^}]*inset:\s*0/s);
+  assert.match(css, /\.codex-model-dock\.is-warning[^}]*\.codex-power-(?:advanced|fast)-toggle/s);
   assert.match(css, /\.codex-power-advanced[^}]*grid-template-columns/s);
   assert.doesNotMatch(css, /\.codex-model-row[^}]*112px/s);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*animation:\s*none\s*!important/);
@@ -100,11 +113,8 @@ test("approved CSS docks management in the sidebar and model controls at the com
   );
   assert.match(css, /:root\[data-theme="light"\][\s\S]*--codex-surface:\s*#f[0-9a-f]{5}/i);
   assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)/);
-  assert.match(css, /\.codex-model-dock\s*\{[^}]*container-type:\s*inline-size/s);
-  assert.match(
-    css,
-    /@container\s*\(max-width:\s*440px\)[\s\S]*\.codex-power-shell\s*\{[^}]*grid-template-areas:[^}]*height:\s*auto/s,
-  );
+  assert.match(css, /\.codex-power-fast-toggle\.is-active\s*\{[^}]*var\(--codex-blue\)/s);
+  assert.doesNotMatch(css, /\.codex-model-dock\s*\{[^}]*container-type:\s*inline-size/s);
   assert.match(css, /@media\s*\(max-width:\s*1100px\)/);
   assert.match(css, /\.codex-bot-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+max-content/s);
   assert.match(css, /\.codex-bot-new\s*\{[^}]*white-space:\s*nowrap/s);
@@ -113,5 +123,20 @@ test("approved CSS docks management in the sidebar and model controls at the com
   assert.match(botUi, /rename\.addEventListener\("keydown"[\s\S]*event\.key === "Enter"/);
   assert.match(botUi, /findUiMounts/);
   assert.match(botUi, /MutationObserver/);
+  assert.match(botUi, /modelTrigger\.setAttribute\("aria-haspopup",\s*"dialog"\)/);
+  assert.match(botUi, /composerHost\.append\?\.\(modelDock\)/);
   assert.match(botUi, /reasoningView\.control\.classList\.toggle\("is-disabled",\s*snapshot\.disabled\)/s);
+  assert.match(botUi, /compactControls\.append\(advancedToggle,\s*fastToggle,\s*reasoningView\.warning\)/s);
+  assert.doesNotMatch(botUi, /popover\.append\([^;]*reasoningView\.warning/s);
+});
+
+test("visual disabled and later-Ultra evidence comes from production state instead of DOM mutation", () => {
+  const runtime = fs.readFileSync(visualRuntimePath, "utf8");
+  const fixture = fs.readFileSync(visualFixturePath, "utf8");
+  assert.match(runtime, /phase === "disabled"[\s\S]*trigger\.disabled[\s\S]*popover[^\n]*hidden/s);
+  assert.match(runtime, /disabled:\s*phase === "disabled"\s*\?\s*"true"\s*:\s*"false"/s);
+  assert.match(runtime, /phase === "later"[\s\S]*3300/s);
+  assert.doesNotMatch(runtime, /slider\.disabled\s*=|classList\.add\("is-disabled"\)/);
+  assert.match(fixture, /params\.get\("disabled"\) === "true"/);
+  assert.match(fixture, /selectBot\(\)[\s\S]*new Promise\(\(\) => \{\}\)/s);
 });

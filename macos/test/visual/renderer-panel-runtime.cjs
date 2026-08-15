@@ -20,7 +20,7 @@ async function main() {
   const catalog = argument("catalog", "full");
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 640 || height < 480
     || !new Set(["terra-light", "sol-light", "medium", "high", "xhigh", "max", "ultra", "ultra-code"]).has(effort)
-    || !new Set(["entry", "steady", "advanced", "hold", "drag", "wheel", "arrows", "focus", "hover", "disabled", "reduced", "fast-entry", "fast-steady", "fast-exit"]).has(phase)
+    || !new Set(["closed", "entry", "steady", "later", "advanced", "hold", "drag", "wheel", "arrows", "focus", "hover", "disabled", "reduced", "fast-entry", "fast-steady", "fast-exit"]).has(phase)
     || !new Set(["standard", "priority"]).has(tier)
     || !new Set(["dark", "light"]).has(theme)
     || !new Set(["wide", "narrow"]).has(layout)
@@ -38,8 +38,17 @@ async function main() {
     webPreferences: { backgroundThrottling: false, contextIsolation: true, sandbox: true },
   });
   const fixture = path.join(__dirname, "..", "fixtures", "renderer-panel.html");
-  const initialTier = phase === "fast-entry" ? "standard" : tier;
-  await window.loadFile(fixture, { query: { effort, tier: initialTier, theme, layout, catalog } });
+  const initialTier = phase === "fast-entry" ? "standard"
+    : phase === "fast-exit" ? "priority"
+      : tier;
+  await window.loadFile(fixture, { query: {
+    effort,
+    tier: initialTier,
+    theme,
+    layout,
+    catalog,
+    disabled: phase === "disabled" ? "true" : "false",
+  } });
   const expectedLabel = effort === "terra-light" || effort === "sol-light" ? "Light"
     : effort === "medium" ? "Standard"
       : effort === "high" ? "Extended"
@@ -47,13 +56,35 @@ async function main() {
           : effort === "ultra-code" ? "Ultra Code"
             : effort[0].toUpperCase() + effort.slice(1);
   const sliderRect = await window.webContents.executeJavaScript(`(() => {
+    const trigger = document.querySelector(".codex-model-trigger");
+    if (!trigger) throw new Error("Power trigger did not mount.");
+    const phase = ${JSON.stringify(phase)};
+    if (phase === "closed" || phase === "disabled") {
+      const popover = document.querySelector(".codex-power-popover");
+      if (trigger.getAttribute("aria-expanded") !== "false"
+        || !popover?.hidden) {
+        throw new Error("Power popover did not begin closed.");
+      }
+      if (phase === "disabled" && !trigger.disabled) {
+        throw new Error("Disabled evidence did not originate from production state.");
+      }
+      if (phase === "disabled" && !/Choose model/.test(trigger.textContent)) {
+        throw new Error("Pending selection evidence exposed an unconfirmed model.");
+      }
+      const rect = trigger.getBoundingClientRect();
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    }
+    trigger.click();
+    if (trigger.getAttribute("aria-expanded") !== "true"
+      || document.querySelector(".codex-power-popover")?.hidden) {
+      throw new Error("Power popover did not open from the composer trigger.");
+    }
     const slider = document.querySelector(".codex-power-input");
     const label = document.querySelector(".codex-power-label");
     if (!slider || !label) throw new Error("Power control did not mount.");
     if (label.textContent !== ${JSON.stringify(expectedLabel)}) {
       throw new Error("Power control did not render the requested state.");
     }
-    const phase = ${JSON.stringify(phase)};
     if (phase === "advanced") document.querySelector(".codex-power-advanced-toggle")?.click();
     if (phase === "hold") slider.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     if (phase === "drag") {
@@ -67,19 +98,11 @@ async function main() {
       slider.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "ArrowRight" }));
     }
     if (phase === "focus") slider.focus();
-    if (phase === "disabled") {
-      slider.disabled = true;
-      slider.closest(".codex-power-control")?.classList.add("is-disabled");
-    }
     if (phase === "fast-entry") {
-      const speed = document.querySelector(".codex-power-speed-select");
-      speed.value = "priority";
-      speed.dispatchEvent(new Event("change", { bubbles: true }));
+      document.querySelector(".codex-power-fast-toggle")?.click();
     }
     if (phase === "fast-exit") {
-      const speed = document.querySelector(".codex-power-speed-select");
-      speed.value = "__standard__";
-      speed.dispatchEvent(new Event("change", { bubbles: true }));
+      document.querySelector(".codex-power-fast-toggle")?.click();
     }
     const rect = slider.getBoundingClientRect();
     return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
@@ -89,6 +112,7 @@ async function main() {
   }
   const delay = phase === "entry" || phase === "fast-entry" ? 280
     : phase === "hold" ? 560
+      : phase === "later" ? 3300
       : phase === "fast-steady" || tier === "priority" ? 720
       : (effort === "ultra" || effort === "ultra-code") ? 2300 : 180;
   await new Promise((resolve) => setTimeout(resolve, delay));

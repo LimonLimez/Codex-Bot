@@ -9,6 +9,16 @@ const uiPath = path.join(__dirname, "..", "src", "renderer", "bot-runtime-ui.js"
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function bot(botId, name, state) {
   return Object.freeze({
     botId,
@@ -738,6 +748,80 @@ test("initialization and creation keep send gated until the main-owned selection
   assert.deepEqual(selected, [null, BOT_A, null, BOT_B]);
 });
 
+test("disposal fences pending initialization and immediately releases late subscriptions", async () => {
+  const { createBotUiController } = require(uiPath);
+  const catalog = deferred();
+  const calls = [];
+  const controller = createBotUiController({
+    facade: {
+      async list() { calls.push("list"); return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { calls.push("bots-subscribe"); return () => calls.push("bots-unsubscribe"); },
+    },
+    runtimeFacade: {
+      async selectBot() { calls.push("select"); return null; },
+      onEvent() { calls.push("runtime-subscribe"); return () => calls.push("runtime-unsubscribe"); },
+    },
+    accountFacade: {
+      catalog() { return catalog.promise; },
+      onCatalogChanged() { calls.push("catalog-subscribe"); return () => calls.push("catalog-unsubscribe"); },
+    },
+    onStateChanged() { calls.push("render"); },
+  });
+  const initialization = controller.initialize();
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.dispose();
+  catalog.resolve(Object.freeze({ generation: 0, status: "loading", models: Object.freeze([]) }));
+  await assert.rejects(initialization, /unavailable/i);
+  assert.deepEqual(calls, ["catalog-subscribe", "catalog-unsubscribe"]);
+  assert.deepEqual(controller.snapshot().bots, []);
+});
+
+test("disposal fences a late bot creation result without reviving local state", async () => {
+  const { createBotUiController } = require(uiPath);
+  const creation = deferred();
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      create() { return creation.promise; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: { async selectBot() { return null; } },
+  });
+  await controller.initialize();
+  const pending = controller.createBot();
+  controller.dispose();
+  creation.resolve(bot(BOT_B, "New Bot", "provisioning"));
+  await assert.rejects(pending, /unavailable/i);
+  assert.deepEqual(controller.snapshot().bots, []);
+  assert.equal(controller.snapshot().activeBotId, null);
+});
+
+test("disposal during the initial selection prevents post-dispose renders and subscriptions", async () => {
+  const { createBotUiController } = require(uiPath);
+  const selection = deferred();
+  const calls = [];
+  let renders = 0;
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { calls.push("bots-subscribe"); return () => calls.push("bots-unsubscribe"); },
+    },
+    runtimeFacade: {
+      selectBot() { calls.push("select"); return selection.promise; },
+      onEvent() { calls.push("runtime-subscribe"); return () => calls.push("runtime-unsubscribe"); },
+    },
+    onStateChanged() { renders += 1; },
+  });
+  const initialization = controller.initialize();
+  await new Promise((resolve) => setImmediate(resolve));
+  const rendersBeforeDispose = renders;
+  controller.dispose();
+  selection.resolve(null);
+  await assert.rejects(initialization, /changed|unavailable/i);
+  assert.equal(renders, rendersBeforeDispose);
+  assert.deepEqual(calls, ["select"]);
+});
+
 test("runtime events remain scoped to the selected bot and detach on disposal", async () => {
   const { createBotUiController } = require(uiPath);
   let runtimeListener;
@@ -951,12 +1035,35 @@ test("mounted optional model controls stay reachable while the official catalog 
     return null;
   };
   const power = find(mounted.modelDock, "codex-power-input");
+  const trigger = find(mounted.modelDock, "codex-model-trigger");
+  const triggerModel = find(mounted.modelDock, "codex-model-trigger-model");
+  const triggerEffort = find(mounted.modelDock, "codex-model-trigger-effort");
+  const popover = find(mounted.modelDock, "codex-power-popover");
+  const panelStack = find(mounted.modelDock, "codex-power-panel-stack");
+  const powerShell = find(mounted.modelDock, "codex-power-shell");
+  const fastToggle = find(mounted.modelDock, "codex-power-fast-toggle");
   const advancedToggle = find(mounted.modelDock, "codex-power-advanced-toggle");
   const advanced = find(mounted.modelDock, "codex-power-advanced");
   const advancedModel = find(mounted.modelDock, "codex-power-model-select");
   assert.equal(mounted.controller.snapshot().activeBotId, BOT_A);
   assert.equal(mounted.controller.snapshot().modelSelection, null);
   assert.equal(power.disabled, false);
+  assert.ok(trigger);
+  assert.equal(trigger.attributes["aria-haspopup"], "dialog");
+  assert.equal(trigger.attributes["aria-expanded"], "false");
+  assert.equal(popover.hidden, true);
+  assert.deepEqual(panelStack.children.map((child) => child.className), [
+    "codex-power-shell",
+    "codex-power-advanced",
+  ]);
+  trigger.listeners.get("click")();
+  assert.equal(trigger.attributes["aria-expanded"], "true");
+  assert.equal(popover.hidden, false);
+  assert.equal(fastToggle.hidden, true);
+  mounted.modelDock.listeners.get("keydown")({ key: "Escape", preventDefault() {} });
+  assert.equal(trigger.attributes["aria-expanded"], "false");
+  assert.equal(popover.hidden, true);
+  trigger.listeners.get("click")();
   assert.equal(advancedToggle.disabled, false);
   assert.equal(advanced.hidden, true);
   assert.equal(advancedModel.children[0].value, "claude-fable-5");
@@ -970,8 +1077,238 @@ test("mounted optional model controls stay reachable while the official catalog 
     serviceTier: null,
   }]);
   assert.equal(find(mounted.modelDock, "codex-power-label").textContent, "Ultra Code");
+  assert.equal(triggerModel.textContent, "Claude Fable 5");
+  assert.equal(triggerEffort.textContent, "Ultra Code");
   advancedToggle.listeners.get("click")();
   assert.equal(advanced.hidden, false);
+  assert.equal(powerShell.hidden, true);
   assert.equal(advancedToggle.attributes["aria-expanded"], "true");
   mounted.dispose();
+});
+
+function createMountedUiHarness({ catalog, initialSelection, windowTimers = { clearTimeout, setTimeout } }) {
+  const { mount } = require(uiPath);
+  class MountElement extends FakeElement {
+    constructor(tagName, documentRef) {
+      super(tagName);
+      this.ownerDocument = documentRef;
+      this.dataset = Object.create(null);
+      this.parentElement = null;
+      this.value = "";
+      this.disabled = false;
+      this.listeners = new Map();
+    }
+    append(...children) {
+      super.append(...children);
+      for (const child of children) child.parentElement = this;
+    }
+    replaceChildren(...children) {
+      super.replaceChildren(...children);
+      for (const child of children) child.parentElement = this;
+    }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    contains(candidate) {
+      return candidate === this || this.children.some((child) => child.contains?.(candidate));
+    }
+    focus() {}
+    remove() { this.parentElement = null; }
+  }
+  const documentRef = {
+    body: null,
+    sidebar: null,
+    composer: null,
+    listeners: new Map(),
+    createElement(tagName) { return new MountElement(tagName, this); },
+    getElementById() { return null; },
+    querySelector(selector) {
+      if (selector === "[data-codex-bot-sidebar-host]") return this.sidebar;
+      if (selector === "[data-codex-bot-composer-host]") return this.composer;
+      return null;
+    },
+    querySelectorAll() { return []; },
+    addEventListener(name, listener) { this.listeners.set(name, listener); },
+    removeEventListener(name) { this.listeners.delete(name); },
+  };
+  documentRef.body = documentRef.createElement("body");
+  documentRef.sidebar = documentRef.createElement("aside");
+  documentRef.composer = documentRef.createElement("form");
+  let current = initialSelection;
+  let generation = initialSelection.generation;
+  const selected = [];
+  const windowRef = {
+    codexBots: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    codexRuntime: {
+      async selectBot() { return current; },
+      async readModel() { return current; },
+      async selectModel(value) {
+        selected.push(value);
+        const model = catalog.models.find((entry) => entry.id === value.model);
+        current = Object.freeze({
+          ...value,
+          provider: "openai-codex",
+          catalogGeneration: catalog.generation,
+          generation: ++generation,
+        });
+        assert.ok(model);
+        return current;
+      },
+    },
+    codexAccount: {
+      async catalog() { return catalog; },
+      onCatalogChanged() { return () => {}; },
+    },
+    CustomEvent: class CustomEvent { constructor(type) { this.type = type; } },
+    dispatchEvent() {},
+    setTimeout: windowTimers.setTimeout,
+    clearTimeout: windowTimers.clearTimeout,
+  };
+  const mounted = mount({ windowRef, documentRef });
+  const find = (node, className) => {
+    if (node.className === className) return node;
+    for (const child of node.children) {
+      const found = find(child, className);
+      if (found) return found;
+    }
+    return null;
+  };
+  return { find: (className) => find(mounted.modelDock, className), mounted, selected };
+}
+
+test("mounted Power keeps an authoritative noncompact tuple visible until a projected stop commits", async () => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([
+      Object.freeze({
+        id: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+      }),
+      Object.freeze({
+        id: "gpt-5.5",
+        displayName: "GPT-5.5",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh"]),
+      }),
+    ]),
+  });
+  const initialSelection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.5",
+    reasoningEffort: "xhigh",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 4,
+  });
+  const harness = createMountedUiHarness({ catalog, initialSelection });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.find("codex-model-trigger-model").textContent, "GPT-5.5");
+  assert.equal(harness.find("codex-model-trigger-effort").textContent, "Extra High");
+  const power = harness.find("codex-power-input");
+  power.listeners.get("pointerdown")();
+  power.listeners.get("pointerup")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(harness.selected, [{
+    botId: BOT_A,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "xhigh",
+    serviceTier: null,
+  }]);
+  assert.equal(harness.find("codex-model-trigger-model").textContent, "GPT-5.6 Sol");
+  harness.mounted.dispose();
+});
+
+test("mounted Fast state distinguishes priority from other authoritative service tiers", async () => {
+  const catalog = Object.freeze({
+    generation: 7,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+        Object.freeze({ id: "flex", name: "Flex", description: "Flexible scheduling" }),
+      ]),
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+    })]),
+  });
+  const initialSelection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: "flex",
+    catalogGeneration: 7,
+    generation: 2,
+  });
+  const harness = createMountedUiHarness({ catalog, initialSelection });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fast = harness.find("codex-power-fast-toggle");
+  assert.equal(fast.classList.contains("is-active"), false);
+  assert.equal(fast.attributes["aria-pressed"], "false");
+  assert.equal(harness.mounted.modelDock.classList.contains("has-fast-tier"), false);
+  fast.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.selected[0].serviceTier, "priority");
+  assert.equal(fast.classList.contains("is-active"), true);
+  assert.equal(harness.mounted.modelDock.classList.contains("has-fast-tier"), true);
+  fast.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.selected[1].serviceTier, null);
+  harness.mounted.dispose();
+});
+
+test("mounted Ultra entry survives an immediate authoritative reply for its full warning window", async () => {
+  const timers = new Map();
+  let timerId = 0;
+  const windowTimers = {
+    setTimeout(callback, delay) {
+      const id = ++timerId;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const catalog = Object.freeze({
+    generation: 9,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+    })]),
+  });
+  const initialSelection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 9,
+    generation: 3,
+  });
+  const harness = createMountedUiHarness({ catalog, initialSelection, windowTimers });
+  await new Promise((resolve) => setImmediate(resolve));
+  const power = harness.find("codex-power-input");
+  const warning = harness.find("codex-power-warning");
+  power.listeners.get("keydown")({ key: "End", preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.selected.at(-1).reasoningEffort, "ultra");
+  assert.equal(warning.hidden, false);
+  assert.equal(harness.mounted.modelDock.classList.contains("is-warning"), true);
+  const pending = [...timers.values()];
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].delay, 2000);
+  pending[0].callback();
+  assert.equal(warning.hidden, true);
+  assert.equal(harness.mounted.modelDock.classList.contains("is-warning"), false);
+  harness.mounted.dispose();
 });

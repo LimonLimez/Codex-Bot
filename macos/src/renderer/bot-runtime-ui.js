@@ -424,13 +424,24 @@
         const candidateCatalog = accountFacade.onCatalogChanged((value) => {
           applyCatalog(value);
         });
+        if (disposed) {
+          if (typeof candidateCatalog === "function") candidateCatalog();
+          throw new Error("Bot controls are unavailable.");
+        }
         catalogUnsubscribe = typeof candidateCatalog === "function" ? candidateCatalog : null;
       }
       if (accountFacade && typeof accountFacade.catalog === "function") {
-        try { applyCatalog(await accountFacade.catalog(), { refreshSelection: false }); }
-        catch { applyCatalog(null, { refreshSelection: false }); }
+        try {
+          const catalog = await accountFacade.catalog();
+          if (disposed) throw new Error("Bot controls are unavailable.");
+          applyCatalog(catalog, { refreshSelection: false });
+        } catch (error) {
+          if (disposed) throw error;
+          applyCatalog(null, { refreshSelection: false });
+        }
       }
       const records = await facade.list();
+      if (disposed) throw new Error("Bot controls are unavailable.");
       if (!Array.isArray(records)) throw new Error("Bot controls are unavailable.");
       for (const value of records) {
         const record = normalizeBot(value);
@@ -438,14 +449,22 @@
       }
       if (bots.size > 0) {
         try { await selectBot(bots.keys().next().value); }
-        catch { publish(); }
+        catch (error) {
+          if (disposed) throw error;
+          publish();
+        }
       }
       else publish();
+      if (disposed) throw new Error("Bot controls are unavailable.");
       const candidate = facade.onChanged((value) => {
         try {
           applyBot(value);
         } catch {}
       });
+      if (disposed) {
+        if (typeof candidate === "function") candidate();
+        throw new Error("Bot controls are unavailable.");
+      }
       unsubscribe = typeof candidate === "function" ? candidate : null;
       if (runtimeFacade && typeof runtimeFacade.onEvent === "function") {
         const runtimeCandidate = runtimeFacade.onEvent((event) => {
@@ -459,6 +478,10 @@
           ) return;
           try { onRuntimeEvent(event); } catch {}
         });
+        if (disposed) {
+          if (typeof runtimeCandidate === "function") runtimeCandidate();
+          throw new Error("Bot controls are unavailable.");
+        }
         runtimeUnsubscribe = typeof runtimeCandidate === "function" ? runtimeCandidate : null;
       }
       return snapshot();
@@ -468,7 +491,9 @@
       if (disposed || typeof facade.create !== "function") {
         throw new Error("Bot creation is unavailable.");
       }
-      const record = normalizeBot(await facade.create());
+      const created = await facade.create();
+      if (disposed) throw new Error("Bot creation is unavailable.");
+      const record = normalizeBot(created);
       bots.set(record.botId, record);
       await selectBot(record.botId);
       return record;
@@ -782,6 +807,23 @@
     modelDock.id = "codex-model-dock";
     modelDock.dataset.codexMountState = "pending";
     modelDock.setAttribute("aria-label", "OpenBot Power controls");
+    const modelTrigger = element(documentRef, "button", "codex-model-trigger");
+    modelTrigger.type = "button";
+    modelTrigger.setAttribute("aria-haspopup", "dialog");
+    modelTrigger.setAttribute("aria-expanded", "false");
+    modelTrigger.setAttribute("aria-controls", "codex-power-popover");
+    const triggerFast = element(documentRef, "span", "codex-model-trigger-fast");
+    triggerFast.setAttribute("aria-hidden", "true");
+    const triggerModel = element(documentRef, "span", "codex-model-trigger-model", "Choose model");
+    const triggerEffort = element(documentRef, "span", "codex-model-trigger-effort", "");
+    const triggerChevron = element(documentRef, "span", "codex-model-trigger-chevron", "⌄");
+    triggerChevron.setAttribute("aria-hidden", "true");
+    modelTrigger.append(triggerFast, triggerModel, triggerEffort, triggerChevron);
+    const popover = element(documentRef, "div", "codex-power-popover");
+    popover.id = "codex-power-popover";
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", "Power");
+    popover.hidden = true;
     const providerRow = element(documentRef, "div", "codex-provider-row");
     const providerSelect = element(documentRef, "select", "codex-provider-select");
     providerSelect.setAttribute("aria-label", "Inference provider");
@@ -796,11 +838,16 @@
     const reasoningView = createReasoningView(documentRef);
     const reasoning = reasoningView.input;
     const powerShell = element(documentRef, "div", "codex-power-shell");
-    const powerTitle = element(documentRef, "span", "codex-power-title", "Power");
     const advancedToggle = element(documentRef, "button", "codex-power-advanced-toggle", "Advanced");
     advancedToggle.type = "button";
     advancedToggle.setAttribute("aria-expanded", "false");
-    powerShell.append(powerTitle, reasoningView.control, reasoningView.label, advancedToggle);
+    const fastToggle = element(documentRef, "button", "codex-power-fast-toggle");
+    fastToggle.type = "button";
+    fastToggle.setAttribute("aria-label", "Use Fast speed");
+    fastToggle.setAttribute("aria-pressed", "false");
+    const compactControls = element(documentRef, "div", "codex-power-compact-controls");
+    compactControls.append(advancedToggle, fastToggle, reasoningView.warning);
+    powerShell.append(reasoningView.control);
     const advanced = element(documentRef, "div", "codex-power-advanced");
     advanced.hidden = true;
     const advancedModelLabel = element(documentRef, "label", "codex-power-advanced-field");
@@ -819,8 +866,11 @@
     advancedSpeed.setAttribute("aria-label", "Speed");
     advancedSpeedLabel.append(advancedSpeed);
     advanced.append(advancedModelLabel, advancedEffortLabel, advancedSpeedLabel);
+    const panelStack = element(documentRef, "div", "codex-power-panel-stack");
+    panelStack.append(powerShell, advanced);
     panel.append(header, renameRow, providerRow, statusRow);
-    modelDock.append(powerShell, advanced, reasoningView.warning, reasoningView.instructions);
+    popover.append(panelStack, compactControls, reasoningView.label, reasoningView.instructions);
+    modelDock.append(modelTrigger, popover);
     documentRef.body.append(panel, modelDock);
 
     function attachToProductHosts() {
@@ -833,8 +883,7 @@
       }
       if (composerHost) {
         if (modelDock.parentElement !== composerHost) {
-          if (typeof composerHost.prepend === "function") composerHost.prepend(modelDock);
-          else composerHost.insertBefore?.(modelDock, composerHost.firstChild || null);
+          composerHost.append?.(modelDock);
         }
         modelDock.dataset.codexMountState = "mounted";
       } else {
@@ -851,14 +900,22 @@
     let lastSnapshot = null;
     let lastEffect = null;
     let warningTimer = null;
+    let warningScope = null;
+    let currentPowerScope = "unselected";
     let holdTimer = null;
+    let activeFastTier = null;
+    let compactProjectionPending = false;
     const powerState = new POWER_CONTROL.PowerControlState([], null, { ownerKey: "unselected" });
     let controller;
 
     function paintPower(snapshot, { enteredUltra = snapshot.enteredUltra } = {}) {
       if (!snapshot.stops.length) return;
+      const retainsUltraEntry = !enteredUltra
+        && warningTimer != null
+        && warningScope === currentPowerScope
+        && snapshot.effect === "ultra";
       updateReasoningView(reasoningView, snapshot.stops, snapshot.previewIndex, {
-        enteredUltra,
+        enteredUltra: enteredUltra || retainsUltraEntry,
         endpointLabelsVisible: snapshot.endpointLabelsVisible,
       });
       reasoning.disabled = snapshot.disabled;
@@ -867,16 +924,25 @@
       modelDock.classList.toggle("is-max", snapshot.effect === "max");
       modelDock.classList.toggle("is-ultra", snapshot.effect === "ultra");
       modelDock.classList.toggle("is-ultra-code", snapshot.selection?.effort === "ultra-code");
-      if (warningTimer != null) {
+      modelDock.classList.toggle("is-holding", snapshot.endpointLabelsVisible);
+      modelDock.classList.toggle("is-warning", !reasoningView.warning.hidden);
+      if (!retainsUltraEntry && warningTimer != null) {
         (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
+        warningScope = null;
       }
       if (enteredUltra) {
-        warningTimer = (windowRef.setTimeout || setTimeout)(() => {
+        warningScope = currentPowerScope;
+        const scope = warningScope;
+        const timer = (windowRef.setTimeout || setTimeout)(() => {
+          if (warningTimer !== timer || warningScope !== scope) return;
           reasoningView.control.classList.remove("is-ultra-entering");
           reasoningView.warning.hidden = true;
+          modelDock.classList.remove("is-warning");
           warningTimer = null;
+          warningScope = null;
         }, 2000);
+        warningTimer = timer;
       }
       lastEffect = snapshot.effect;
     }
@@ -944,10 +1010,57 @@
       const stops = MODEL_CONTROLS.buildPowerStops(next.modelCatalog, selectedTuple);
       const selectedIndex = selectedTuple ? MODEL_CONTROLS.closestPowerStop(stops, selectedTuple) : 0;
       const ownerKey = `${next.activeBotId ?? "none"}:${next.modelSelection?.generation ?? "pending"}:${stops[0]?.catalogGeneration ?? 0}`;
+      currentPowerScope = `${next.activeBotId ?? "none"}:${next.selectionEpoch}`;
       let power = powerState.setStops(stops, selectedIndex, { ownerKey });
       power = powerState.setDisabled(!enabled);
+      compactProjectionPending = Boolean(selectedTuple && power.selection
+        && (power.selection.provider !== selectedTuple.provider
+          || power.selection.model !== selectedTuple.model
+          || power.selection.effort !== selectedTuple.effort
+          || power.selection.serviceTier !== selectedTuple.serviceTier
+          || power.selection.catalogGeneration !== selectedTuple.catalogGeneration));
       const enteredUltra = power.effect === "ultra" && lastEffect !== "ultra";
       if (power.stops.length) paintPower(power, { enteredUltra });
+      const visibleSelection = next.selectionPending
+        ? null
+        : next.modelSelection ? {
+        provider: next.modelSelection.provider,
+        model: next.modelSelection.model,
+        effort: next.modelSelection.reasoningEffort,
+        serviceTier: next.modelSelection.serviceTier,
+        catalogGeneration: next.modelSelection.catalogGeneration,
+        label: EFFORT_LABELS[next.modelSelection.reasoningEffort]
+          ?? next.modelSelection.reasoningEffort,
+        effect: isUltraEffect(next.modelSelection.reasoningEffort)
+          ? "ultra"
+          : next.modelSelection.reasoningEffort === "max"
+            ? "max"
+            : "ordinary",
+        } : power.selection;
+      const visibleModel = next.modelCatalog.find((entry) => entry.model === visibleSelection?.model);
+      triggerModel.textContent = visibleModel?.label
+        ?? visibleModel?.displayName
+        ?? visibleSelection?.model
+        ?? "Choose model";
+      triggerEffort.textContent = visibleSelection?.label ?? "";
+      triggerEffort.classList.toggle("is-max", visibleSelection?.effect === "max");
+      triggerEffort.classList.toggle("is-ultra", visibleSelection?.effect === "ultra");
+      modelTrigger.disabled = !enabled;
+      if (!enabled && !popover.hidden) setPopoverOpen(false);
+      const speedOptions = visibleSelection
+        ? MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, visibleSelection.model).speeds
+        : [];
+      activeFastTier = speedOptions.find((entry) => entry.serviceTier === "priority")?.serviceTier
+        ?? speedOptions.find((entry) => entry.serviceTier && /fast/i.test(entry.label))?.serviceTier
+        ?? null;
+      const fastActive = Boolean(activeFastTier
+        && visibleSelection?.serviceTier === activeFastTier);
+      fastToggle.hidden = !activeFastTier;
+      fastToggle.disabled = !enabled || !activeFastTier;
+      fastToggle.classList.toggle("is-active", fastActive);
+      fastToggle.setAttribute("aria-pressed", String(fastActive));
+      fastToggle.setAttribute("aria-label", fastActive ? "Use Standard speed" : "Use Fast speed");
+      modelDock.classList.toggle("has-fast-tier", fastActive);
       advancedToggle.disabled = !enabled;
       advancedModel.disabled = !enabled;
       advancedEffort.disabled = !enabled;
@@ -986,10 +1099,36 @@
       });
     });
 
+    const setPopoverOpen = (open) => {
+      const next = Boolean(open) && !modelTrigger.disabled;
+      popover.hidden = !next;
+      modelDock.classList.toggle("is-open", next);
+      modelTrigger.setAttribute("aria-expanded", String(next));
+      if (!next) {
+        powerShell.hidden = false;
+        advanced.hidden = true;
+        popover.classList.remove("is-advanced");
+        advancedToggle.setAttribute("aria-expanded", "false");
+      }
+    };
+    modelTrigger.addEventListener("click", () => setPopoverOpen(popover.hidden));
+    modelDock.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || popover.hidden) return;
+      event.preventDefault?.();
+      setPopoverOpen(false);
+      modelTrigger.focus?.();
+    });
+    const dismissPopover = (event) => {
+      if (popover.hidden || modelDock.contains?.(event.target)) return;
+      setPopoverOpen(false);
+    };
+    documentRef.addEventListener?.("pointerdown", dismissPopover);
+
     const commitPower = (snapshot) => {
       paintPower(snapshot);
-      if (!snapshot.changed || !snapshot.selection) return;
+      if ((!snapshot.changed && !compactProjectionPending) || !snapshot.selection) return;
       const selection = snapshot.selection;
+      compactProjectionPending = false;
       void controller.selectModel(
         selection.model,
         selection.effort,
@@ -1037,8 +1176,22 @@
 
     advancedToggle.addEventListener("click", () => {
       advanced.hidden = !advanced.hidden;
+      powerShell.hidden = !advanced.hidden;
+      popover.classList.toggle("is-advanced", !advanced.hidden);
       advancedToggle.setAttribute("aria-expanded", String(!advanced.hidden));
       if (!advanced.hidden && lastSnapshot) populateAdvanced(lastSnapshot);
+    });
+    fastToggle.addEventListener("click", () => {
+      if (!lastSnapshot || !activeFastTier) return;
+      const selection = lastSnapshot.modelSelection ? {
+        model: lastSnapshot.modelSelection.model,
+        effort: lastSnapshot.modelSelection.reasoningEffort,
+        serviceTier: lastSnapshot.modelSelection.serviceTier,
+      } : powerState.snapshot().selection;
+      if (!selection) return;
+      const serviceTier = selection.serviceTier === activeFastTier ? null : activeFastTier;
+      void controller.selectModel(selection.model, selection.effort, serviceTier)
+        .catch(() => render(controller.snapshot()));
     });
     const submitAdvanced = () => {
       if (!lastSnapshot) return;
@@ -1072,8 +1225,11 @@
       panel,
       dispose() {
         mountObserver?.disconnect();
+        documentRef.removeEventListener?.("pointerdown", dismissPopover);
         if (holdTimer != null) (windowRef.clearTimeout || clearTimeout)(holdTimer);
         if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);
+        warningTimer = null;
+        warningScope = null;
         controller.dispose();
         panel.remove?.();
         modelDock.remove?.();

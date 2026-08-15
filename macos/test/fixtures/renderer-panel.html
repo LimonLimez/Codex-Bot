@@ -36,6 +36,7 @@
       const requestedServiceTier = params.get("tier") === "priority"
         ? "priority"
         : null;
+      const selectionDisabled = params.get("disabled") === "true";
       let selection = Object.freeze({
         botId: BOT_ID,
         provider: requestedModel.startsWith("claude-") ? "cliproxy-anthropic" : "openai-codex",
@@ -53,7 +54,10 @@
         onChanged() { return () => {}; },
       });
       window.codexRuntime = Object.freeze({
-        async selectBot() { return selection; },
+        async selectBot() {
+          if (selectionDisabled) return new Promise(() => {});
+          return selection;
+        },
         async readModel() { return selection; },
         async selectModel(next) {
           selection = Object.freeze({
