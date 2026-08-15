@@ -4,7 +4,7 @@
 
 **Date:** 2026-08-15
 
-**Platform:** macOS controller running Node.js 24.14.1 or newer
+**Platform:** macOS controller running Node.js 22.13.0 or newer
 
 **Extends:** `2026-08-15-remote-runtime-live-acceptance-design.md`
 
@@ -20,17 +20,26 @@ the same constructor path.
 
 ## Decision
 
-Each reviewed adapter executes in its own Node Worker with the Node permission
-model enabled and no filesystem, child-process, native-addon, WASI, or nested
-worker grants. The worker receives the already-read, SHA-256-verified source as
-data, so it needs no filesystem permission. Network access remains available
-for the provider's reviewed remote API implementation.
+Each trusted, human-reviewed adapter executes in its own Node Worker with the
+Node permission model enabled and no filesystem, child-process, native-addon,
+WASI, or nested-worker grants. The worker receives the already-read,
+SHA-256-verified source as data, so it needs no filesystem permission. Network
+access remains available for the provider's reviewed remote API implementation.
+
+The Node permission model is defense in depth against accidental local
+capability use, not a malicious-code sandbox. Adapter review must reject source
+that evaluates downloaded code, exfiltrates environment data, uses unapproved
+hosts or local endpoints, reaches worker IPC directly, or logs secrets. The
+adapter necessarily receives its own configured credentials and may contact
+its reviewed provider endpoints.
 
 The main thread communicates only through structured-clone messages. It never
 passes host objects, functions, prototypes, or callback capabilities into
 reviewed source. Abort is represented by an operation ID and recreated as a
 worker-local `AbortController`. Provider events and operation results cross the
-same clone boundary and are then subjected to the existing strict provider and
+same clone boundary only after the worker rejects oversized values or property
+keys, excessive fields, depth, nodes, accessors, proxies, and non-plain
+containers. They are then subjected to the existing strict provider and
 exercise validators.
 
 ## Components
@@ -45,14 +54,16 @@ source string. The worker:
 - validates the factory result's exact method topology;
 - opens and validates the provider subscription before reporting ready;
 - executes bounded RPC operations and creates worker-local abort signals;
+- enforces fixed heap, young-generation, and stack limits;
 - emits only structured-cloneable results and events;
 - unsubscribes and exits on explicit shutdown.
 
-Although reviewed code can recover its worker-local `process`, Node permissions
-still deny local/package file reads and process creation. An import attempt,
-including `Buffer.constructor(...).getBuiltinModule("node:module")`, therefore
-fails before the worker reports ready or before an operation result is
-accepted.
+Although reviewed code can recover its worker-local `process`, the permission
+configuration rejects ordinary local/package file reads and process creation.
+An import attempt, including
+`Buffer.constructor(...).getBuiltinModule("node:module")`, therefore fails in
+the reviewed-adapter regression suite. This is not claimed as containment for
+hostile source; provenance and human review remain mandatory.
 
 ### Main-thread proxy
 
@@ -65,7 +76,9 @@ or post-shutdown messages fail closed without exposing diagnostics.
 The provider proxy buffers at most the existing event-log limit before the
 single validated subscriber attaches. Unsubscribe shuts down its worker after
 all live-gate cleanup operations have completed. `exercise.dispose()` always
-shuts down the exercise worker, including rejected disposal.
+shuts down the exercise worker, including rejected disposal. A dependency-level
+disposer closes both workers if CLI workspace or report setup fails before the
+live gate takes ownership.
 
 ## Alternatives rejected
 

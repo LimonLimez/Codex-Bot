@@ -10,7 +10,7 @@
     "url": "https://github.com/LimonLimez/Codex-Bot.git"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "test": "node --test test/*.test.cjs",

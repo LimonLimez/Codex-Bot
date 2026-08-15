@@ -3,14 +3,18 @@
 const fs = require("node:fs");
 const { createHash, randomUUID } = require("node:crypto");
 const dns = require("node:dns/promises");
-const Module = require("node:module");
 const { isIP } = require("node:net");
 const path = require("node:path");
 const { types } = require("node:util");
-const vm = require("node:vm");
+const {
+  MessageChannel,
+  Worker,
+  receiveMessageOnPort,
+} = require("node:worker_threads");
 
 const { BotStore } = require("./bot-store.cjs");
 const { RemoteAppServerClient } = require("./remote-app-server-client.cjs");
+const { REVIEWED_ADAPTER_WORKER_SOURCE } = require("./reviewed-adapter-worker-source.cjs");
 const { BotRuntimeController } = require("./runtime-controller.cjs");
 const { validateProvider } = require("./runtime-provider.cjs");
 
@@ -21,6 +25,8 @@ const FAILED_MESSAGE = "Remote provider verification failed.";
 const YOUTUBE_URL = "https://www.youtube.com/";
 const MAX_GATE_EVENTS = 256;
 const MAX_ADAPTER_MODULE_BYTES = 1_048_576;
+const MAX_ADAPTER_PENDING_OPERATIONS = 64;
+const ADAPTER_START_TIMEOUT_MS = 1_000;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
@@ -182,71 +188,296 @@ function reviewedModuleSource(value, expectedSha256) {
   }
 }
 
-function executeReviewedModule(modulePath, source) {
-  const safeEnvironment = Object.freeze(Object.assign(Object.create(null), process.env));
-  const safeVersions = Object.freeze(Object.assign(Object.create(null), { node: process.versions.node }));
-  const safeProcess = Object.freeze(Object.assign(Object.create(null), {
-    arch: process.arch,
-    env: safeEnvironment,
-    platform: process.platform,
-    versions: safeVersions,
-  }));
-  const sandbox = Object.assign(Object.create(null), {
-    AbortController,
-    AbortSignal,
-    Buffer,
-    TextDecoder,
-    TextEncoder,
-    URL,
-    URLSearchParams,
-    clearInterval,
-    clearTimeout,
-    process: safeProcess,
-    queueMicrotask,
-    setInterval,
-    setTimeout,
-    structuredClone,
-  });
-  if (typeof fetch === "function") sandbox.fetch = fetch;
-  if (typeof WebSocket === "function") sandbox.WebSocket = WebSocket;
-  if (globalThis.crypto) sandbox.crypto = globalThis.crypto;
-  const context = vm.createContext(sandbox, {
-    codeGeneration: { strings: false, wasm: false },
-    name: "codex-bot-reviewed-adapter",
-  });
-  const restrictedRequire = vm.runInContext(
-    "(function require() { throw new Error('Module imports are unavailable.'); })",
-    context,
-  );
-  const moduleRecord = vm.runInContext("Object.create(null)", context);
-  moduleRecord.exports = vm.runInContext("Object.create(null)", context);
-  moduleRecord.filename = modulePath;
-  moduleRecord.require = restrictedRequire;
-  const wrapper = new vm.Script(Module.wrap(source), {
-    filename: modulePath,
-    displayErrors: false,
-  }).runInContext(context, { timeout: 1_000 });
-  wrapper.call(
-    moduleRecord.exports,
-    moduleRecord.exports,
-    restrictedRequire,
-    moduleRecord,
-    modulePath,
-    path.dirname(modulePath),
-  );
-  return moduleRecord.exports;
+const reviewedAdapterChannels = new WeakMap();
+const reviewedDependencyClosers = new WeakMap();
+
+function adapterWorkerFailure() {
+  return new Error("Reviewed adapter worker failed.");
 }
 
-function configuredModule(modulePath, expectedSha256, factoryName) {
-  try {
-    const loaded = executeReviewedModule(
+function isReviewedAdapterEnvelope(message) {
+  return message !== null && typeof message === "object" && !Array.isArray(message);
+}
+
+function permissionWorkerSupported(version = process.versions.node) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 22 || (major === 22 && minor >= 13);
+}
+
+function permissionWorkerArguments(version = process.versions.node) {
+  const major = Number(version.split(".", 1)[0]);
+  return major >= 25 ? ["--permission", "--allow-net"] : ["--permission"];
+}
+
+function adapterInput(value) {
+  if (value === undefined) return Object.freeze({ input: undefined, signal: undefined });
+  const descriptors = objectDescriptors(value, "Reviewed adapter input");
+  const input = Object.create(null);
+  let signal;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (key === "signal") {
+      signal = descriptors[key].value;
+      continue;
+    }
+    if (descriptors[key].enumerable) input[key] = descriptors[key].value;
+  }
+  return Object.freeze({ input, signal });
+}
+
+function createReviewedAdapterWorker({ modulePath, source, factoryName, adapterKind }) {
+  if (!permissionWorkerSupported()) throw blockedError();
+  const handshakeBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const handshake = new Int32Array(handshakeBuffer);
+  const { port1, port2 } = new MessageChannel();
+  const worker = new Worker(REVIEWED_ADAPTER_WORKER_SOURCE, {
+    eval: true,
+    execArgv: permissionWorkerArguments(),
+    resourceLimits: {
+      maxOldGenerationSizeMb: 64,
+      maxYoungGenerationSizeMb: 16,
+      stackSizeMb: 2,
+    },
+    workerData: {
+      adapterKind,
+      factoryName,
+      handshake: handshakeBuffer,
+      maxEvents: MAX_GATE_EVENTS,
+      moduleDirectory: path.dirname(modulePath),
       modulePath,
-      reviewedModuleSource(modulePath, expectedSha256),
-    );
-    const descriptors = objectDescriptors(loaded, "Remote provider module", [factoryName]);
-    const factory = descriptors[factoryName].value;
-    if (typeof factory !== "function") throw blockedError();
-    return factory.call(loaded);
+      port: port2,
+      source,
+    },
+    transferList: [port2],
+  });
+  worker.on("error", () => {});
+  worker.unref();
+  port1.unref();
+
+  if (Atomics.load(handshake, 0) === 0) {
+    Atomics.wait(handshake, 0, 0, ADAPTER_START_TIMEOUT_MS);
+  }
+  const envelope = receiveMessageOnPort(port1);
+  if (Atomics.load(handshake, 0) !== 1
+    || !envelope
+    || !envelope.message
+    || envelope.message.type !== "ready"
+    || !Array.isArray(envelope.message.events)
+    || envelope.message.events.length > MAX_GATE_EVENTS) {
+    port1.close();
+    void worker.terminate();
+    throw blockedError();
+  }
+
+  let closed = false;
+  let nextId = 1;
+  let subscriber = null;
+  const earlyEvents = [...envelope.message.events];
+  const pending = new Map();
+
+  const rejectPending = () => {
+    for (const operation of pending.values()) {
+      operation.signal?.removeEventListener("abort", operation.onAbort);
+      operation.reject(adapterWorkerFailure());
+    }
+    pending.clear();
+  };
+  const shutdown = () => {
+    if (closed) return;
+    closed = true;
+    subscriber = null;
+    earlyEvents.length = 0;
+    rejectPending();
+    try { port1.postMessage({ type: "shutdown" }); } catch {}
+    const force = setTimeout(() => void worker.terminate(), 100);
+    force.unref();
+  };
+  const fail = () => {
+    if (closed) return;
+    closed = true;
+    subscriber = null;
+    earlyEvents.length = 0;
+    rejectPending();
+    port1.close();
+    void worker.terminate();
+  };
+
+  const settle = (message) => {
+    if (!isReviewedAdapterEnvelope(message)) {
+      fail();
+      return;
+    }
+    if (message.type === "stopped") {
+      port1.close();
+      void worker.terminate();
+      return;
+    }
+    if (closed) return;
+    if (message.type === "event" && adapterKind === "provider") {
+      if (subscriber) {
+        try {
+          subscriber(message.value);
+        } catch {
+          fail();
+        }
+      } else if (earlyEvents.length < MAX_GATE_EVENTS) {
+        earlyEvents.push(message.value);
+      } else {
+        fail();
+      }
+      return;
+    }
+    if (message.type !== "result" || !Number.isSafeInteger(message.id)
+      || message.id < 1 || !pending.has(message.id)
+      || (message.ok !== true && message.ok !== false)) {
+      fail();
+      return;
+    }
+    const operation = pending.get(message.id);
+    pending.delete(message.id);
+    operation.signal?.removeEventListener("abort", operation.onAbort);
+    if (message.ok) operation.resolve(message.value);
+    else operation.reject(adapterWorkerFailure());
+  };
+
+  port1.on("message", settle);
+  port1.on("close", () => {
+    if (!closed) fail();
+  });
+  port1.unref();
+  worker.on("error", fail);
+  worker.on("exit", () => {
+    if (!closed) fail();
+  });
+
+  const request = (method, value) => {
+    if (closed || pending.size >= MAX_ADAPTER_PENDING_OPERATIONS) {
+      return Promise.reject(adapterWorkerFailure());
+    }
+    const normalized = adapterInput(value);
+    const id = nextId;
+    nextId = nextId === Number.MAX_SAFE_INTEGER ? 1 : nextId + 1;
+    if (pending.has(id)) return Promise.reject(adapterWorkerFailure());
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        try { port1.postMessage({ type: "abort", id }); } catch { fail(); }
+      };
+      pending.set(id, { onAbort, reject, resolve, signal: normalized.signal });
+      normalized.signal?.addEventListener("abort", onAbort, { once: true });
+      try {
+        port1.postMessage({
+          type: "operation",
+          id,
+          method,
+          input: normalized.input,
+          abortable: normalized.signal !== undefined,
+        });
+        if (normalized.signal?.aborted) onAbort();
+      } catch {
+        pending.delete(id);
+        normalized.signal?.removeEventListener("abort", onAbort);
+        reject(adapterWorkerFailure());
+        fail();
+      }
+    });
+  };
+
+  const subscribe = (callback) => {
+    if (closed || adapterKind !== "provider" || subscriber || typeof callback !== "function") {
+      throw adapterWorkerFailure();
+    }
+    subscriber = callback;
+    for (const event of earlyEvents.splice(0)) subscriber(event);
+    let active = true;
+    return () => {
+      if (!active) return undefined;
+      active = false;
+      shutdown();
+      return undefined;
+    };
+  };
+
+  return Object.freeze({ request, shutdown, subscribe });
+}
+
+function closeReviewedAdapter(adapter) {
+  try { reviewedAdapterChannels.get(adapter)?.shutdown(); } catch {}
+}
+
+function closeReviewedDependencies(...adapters) {
+  for (const adapter of adapters) {
+    const close = reviewedDependencyClosers.get(adapter);
+    if (typeof close === "function") {
+      close();
+      return;
+    }
+  }
+}
+
+function disposeLiveGateDependencies(dependencies) {
+  if (!dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)) {
+    return undefined;
+  }
+  closeReviewedDependencies(dependencies.provider, dependencies.exercise);
+  return undefined;
+}
+
+function configuredModule(modulePath, expectedSha256, factoryName, adapterKind) {
+  try {
+    const channel = createReviewedAdapterWorker({
+      modulePath,
+      source: reviewedModuleSource(modulePath, expectedSha256),
+      factoryName,
+      adapterKind,
+    });
+    let adapter;
+    if (adapterKind === "provider") {
+      adapter = Object.freeze({
+        capabilities: (input) => channel.request("capabilities", input),
+        provision: (input) => channel.request("provision", input),
+        inspect: (input) => channel.request("inspect", input),
+        retire: (input) => channel.request("retire", input),
+        subscribe: (callback) => channel.subscribe(callback),
+      });
+    } else {
+      adapter = Object.freeze({
+        openRemoteUrl: (input) => channel.request("openRemoteUrl", input),
+        async dispose(input) {
+          const signal = input === undefined
+            ? undefined
+            : Object.getOwnPropertyDescriptor(input, "signal")?.value;
+          try {
+            const operation = channel.request("dispose", input);
+            if (!signal) return await operation;
+            return await new Promise((resolve, reject) => {
+              let settled = false;
+              const finish = (callback, value) => {
+                if (settled) return;
+                settled = true;
+                signal.removeEventListener("abort", onAbort);
+                callback(value);
+              };
+              const onAbort = () => {
+                channel.shutdown();
+                finish(reject, adapterWorkerFailure());
+              };
+              signal.addEventListener("abort", onAbort, { once: true });
+              operation.then(
+                (value) => finish(resolve, value),
+                (error) => finish(reject, error),
+              );
+              if (signal.aborted) onAbort();
+            });
+          } finally {
+            channel.shutdown();
+          }
+        },
+      });
+    }
+    reviewedAdapterChannels.set(adapter, channel);
+    return adapter;
   } catch {
     throw blockedError();
   }
@@ -349,6 +580,8 @@ function validateComputerExercise(raw) {
 }
 
 function loadLiveGateDependencies(options) {
+  let rawProvider;
+  let rawExercise;
   try {
     const descriptors = objectDescriptors(
       options,
@@ -360,20 +593,45 @@ function loadLiveGateDependencies(options) {
         "exerciseModuleSha256",
       ],
     );
-    const rawProvider = configuredModule(
+    rawProvider = configuredModule(
       descriptors.providerModulePath.value,
       descriptors.providerModuleSha256.value,
       "createProvider",
+      "provider",
     );
-    const rawExercise = configuredModule(
+    rawExercise = configuredModule(
       descriptors.exerciseModulePath.value,
       descriptors.exerciseModuleSha256.value,
       "createExercise",
+      "exercise",
     );
     const provider = validateProvider(rawProvider);
-    const exercise = validateComputerExercise(rawExercise);
+    const validatedExercise = validateComputerExercise(rawExercise);
+    const exercise = Object.freeze({
+      openRemoteUrl: (input) => validatedExercise.openRemoteUrl(input),
+      async dispose(input) {
+        try {
+          return await validatedExercise.dispose(input);
+        } finally {
+          closeReviewedAdapter(rawExercise);
+        }
+      },
+    });
+    let dependenciesClosed = false;
+    const closeDependencies = () => {
+      if (dependenciesClosed) return;
+      dependenciesClosed = true;
+      reviewedDependencyClosers.delete(provider);
+      reviewedDependencyClosers.delete(exercise);
+      closeReviewedAdapter(rawProvider);
+      closeReviewedAdapter(rawExercise);
+    };
+    reviewedDependencyClosers.set(provider, closeDependencies);
+    reviewedDependencyClosers.set(exercise, closeDependencies);
     return Object.freeze({ provider, exercise });
   } catch {
+    closeReviewedAdapter(rawProvider);
+    closeReviewedAdapter(rawExercise);
     throw blockedError();
   }
 }
@@ -1081,7 +1339,10 @@ async function runRemoteProviderLiveGate(options) {
     || !exercise || typeof exercise.dispose !== "function"
     || typeof workspacePath !== "string" || !path.isAbsolute(workspacePath)
     || !dependencies || typeof dependencies !== "object" || Array.isArray(dependencies)
-    || (signal !== undefined && !(signal instanceof AbortSignal))) throw failedError();
+    || (signal !== undefined && !(signal instanceof AbortSignal))) {
+    closeReviewedDependencies(provider, exercise);
+    throw failedError();
+  }
 
   const clients = [];
   const receipts = [];
@@ -1103,11 +1364,17 @@ async function runRemoteProviderLiveGate(options) {
   const operationTimeoutMs = dependencies.operationTimeoutMs ?? 30_000;
   if (!Number.isSafeInteger(operationTimeoutMs)
     || operationTimeoutMs < 10
-    || operationTimeoutMs > 60_000) throw failedError();
+    || operationTimeoutMs > 60_000) {
+    closeReviewedDependencies(provider, exercise);
+    throw failedError();
+  }
   const cleanupTimeoutMs = dependencies.cleanupTimeoutMs ?? 30_000;
   if (!Number.isSafeInteger(cleanupTimeoutMs)
     || cleanupTimeoutMs < 50
-    || cleanupTimeoutMs > 120_000) throw failedError();
+    || cleanupTimeoutMs > 120_000) {
+    closeReviewedDependencies(provider, exercise);
+    throw failedError();
+  }
   const computerTimeoutMs = dependencies.computerTimeoutMs ?? 30_000;
   const frameSettleMs = dependencies.frameSettleMs ?? 250;
   if (!Number.isSafeInteger(computerTimeoutMs)
@@ -1116,7 +1383,10 @@ async function runRemoteProviderLiveGate(options) {
     || !Number.isSafeInteger(frameSettleMs)
     || frameSettleMs < 10
     || frameSettleMs > 1_000
-    || frameSettleMs >= computerTimeoutMs) throw failedError();
+    || frameSettleMs >= computerTimeoutMs) {
+    closeReviewedDependencies(provider, exercise);
+    throw failedError();
+  }
   const providerControl = runtimeProviderRecorder(provider, receipts, ingressEvents, {
     timeoutMs: operationTimeoutMs,
     signal,
@@ -1235,19 +1505,24 @@ async function runRemoteProviderLiveGate(options) {
     failure = failedError();
   }
 
-  const cleanup = await minimalCleanup({
-    clients,
-    exercise,
-    controller,
-    provider: recordedProvider,
-    providerControl,
-    receipts,
-    readyReceipts,
-    store,
-    storeFilePath,
-    operationTimeoutMs,
-    cleanupTimeoutMs,
-  });
+  let cleanup;
+  try {
+    cleanup = await minimalCleanup({
+      clients,
+      exercise,
+      controller,
+      provider: recordedProvider,
+      providerControl,
+      receipts,
+      readyReceipts,
+      store,
+      storeFilePath,
+      operationTimeoutMs,
+      cleanupTimeoutMs,
+    });
+  } finally {
+    closeReviewedDependencies(provider, exercise);
+  }
   const monitored = computerMonitor?.finish() ?? Object.freeze({ clean: false, crossBotFrameCount: 0 });
   if (failure || !cleanup.safe || !result
     || runtimeEvents.overflow || ingressEvents.overflow
@@ -1262,6 +1537,8 @@ async function runRemoteProviderLiveGate(options) {
 }
 
 module.exports = {
+  disposeLiveGateDependencies,
+  isReviewedAdapterEnvelope,
   loadLiveGateDependencies,
   runRemoteProviderLiveGate,
   validateComputerExercise,

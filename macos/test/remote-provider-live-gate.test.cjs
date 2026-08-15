@@ -10,9 +10,11 @@ const test = require("node:test");
 let loadLiveGateDependencies;
 let runRemoteProviderLiveGate;
 let validateComputerExercise;
+let isReviewedAdapterEnvelope;
 let moduleLoadError = null;
 try {
   ({
+    isReviewedAdapterEnvelope,
     loadLiveGateDependencies,
     runRemoteProviderLiveGate,
     validateComputerExercise,
@@ -34,6 +36,9 @@ const ACTION_ID = "exercise-00000000-0000-4000-8000-000000000001";
 const FRAME_DIGEST = `sha256:${"a".repeat(64)}`;
 const SECOND_FRAME_DIGEST = `sha256:${"b".repeat(64)}`;
 const { BotStore } = require("../src/bots/bot-store.cjs");
+const {
+  assertBoundedAdapterData,
+} = require("../src/bots/reviewed-adapter-worker-source.cjs");
 const { validateProvider } = require("../src/bots/runtime-provider.cjs");
 
 async function temporaryDirectory(t) {
@@ -232,6 +237,27 @@ test("loads exact reviewed module bytes without transitive files or require-cach
     message: "Remote provider verification is not configured.",
   });
 
+  const hostConstructorEscapeSource = [
+    'const hostProcess = Buffer.constructor("return process")();',
+    'const createRequire = hostProcess.getBuiltinModule("node:module").createRequire;',
+    'module.exports = createRequire(__filename)("./helper.cjs");',
+    "",
+  ].join("\n");
+  const hostConstructorEscapePath = await writePrivateModule(
+    directory,
+    "host-constructor-escape.cjs",
+    hostConstructorEscapeSource,
+  );
+  assert.throws(() => loadLiveGateDependencies({
+    providerModulePath: hostConstructorEscapePath,
+    providerModuleSha256: sha256Text(hostConstructorEscapeSource),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  }), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+    message: "Remote provider verification is not configured.",
+  });
+
   const firstSource = providerSource();
   const providerModulePath = await writePrivateModule(directory, "replaceable.cjs", firstSource);
   const first = loadLiveGateDependencies({
@@ -257,6 +283,322 @@ test("loads exact reviewed module bytes without transitive files or require-cach
     botId: BOT_ID,
     idempotencyKey: "second",
   })).provider, "fixture-provider-two");
+});
+
+test("reviewed adapter workers deny local process capabilities", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const markerPath = path.join(directory, "must-not-exist");
+  const exercise = exerciseSource();
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  const attempts = [
+    `process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "private");`,
+    `process.getBuiltinModule("node:child_process").spawnSync(process.execPath, ["-e", "0"]);`,
+    `new (process.getBuiltinModule("node:worker_threads").Worker)("0", { eval: true });`,
+  ];
+
+  for (const [index, attempt] of attempts.entries()) {
+    const source = providerSource().replace("createProvider() {", `createProvider() { ${attempt}`);
+    const providerModulePath = await writePrivateModule(
+      directory,
+      `denied-capability-${index}.cjs`,
+      source,
+    );
+    assert.throws(() => loadLiveGateDependencies({
+      providerModulePath,
+      providerModuleSha256: sha256Text(source),
+      exerciseModulePath,
+      exerciseModuleSha256: sha256Text(exercise),
+    }), {
+      code: "REMOTE_PROVIDER_GATE_BLOCKED",
+      message: "Remote provider verification is not configured.",
+    });
+  }
+
+  await assert.rejects(fs.stat(markerPath), { code: "ENOENT" });
+});
+
+test("reviewed adapter workers require the stable Node permission runtime", async (t) => {
+  const paths = await validModulePaths(t);
+  const original = Object.getOwnPropertyDescriptor(process.versions, "node");
+  t.after(() => Object.defineProperty(process.versions, "node", original));
+
+  Object.defineProperty(process.versions, "node", {
+    ...original,
+    value: "22.12.0",
+  });
+  assert.throws(() => loadLiveGateDependencies(paths), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+    message: "Remote provider verification is not configured.",
+  });
+
+  Object.defineProperty(process.versions, "node", {
+    ...original,
+    value: "22.13.0",
+  });
+  const loaded = loadLiveGateDependencies(paths);
+  assert.equal((await loaded.provider.capabilities()).computerFrames, true);
+  await loaded.exercise.dispose();
+});
+
+test("reviewed adapter worker bounds results before structured-clone transport", () => {
+  const cyclic = { runtimeId: "runtime-cycle" };
+  cyclic.self = cyclic;
+  assert.equal(assertBoundedAdapterData(cyclic), cyclic);
+
+  assert.throws(() => assertBoundedAdapterData({ value: "x".repeat(65_537) }), {
+    message: "Reviewed adapter data exceeds bounded size.",
+  });
+  assert.throws(() => assertBoundedAdapterData({ ["x".repeat(65_537)]: true }), {
+    message: "Reviewed adapter data exceeds bounded size.",
+  });
+  assert.throws(() => assertBoundedAdapterData(Array.from({ length: 257 }, () => null)), {
+    message: "Reviewed adapter data exceeds bounded complexity.",
+  });
+  let deep = null;
+  for (let index = 0; index < 25; index += 1) deep = { deep };
+  assert.throws(() => assertBoundedAdapterData(deep), {
+    message: "Reviewed adapter data exceeds bounded complexity.",
+  });
+});
+
+test("reviewed adapter worker rejects oversized event keys before IPC", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const provider = providerSource().replace(
+    "subscribe() { return () => {}; },",
+    `subscribe(callback) {
+      callback({ runtimeId: "runtime-early", ["x".repeat(65_537)]: true });
+      return () => {};
+    },`,
+  );
+  const exercise = exerciseSource();
+  const providerModulePath = await writePrivateModule(directory, "provider.cjs", provider);
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+
+  assert.throws(() => loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  }), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+    message: "Remote provider verification is not configured.",
+  });
+});
+
+test("reviewed adapter worker rejects oversized result keys before IPC", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const provider = providerSource().replace(
+    "async capabilities() {",
+    `async capabilities() {
+      return { ["x".repeat(65_537)]: true };`,
+  );
+  const exercise = exerciseSource();
+  const providerModulePath = await writePrivateModule(directory, "provider.cjs", provider);
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  const loaded = loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  });
+
+  try {
+    await assert.rejects(loaded.provider.capabilities(), {
+      message: "Remote runtime provider failed.",
+    });
+  } finally {
+    try {
+      const unsubscribe = loaded.provider.subscribe(() => {});
+      unsubscribe();
+    } catch {}
+    await loaded.exercise.dispose().catch(() => {});
+  }
+});
+
+test("reviewed adapter worker envelopes reject null arrays and malformed messages", () => {
+  assert.equal(isReviewedAdapterEnvelope(null), false);
+  assert.equal(isReviewedAdapterEnvelope(undefined), false);
+  assert.equal(isReviewedAdapterEnvelope([]), false);
+  assert.equal(isReviewedAdapterEnvelope({}), true);
+});
+
+test("reviewed adapter worker has a bounded heap", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const source = providerSource().replace(
+    "async capabilities() {",
+    `async capabilities() {
+      globalThis.retained = Array.from(
+        { length: 1_000_000 },
+        (_, index) => ({ index, payload: "reviewed-worker-" + index }),
+      );
+      return {
+        provision: true,
+        reconcile: true,
+        retire: true,
+        remoteAppServer: true,
+        computerFrames: true,
+      };`,
+  );
+  const exercise = exerciseSource();
+  const providerModulePath = await writePrivateModule(directory, "provider.cjs", source);
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  const loaded = loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(source),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  });
+  try {
+    await assert.rejects(loaded.provider.capabilities(), {
+      message: "Remote runtime provider failed.",
+    });
+  } finally {
+    try {
+      const unsubscribe = loaded.provider.subscribe(() => {});
+      unsubscribe();
+    } catch {}
+    await loaded.exercise.dispose().catch(() => {});
+  }
+});
+
+test("reviewed adapter workers clone operations propagate abort and own subscription shutdown", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const provider = `
+"use strict";
+module.exports = {
+  createProvider() {
+    return {
+      async capabilities() {
+        return {
+          provision: true,
+          reconcile: true,
+          retire: true,
+          remoteAppServer: true,
+          computerFrames: true,
+        };
+      },
+      async provision(input) {
+        if (Object.getPrototypeOf(input) !== null) throw new Error("host input");
+        return {
+          provider: "fixture-provider",
+          runtimeId: "runtime-" + input.botId,
+          ownerBotId: input.botId,
+          endpoint: "wss://runtime.provider.example/app-server",
+          authToken: "fixture-private-auth-token-value",
+          state: "ready",
+        };
+      },
+      async inspect({ runtimeId, signal }) {
+        if (!signal || signal.constructor.name !== "AbortSignal") throw new Error("missing signal");
+        await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+        return { runtimeId, ownerBotId: ${JSON.stringify(BOT_ID)}, state: "ready" };
+      },
+      async retire({ runtimeId }) {
+        return { runtimeId, state: "retired" };
+      },
+      subscribe(callback) {
+        callback({ runtimeId: "runtime-early", type: "state", state: "ready" });
+        return () => {};
+      },
+    };
+  },
+};
+`;
+  const exercise = exerciseSource();
+  const providerModulePath = await writePrivateModule(directory, "provider.cjs", provider);
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  const loaded = loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  });
+  const events = [];
+  const unsubscribe = loaded.provider.subscribe((event) => events.push(event));
+  assert.deepEqual(events, [{ runtimeId: "runtime-early", type: "state", state: "ready" }]);
+
+  assert.equal((await loaded.provider.provision({
+    botId: BOT_ID,
+    idempotencyKey: "worker-clone",
+  })).ownerBotId, BOT_ID);
+  const controller = new AbortController();
+  const inspection = loaded.provider.inspect({ runtimeId: "runtime-worker", signal: controller.signal });
+  controller.abort();
+  assert.deepEqual(await inspection, {
+    runtimeId: "runtime-worker",
+    ownerBotId: BOT_ID,
+    state: "ready",
+  });
+
+  unsubscribe();
+  await assert.rejects(loaded.provider.capabilities(), {
+    message: "Remote runtime provider failed.",
+  });
+  await loaded.exercise.dispose();
+});
+
+test("reviewed exercise disposal keeps the provider alive for authoritative cleanup", async (t) => {
+  const loaded = loadLiveGateDependencies(await validModulePaths(t));
+
+  await loaded.exercise.dispose();
+
+  assert.equal((await loaded.provider.capabilities()).retire, true);
+});
+
+test("invalid live-gate setup closes both reviewed adapter workers", async (t) => {
+  const loaded = loadLiveGateDependencies(await validModulePaths(t));
+
+  await assert.rejects(runRemoteProviderLiveGate({
+    provider: loaded.provider,
+    exercise: loaded.exercise,
+    workspacePath: "relative-workspace",
+    dependencies: {},
+  }), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+
+  await assert.rejects(loaded.provider.capabilities(), {
+    message: "Remote runtime provider failed.",
+  });
+});
+
+test("aborting reviewed exercise disposal terminates it without preempting provider cleanup", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const provider = providerSource();
+  const exercise = `
+"use strict";
+module.exports = {
+  createExercise() {
+    return {
+      async openRemoteUrl(input) { return { accepted: true, ...input }; },
+      async dispose({ signal }) {
+        await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+        await new Promise(() => {});
+      },
+    };
+  },
+};
+`;
+  const providerModulePath = await writePrivateModule(directory, "provider.cjs", provider);
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  const loaded = loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  });
+  const controller = new AbortController();
+  const disposal = loaded.exercise.dispose({ signal: controller.signal });
+  controller.abort();
+
+  await assert.rejects(Promise.race([
+    disposal,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("dispose timeout")), 200)),
+  ]), {
+    message: "Remote provider verification failed.",
+  });
+  assert.equal((await loaded.provider.capabilities()).retire, true);
 });
 
 test("narrows freezes and validates remote exercise acknowledgements", async () => {
@@ -1234,6 +1576,58 @@ test("CLI removes its private default report directory after a failed gate", asy
 
   assert.equal(code, 1);
   assert.deepEqual(removed, ["/private/tmp/owned-private-output"]);
+  assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
+});
+
+test("CLI closes both reviewed dependencies when setup fails before the live gate", async () => {
+  const stdout = outputSink();
+  const dependencies = Object.freeze({
+    provider: Object.freeze({}),
+    exercise: Object.freeze({ async dispose() {} }),
+  });
+  let disposed = 0;
+
+  const code = await runCliMain({
+    argv: [],
+    env: {},
+    stdout: stdout.stream,
+    stderr: outputSink().stream,
+    loadDependencies: () => dependencies,
+    async createWorkspace() {
+      throw new Error("private setup failure");
+    },
+    disposeDependencies(value) {
+      assert.equal(value, dependencies);
+      disposed += 1;
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.equal(disposed, 1);
+  assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
+});
+
+test("CLI output setup failure closes the actual reviewed provider worker", async (t) => {
+  const dependencies = loadLiveGateDependencies(await validModulePaths(t));
+  const stdout = outputSink();
+
+  const code = await runCliMain({
+    argv: [],
+    env: {},
+    stdout: stdout.stream,
+    stderr: outputSink().stream,
+    loadDependencies: () => dependencies,
+    createWorkspace: async () => "/private/tmp/private-workspace",
+    async resolveOutputDirectory() {
+      throw new Error("private output setup failure");
+    },
+    removeWorkspace: async () => undefined,
+  });
+
+  assert.equal(code, 1);
+  await assert.rejects(dependencies.provider.capabilities(), {
+    message: "Remote runtime provider failed.",
+  });
   assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
 });
 

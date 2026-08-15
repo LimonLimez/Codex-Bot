@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const {
+  disposeLiveGateDependencies,
   loadLiveGateDependencies,
   runRemoteProviderLiveGate,
 } = require("../src/bots/remote-provider-live-gate.cjs");
@@ -62,6 +63,7 @@ async function main({
   resolveOutputDirectory: outputDirectory = resolveOutputDirectory,
   removeWorkspace = removePrivateWorkspace,
   removeOutputDirectory = removePrivateWorkspace,
+  disposeDependencies = disposeLiveGateDependencies,
 } = {}) {
   void stderr;
   let dependencies = null;
@@ -121,7 +123,7 @@ async function main({
     }
     if (dependencies && !gateStarted) {
       try {
-        await dependencies.exercise?.dispose?.();
+        await disposeDependencies(dependencies);
       } catch {
         status = "FAIL";
         code = 1;

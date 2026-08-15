@@ -61,7 +61,7 @@ test("the macOS package has an independent release and command surface", () => {
       version: "0.1.4-macos.1",
       private: true,
       license: "MIT",
-      node: ">=22",
+      node: ">=22.13.0",
     },
   );
   for (const command of [

@@ -6,13 +6,14 @@
 
 **Architecture:** The main gate verifies private regular-file bytes, then starts an eval Worker under `--permission` with no grants. A structured-clone RPC proxy preserves the provider/exercise interfaces, recreates abort signals inside the worker, and owns deterministic subscription and shutdown lifecycles.
 
-**Tech Stack:** Node.js 24.14.1 Worker Threads, Node permission model, CommonJS, `node:test`
+**Tech Stack:** Node.js 22.13.0+ Worker Threads, Node permission model, CommonJS, `node:test`
 
 ## Global Constraints
 
 - macOS-only branch and files; no Windows edits.
 - Exact reviewed adapter bytes remain limited to 1 MiB and paired with lowercase SHA-256.
 - Reviewed source gets no filesystem, child-process, native-addon, WASI, or nested-worker grant.
+- Reviewed source is trusted exact-hash code; the permission model is defense in depth, not a malicious-code sandbox.
 - Provider networking remains possible; local Chrome, local VM, SSH, and local browser automation remain forbidden.
 - All public failures remain sanitized and contain no adapter path, source, endpoint, token, credential, or diagnostic.
 - Real remote Chrome/YouTube acceptance, DMG signing, notarization, installation, and push remain blocked until the external provider gate passes.
@@ -95,6 +96,9 @@ no observable side effect.
 - Produces provider proxy methods `capabilities()`, `provision(input)`, `inspect(input)`, `retire(input)`, and `subscribe(callback)`.
 - Produces exercise proxy methods `openRemoteUrl(input)` and `dispose()`.
 - RPC messages are exact data-only records keyed by positive safe-integer `id`; abort messages recreate a worker-local signal.
+- Worker-side result and event validation bounds string values and property
+  keys, total bytes, fields, nodes, and depth before structured-clone IPC.
+- Worker resource limits bound old generation, young generation, and stack.
 
 - [ ] **Step 1: Add REDs for cloned inputs and abort**
 
@@ -235,7 +239,8 @@ Address each confirmed finding through its own RED/GREEN cycle.
 
 - [ ] **Step 5: Commit the reviewed boundary**
 
-Stage only the worker source, live gate source, and live gate test. Commit with:
+Stage only the worker source, live gate/CLI source, focused tests, Node engine
+metadata, and these two reviewed design/plan amendments. Commit with:
 
 ```bash
 git commit -m "fix(mac): isolate reviewed provider workers"
