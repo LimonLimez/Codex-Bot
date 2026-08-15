@@ -936,6 +936,10 @@ class RemoteAppServerClient extends EventEmitter {
     return this.#session.runtimeId;
   }
 
+  get provider() {
+    return this.#session.provider;
+  }
+
   get generation() {
     return this.#session.generation;
   }

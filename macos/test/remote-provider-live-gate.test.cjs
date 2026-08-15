@@ -289,11 +289,19 @@ async function liveGateHarness(t, options = {}) {
         ? provisionCalls[0].botId
         : input.botId;
       const record = {
-        provider: "fixture-provider",
+        provider: options.collision === "provider" && index === 1
+          ? "fixture-provider-two"
+          : "fixture-provider",
         runtimeId,
         ownerBotId,
-        endpoint: `wss://runtime-${endpointIndex}.provider.example/app-server`,
-        authToken: `fixture-private-auth-token-${index + 1}-value`,
+        endpoint: options.collision === "canonicalEndpoint"
+          ? index === 0
+            ? "wss://RUNTIME.provider.example:443/app-server"
+            : "wss://runtime.provider.example/app-server"
+          : `wss://runtime-${endpointIndex}.provider.example/app-server`,
+        authToken: options.collision === "authToken"
+          ? "fixture-private-shared-auth-token-value"
+          : `fixture-private-auth-token-${index + 1}-value`,
         state: "ready",
       };
       runtimes.set(runtimeId, { ...record });
@@ -411,8 +419,12 @@ async function liveGateHarness(t, options = {}) {
       return [{ address: `8.8.8.${suffix}`, family: 4 }];
     },
     clientFactory(session) {
+      if (options.collision === "clientObject" && clients.length > 0) return clients[0];
       const client = {
         session,
+        provider: options.collision === "clientTuple" ? "wrong-provider" : session.provider,
+        runtimeId: options.collision === "clientTuple" ? "wrong-runtime" : session.runtimeId,
+        generation: options.collision === "clientTuple" ? session.generation + 1 : session.generation,
         started: false,
         stopped: false,
         async start() {
@@ -539,6 +551,25 @@ test("fails before Computer work for duplicate runtimes endpoints or owners", as
       await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
         code: "ENOENT",
       });
+    });
+  }
+});
+
+test("rejects every shared or mismatched two-bot private transport identity", async (t) => {
+  for (const collision of [
+    "authToken",
+    "canonicalEndpoint",
+    "provider",
+    "clientObject",
+    "clientTuple",
+  ]) {
+    await t.test(collision, async () => {
+      const harness = await liveGateHarness(t, { collision });
+      await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+        code: "REMOTE_PROVIDER_GATE_FAILED",
+        message: "Remote provider verification failed.",
+      });
+      assert.equal(harness.exerciseCalls.length, 0);
     });
   }
 });

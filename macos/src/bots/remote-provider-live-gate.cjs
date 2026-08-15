@@ -405,6 +405,14 @@ function sameAddresses(left, right) {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function canonicalEndpoint(endpoint) {
+  try {
+    return new URL(endpoint).href;
+  } catch {
+    throw failedError();
+  }
+}
+
 function withDeadline(promise, timeoutMs, signal) {
   if (signal?.aborted) return Promise.reject(failedError());
   return new Promise((resolve, reject) => {
@@ -893,8 +901,17 @@ async function runRemoteProviderLiveGate(options) {
         generation: bot.session.generation,
       }));
     }
-    if (botA.session.runtimeId === botB.session.runtimeId
-      || botA.session.endpoint === botB.session.endpoint) throw failedError();
+    const receiptA = receipts.find((receipt) => (
+      receipt.botId === botA.botId && receipt.runtimeId === botA.session.runtimeId
+    ));
+    const receiptB = receipts.find((receipt) => (
+      receipt.botId === botB.botId && receipt.runtimeId === botB.session.runtimeId
+    ));
+    if (!receiptA || !receiptB
+      || botA.session.runtimeId === botB.session.runtimeId
+      || canonicalEndpoint(botA.session.endpoint) === canonicalEndpoint(botB.session.endpoint)
+      || receiptA.provider !== receiptB.provider
+      || receiptA.authToken === receiptB.authToken) throw failedError();
 
     const firstAddresses = await Promise.all([
       resolvedPublicAddresses(botA.session.endpoint, lookup, operationTimeoutMs, signal),
@@ -902,10 +919,18 @@ async function runRemoteProviderLiveGate(options) {
     ]);
     const clientA = clientFactory(botA.session);
     const clientB = clientFactory(botB.session);
+    if (clientA && typeof clientA.stop === "function") clients.push(clientA);
+    if (clientB && typeof clientB.stop === "function") clients.push(clientB);
     if (!clientA || typeof clientA.start !== "function" || typeof clientA.request !== "function"
       || typeof clientA.stop !== "function" || !clientB || typeof clientB.start !== "function"
-      || typeof clientB.request !== "function" || typeof clientB.stop !== "function") throw failedError();
-    clients.push(clientA, clientB);
+      || typeof clientB.request !== "function" || typeof clientB.stop !== "function"
+      || clientA === clientB
+      || clientA.provider !== botA.session.provider
+      || clientA.runtimeId !== botA.session.runtimeId
+      || clientA.generation !== botA.session.generation
+      || clientB.provider !== botB.session.provider
+      || clientB.runtimeId !== botB.session.runtimeId
+      || clientB.generation !== botB.session.generation) throw failedError();
     const secondAddresses = await Promise.all([
       resolvedPublicAddresses(botA.session.endpoint, lookup, operationTimeoutMs, signal),
       resolvedPublicAddresses(botB.session.endpoint, lookup, operationTimeoutMs, signal),

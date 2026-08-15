@@ -271,6 +271,7 @@ test("opens only the authorized endpoint with a bearer header and fixed subproto
   assert.deepEqual(ready, [{ runtimeId: "runtime-bot-01", generation: 7, state: "ready" }]);
   assertDeepFrozen(ready[0]);
   assert.equal(client.runtimeId, "runtime-bot-01");
+  assert.equal(client.provider, "authorized-provider");
   assert.equal(client.generation, 7);
   assert.equal(client.state, "ready");
   const publicText = `${JSON.stringify(client)} ${inspect(client)} ${JSON.stringify(ready)}`;
@@ -726,6 +727,7 @@ test("detaches the accepted session from later caller mutation", async () => {
 
   await startReady(client, harness.sockets[0]);
   assert.equal(client.runtimeId, "runtime-bot-01");
+  assert.equal(client.provider, "authorized-provider");
   assert.equal(client.generation, 7);
   assert.equal(harness.calls[0].url, ENDPOINT);
   assert.equal(harness.calls[0].options.headers.Authorization, `Bearer ${PRIVATE_TOKEN}`);
