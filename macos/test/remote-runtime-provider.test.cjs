@@ -212,6 +212,59 @@ test("passes only canonical provision identifiers to the adapter", async () => {
   assert.equal(result.state, "provisioning");
 });
 
+test("passes cooperative cancellation privately on every provider operation", async () => {
+  const controller = new AbortController();
+  const received = [];
+  const raw = fakeProvider({
+    async capabilities(input) {
+      received.push(["capabilities", input]);
+      return { ...REQUIRED_CAPABILITIES };
+    },
+    async provision(input) {
+      received.push(["provision", input]);
+      return {
+        provider: "authorized-test-provider",
+        runtimeId: "runtime-bot-1",
+        ownerBotId: "bot-1",
+        endpoint: "wss://runtime.example.test/app-server",
+        authToken: "memory-only-token",
+        state: "ready",
+      };
+    },
+    async inspect(input) {
+      received.push(["inspect", input]);
+      return { runtimeId: input.runtimeId, ownerBotId: "bot-1", state: "ready" };
+    },
+    async retire(input) {
+      received.push(["retire", input]);
+      return { runtimeId: input.runtimeId, state: "retired" };
+    },
+  });
+  const provider = validateProvider(raw);
+
+  await provider.capabilities({ signal: controller.signal });
+  await provider.provision({
+    botId: "bot-1",
+    idempotencyKey: "codex-bot:bot-1",
+    signal: controller.signal,
+  });
+  await provider.inspect({ runtimeId: "runtime-bot-1", signal: controller.signal });
+  await provider.retire({ runtimeId: "runtime-bot-1", signal: controller.signal });
+
+  assert.deepEqual(received.map(([method, input]) => [method, Object.keys(input)]), [
+    ["capabilities", []],
+    ["provision", ["botId", "idempotencyKey"]],
+    ["inspect", ["runtimeId"]],
+    ["retire", ["runtimeId"]],
+  ]);
+  assert.equal(received.every(([, input]) => input.signal === controller.signal), true);
+  assert.equal(received.every(([, input]) => Object.isFrozen(input)), true);
+  await assert.rejects(
+    provider.inspect({ runtimeId: "runtime-bot-1", signal: {} }),
+    /signal/i,
+  );
+});
+
 test("rejects non-remote and non-wss provision endpoints", async (t) => {
   const invalidEndpoints = [
     "file:///tmp/runtime.sock",

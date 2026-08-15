@@ -145,20 +145,24 @@ function configuredModule(modulePath, factoryName) {
 }
 
 function normalizedExerciseInput(value) {
-  const descriptors = objectDescriptors(
-    value,
-    "Remote computer exercise input",
-    ["botId", "runtimeId", "generation", "url"],
-  );
+  const descriptors = objectDescriptors(value, "Remote computer exercise input");
+  const keys = Reflect.ownKeys(descriptors);
+  const allowed = new Set(["botId", "runtimeId", "generation", "url", "signal"]);
+  if (keys.some((key) => !allowed.has(key))
+    || ["botId", "runtimeId", "generation", "url"].some((key) => !descriptors[key])) {
+    throw failedError();
+  }
   const botId = descriptors.botId.value;
   const runtimeId = descriptors.runtimeId.value;
   const generation = descriptors.generation.value;
   const url = descriptors.url.value;
+  const signal = descriptors.signal?.value;
   if (typeof botId !== "string" || !BOT_ID_PATTERN.test(botId)) throw failedError();
   if (typeof runtimeId !== "string" || !SAFE_IDENTIFIER_PATTERN.test(runtimeId)) throw failedError();
   if (!Number.isSafeInteger(generation) || generation < 1) throw failedError();
   if (url !== YOUTUBE_URL) throw failedError();
-  return Object.freeze({ botId: botId.toLowerCase(), runtimeId, generation, url });
+  if (signal !== undefined && !(signal instanceof AbortSignal)) throw failedError();
+  return operationInput({ botId: botId.toLowerCase(), runtimeId, generation, url }, signal);
 }
 
 function normalizedAcknowledgement(value, expected) {
@@ -214,11 +218,17 @@ function validateComputerExercise(raw) {
       }
     },
 
-    async dispose() {
+    async dispose(input) {
       if (disposed) return undefined;
       disposed = true;
       try {
-        await dispose.call(raw);
+        let signal;
+        if (input !== undefined) {
+          const inputDescriptors = objectDescriptors(input, "Remote computer exercise disposal", ["signal"]);
+          signal = inputDescriptors.signal.value;
+          if (!(signal instanceof AbortSignal)) throw failedError();
+        }
+        await dispose.call(raw, signal === undefined ? undefined : operationInput({}, signal));
         return undefined;
       } catch {
         throw failedError();
@@ -244,11 +254,65 @@ function loadLiveGateDependencies(options) {
   }
 }
 
-function runtimeProviderRecorder(provider, receipts, ingressEvents) {
-  return Object.freeze({
-    capabilities: (...args) => provider.capabilities(...args),
+function operationInput(fields, signal) {
+  const input = { ...fields };
+  if (signal !== undefined) {
+    Object.defineProperty(input, "signal", {
+      value: signal,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(input);
+}
+
+function withCooperativeDeadline(start, timeoutMs, signal) {
+  if (signal?.aborted) return Promise.reject(failedError());
+  const operationController = new AbortController();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    const abort = () => {
+      operationController.abort();
+      finish(reject, failedError());
+    };
+    const onAbort = () => abort();
+    const timer = setTimeout(abort, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve().then(() => start(operationController.signal)).then(
+      (value) => finish(resolve, value),
+      () => finish(reject, failedError()),
+    );
+  });
+}
+
+function runtimeProviderRecorder(provider, receipts, ingressEvents, options) {
+  let defaultSignal = options.signal;
+  const inflight = new Set();
+  const invoke = (method, fields, signal = defaultSignal) => withCooperativeDeadline(
+    (operationSignal) => {
+      const operation = Promise.resolve(provider[method](operationInput(fields, operationSignal)));
+      inflight.add(operation);
+      void operation.finally(() => inflight.delete(operation)).catch(() => {});
+      return operation;
+    },
+    options.timeoutMs,
+    signal,
+  );
+  const adapter = Object.freeze({
+    capabilities: () => invoke("capabilities", {}),
     async provision(input) {
-      const result = await provider.provision(input);
+      const result = await invoke("provision", {
+        botId: input.botId,
+        idempotencyKey: input.idempotencyKey,
+      }, input.signal ?? defaultSignal);
       const receipt = {
         botId: input.botId,
         idempotencyKey: input.idempotencyKey,
@@ -262,11 +326,11 @@ function runtimeProviderRecorder(provider, receipts, ingressEvents) {
         configurable: false,
         writable: false,
       });
-      receipts.push(Object.freeze(receipt));
+      if (input.recordReceipt !== false) receipts.push(Object.freeze(receipt));
       return result;
     },
-    inspect: (...args) => provider.inspect(...args),
-    retire: (...args) => provider.retire(...args),
+    inspect: (input) => invoke("inspect", { runtimeId: input.runtimeId }, input.signal ?? defaultSignal),
+    retire: (input) => invoke("retire", { runtimeId: input.runtimeId }, input.signal ?? defaultSignal),
     subscribe(callback) {
       return provider.subscribe((event) => {
         ingressEvents.push(Object.freeze({
@@ -278,9 +342,20 @@ function runtimeProviderRecorder(provider, receipts, ingressEvents) {
       });
     },
   });
+  return Object.freeze({
+    adapter,
+    useSignal(signal) {
+      defaultSignal = signal;
+    },
+    async settleInflight(signal, timeoutMs) {
+      while (inflight.size > 0) {
+        await withDeadline(Promise.allSettled([...inflight]), timeoutMs, signal);
+      }
+    },
+  });
 }
 
-async function resolvedPublicAddresses(endpoint, lookup) {
+async function resolvedPublicAddresses(endpoint, lookup, timeoutMs, signal) {
   let hostname;
   try {
     hostname = new URL(endpoint).hostname.replace(/^\[|\]$/g, "");
@@ -295,7 +370,15 @@ async function resolvedPublicAddresses(endpoint, lookup) {
 
   let raw;
   try {
-    raw = await lookup(hostname, { all: true, verbatim: true });
+    raw = await withCooperativeDeadline(
+      (operationSignal) => lookup(hostname, {
+        all: true,
+        verbatim: true,
+        signal: operationSignal,
+      }),
+      timeoutMs,
+      signal,
+    );
   } catch {
     throw failedError();
   }
@@ -569,12 +652,16 @@ async function waitForYouTubeFrame({
   });
   void waiter.promise.catch(() => {});
   try {
-    await withDeadline(exercise.openRemoteUrl(Object.freeze({
-      botId: botA.botId,
-      runtimeId: botA.session.runtimeId,
-      generation: botA.session.generation,
-      url: YOUTUBE_URL,
-    })), timeoutMs, signal);
+    await withCooperativeDeadline(
+      (operationSignal) => exercise.openRemoteUrl(operationInput({
+        botId: botA.botId,
+        runtimeId: botA.session.runtimeId,
+        generation: botA.session.generation,
+        url: YOUTUBE_URL,
+      }, operationSignal)),
+      timeoutMs,
+      signal,
+    );
     const proof = await waiter.promise;
     const currentA = await controller.runtimeSession(botA.botId);
     const currentB = await controller.runtimeSession(botB.botId);
@@ -593,14 +680,21 @@ async function minimalCleanup({
   exercise,
   controller,
   provider,
+  providerControl,
   receipts,
   readyReceipts,
   store,
   storeFilePath,
+  operationTimeoutMs,
+  cleanupTimeoutMs,
 }) {
   let safe = true;
   let retiredRuntimeCount = 0;
   let terminalRuntimeCount = 0;
+  const cleanupController = new AbortController();
+  const cleanupTimer = setTimeout(() => cleanupController.abort(), cleanupTimeoutMs);
+  const cleanupSignal = cleanupController.signal;
+  providerControl.useSignal(cleanupSignal);
   for (const client of clients) {
     try {
       client.stop();
@@ -609,7 +703,16 @@ async function minimalCleanup({
     }
   }
   try {
-    await exercise.dispose();
+    await withCooperativeDeadline(
+      (operationSignal) => exercise.dispose(operationInput({}, operationSignal)),
+      operationTimeoutMs,
+      cleanupSignal,
+    );
+  } catch {
+    safe = false;
+  }
+  try {
+    await providerControl.settleInflight(cleanupSignal, cleanupTimeoutMs);
   } catch {
     safe = false;
   }
@@ -624,6 +727,7 @@ async function minimalCleanup({
         const recovered = await provider.provision({
           botId: receipt.botId,
           idempotencyKey: receipt.idempotencyKey,
+          recordReceipt: false,
         });
         if (recovered.provider !== receipt.provider
           || recovered.runtimeId !== receipt.runtimeId
@@ -673,6 +777,11 @@ async function minimalCleanup({
     }
   }
   try {
+    await providerControl.settleInflight(cleanupSignal, cleanupTimeoutMs);
+  } catch {
+    safe = false;
+  }
+  try {
     controller?.dispose();
   } catch {
     safe = false;
@@ -687,6 +796,7 @@ async function minimalCleanup({
     if (error?.code === "ENOENT") storeRemoved = true;
     else safe = false;
   }
+  clearTimeout(cleanupTimer);
   safe = safe
     && retiredRuntimeCount === receipts.length
     && terminalRuntimeCount === receipts.length
@@ -732,6 +842,10 @@ async function runRemoteProviderLiveGate(options) {
   if (!Number.isSafeInteger(operationTimeoutMs)
     || operationTimeoutMs < 10
     || operationTimeoutMs > 60_000) throw failedError();
+  const cleanupTimeoutMs = dependencies.cleanupTimeoutMs ?? 30_000;
+  if (!Number.isSafeInteger(cleanupTimeoutMs)
+    || cleanupTimeoutMs < 50
+    || cleanupTimeoutMs > 120_000) throw failedError();
   const computerTimeoutMs = dependencies.computerTimeoutMs ?? 30_000;
   const frameSettleMs = dependencies.frameSettleMs ?? 250;
   if (!Number.isSafeInteger(computerTimeoutMs)
@@ -741,7 +855,11 @@ async function runRemoteProviderLiveGate(options) {
     || frameSettleMs < 10
     || frameSettleMs > 1_000
     || frameSettleMs >= computerTimeoutMs) throw failedError();
-  const recordedProvider = runtimeProviderRecorder(provider, receipts, ingressEvents);
+  const providerControl = runtimeProviderRecorder(provider, receipts, ingressEvents, {
+    timeoutMs: operationTimeoutMs,
+    signal,
+  });
+  const recordedProvider = providerControl.adapter;
   const storeFilePath = path.join(workspacePath, "bots.json");
 
   try {
@@ -779,8 +897,8 @@ async function runRemoteProviderLiveGate(options) {
       || botA.session.endpoint === botB.session.endpoint) throw failedError();
 
     const firstAddresses = await Promise.all([
-      resolvedPublicAddresses(botA.session.endpoint, lookup),
-      resolvedPublicAddresses(botB.session.endpoint, lookup),
+      resolvedPublicAddresses(botA.session.endpoint, lookup, operationTimeoutMs, signal),
+      resolvedPublicAddresses(botB.session.endpoint, lookup, operationTimeoutMs, signal),
     ]);
     const clientA = clientFactory(botA.session);
     const clientB = clientFactory(botB.session);
@@ -789,8 +907,8 @@ async function runRemoteProviderLiveGate(options) {
       || typeof clientB.request !== "function" || typeof clientB.stop !== "function") throw failedError();
     clients.push(clientA, clientB);
     const secondAddresses = await Promise.all([
-      resolvedPublicAddresses(botA.session.endpoint, lookup),
-      resolvedPublicAddresses(botB.session.endpoint, lookup),
+      resolvedPublicAddresses(botA.session.endpoint, lookup, operationTimeoutMs, signal),
+      resolvedPublicAddresses(botB.session.endpoint, lookup, operationTimeoutMs, signal),
     ]);
     if (!sameAddresses(firstAddresses[0], secondAddresses[0])
       || !sameAddresses(firstAddresses[1], secondAddresses[1])) throw failedError();
@@ -833,11 +951,14 @@ async function runRemoteProviderLiveGate(options) {
     clients,
     exercise,
     controller,
-    provider,
+    provider: recordedProvider,
+    providerControl,
     receipts,
     readyReceipts,
     store,
     storeFilePath,
+    operationTimeoutMs,
+    cleanupTimeoutMs,
   });
   if (failure || !cleanup.safe || !result) throw failedError();
   return Object.freeze({

@@ -35,6 +35,30 @@ function requiredIdentifier(value, label) {
   return value.trim();
 }
 
+function optionalOperationSignal(input) {
+  if (input === undefined) return undefined;
+  requiredObject(input, "provider operation input");
+  const descriptor = Object.getOwnPropertyDescriptor(input, "signal");
+  if (!descriptor) return undefined;
+  if (!("value" in descriptor) || !(descriptor.value instanceof AbortSignal)) {
+    throw new TypeError("Provider operation signal is invalid.");
+  }
+  return descriptor.value;
+}
+
+function providerOperationInput(fields, signal) {
+  const input = { ...fields };
+  if (signal !== undefined) {
+    Object.defineProperty(input, "signal", {
+      value: signal,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(input);
+}
+
 function sanitizedProviderFailure() {
   return new Error(PROVIDER_FAILURE);
 }
@@ -292,9 +316,14 @@ function validateProvider(provider) {
   for (const method of REQUIRED_METHODS) requiredProviderMethod(provider, method);
 
   const wrapper = {
-    async capabilities() {
+    async capabilities(input) {
+      const signal = optionalOperationSignal(input);
       const raw = requiredObject(
-        detachProviderData(await invoke(provider, "capabilities")),
+        detachProviderData(await invoke(
+          provider,
+          "capabilities",
+          signal === undefined ? undefined : providerOperationInput({}, signal),
+        )),
         "provider capabilities",
       );
       for (const name of CAPABILITY_NAMES) {
@@ -309,8 +338,9 @@ function validateProvider(provider) {
       requiredObject(input, "provision input");
       const botId = requiredIdentifier(input.botId, "botId");
       const idempotencyKey = requiredIdentifier(input.idempotencyKey, "idempotencyKey");
+      const signal = optionalOperationSignal(input);
       const raw = detachProviderData(
-        await invoke(provider, "provision", Object.freeze({ botId, idempotencyKey })),
+        await invoke(provider, "provision", providerOperationInput({ botId, idempotencyKey }, signal)),
       );
       return frozenProvisionResult(raw, botId);
     },
@@ -318,14 +348,20 @@ function validateProvider(provider) {
     async inspect(input) {
       requiredObject(input, "inspect input");
       const runtimeId = requiredIdentifier(input.runtimeId, "runtimeId");
-      const raw = detachProviderData(await invoke(provider, "inspect", Object.freeze({ runtimeId })));
+      const signal = optionalOperationSignal(input);
+      const raw = detachProviderData(
+        await invoke(provider, "inspect", providerOperationInput({ runtimeId }, signal)),
+      );
       return frozenInspectResult(raw, runtimeId);
     },
 
     async retire(input) {
       requiredObject(input, "retire input");
       const runtimeId = requiredIdentifier(input.runtimeId, "runtimeId");
-      const raw = detachProviderData(await invoke(provider, "retire", Object.freeze({ runtimeId })));
+      const signal = optionalOperationSignal(input);
+      const raw = detachProviderData(
+        await invoke(provider, "retire", providerOperationInput({ runtimeId }, signal)),
+      );
       return frozenRetireResult(raw, runtimeId);
     },
 

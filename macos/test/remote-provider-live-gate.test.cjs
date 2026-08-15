@@ -246,10 +246,27 @@ async function liveGateHarness(t, options = {}) {
   const clients = [];
   const protocolCalls = [];
   let exerciseDisposed = 0;
+  let providerAbortCount = 0;
+  let exerciseAbortCount = 0;
+  let lookupAbortCount = 0;
   let lookupCalls = 0;
+  let inspectCalls = 0;
+
+  const pendingUntilAbort = (signal, counter) => new Promise((resolve, reject) => {
+    if (!(signal instanceof AbortSignal)) return;
+    const abort = () => {
+      if (counter === "provider") providerAbortCount += 1;
+      if (counter === "exercise") exerciseAbortCount += 1;
+      if (counter === "lookup") lookupAbortCount += 1;
+      reject(new Error("private aborted operation"));
+    };
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+  });
 
   const provider = validateProvider({
-    async capabilities() {
+    async capabilities(input) {
+      if (options.hungCapabilities) return pendingUntilAbort(input?.signal, "provider");
       return {
         provision: true,
         reconcile: true,
@@ -259,6 +276,9 @@ async function liveGateHarness(t, options = {}) {
       };
     },
     async provision(input) {
+      if (options.hungProvision && !idempotentProvision.has(input.idempotencyKey)) {
+        return pendingUntilAbort(input.signal, "provider");
+      }
       const recovered = idempotentProvision.get(input.idempotencyKey);
       if (recovered) return { ...recovered };
       const index = provisionCalls.length;
@@ -280,12 +300,19 @@ async function liveGateHarness(t, options = {}) {
       idempotentProvision.set(input.idempotencyKey, { ...record });
       return record;
     },
-    async inspect({ runtimeId }) {
+    async inspect(input) {
+      const { runtimeId } = input;
+      inspectCalls += 1;
+      if (options.hungInspect && inspectCalls === 1) {
+        return pendingUntilAbort(input.signal, "provider");
+      }
       const record = runtimes.get(runtimeId);
       if (!record) return { runtimeId, ownerBotId: BOT_ID, state: "retired" };
       return { runtimeId, ownerBotId: record.ownerBotId, state: record.state };
     },
-    async retire({ runtimeId }) {
+    async retire(input) {
+      const { runtimeId } = input;
+      if (options.hungRetire) return pendingUntilAbort(input.signal, "provider");
       if (options.retireFailure && runtimeId === "runtime-1") {
         throw new Error("provider endpoint token private-retire-diagnostic");
       }
@@ -303,6 +330,9 @@ async function liveGateHarness(t, options = {}) {
   const exercise = validateComputerExercise({
     async openRemoteUrl(input) {
       exerciseCalls.push(input);
+      if (options.hungExerciseOpen) {
+        return pendingUntilAbort(input.signal, "exercise");
+      }
       if (options.frameMutation !== "no-frame" && options.frameMutation !== "cached") {
         const runtimeId = options.frameMutation === "wrong-runtime"
           ? "runtime-unknown"
@@ -345,8 +375,11 @@ async function liveGateHarness(t, options = {}) {
       }
       return { accepted: true, ...input };
     },
-    async dispose() {
+    async dispose(input) {
       exerciseDisposed += 1;
+      if (options.hungExerciseDispose) {
+        return pendingUntilAbort(input?.signal, "exercise");
+      }
       if (options.successorOnDispose) {
         const store = new BotStore({ filePath: path.join(workspacePath, "bots.json") });
         await store.updateRuntime(provisionCalls[0].botId, {
@@ -367,8 +400,9 @@ async function liveGateHarness(t, options = {}) {
   });
 
   const dependencies = {
-    async lookup(hostname) {
+    async lookup(hostname, lookupOptions) {
       lookupCalls += 1;
+      if (options.hungDns) return pendingUntilAbort(lookupOptions?.signal, "lookup");
       if (options.privateDns) return [{ address: "127.0.0.1", family: 4 }];
       const suffix = hostname.includes("runtime-2") ? "2" : "1";
       if (options.rebindingDns && lookupCalls > 2) {
@@ -435,6 +469,9 @@ async function liveGateHarness(t, options = {}) {
     clients,
     protocolCalls,
     get exerciseDisposed() { return exerciseDisposed; },
+    get providerAbortCount() { return providerAbortCount; },
+    get exerciseAbortCount() { return exerciseAbortCount; },
+    get lookupAbortCount() { return lookupAbortCount; },
     get lookupCalls() { return lookupCalls; },
   };
 }
@@ -613,6 +650,58 @@ test("abort interrupts a hung remote client and still performs cleanup", async (
   assert.equal(harness.clients.every(({ stopped }) => stopped), true);
   assert.equal(harness.exerciseDisposed, 1);
 });
+
+test("abort cancels a hung provider capability check and completes bounded cleanup", async (t) => {
+  const harness = await liveGateHarness(t, { hungCapabilities: true });
+  harness.options.dependencies.operationTimeoutMs = 80;
+  harness.options.dependencies.cleanupTimeoutMs = 160;
+  const controller = new AbortController();
+  const operation = runRemoteProviderLiveGate({
+    ...harness.options,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 20);
+
+  const outcome = await raceWithSentinel(operation.then(
+    () => ({ status: "resolved" }),
+    (error) => ({ status: "rejected", error }),
+  ), 300);
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.error?.code, "REMOTE_PROVIDER_GATE_FAILED");
+  assert.equal(harness.providerAbortCount, 1);
+  assert.equal(harness.exerciseDisposed, 1);
+  await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
+    code: "ENOENT",
+  });
+});
+
+for (const [name, options, abortCounter] of [
+  ["provision operation", { hungProvision: true }, "providerAbortCount"],
+  ["inspection operation", { hungInspect: true }, "providerAbortCount"],
+  ["DNS lookup", { hungDns: true }, "lookupAbortCount"],
+  ["computer exercise", { hungExerciseOpen: true }, "exerciseAbortCount"],
+  ["exercise disposal", { hungExerciseDispose: true }, "exerciseAbortCount"],
+  ["runtime retirement", { hungRetire: true }, "providerAbortCount"],
+]) {
+  test(`bounds a hung ${name} and returns only after cooperative cancellation`, async (t) => {
+    const harness = await liveGateHarness(t, options);
+    harness.options.dependencies.operationTimeoutMs = 60;
+    harness.options.dependencies.cleanupTimeoutMs = 180;
+    harness.options.dependencies.computerTimeoutMs = 100;
+    harness.options.dependencies.frameSettleMs = 20;
+
+    const outcome = await raceWithSentinel(
+      runRemoteProviderLiveGate(harness.options).then(
+        () => ({ status: "resolved" }),
+        (error) => ({ status: "rejected", error }),
+      ),
+      600,
+    );
+    assert.equal(outcome.status, "rejected");
+    assert.equal(outcome.error?.code, "REMOTE_PROVIDER_GATE_FAILED");
+    assert.ok(harness[abortCounter] >= 1);
+  });
+}
 
 test("passes only after Bot A remote Chrome shows YouTube", async (t) => {
   const harness = await liveGateHarness(t);
