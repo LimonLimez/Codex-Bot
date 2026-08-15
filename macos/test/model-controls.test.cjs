@@ -143,3 +143,159 @@ test("effort labels use the advertised Work vocabulary", () => {
     ["Light", "Medium", "High", "Extra High", "Max", "Ultra", "Ultra Code"],
   );
 });
+
+test("native Power stops are immutable exact live-catalog tuples with approved labels and effects", () => {
+  const catalog = [
+    {
+      model: "gpt-5.6-terra",
+      label: "GPT-5.6 Terra",
+      provider: "openai-codex",
+      efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultServiceTier: null,
+      serviceTiers: [{ id: "priority", name: "Fast", description: "1.5x speed" }],
+      catalogGeneration: 17,
+      isDefault: false,
+    },
+    {
+      model: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      provider: "openai-codex",
+      efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultServiceTier: "priority",
+      serviceTiers: [{ id: "priority", name: "Fast", description: "1.5x speed" }],
+      catalogGeneration: 17,
+      isDefault: true,
+    },
+  ];
+  const stops = controls.buildPowerStops(catalog);
+  assert.deepEqual(stops, [
+    { provider: "openai-codex", model: "gpt-5.6-terra", effort: "low", serviceTier: null, catalogGeneration: 17, label: "Light", effect: "ordinary" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "low", serviceTier: "priority", catalogGeneration: 17, label: "Light", effect: "fast" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "medium", serviceTier: "priority", catalogGeneration: 17, label: "Standard", effect: "fast" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "high", serviceTier: "priority", catalogGeneration: 17, label: "Extended", effect: "fast" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "priority", catalogGeneration: 17, label: "Extra High", effect: "fast" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "max", serviceTier: "priority", catalogGeneration: 17, label: "Max", effect: "max" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "ultra", serviceTier: "priority", catalogGeneration: 17, label: "Ultra", effect: "ultra" },
+  ]);
+  assert.equal(Object.isFrozen(stops), true);
+  assert.equal(stops.every(Object.isFrozen), true);
+});
+
+test("Power preserves the selected advertised speed across compatible effort stops", () => {
+  const tier = { id: "priority", name: "Fast", description: "1.5x speed" };
+  const catalog = [
+    {
+      model: "gpt-5.6-terra", provider: "openai-codex", efforts: ["low"],
+      defaultServiceTier: null, serviceTiers: [tier], catalogGeneration: 18,
+    },
+    {
+      model: "gpt-5.6-sol", provider: "openai-codex", efforts: ["low", "medium", "high"],
+      defaultServiceTier: null, serviceTiers: [tier], catalogGeneration: 18, isDefault: true,
+    },
+  ];
+  const standard = controls.buildPowerStops(catalog, {
+    provider: "openai-codex", model: "gpt-5.6-sol", effort: "medium",
+    serviceTier: null, catalogGeneration: 18,
+  });
+  const fast = controls.buildPowerStops(catalog, {
+    provider: "openai-codex", model: "gpt-5.6-sol", effort: "medium",
+    serviceTier: "priority", catalogGeneration: 18,
+  });
+  assert.equal(standard.some((stop) => stop.effect === "fast"), false);
+  assert.equal(fast.every((stop) => stop.serviceTier === "priority"), true);
+  assert.equal(fast.some((stop) => stop.effect === "fast"), true);
+  assert.equal(controls.closestPowerStop(fast, {
+    provider: "openai-codex", model: "gpt-5.6-sol", effort: "medium",
+    serviceTier: "priority", catalogGeneration: 18,
+  }), 2);
+  assert.notDeepEqual(standard, fast);
+});
+
+test("Power stop fallback never invents a missing preferred model or unsupported capability", () => {
+  const catalog = [{
+    model: "gpt-live-luna",
+    label: "Live Luna",
+    provider: "openai-codex",
+    efforts: ["low", "medium", "max"],
+    defaultServiceTier: null,
+    serviceTiers: [],
+    catalogGeneration: 9,
+    isDefault: true,
+  }];
+  assert.deepEqual(
+    controls.buildPowerStops(catalog).map(({ model, effort, label }) => ({ model, effort, label })),
+    [
+      { model: "gpt-live-luna", effort: "low", label: "Light" },
+      { model: "gpt-live-luna", effort: "medium", label: "Standard" },
+      { model: "gpt-live-luna", effort: "max", label: "Max" },
+    ],
+  );
+  assert.equal(controls.buildPowerStops([]).length, 0);
+});
+
+test("optional Fable Power keeps Ultra Code identity while reusing the Ultra effect", () => {
+  const catalog = [{
+    model: "claude-fable-5",
+    label: "Claude Fable 5",
+    provider: "cliproxy-anthropic",
+    efforts: ["low", "medium", "high", "xhigh", "max", "ultra-code"],
+    defaultServiceTier: null,
+    serviceTiers: [],
+    catalogGeneration: 1,
+  }];
+  const stops = controls.buildPowerStops(catalog, { model: "claude-fable-5" });
+  assert.deepEqual(stops.map(({ effort, label, effect }) => [effort, label, effect]), [
+    ["low", "Light", "ordinary"],
+    ["medium", "Standard", "ordinary"],
+    ["high", "Extended", "ordinary"],
+    ["xhigh", "Extra High", "ordinary"],
+    ["max", "Max", "max"],
+    ["ultra-code", "Ultra Code", "ultra"],
+  ]);
+});
+
+test("Advanced controls expose exact Model Effort and Speed tuples and round-trip to Power", () => {
+  const catalog = [{
+    model: "gpt-live-sol",
+    label: "GPT Live Sol",
+    provider: "openai-codex",
+    efforts: ["low", "medium", "ultra"],
+    defaultServiceTier: null,
+    serviceTiers: [
+      { id: "priority", name: "Fast", description: "1.5x speed" },
+      { id: "ultrafast", name: "Ultra fast", description: "Fastest" },
+    ],
+    catalogGeneration: 3,
+    isDefault: true,
+  }];
+  const advanced = controls.buildAdvancedOptions(catalog, "gpt-live-sol");
+  assert.deepEqual(advanced.models, [{ model: "gpt-live-sol", label: "GPT Live Sol", provider: "openai-codex" }]);
+  assert.deepEqual(advanced.efforts, [
+    { effort: "low", label: "Light" },
+    { effort: "medium", label: "Medium" },
+    { effort: "ultra", label: "Ultra" },
+  ]);
+  assert.deepEqual(advanced.speeds, [
+    { serviceTier: null, label: "Standard", description: "Default speed" },
+    { serviceTier: "priority", label: "Fast", description: "1.5x speed" },
+    { serviceTier: "ultrafast", label: "Ultra fast", description: "Fastest" },
+  ]);
+  const exact = controls.resolveAdvancedSelection(catalog, {
+    model: "gpt-live-sol",
+    effort: "ultra",
+    serviceTier: "ultrafast",
+  });
+  assert.deepEqual(exact, {
+    provider: "openai-codex",
+    model: "gpt-live-sol",
+    effort: "ultra",
+    serviceTier: "ultrafast",
+    catalogGeneration: 3,
+  });
+  assert.equal(controls.closestPowerStop(controls.buildPowerStops(catalog), exact), 2);
+  assert.equal(controls.resolveAdvancedSelection(catalog, {
+    model: "gpt-live-sol",
+    effort: "max",
+    serviceTier: null,
+  }), null);
+});

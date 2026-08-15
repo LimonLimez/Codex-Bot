@@ -6,6 +6,16 @@
   "use strict";
 
   const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const MODEL_CONTROLS = typeof globalThis.CodexModelControls === "object"
+    ? globalThis.CodexModelControls
+    : typeof require === "function"
+      ? require("./model-controls.js")
+      : null;
+  const POWER_CONTROL = typeof globalThis.CodexReasoningControl === "object"
+    ? globalThis.CodexReasoningControl
+    : typeof require === "function"
+      ? require("./reasoning-control.js")
+      : null;
   const OPTIONAL_MODEL_CATALOG = Object.freeze([
     Object.freeze({
       model: "claude-fable-5",
@@ -13,7 +23,11 @@
       efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
       provider: "cliproxy-anthropic",
       serviceTier: null,
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
       catalogGeneration: 1,
+      defaultReasoningEffort: "medium",
+      isDefault: false,
     }),
     Object.freeze({
       model: "claude-opus-5",
@@ -21,7 +35,11 @@
       efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
       provider: "cliproxy-anthropic",
       serviceTier: null,
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
       catalogGeneration: 1,
+      defaultReasoningEffort: "medium",
+      isDefault: false,
     }),
     Object.freeze({
       model: "claude-sonnet-5",
@@ -29,7 +47,11 @@
       efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
       provider: "cliproxy-anthropic",
       serviceTier: null,
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
       catalogGeneration: 1,
+      defaultReasoningEffort: "medium",
+      isDefault: false,
     }),
   ]);
   const MODEL_CATALOG = OPTIONAL_MODEL_CATALOG;
@@ -123,14 +145,40 @@
         || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))) {
         throw new Error("Model catalog is unavailable.");
       }
+      const rawServiceTiers = raw.serviceTiers ?? [];
+      const defaultServiceTier = raw.defaultServiceTier ?? null;
+      if (!Array.isArray(rawServiceTiers) || rawServiceTiers.length > 16
+        || !(defaultServiceTier === null || (typeof defaultServiceTier === "string"
+          && /^[a-z][a-z0-9_-]{0,31}$/.test(defaultServiceTier)))) {
+        throw new Error("Model catalog is unavailable.");
+      }
+      const tierIds = new Set();
+      const serviceTiers = Object.freeze(rawServiceTiers.map((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)
+          || typeof entry.id !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(entry.id)
+          || tierIds.has(entry.id) || typeof entry.name !== "string"
+          || entry.name.trim().length < 1 || entry.name.length > 160
+          || typeof entry.description !== "string" || entry.description.length > 1024) {
+          throw new Error("Model catalog is unavailable.");
+        }
+        tierIds.add(entry.id);
+        return Object.freeze({ id: entry.id, name: entry.name, description: entry.description });
+      }));
+      if (defaultServiceTier !== null && !tierIds.has(defaultServiceTier)) {
+        throw new Error("Model catalog is unavailable.");
+      }
       names.add(raw.id);
       official.push(Object.freeze({
         model: raw.id,
         label: raw.displayName,
         efforts,
         provider: "openai-codex",
-        serviceTier: null,
+        serviceTier: defaultServiceTier,
+        defaultServiceTier,
+        serviceTiers,
         catalogGeneration: value.generation,
+        defaultReasoningEffort: raw.defaultReasoningEffort,
+        isDefault: raw.isDefault === true,
       }));
     }
     return Object.freeze([
@@ -139,7 +187,11 @@
         ...entry,
         provider: "cliproxy-anthropic",
         serviceTier: null,
+        defaultServiceTier: null,
+        serviceTiers: Object.freeze([]),
         catalogGeneration: 1,
+        defaultReasoningEffort: entry.defaultReasoningEffort,
+        isDefault: false,
       })),
     ]);
   }
@@ -170,7 +222,8 @@
     const model = catalog.find((entry) => entry.model === read("model"));
     if (read("botId") !== botId || !model || !model.efforts.includes(read("reasoningEffort"))
       || read("provider") !== model.provider
-      || read("serviceTier") !== model.serviceTier
+      || (read("serviceTier") !== null
+        && !model.serviceTiers.some((entry) => entry.id === read("serviceTier")))
       || read("catalogGeneration") !== model.catalogGeneration
       || !(read("serviceTier") === null || (typeof read("serviceTier") === "string"
         && /^[a-z][a-z0-9_-]{0,31}$/.test(read("serviceTier"))))
@@ -219,6 +272,7 @@
     let catalogUnsubscribe = null;
     let disposed = false;
     let selectionEpoch = 0;
+    let modelRequestEpoch = 0;
     let selectionFlight = null;
     let selectionPending = false;
     let modelSelection = null;
@@ -464,27 +518,36 @@
       return applyBot(await facade.retryRuntime(bot.botId));
     }
 
-    async function selectModel(model, reasoningEffort) {
+    async function selectModel(model, reasoningEffort, requestedServiceTier) {
       const bot = activeBot();
       const catalog = modelCatalog.find((entry) => entry.model === model);
+      const serviceTier = requestedServiceTier === undefined
+        ? catalog?.defaultServiceTier ?? null
+        : requestedServiceTier;
       if (
         disposed ||
         !bot ||
         !catalog ||
         !catalog.efforts.includes(reasoningEffort) ||
+        !(serviceTier === null
+          || catalog.serviceTiers.some((entry) => entry.id
+            === serviceTier)) ||
         runtimeFacade == null ||
         typeof runtimeFacade.selectModel !== "function"
       ) {
         throw new Error("Model selection is unavailable.");
       }
       const epoch = selectionEpoch;
+      const requestEpoch = ++modelRequestEpoch;
       const selection = Object.freeze({
         botId: bot.botId,
         model,
         reasoningEffort,
+        serviceTier,
       });
       const result = await runtimeFacade.selectModel(selection);
-      if (disposed || epoch !== selectionEpoch || activeBotId !== bot.botId) {
+      if (disposed || epoch !== selectionEpoch || requestEpoch !== modelRequestEpoch
+        || activeBotId !== bot.botId) {
         throw new Error("Model selection changed.");
       }
       if (result && typeof result === "object") {
@@ -572,46 +635,66 @@
 
   function createReasoningView(documentRef) {
     if (!documentRef || typeof documentRef.createElement !== "function") {
-      throw new Error("Reasoning control is unavailable.");
+      throw new Error("Power control is unavailable.");
     }
-    const control = element(documentRef, "div", "codex-reasoning-control");
-    const track = element(documentRef, "div", "codex-reasoning-track");
+    const control = element(documentRef, "div", "codex-power-control");
+    const endpoints = element(documentRef, "div", "codex-power-endpoints");
+    const firstLabel = element(documentRef, "span", "codex-power-endpoint is-first");
+    const lastLabel = element(documentRef, "span", "codex-power-endpoint is-last");
+    endpoints.append(firstLabel, lastLabel);
+    endpoints.hidden = true;
+    const track = element(documentRef, "div", "codex-power-track");
     track.setAttribute("aria-hidden", "true");
-    const fill = element(documentRef, "div", "codex-reasoning-fill");
-    const ultraFill = element(documentRef, "div", "codex-reasoning-ultra-fill");
-    const particles = element(documentRef, "div", "codex-reasoning-particles");
+    const fill = element(documentRef, "div", "codex-power-fill");
+    const ultraFill = element(documentRef, "div", "codex-power-ultra-field");
+    const particles = element(documentRef, "div", "codex-power-particles");
     for (let index = 0; index < 14; index += 1) {
-      particles.append(element(documentRef, "i", "codex-reasoning-particle"));
+      particles.append(element(documentRef, "i", "codex-power-particle"));
     }
-    const ticks = element(documentRef, "div", "codex-reasoning-ticks");
+    const ticks = element(documentRef, "div", "codex-power-ticks");
     track.append(fill, ultraFill, particles, ticks);
-    const thumbRail = element(documentRef, "div", "codex-reasoning-thumb-rail");
+    const thumbRail = element(documentRef, "div", "codex-power-thumb-rail");
     thumbRail.setAttribute("aria-hidden", "true");
-    const thumb = element(documentRef, "i", "codex-reasoning-thumb");
-    const burst = element(documentRef, "span", "codex-reasoning-burst");
+    const thumb = element(documentRef, "i", "codex-power-thumb");
+    const burst = element(documentRef, "span", "codex-power-burst");
     for (let index = 0; index < 16; index += 1) burst.append(element(documentRef, "i"));
     thumbRail.append(thumb, burst);
-    const input = element(documentRef, "input", "codex-reasoning-input");
+    const input = element(documentRef, "input", "codex-power-input");
     input.type = "range";
     input.min = "0";
     input.step = "1";
     input.value = "1";
-    input.setAttribute("aria-label", "Reasoning effort");
+    input.setAttribute("aria-label", "Power");
+    input.setAttribute("aria-describedby", "codex-power-instructions");
+    const label = element(documentRef, "output", "codex-power-label", "Standard");
+    label.setAttribute("aria-live", "polite");
+    const instructions = element(
+      documentRef,
+      "span",
+      "codex-power-instructions",
+      "Use arrow keys, Home, End, or the scroll wheel to change Power.",
+    );
+    instructions.id = "codex-power-instructions";
     const warning = element(
       documentRef,
       "div",
-      "codex-reasoning-warning",
+      "codex-power-warning",
       "Consumes usage limits faster",
     );
     warning.setAttribute("role", "status");
     warning.setAttribute("aria-live", "polite");
     warning.hidden = true;
-    control.append(track, thumbRail, input);
+    control.append(endpoints, track, thumbRail, input);
     return Object.freeze({
       burst,
       control,
+      endpoints,
       fill,
+      firstLabel,
       input,
+      instructions,
+      label,
+      lastLabel,
       particles,
       thumb,
       ticks,
@@ -627,41 +710,50 @@
     return `calc(${percent}% + ${offset}px)`;
   }
 
-  function updateReasoningView(view, efforts, selectedIndex, { enteredUltra = false } = {}) {
+  function updateReasoningView(view, stops, selectedIndex, {
+    enteredUltra = false,
+    endpointLabelsVisible = false,
+  } = {}) {
     if (!view?.control || !view?.ticks || !view?.input) {
-      throw new Error("Reasoning control is unavailable.");
+      throw new Error("Power control is unavailable.");
     }
-    const options = Array.isArray(efforts) ? efforts.filter((effort) => typeof effort === "string") : [];
-    if (options.length < 1) throw new Error("Reasoning options are unavailable.");
+    const options = Array.isArray(stops) ? stops.filter((stop) => stop && typeof stop === "object"
+      && typeof stop.label === "string") : [];
+    if (options.length < 1) throw new Error("Power options are unavailable.");
     const index = Math.max(0, Math.min(options.length - 1, Math.round(Number(selectedIndex) || 0)));
-    const tickNodes = options.map((_effort, tickIndex) => {
+    const tickNodes = options.map((_stop, tickIndex) => {
       const tick = element(view.input.ownerDocument || {
         createElement: (tag) => view.input.constructor ? new view.input.constructor(tag) : null,
-      }, "i", "codex-reasoning-tick");
+      }, "i", "codex-power-tick");
       tick.classList.toggle("is-selected", tickIndex === index);
       tick.style.left = reasoningCenter(tickIndex, options.length);
       return tick;
     });
     view.ticks.replaceChildren(...tickNodes);
     const position = reasoningCenter(index, options.length);
-    view.control.style.setProperty("--codex-reasoning-thumb", position);
-    view.control.style.setProperty("--codex-reasoning-fill", position);
+    view.control.style.setProperty("--codex-power-thumb-position", position);
+    view.control.style.setProperty("--codex-power-fill-position", position);
     view.input.max = String(options.length - 1);
     view.input.value = String(index);
-    const effort = options[index];
-    view.input.setAttribute("aria-valuetext", EFFORT_LABELS[effort] || effort);
-    view.control.classList.toggle("is-max", effort === "max");
-    view.control.classList.toggle("is-ultra", isUltraEffect(effort));
-    view.control.classList.toggle("is-ultra-code", effort === "ultra-code");
-    view.control.classList.toggle("is-ultra-entering", isUltraEffect(effort) && enteredUltra);
-    view.warning.hidden = !isUltraEffect(effort) || !enteredUltra;
-    return Object.freeze({ effort, index });
+    const stop = options[index];
+    view.input.setAttribute("aria-valuetext", stop.label);
+    view.label.textContent = stop.label;
+    view.firstLabel.textContent = options[0].label;
+    view.lastLabel.textContent = options.at(-1).label;
+    view.endpoints.hidden = !endpointLabelsVisible;
+    view.control.classList.toggle("is-fast", stop.effect === "fast");
+    view.control.classList.toggle("is-max", stop.effect === "max");
+    view.control.classList.toggle("is-ultra", stop.effect === "ultra");
+    view.control.classList.toggle("is-ultra-code", stop.effort === "ultra-code");
+    view.control.classList.toggle("is-ultra-entering", stop.effect === "ultra" && enteredUltra);
+    view.warning.hidden = stop.effect !== "ultra" || !enteredUltra;
+    return Object.freeze({ stop, index });
   }
 
   function mount({ windowRef = window, documentRef = document } = {}) {
     if (!documentRef?.body || documentRef.getElementById("codex-bot-controls")) return null;
     const facade = windowRef.codexBots;
-    if (!facade) return null;
+    if (!facade || !MODEL_CONTROLS || typeof POWER_CONTROL?.PowerControlState !== "function") return null;
     const panel = element(documentRef, "aside", "codex-bot-controls");
     panel.id = "codex-bot-controls";
     panel.dataset.codexMountState = "pending";
@@ -686,11 +778,10 @@
     const retry = element(documentRef, "button", "codex-runtime-retry", "Retry");
     retry.type = "button";
     statusRow.append(status, retry);
-    const modelRow = element(documentRef, "div", "codex-model-row");
     const modelDock = element(documentRef, "section", "codex-model-dock");
     modelDock.id = "codex-model-dock";
     modelDock.dataset.codexMountState = "pending";
-    modelDock.setAttribute("aria-label", "Model and reasoning controls");
+    modelDock.setAttribute("aria-label", "Codex Power controls");
     const providerRow = element(documentRef, "div", "codex-provider-row");
     const providerSelect = element(documentRef, "select", "codex-provider-select");
     providerSelect.setAttribute("aria-label", "CLIProxyAPI provider");
@@ -702,14 +793,34 @@
     const connectProvider = element(documentRef, "button", "codex-provider-connect", "Connect account");
     connectProvider.type = "button";
     providerRow.append(providerSelect, connectProvider);
-    const modelSelect = element(documentRef, "select", "codex-model-select");
-    modelSelect.setAttribute("aria-label", "Codex model");
     const reasoningView = createReasoningView(documentRef);
     const reasoning = reasoningView.input;
-    const reasoningLabel = element(documentRef, "output", "codex-reasoning-label");
-    modelRow.append(modelSelect, reasoningView.control, reasoningLabel);
+    const powerShell = element(documentRef, "div", "codex-power-shell");
+    const powerTitle = element(documentRef, "span", "codex-power-title", "Power");
+    const advancedToggle = element(documentRef, "button", "codex-power-advanced-toggle", "Advanced");
+    advancedToggle.type = "button";
+    advancedToggle.setAttribute("aria-expanded", "false");
+    powerShell.append(powerTitle, reasoningView.control, reasoningView.label, advancedToggle);
+    const advanced = element(documentRef, "div", "codex-power-advanced");
+    advanced.hidden = true;
+    const advancedModelLabel = element(documentRef, "label", "codex-power-advanced-field");
+    advancedModelLabel.append(element(documentRef, "span", "", "Model"));
+    const advancedModel = element(documentRef, "select", "codex-power-model-select");
+    advancedModel.setAttribute("aria-label", "Model");
+    advancedModelLabel.append(advancedModel);
+    const advancedEffortLabel = element(documentRef, "label", "codex-power-advanced-field");
+    advancedEffortLabel.append(element(documentRef, "span", "", "Effort"));
+    const advancedEffort = element(documentRef, "select", "codex-power-effort-select");
+    advancedEffort.setAttribute("aria-label", "Effort");
+    advancedEffortLabel.append(advancedEffort);
+    const advancedSpeedLabel = element(documentRef, "label", "codex-power-advanced-field");
+    advancedSpeedLabel.append(element(documentRef, "span", "", "Speed"));
+    const advancedSpeed = element(documentRef, "select", "codex-power-speed-select");
+    advancedSpeed.setAttribute("aria-label", "Speed");
+    advancedSpeedLabel.append(advancedSpeed);
+    advanced.append(advancedModelLabel, advancedEffortLabel, advancedSpeedLabel);
     panel.append(header, renameRow, providerRow, statusRow);
-    modelDock.append(modelRow, reasoningView.warning);
+    modelDock.append(powerShell, advanced, reasoningView.warning, reasoningView.instructions);
     documentRef.body.append(panel, modelDock);
 
     function attachToProductHosts() {
@@ -738,9 +849,75 @@
     mountObserver?.observe(documentRef.body, { childList: true, subtree: true });
 
     let lastSnapshot = null;
-    let lastEffort = null;
+    let lastEffect = null;
     let warningTimer = null;
+    let holdTimer = null;
+    const powerState = new POWER_CONTROL.PowerControlState([], null, { ownerKey: "unselected" });
     let controller;
+
+    function paintPower(snapshot, { enteredUltra = snapshot.enteredUltra } = {}) {
+      if (!snapshot.stops.length) return;
+      updateReasoningView(reasoningView, snapshot.stops, snapshot.previewIndex, {
+        enteredUltra,
+        endpointLabelsVisible: snapshot.endpointLabelsVisible,
+      });
+      reasoning.disabled = snapshot.disabled;
+      reasoningView.control.classList.toggle("is-disabled", snapshot.disabled);
+      modelDock.classList.toggle("is-fast", snapshot.effect === "fast");
+      modelDock.classList.toggle("is-max", snapshot.effect === "max");
+      modelDock.classList.toggle("is-ultra", snapshot.effect === "ultra");
+      modelDock.classList.toggle("is-ultra-code", snapshot.selection?.effort === "ultra-code");
+      if (warningTimer != null) {
+        (windowRef.clearTimeout || clearTimeout)(warningTimer);
+        warningTimer = null;
+      }
+      if (enteredUltra) {
+        warningTimer = (windowRef.setTimeout || setTimeout)(() => {
+          reasoningView.control.classList.remove("is-ultra-entering");
+          reasoningView.warning.hidden = true;
+          warningTimer = null;
+        }, 2000);
+      }
+      lastEffect = snapshot.effect;
+    }
+
+    function populateAdvanced(next, preferredModel) {
+      const modelId = preferredModel
+        ?? next.modelSelection?.model
+        ?? powerState.snapshot().selection?.model
+        ?? next.modelCatalog[0]?.model;
+      const options = MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, modelId);
+      advancedModel.replaceChildren(...options.models.map((entry) => {
+        const option = element(documentRef, "option", "", entry.label);
+        option.value = entry.model;
+        option.selected = entry.model === modelId;
+        return option;
+      }));
+      if (modelId) advancedModel.value = modelId;
+      const catalog = next.modelCatalog.find((entry) => entry.model === modelId);
+      const effort = next.modelSelection?.model === modelId
+        ? next.modelSelection.reasoningEffort
+        : catalog?.defaultReasoningEffort ?? options.efforts[0]?.effort;
+      advancedEffort.replaceChildren(...options.efforts.map((entry) => {
+        const option = element(documentRef, "option", "", entry.label);
+        option.value = entry.effort;
+        option.selected = entry.effort === effort;
+        return option;
+      }));
+      if (effort) advancedEffort.value = effort;
+      const serviceTier = next.modelSelection?.model === modelId
+        ? next.modelSelection.serviceTier
+        : catalog?.defaultServiceTier ?? null;
+      advancedSpeed.replaceChildren(...options.speeds.map((entry) => {
+        const option = element(documentRef, "option", "", entry.label);
+        option.value = entry.serviceTier ?? "__standard__";
+        option.title = entry.description;
+        option.selected = entry.serviceTier === serviceTier;
+        return option;
+      }));
+      advancedSpeed.value = serviceTier ?? "__standard__";
+    }
+
     function render(next) {
       lastSnapshot = next;
       const selected = next.activeBot;
@@ -757,43 +934,25 @@
       retry.hidden = !next.runtime.retryVisible;
       retry.disabled = !next.runtime.retryVisible;
       const enabled = selected != null && !next.selectionPending && next.modelCatalog.length > 0;
-      modelSelect.replaceChildren();
-      for (const entry of next.modelCatalog) {
-        const option = element(documentRef, "option", "", entry.label);
-        option.value = entry.model;
-        option.selected = entry.model === next.modelSelection?.model;
-        modelSelect.append(option);
-      }
-      modelSelect.disabled = !enabled;
-      reasoning.disabled = !enabled;
-      const model = next.modelCatalog.find((entry) => entry.model === next.modelSelection?.model)
-        ?? next.modelCatalog.find((entry) => entry.model === modelSelect.value)
-        ?? next.modelCatalog[0];
-      if (!model) return;
-      if (modelSelect.value !== model.model) modelSelect.value = model.model;
-      reasoning.max = String(model.efforts.length - 1);
-      if (next.modelSelection?.model === model.model) {
-        reasoning.value = String(Math.max(0, model.efforts.indexOf(next.modelSelection.reasoningEffort)));
-      } else if (Number(reasoning.value) >= model.efforts.length) reasoning.value = "0";
-      const effort = model.efforts[Number(reasoning.value)] ?? model.efforts[0];
-      const enteredUltra = isUltraEffect(effort) && !isUltraEffect(lastEffort);
-      updateReasoningView(reasoningView, model.efforts, Number(reasoning.value), { enteredUltra });
-      reasoningLabel.textContent = EFFORT_LABELS[effort];
-      modelDock.classList.toggle("is-max", effort === "max");
-      modelDock.classList.toggle("is-ultra", isUltraEffect(effort));
-      modelDock.classList.toggle("is-ultra-code", effort === "ultra-code");
-      if (warningTimer != null) {
-        (windowRef.clearTimeout || clearTimeout)(warningTimer);
-        warningTimer = null;
-      }
-      if (enteredUltra) {
-        warningTimer = (windowRef.setTimeout || setTimeout)(() => {
-          reasoningView.control.classList.remove("is-ultra-entering");
-          reasoningView.warning.hidden = true;
-          warningTimer = null;
-        }, 2000);
-      }
-      lastEffort = effort;
+      const selectedTuple = next.modelSelection ? {
+        provider: next.modelSelection.provider,
+        model: next.modelSelection.model,
+        effort: next.modelSelection.reasoningEffort,
+        serviceTier: next.modelSelection.serviceTier,
+        catalogGeneration: next.modelSelection.catalogGeneration,
+      } : null;
+      const stops = MODEL_CONTROLS.buildPowerStops(next.modelCatalog, selectedTuple);
+      const selectedIndex = selectedTuple ? MODEL_CONTROLS.closestPowerStop(stops, selectedTuple) : 0;
+      const ownerKey = `${next.activeBotId ?? "none"}:${next.modelSelection?.generation ?? "pending"}:${stops[0]?.catalogGeneration ?? 0}`;
+      let power = powerState.setStops(stops, selectedIndex, { ownerKey });
+      power = powerState.setDisabled(!enabled);
+      const enteredUltra = power.effect === "ultra" && lastEffect !== "ultra";
+      if (power.stops.length) paintPower(power, { enteredUltra });
+      advancedToggle.disabled = !enabled;
+      advancedModel.disabled = !enabled;
+      advancedEffort.disabled = !enabled;
+      advancedSpeed.disabled = !enabled;
+      populateAdvanced(next);
     }
 
     controller = createBotUiController({
@@ -826,21 +985,86 @@
         connectProvider.disabled = false;
       });
     });
-    const submitModel = () => {
-      const model = lastSnapshot?.modelCatalog.find((entry) => entry.model === modelSelect.value);
-      const effort = model?.efforts[Number(reasoning.value)];
-      if (model && effort) void controller.selectModel(model.model, effort).catch(() => {});
-      render(controller.snapshot());
+
+    const commitPower = (snapshot) => {
+      paintPower(snapshot);
+      if (!snapshot.changed || !snapshot.selection) return;
+      const selection = snapshot.selection;
+      void controller.selectModel(
+        selection.model,
+        selection.effort,
+        selection.serviceTier,
+      ).catch(() => render(controller.snapshot()));
     };
-    modelSelect.addEventListener("change", () => {
-      reasoning.value = "1";
-      submitModel();
+    reasoning.addEventListener("pointerdown", () => {
+      if (holdTimer != null) (windowRef.clearTimeout || clearTimeout)(holdTimer);
+      paintPower(powerState.pointerDown(Number(reasoning.value), Date.now()));
+      holdTimer = (windowRef.setTimeout || setTimeout)(() => {
+        paintPower(powerState.tick(Date.now() + 450));
+        holdTimer = null;
+      }, 450);
     });
-    reasoning.addEventListener("input", submitModel);
+    reasoning.addEventListener("input", () => {
+      const snapshot = powerState.snapshot().pointerActive
+        ? powerState.pointerMove(Number(reasoning.value))
+        : powerState.pointerDown(Number(reasoning.value), Date.now());
+      paintPower(snapshot);
+    });
+    reasoning.addEventListener("change", () => {
+      commitPower(powerState.pointerUp(Number(reasoning.value)));
+    });
+    reasoning.addEventListener("pointerup", () => {
+      if (holdTimer != null) {
+        (windowRef.clearTimeout || clearTimeout)(holdTimer);
+        holdTimer = null;
+      }
+      commitPower(powerState.pointerUp(Number(reasoning.value)));
+    });
+    reasoning.addEventListener("pointercancel", () => paintPower(powerState.pointerCancel()));
+    reasoning.addEventListener("wheel", (event) => {
+      event.preventDefault?.();
+      commitPower(powerState.wheel(Number(event.deltaY)));
+    }, { passive: false });
+    reasoning.addEventListener("keydown", (event) => {
+      if (!new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"]).has(event.key)) return;
+      event.preventDefault?.();
+      commitPower(powerState.keyDown(event.key));
+    });
+    reasoning.addEventListener("focus", () => paintPower(powerState.setFocus(true)));
+    reasoning.addEventListener("blur", () => paintPower(powerState.setFocus(false)));
+    reasoning.addEventListener("mouseenter", () => paintPower(powerState.setHover(true)));
+    reasoning.addEventListener("mouseleave", () => paintPower(powerState.setHover(false)));
+
+    advancedToggle.addEventListener("click", () => {
+      advanced.hidden = !advanced.hidden;
+      advancedToggle.setAttribute("aria-expanded", String(!advanced.hidden));
+      if (!advanced.hidden && lastSnapshot) populateAdvanced(lastSnapshot);
+    });
+    const submitAdvanced = () => {
+      if (!lastSnapshot) return;
+      const selection = MODEL_CONTROLS.resolveAdvancedSelection(lastSnapshot.modelCatalog, {
+        model: advancedModel.value,
+        effort: advancedEffort.value,
+        serviceTier: advancedSpeed.value === "__standard__" ? null : advancedSpeed.value,
+      });
+      if (!selection) return;
+      void controller.selectModel(selection.model, selection.effort, selection.serviceTier)
+        .catch(() => render(controller.snapshot()));
+    };
+    advancedModel.addEventListener("change", () => {
+      if (!lastSnapshot) return;
+      populateAdvanced(lastSnapshot, advancedModel.value);
+      submitAdvanced();
+    });
+    advancedEffort.addEventListener("change", submitAdvanced);
+    advancedSpeed.addEventListener("change", submitAdvanced);
     void controller.initialize().catch(() => {
       status.textContent = "Remote computer unavailable";
-      modelSelect.disabled = true;
       reasoning.disabled = true;
+      advancedToggle.disabled = true;
+      advancedModel.disabled = true;
+      advancedEffort.disabled = true;
+      advancedSpeed.disabled = true;
     });
     return Object.freeze({
       controller,
@@ -848,6 +1072,8 @@
       panel,
       dispose() {
         mountObserver?.disconnect();
+        if (holdTimer != null) (windowRef.clearTimeout || clearTimeout)(holdTimer);
+        if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);
         controller.dispose();
         panel.remove?.();
         modelDock.remove?.();

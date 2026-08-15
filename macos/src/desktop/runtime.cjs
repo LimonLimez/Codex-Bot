@@ -59,13 +59,19 @@ function selectionRequest(value) {
     descriptors = Object.getOwnPropertyDescriptors(value);
     prototype = Object.getPrototypeOf(value);
   } catch { throw sanitizedFailure(); }
-  const fields = ["botId", "model", "reasoningEffort"];
+  const fields = ["botId", "model", "reasoningEffort", "serviceTier"];
+  const required = ["botId", "model", "reasoningEffort"];
   if ((prototype !== Object.prototype && prototype !== null)
     || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
       || !fields.includes(key) || !("value" in descriptors[key]))
-    || fields.some((field) => !descriptors[field])) throw sanitizedFailure();
-  const result = Object.fromEntries(fields.map((field) => [field, descriptors[field].value]));
-  if (typeof result.botId !== "string" || !BOT_ID.test(result.botId)) throw sanitizedFailure();
+    || required.some((field) => !descriptors[field])) throw sanitizedFailure();
+  const result = Object.fromEntries(fields
+    .filter((field) => descriptors[field])
+    .map((field) => [field, descriptors[field].value]));
+  if (typeof result.botId !== "string" || !BOT_ID.test(result.botId)
+    || !(result.serviceTier === undefined || result.serviceTier === null
+      || (typeof result.serviceTier === "string"
+        && /^[a-z][a-z0-9_-]{0,31}$/.test(result.serviceTier)))) throw sanitizedFailure();
   return result;
 }
 
@@ -80,7 +86,8 @@ function resolveModelSelection(rawSelection, catalog) {
   const requested = selectionRequest(rawSelection);
   const optionalEfforts = OPTIONAL_MODEL_EFFORTS[requested.model];
   if (optionalEfforts) {
-    if (!optionalEfforts.includes(requested.reasoningEffort)) throw sanitizedFailure();
+    if (!optionalEfforts.includes(requested.reasoningEffort)
+      || (requested.serviceTier !== undefined && requested.serviceTier !== null)) throw sanitizedFailure();
     return Object.freeze({
       botId: requested.botId,
       provider: "cliproxy-anthropic",
@@ -94,12 +101,17 @@ function resolveModelSelection(rawSelection, catalog) {
   const model = models.find((entry) => entry?.id === requested.model);
   if (!model || !Array.isArray(model.supportedReasoningEfforts)
     || !model.supportedReasoningEfforts.includes(requested.reasoningEffort)) throw sanitizedFailure();
+  const serviceTier = requested.serviceTier === undefined
+    ? model.defaultServiceTier ?? null
+    : requested.serviceTier;
+  if (serviceTier !== null && (!Array.isArray(model.serviceTiers)
+    || !model.serviceTiers.some((entry) => entry?.id === serviceTier))) throw sanitizedFailure();
   return Object.freeze({
     botId: requested.botId,
     provider: "openai-codex",
     model: requested.model,
     reasoningEffort: requested.reasoningEffort,
-    serviceTier: null,
+    serviceTier,
     catalogGeneration: catalog.generation,
   });
 }
@@ -111,6 +123,7 @@ function selectionMatchesCatalog(value, catalog) {
       botId: value.botId,
       model: value.model,
       reasoningEffort: value.reasoningEffort,
+      serviceTier: value.serviceTier,
     }, catalog);
     return current.provider === value.provider && current.model === value.model
       && current.reasoningEffort === value.reasoningEffort
@@ -126,6 +139,7 @@ function defaultModelSelection(botId, catalog) {
     botId,
     model: model.id,
     reasoningEffort: model.defaultReasoningEffort,
+    serviceTier: model.defaultServiceTier ?? null,
   }, catalog);
 }
 
@@ -419,6 +433,7 @@ function installDesktopRuntime(electron, injected = {}) {
           botId,
           model: current.model,
           reasoningEffort: current.reasoningEffort,
+          serviceTier: current.serviceTier,
         }, catalog);
       } catch {
         requested = defaultModelSelection(botId, catalog);
@@ -466,7 +481,9 @@ function installDesktopRuntime(electron, injected = {}) {
   handle(IPC_CHANNELS.selectBot, async (botId) => {
     const bot = await controller.readBot(botId);
     if (!bot) throw sanitizedFailure();
-    return currentModelSelection(bot.botId);
+    const selection = await currentModelSelection(bot.botId);
+    await selectionStore.selectBot(bot.botId);
+    return selection;
   });
   handle(IPC_CHANNELS.readModel, (botId) => currentModelSelection(botId));
   handle(IPC_CHANNELS.selectModel, async (rawSelection) => {

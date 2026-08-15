@@ -113,35 +113,50 @@ test("the reviewed optional-provider manifest preserves model-specific Ultra Cod
   assert.equal(Object.isFrozen(MODEL_CATALOG[0].efforts), true);
 });
 
-test("reasoning control preserves the approved direct-child topology and exact tick counts", () => {
+test("Power control preserves the approved compact topology exact ticks labels and effects", () => {
   const { createReasoningView, updateReasoningView } = require(uiPath);
   const view = createReasoningView(fakeDocument);
   assert.deepEqual(
     view.control.children.map((child) => child.className),
-    ["codex-reasoning-track", "codex-reasoning-thumb-rail", "codex-reasoning-input"],
+    ["codex-power-endpoints", "codex-power-track", "codex-power-thumb-rail", "codex-power-input"],
   );
   assert.deepEqual(
     view.track.children.map((child) => child.className),
     [
-      "codex-reasoning-fill",
-      "codex-reasoning-ultra-fill",
-      "codex-reasoning-particles",
-      "codex-reasoning-ticks",
+      "codex-power-fill",
+      "codex-power-ultra-field",
+      "codex-power-particles",
+      "codex-power-ticks",
     ],
   );
   assert.equal(view.particles.children.length, 14);
   assert.equal(view.burst.children.length, 16);
   assert.equal(view.input.value, "1");
+  const stops = ["Light", "Standard", "Extended", "Extra High", "Max", "Ultra"].map((label, index) => ({
+    provider: "openai-codex",
+    model: index === 0 ? "gpt-5.6-terra" : "gpt-5.6-sol",
+    effort: ["low", "medium", "high", "xhigh", "max", "ultra"][index],
+    serviceTier: null,
+    catalogGeneration: 8,
+    label,
+    effect: index === 4 ? "max" : index === 5 ? "ultra" : "ordinary",
+  }));
 
-  updateReasoningView(view, ["low", "medium", "high", "xhigh", "max", "ultra"], 4, {
+  updateReasoningView(view, stops, 4, {
     enteredUltra: false,
   });
   assert.equal(view.ticks.children.length, 6);
   assert.equal(view.control.classList.contains("is-max"), true);
   assert.equal(view.control.classList.contains("is-ultra"), false);
   assert.equal(view.input.attributes["aria-valuetext"], "Max");
+  assert.equal(view.label.textContent, "Max");
 
-  updateReasoningView(view, ["low", "medium", "high", "xhigh", "max", "ultra"], 5, {
+  updateReasoningView(view, [stops[0], { ...stops[1], serviceTier: "priority", effect: "fast" }], 1);
+  assert.equal(view.control.classList.contains("is-fast"), true);
+  updateReasoningView(view, stops.slice(0, 2), 1);
+  assert.equal(view.control.classList.contains("is-fast"), false);
+
+  updateReasoningView(view, stops, 5, {
     enteredUltra: true,
   });
   assert.equal(view.control.classList.contains("is-max"), false);
@@ -149,21 +164,14 @@ test("reasoning control preserves the approved direct-child topology and exact t
   assert.equal(view.control.classList.contains("is-ultra-entering"), true);
   assert.equal(view.warning.hidden, false);
 
-  updateReasoningView(view, ["low", "medium", "high", "xhigh"], 3, {
-    enteredUltra: false,
-  });
-  assert.equal(view.ticks.children.length, 4);
-  assert.equal(view.control.classList.contains("is-ultra"), false);
-  assert.equal(view.warning.hidden, true);
-  assert.equal(view.input.attributes["aria-valuetext"], "Extra High");
-
-  updateReasoningView(view, ["low", "medium", "high", "xhigh", "max", "ultra-code"], 5, {
+  updateReasoningView(view, [...stops.slice(0, 5), { ...stops[5], effort: "ultra-code", label: "Ultra Code" }], 5, {
     enteredUltra: true,
   });
   assert.equal(view.control.classList.contains("is-ultra"), true);
   assert.equal(view.control.classList.contains("is-ultra-code"), true);
   assert.equal(view.warning.hidden, false);
   assert.equal(view.input.attributes["aria-valuetext"], "Ultra Code");
+  assert.equal(view.label.textContent, "Ultra Code");
 });
 
 test("bot controller uses literal zero-argument New Bot and explicit rename/retry", async () => {
@@ -234,7 +242,6 @@ test("model selection is main-owned, exact, and independent from remote Work rea
         return Object.freeze({
           ...selection,
           provider: "openai-codex",
-          serviceTier: null,
           catalogGeneration: 5,
           generation: calls.length,
         });
@@ -250,6 +257,11 @@ test("model selection is main-owned, exact, and independent from remote Work rea
               id: "gpt-5.6-sol",
               displayName: "GPT-5.6 Sol",
               defaultReasoningEffort: "medium",
+              defaultServiceTier: "priority",
+              serviceTiers: Object.freeze([
+                Object.freeze({ id: "priority", name: "Fast", description: "1.5x speed" }),
+                Object.freeze({ id: "ultrafast", name: "Ultra fast", description: "Fastest" }),
+              ]),
               supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
             }),
             Object.freeze({
@@ -265,13 +277,87 @@ test("model selection is main-owned, exact, and independent from remote Work rea
   });
   await controller.initialize();
   assert.deepEqual(calls.shift(), { selectedBotId: BOT_A });
-  await controller.selectModel("gpt-5.6-sol", "ultra");
-  assert.deepEqual(calls, [{ botId: BOT_A, model: "gpt-5.6-sol", reasoningEffort: "ultra" }]);
+  await controller.selectModel("gpt-5.6-sol", "ultra", "ultrafast");
+  assert.deepEqual(calls, [{
+    botId: BOT_A,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: "ultrafast",
+  }]);
+  await assert.rejects(
+    () => controller.selectModel("gpt-5.6-sol", "ultra", "invented"),
+    /selection/i,
+  );
   await assert.rejects(() => controller.selectModel("gpt-5.5", "ultra"), /selection/i);
   current = bot(BOT_A, "New Bot", "unavailable");
   controller.applyBot(current);
   await controller.selectModel("gpt-5.6-sol", "high");
-  assert.deepEqual(calls.at(-1), { botId: BOT_A, model: "gpt-5.6-sol", reasoningEffort: "high" });
+  assert.deepEqual(calls.at(-1), {
+    botId: BOT_A,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+    serviceTier: "priority",
+  });
+});
+
+test("newer same-bot model intent wins when selection replies resolve out of order", async () => {
+  const { createBotUiController } = require(uiPath);
+  const releases = [];
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return null; },
+      selectModel(selection) {
+        return new Promise((resolve) => releases.push(() => resolve(Object.freeze({
+          ...selection,
+          provider: "openai-codex",
+          catalogGeneration: 4,
+          generation: releases.length,
+        }))));
+      },
+    },
+    accountFacade: {
+      async catalog() {
+        return Object.freeze({
+          generation: 4,
+          status: "ready",
+          models: Object.freeze([
+            Object.freeze({
+              id: "gpt-5.6-terra",
+              displayName: "GPT-5.6 Terra",
+              defaultReasoningEffort: "low",
+              supportedReasoningEfforts: Object.freeze(["low"]),
+            }),
+            Object.freeze({
+              id: "gpt-5.6-sol",
+              displayName: "GPT-5.6 Sol",
+              defaultReasoningEffort: "medium",
+              supportedReasoningEfforts: Object.freeze(["medium", "ultra"]),
+            }),
+          ]),
+        });
+      },
+    },
+  });
+  await controller.initialize();
+  const older = controller.selectModel("gpt-5.6-terra", "low");
+  const newer = controller.selectModel("gpt-5.6-sol", "ultra");
+  releases[1]();
+  await newer;
+  releases[0]();
+  await assert.rejects(older, /selection changed/i);
+  assert.deepEqual(controller.snapshot().modelSelection, {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+    catalogGeneration: 4,
+    generation: 2,
+  });
 });
 
 test("bot selection renders the authoritative persisted model and suppresses stale selection reads", async () => {
@@ -778,6 +864,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
 
 test("mounted optional model controls stay reachable while the official catalog is pending", async () => {
   const { mount } = require(uiPath);
+  const selected = [];
   class MountElement extends FakeElement {
     constructor(tagName, documentRef) {
       super(tagName);
@@ -832,6 +919,15 @@ test("mounted optional model controls stay reachable while the official catalog 
     codexRuntime: {
       async selectBot() { return official; },
       async readModel() { return official; },
+      async selectModel(value) {
+        selected.push(value);
+        return Object.freeze({
+          ...value,
+          provider: "cliproxy-anthropic",
+          catalogGeneration: 1,
+          generation: 3,
+        });
+      },
     },
     codexAccount: {
       async catalog() {
@@ -854,12 +950,28 @@ test("mounted optional model controls stay reachable while the official catalog 
     }
     return null;
   };
-  const modelSelect = find(mounted.modelDock, "codex-model-select");
-  const reasoning = find(mounted.modelDock, "codex-reasoning-input");
+  const power = find(mounted.modelDock, "codex-power-input");
+  const advancedToggle = find(mounted.modelDock, "codex-power-advanced-toggle");
+  const advanced = find(mounted.modelDock, "codex-power-advanced");
+  const advancedModel = find(mounted.modelDock, "codex-power-model-select");
   assert.equal(mounted.controller.snapshot().activeBotId, BOT_A);
   assert.equal(mounted.controller.snapshot().modelSelection, null);
-  assert.equal(modelSelect.disabled, false);
-  assert.equal(reasoning.disabled, false);
-  assert.equal(modelSelect.children[0].value, "claude-fable-5");
+  assert.equal(power.disabled, false);
+  assert.equal(advancedToggle.disabled, false);
+  assert.equal(advanced.hidden, true);
+  assert.equal(advancedModel.children[0].value, "claude-fable-5");
+  assert.equal(find(mounted.modelDock, "codex-model-select"), null);
+  power.listeners.get("keydown")({ key: "End", preventDefault() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(selected, [{
+    botId: BOT_A,
+    model: "claude-fable-5",
+    reasoningEffort: "ultra-code",
+    serviceTier: null,
+  }]);
+  assert.equal(find(mounted.modelDock, "codex-power-label").textContent, "Ultra Code");
+  advancedToggle.listeners.get("click")();
+  assert.equal(advanced.hidden, false);
+  assert.equal(advancedToggle.attributes["aria-expanded"], "true");
   mounted.dispose();
 });

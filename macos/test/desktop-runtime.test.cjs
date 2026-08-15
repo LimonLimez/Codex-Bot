@@ -8,7 +8,9 @@ const test = require("node:test");
 
 const runtimePath = path.join(__dirname, "..", "src", "desktop", "runtime.cjs");
 const selectionPath = path.join(__dirname, "..", "src", "desktop", "model-selection-store.cjs");
+const runtimeConfigPath = path.join(__dirname, "..", "src", "bridge", "runtime-config.cjs");
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
+const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
 
 function readyCatalog(generation = 7) {
   const entry = (id, efforts, defaultReasoningEffort = efforts[0], isDefault = false) => Object.freeze({
@@ -244,6 +246,7 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     dispose() { calls.push(["dispose"]); },
   };
   const selectionStore = {
+    async selectBot(botId) { calls.push(["activate-model-bot", botId]); return botId; },
     async ensure(botId, fallback) {
       const selection = { botId, ...fallback, generation: 0 };
       calls.push(["ensure-model", selection]);
@@ -337,6 +340,7 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
       generation: 0,
     },
   ]);
+  assert.deepEqual(calls.find(([name]) => name === "activate-model-bot"), ["activate-model-bot", BOT_A]);
   const selected = await handlers.get(IPC_CHANNELS.selectModel)({}, {
     botId: BOT_A,
     model: "gpt-5.6-sol",
@@ -517,6 +521,7 @@ test("selecting a bot retains its local model generation across remote runtime c
   });
   const selectionStore = {
     async read() { return retained; },
+    async selectBot(botId) { assert.equal(botId, BOT_A); return botId; },
   };
   const electron = {
     app: { once() {} },
@@ -534,6 +539,55 @@ test("selecting a bot retains its local model generation across remote runtime c
   const selected = await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A);
   assert.equal(selected, retained);
   assert.equal(runtimeReads, 0);
+  installed.dispose();
+});
+
+test("selecting a stored bot durably owns the next unbound inference conversation", async (t) => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const { ModelSelectionStore } = require(selectionPath);
+  const { loadRuntimeConfig } = require(runtimeConfigPath);
+  const handlers = new Map();
+  const root = tempRoot(t);
+  const filePath = path.join(root, "state", "model-selections.v1.json");
+  const selectionStore = new ModelSelectionStore({ filePath });
+  await selectionStore.write({
+    botId: BOT_B, provider: "openai-codex", model: "gpt-5.6-terra",
+    reasoningEffort: "low", serviceTier: null, catalogGeneration: 7, generation: 9,
+  });
+  await selectionStore.write({
+    botId: BOT_A, provider: "openai-codex", model: "gpt-5.6-sol",
+    reasoningEffort: "medium", serviceTier: null, catalogGeneration: 7, generation: 4,
+  });
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async readBot(botId) {
+      return Object.freeze({ botId, name: botId === BOT_B ? "B" : "A", runtime: Object.freeze({ state: "ready" }) });
+    },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { getAllWindows: () => [] },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore,
+    accountController: accountWithCatalog(),
+  });
+  const selected = await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_B);
+  assert.equal(selected.botId, BOT_B);
+  assert.equal(selected.generation, 9);
+  const config = loadRuntimeConfig({
+    CODEX_BOT_MODEL_SELECTIONS: filePath,
+    CODEX_BOT_INFERENCE_ENDPOINT: "tcp://127.0.0.1:49152",
+    CODEX_BOT_INFERENCE_CAPABILITY: "a".repeat(64),
+  });
+  assert.equal(config.botId, BOT_B.slice(4));
+  assert.equal(config.generation, 9);
+  assert.equal(config.model, "gpt-5.6-terra");
   installed.dispose();
 });
 
@@ -570,6 +624,7 @@ test("official Codex selection remains usable when the bot's remote Work runtime
     generation: 1,
   });
   const selectionStore = {
+    async selectBot(botId) { calls.push(["activate-model-bot", botId]); return botId; },
     async ensure(botId, fallback) { calls.push(["ensure", botId, fallback]); return initial; },
     async read(botId) { calls.push(["read-model", botId]); return initial; },
     async writeNext(value) { calls.push(["write-next", value]); return changed; },
@@ -746,6 +801,11 @@ test("model selection policy persists the complete live-catalog routing tuple an
         id: "gpt-live-only",
         displayName: "GPT Live Only",
         defaultReasoningEffort: "high",
+        defaultServiceTier: "priority",
+        serviceTiers: Object.freeze([
+          Object.freeze({ id: "priority", name: "Fast", description: "1.5x speed" }),
+          Object.freeze({ id: "ultrafast", name: "Ultra fast", description: "Fastest" }),
+        ]),
         supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
         inputModalities: Object.freeze(["text", "image"]),
         supportsPersonality: false,
@@ -757,13 +817,14 @@ test("model selection policy persists the complete live-catalog routing tuple an
     botId: BOT_A,
     model: "gpt-live-only",
     reasoningEffort: "ultra",
+    serviceTier: "ultrafast",
   }, catalog);
   assert.deepEqual(official, {
     botId: BOT_A,
     provider: "openai-codex",
     model: "gpt-live-only",
     reasoningEffort: "ultra",
-    serviceTier: null,
+    serviceTier: "ultrafast",
     catalogGeneration: 12,
   });
   const optional = resolveModelSelection({
@@ -774,6 +835,12 @@ test("model selection policy persists the complete live-catalog routing tuple an
   assert.equal(optional.provider, "cliproxy-anthropic");
   assert.equal(optional.catalogGeneration, 1);
   assert.equal(selectionMatchesCatalog({ ...official, generation: 4 }, catalog), true);
+  assert.throws(() => resolveModelSelection({
+    botId: BOT_A,
+    model: "gpt-live-only",
+    reasoningEffort: "high",
+    serviceTier: "invented",
+  }, catalog), { code: "CODEX_BOT_OPERATION_FAILED" });
   assert.equal(selectionMatchesCatalog({ ...official, catalogGeneration: 11, generation: 4 }, catalog), false);
   assert.throws(() => resolveModelSelection({
     botId: BOT_A,

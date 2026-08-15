@@ -43,6 +43,8 @@ function model({
   id,
   efforts,
   defaultEffort = efforts[0],
+  defaultServiceTier = null,
+  serviceTiers = [],
   displayName = id,
   hidden = false,
   isDefault = false,
@@ -54,6 +56,12 @@ function model({
     displayName,
     hidden,
     defaultReasoningEffort: defaultEffort,
+    defaultServiceTier,
+    serviceTiers: serviceTiers.map(({ id: tierId, name, description }) => ({
+      id: tierId,
+      name,
+      description,
+    })),
     supportedReasoningEfforts: efforts.map((reasoningEffort) => ({
       reasoningEffort,
       description: `${reasoningEffort} description`,
@@ -69,7 +77,16 @@ function readyManager(overrides = {}) {
   const pages = new Map([
     [null, {
       data: [
-        model({ id: "gpt-live-sol", efforts: ["low", "medium", "high", "ultra"], isDefault: true }),
+        model({
+          id: "gpt-live-sol",
+          efforts: ["low", "medium", "high", "ultra"],
+          isDefault: true,
+          defaultServiceTier: "priority",
+          serviceTiers: [
+            { id: "priority", name: "Fast", description: "1.5x speed, increased usage" },
+            { id: "ultrafast", name: "Ultra fast", description: "Fastest available speed" },
+          ],
+        }),
         model({ id: "hidden-private", efforts: ["low"], hidden: true }),
       ],
       nextCursor: "page-two",
@@ -148,6 +165,11 @@ test("starts one direct account flight and publishes only frozen sanitized accou
         id: "gpt-live-sol",
         displayName: "gpt-live-sol",
         defaultReasoningEffort: "low",
+        defaultServiceTier: "priority",
+        serviceTiers: [
+          { id: "priority", name: "Fast", description: "1.5x speed, increased usage" },
+          { id: "ultrafast", name: "Ultra fast", description: "Fastest available speed" },
+        ],
         supportedReasoningEfforts: ["low", "medium", "high", "ultra"],
         inputModalities: ["text", "image"],
         supportsPersonality: true,
@@ -157,6 +179,8 @@ test("starts one direct account flight and publishes only frozen sanitized accou
         id: "gpt-live-terra",
         displayName: "Live Terra",
         defaultReasoningEffort: "low",
+        defaultServiceTier: null,
+        serviceTiers: [],
         supportedReasoningEfforts: ["low", "medium", "max", "ultra"],
         inputModalities: ["text", "image"],
         supportsPersonality: true,
@@ -166,6 +190,8 @@ test("starts one direct account flight and publishes only frozen sanitized accou
   });
   assert.equal(Object.isFrozen(controller.accountState()), true);
   assert.equal(Object.isFrozen(controller.catalogState().models[0].supportedReasoningEfforts), true);
+  assert.equal(Object.isFrozen(controller.catalogState().models[0].serviceTiers), true);
+  assert.equal(Object.isFrozen(controller.catalogState().models[0].serviceTiers[0]), true);
   assert.equal(accountEvents.length, 1);
   assert.equal(catalogEvents.length, 1);
   assert.doesNotMatch(JSON.stringify({ accountEvents, catalogEvents }), /private@example|acct-private|accessToken|private-token|providerDiagnostic|limitId|limitName/);
@@ -329,6 +355,32 @@ test("rejects malformed account login catalog pagination and capability payloads
     const controller = new CodexAccountController({ manager });
     await assert.rejects(controller.start(), { code: "CODEX_CATALOG_INVALID" });
     assert.deepEqual(controller.catalogState().models, []);
+  });
+
+  await t.test("malformed or duplicate service tiers", async () => {
+    for (const invalid of [
+      model({
+        id: "bad-default-tier",
+        efforts: ["low"],
+        defaultServiceTier: "missing",
+        serviceTiers: [{ id: "priority", name: "Fast", description: "Fast" }],
+      }),
+      model({
+        id: "duplicate-tier",
+        efforts: ["low"],
+        defaultServiceTier: "priority",
+        serviceTiers: [
+          { id: "priority", name: "Fast", description: "Fast" },
+          { id: "priority", name: "Duplicate", description: "Duplicate" },
+        ],
+      }),
+    ]) {
+      const manager = readyManager({
+        "model/list": () => ({ data: [invalid], nextCursor: null }),
+      });
+      const controller = new CodexAccountController({ manager });
+      await assert.rejects(controller.start(), { code: "CODEX_CATALOG_INVALID" });
+    }
   });
 });
 

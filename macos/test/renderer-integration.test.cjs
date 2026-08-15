@@ -75,21 +75,43 @@ test("approved CSS docks management in the sidebar and model controls at the com
   const css = fs.readFileSync(cssPath, "utf8");
   const botUi = fs.readFileSync(botUiPath, "utf8");
   assert.match(css, /\.codex-bot-controls\s*\{[^}]*position:\s*relative[^}]*width:\s*100%/s);
-  assert.match(css, /\.codex-bot-controls\s*\{[^}]*color:\s*#eee[^}]*background:\s*#242424/s);
+  assert.match(css, /\.codex-bot-controls\s*\{[^}]*color:\s*var\(--codex-text\)[^}]*background:\s*var\(--codex-surface\)/s);
   assert.match(css, /\.codex-model-dock\s*\{[^}]*position:\s*relative[^}]*width:\s*100%/s);
   assert.match(css, /\[data-codex-mount-state="pending"\][^}]*display:\s*none/s);
   assert.doesNotMatch(css, /\.codex-bot-controls\s*\{[^}]*position:\s*fixed/s);
   assert.doesNotMatch(css, /\.codex-bot-controls\s*\{[^}]*top:\s*12px/s);
   assert.doesNotMatch(css, /\bCanvas(?:Text)?\b/);
-  assert.match(css, /\.codex-reasoning-control\.is-max[^}]*#2383ff/s);
-  assert.match(css, /\.codex-reasoning-ultra-fill[^}]*linear-gradient\([^)]*#2383ff[^)]*(?:#7c3aed|#8b5cf6)[^)]*#2383ff/s);
-  assert.match(css, /\.codex-reasoning-control\.is-ultra-entering[^}]*\.codex-reasoning-burst/s);
-  assert.match(css, /@keyframes\s+codex-ultra-flow/);
+  assert.match(css, /\.codex-power-shell\s*\{[^}]*height:\s*32px/s);
+  assert.match(css, /\.codex-power-control\s*\{[^}]*height:\s*28px/s);
+  assert.match(css, /\.codex-power-track\s*\{[^}]*height:\s*24px/s);
+  assert.match(css, /\.codex-power-thumb\s*\{[^}]*width:\s*28px[^}]*height:\s*28px/s);
+  assert.match(css, /\.codex-power-tick\s*\{[^}]*width:\s*4px[^}]*height:\s*4px/s);
+  assert.match(css, /\.codex-power-control\.is-max[^}]*#2383ff/s);
+  assert.match(css, /\.codex-power-control\.is-disabled\s*\{[^}]*opacity:\s*0\.5[0-9]/s);
+  assert.match(css, /\.codex-power-ultra-field[^}]*linear-gradient\([^)]*#2383ff[^)]*(?:#7c3aed|#8b5cf6)[^)]*#2383ff/s);
+  assert.match(css, /\.codex-power-control\.is-ultra-entering[^}]*\.codex-power-burst/s);
+  assert.match(css, /@keyframes\s+codex-power-ultra-flow/);
+  assert.match(css, /\.codex-power-advanced[^}]*grid-template-columns/s);
+  assert.doesNotMatch(css, /\.codex-model-row[^}]*112px/s);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*animation:\s*none\s*!important/);
+  assert.match(
+    css,
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-power-particles,[\s\S]*\.codex-power-burst\s*\{[^}]*display:\s*none\s*!important/s,
+  );
+  assert.match(css, /:root\[data-theme="light"\][\s\S]*--codex-surface:\s*#f[0-9a-f]{5}/i);
+  assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)/);
+  assert.match(css, /\.codex-model-dock\s*\{[^}]*container-type:\s*inline-size/s);
+  assert.match(
+    css,
+    /@container\s*\(max-width:\s*440px\)[\s\S]*\.codex-power-shell\s*\{[^}]*grid-template-areas:[^}]*height:\s*auto/s,
+  );
   assert.match(css, /@media\s*\(max-width:\s*1100px\)/);
+  assert.match(css, /\.codex-bot-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+max-content/s);
+  assert.match(css, /\.codex-bot-new\s*\{[^}]*white-space:\s*nowrap/s);
   assert.doesNotMatch(css, /url\(|data:image|\/Users\/|\/private\/tmp\//);
   assert.match(botUi, /"button",\s*"codex-bot-rename-action",\s*"Rename"/);
   assert.match(botUi, /rename\.addEventListener\("keydown"[\s\S]*event\.key === "Enter"/);
   assert.match(botUi, /findUiMounts/);
   assert.match(botUi, /MutationObserver/);
+  assert.match(botUi, /reasoningView\.control\.classList\.toggle\("is-disabled",\s*snapshot\.disabled\)/s);
 });

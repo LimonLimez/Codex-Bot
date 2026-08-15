@@ -1,7 +1,16 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { ReasoningControlState } = require("../src/renderer/reasoning-control.js");
+const { PowerControlState, ReasoningControlState } = require("../src/renderer/reasoning-control.js");
+
+function powerStops(generation = 4) {
+  return [
+    { provider: "openai-codex", model: "terra", effort: "low", serviceTier: null, catalogGeneration: generation, label: "Light", effect: "ordinary" },
+    { provider: "openai-codex", model: "sol", effort: "medium", serviceTier: null, catalogGeneration: generation, label: "Standard", effect: "ordinary" },
+    { provider: "openai-codex", model: "sol", effort: "max", serviceTier: "priority", catalogGeneration: generation, label: "Max", effect: "max" },
+    { provider: "openai-codex", model: "sol", effort: "ultra", serviceTier: "priority", catalogGeneration: generation, label: "Ultra", effect: "ultra" },
+  ];
+}
 
 test("Ultra enters once and pointer jitter is a no-op", () => {
   const control = new ReasoningControlState(["low", "medium", "high", "xhigh", "max", "ultra"], "max");
@@ -55,4 +64,83 @@ test("Ultra Code reuses the Ultra transition without changing its provider-speci
   const selected = control.selectIndex(5);
   assert.equal(selected.effort, "ultra-code");
   assert.equal(selected.enteredUltra, true);
+});
+
+test("Power pointer interaction previews without committing then commits once on release", () => {
+  const supplied = powerStops();
+  const control = new PowerControlState(supplied, supplied[1], { ownerKey: "bot-a:4" });
+  supplied[1].label = "mutated";
+  assert.equal(control.snapshot().label, "Standard");
+  assert.equal(Object.isFrozen(control.snapshot().stops), true);
+  assert.equal(Object.isFrozen(control.snapshot().stops[0]), true);
+
+  let preview = control.pointerDown(0, 100);
+  assert.equal(preview.committedIndex, 1);
+  assert.equal(preview.previewIndex, 0);
+  assert.equal(preview.label, "Light");
+  assert.equal(preview.changed, false);
+  preview = control.pointerMove(3);
+  assert.equal(preview.committedIndex, 1);
+  assert.equal(preview.previewIndex, 3);
+  assert.equal(preview.endpointLabelsVisible, false);
+  assert.equal(control.tick(549).endpointLabelsVisible, false);
+  assert.equal(control.tick(550).endpointLabelsVisible, true);
+
+  const committed = control.pointerUp(3);
+  assert.equal(committed.committedIndex, 3);
+  assert.equal(committed.previewIndex, 3);
+  assert.equal(committed.changed, true);
+  assert.equal(committed.enteredUltra, true);
+  assert.equal(committed.endpointLabelsVisible, false);
+});
+
+test("Power wheel and keyboard operations snap exact stops with native Home End and arrow semantics", () => {
+  const stops = powerStops();
+  const control = new PowerControlState(stops, stops[1], { ownerKey: "bot-a:4" });
+  assert.equal(control.wheel(7).committedIndex, 2);
+  assert.equal(control.keyDown("ArrowLeft").committedIndex, 1);
+  assert.equal(control.keyDown("ArrowUp").committedIndex, 2);
+  assert.equal(control.keyDown("End").committedIndex, 3);
+  assert.equal(control.keyDown("Home").committedIndex, 0);
+  assert.equal(control.keyDown("PageDown").changed, false);
+  assert.match(control.snapshot().liveText, /Light.*Terra/i);
+});
+
+test("Power focus hover and disabled state are explicit and disabled input is inert", () => {
+  const stops = powerStops();
+  const control = new PowerControlState(stops, stops[1], { ownerKey: "bot-a:4" });
+  assert.equal(control.setFocus(true).focused, true);
+  assert.equal(control.setHover(true).hovered, true);
+  const disabled = control.setDisabled(true);
+  assert.equal(disabled.disabled, true);
+  assert.equal(control.pointerDown(3, 0).committedIndex, 1);
+  assert.equal(control.wheel(8).committedIndex, 1);
+  assert.equal(control.keyDown("End").committedIndex, 1);
+  assert.equal(control.setDisabled(false).disabled, false);
+  assert.equal(control.keyDown("End").committedIndex, 3);
+});
+
+test("Power catalog or bot ownership replacement cancels stale preview and keeps only an exact current tuple", () => {
+  const stops = powerStops();
+  const control = new PowerControlState(stops, stops[2], { ownerKey: "bot-a:4" });
+  control.pointerDown(3, 0);
+  const replacement = powerStops(5).slice(0, 3);
+  const reset = control.setStops(replacement, replacement[1], { ownerKey: "bot-b:5" });
+  assert.equal(reset.ownerKey, "bot-b:5");
+  assert.equal(reset.committedIndex, 1);
+  assert.equal(reset.previewIndex, 1);
+  assert.equal(reset.pointerActive, false);
+  assert.equal(reset.endpointLabelsVisible, false);
+  assert.equal(reset.changed, true);
+  assert.equal(control.pointerUp(2).committedIndex, 1, "a stale pointer release must be inert");
+});
+
+test("Power preserves provider-specific Ultra Code in live text and transition identity", () => {
+  const stops = [{ provider: "cliproxy-anthropic", model: "claude-fable-5", effort: "max", serviceTier: null, catalogGeneration: 1, label: "Max", effect: "max" },
+    { provider: "cliproxy-anthropic", model: "claude-fable-5", effort: "ultra-code", serviceTier: null, catalogGeneration: 1, label: "Ultra Code", effect: "ultra" }];
+  const control = new PowerControlState(stops, stops[0], { ownerKey: "bot-fable:1" });
+  const result = control.keyDown("End");
+  assert.equal(result.enteredUltra, true);
+  assert.equal(result.selection.effort, "ultra-code");
+  assert.match(result.liveText, /Ultra Code.*Claude Fable 5/i);
 });

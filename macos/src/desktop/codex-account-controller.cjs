@@ -8,6 +8,7 @@ const MAX_MODELS = 512;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const EFFORT = /^[a-z][a-z0-9_-]{0,31}$/;
+const SERVICE_TIER = /^[a-z][a-z0-9_-]{0,31}$/;
 const CURSOR = /^[A-Za-z0-9._~+/=-]{1,512}$/;
 const USER_CODE = /^[A-Z0-9]{3,16}(?:-[A-Z0-9]{2,16})?$/;
 const AUTH_MODES = new Set([
@@ -159,6 +160,34 @@ function normalizeModel(value) {
   if (!seenEfforts.has(raw.defaultReasoningEffort)) {
     throw accountError("CODEX_CATALOG_INVALID", "Codex catalog is invalid.");
   }
+  const rawServiceTiers = raw.serviceTiers === undefined ? [] : raw.serviceTiers;
+  const defaultServiceTier = raw.defaultServiceTier ?? null;
+  if (!Array.isArray(rawServiceTiers) || types.isProxy(rawServiceTiers)
+    || rawServiceTiers.length > 16
+    || !(defaultServiceTier === null
+      || (typeof defaultServiceTier === "string" && SERVICE_TIER.test(defaultServiceTier)))) {
+    throw accountError("CODEX_CATALOG_INVALID", "Codex catalog is invalid.");
+  }
+  const serviceTiers = [];
+  const seenServiceTiers = new Set();
+  for (const valueEntry of rawServiceTiers) {
+    const entry = plainData(valueEntry, "CODEX_CATALOG_INVALID");
+    if (typeof entry.id !== "string" || !SERVICE_TIER.test(entry.id)
+      || seenServiceTiers.has(entry.id)
+      || typeof entry.name !== "string" || entry.name.trim().length < 1 || entry.name.length > 160
+      || typeof entry.description !== "string" || entry.description.length > 1024) {
+      throw accountError("CODEX_CATALOG_INVALID", "Codex catalog is invalid.");
+    }
+    seenServiceTiers.add(entry.id);
+    serviceTiers.push(deepFreeze({
+      id: entry.id,
+      name: entry.name,
+      description: entry.description,
+    }));
+  }
+  if (defaultServiceTier !== null && !seenServiceTiers.has(defaultServiceTier)) {
+    throw accountError("CODEX_CATALOG_INVALID", "Codex catalog is invalid.");
+  }
   const rawModalities = raw.inputModalities === undefined ? ["text", "image"] : raw.inputModalities;
   if (!Array.isArray(rawModalities) || rawModalities.length < 1 || rawModalities.length > 8) {
     throw accountError("CODEX_CATALOG_INVALID", "Codex catalog is invalid.");
@@ -174,6 +203,8 @@ function normalizeModel(value) {
     id: raw.id,
     displayName: raw.displayName,
     defaultReasoningEffort: raw.defaultReasoningEffort,
+    defaultServiceTier,
+    serviceTiers,
     supportedReasoningEfforts: efforts,
     inputModalities: modalities,
     supportsPersonality: raw.supportsPersonality === true,
