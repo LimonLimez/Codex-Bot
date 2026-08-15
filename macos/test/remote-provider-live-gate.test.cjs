@@ -7,11 +7,13 @@ const path = require("node:path");
 const test = require("node:test");
 
 let loadLiveGateDependencies;
+let runRemoteProviderLiveGate;
 let validateComputerExercise;
 let moduleLoadError = null;
 try {
   ({
     loadLiveGateDependencies,
+    runRemoteProviderLiveGate,
     validateComputerExercise,
   } = require("../src/bots/remote-provider-live-gate.cjs"));
 } catch (error) {
@@ -19,6 +21,7 @@ try {
 }
 
 const BOT_ID = "bot-00000000-0000-4000-8000-000000000001";
+const { validateProvider } = require("../src/bots/runtime-provider.cjs");
 
 async function temporaryDirectory(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-live-gate-test-"));
@@ -221,4 +224,272 @@ test("exercise adapter rejects hostile shapes and mismatched acknowledgements wi
       assert.doesNotMatch(String(error?.stack), /private-proxy-diagnostic|\/Users\/private|token=secret/);
     });
   }
+});
+
+async function liveGateHarness(t, options = {}) {
+  const workspacePath = await temporaryDirectory(t);
+  const provisionCalls = [];
+  const runtimes = new Map();
+  const retired = [];
+  const subscribers = new Set();
+  const exerciseCalls = [];
+  const clients = [];
+  const protocolCalls = [];
+  let exerciseDisposed = 0;
+  let lookupCalls = 0;
+
+  const provider = validateProvider({
+    async capabilities() {
+      return {
+        provision: true,
+        reconcile: true,
+        retire: true,
+        remoteAppServer: true,
+        computerFrames: true,
+      };
+    },
+    async provision(input) {
+      const index = provisionCalls.length;
+      provisionCalls.push(input);
+      const runtimeId = options.collision === "runtimeId" ? "runtime-shared" : `runtime-${index + 1}`;
+      const endpointIndex = options.collision === "endpoint" ? 1 : index + 1;
+      const ownerBotId = options.collision === "ownerBotId" && index === 1
+        ? provisionCalls[0].botId
+        : input.botId;
+      const record = {
+        provider: "fixture-provider",
+        runtimeId,
+        ownerBotId,
+        endpoint: `wss://runtime-${endpointIndex}.provider.example/app-server`,
+        authToken: `fixture-private-auth-token-${index + 1}-value`,
+        state: "ready",
+      };
+      runtimes.set(runtimeId, { ...record });
+      return record;
+    },
+    async inspect({ runtimeId }) {
+      const record = runtimes.get(runtimeId);
+      if (!record) return { runtimeId, ownerBotId: BOT_ID, state: "retired" };
+      return { runtimeId, ownerBotId: record.ownerBotId, state: record.state };
+    },
+    async retire({ runtimeId }) {
+      const record = runtimes.get(runtimeId);
+      if (record) record.state = "retired";
+      retired.push(runtimeId);
+      return { runtimeId, state: "retired" };
+    },
+    subscribe(callback) {
+      subscribers.add(callback);
+      return () => subscribers.delete(callback);
+    },
+  });
+
+  const exercise = validateComputerExercise({
+    async openRemoteUrl(input) {
+      exerciseCalls.push(input);
+      return { accepted: true, ...input };
+    },
+    async dispose() {
+      exerciseDisposed += 1;
+    },
+  });
+
+  const dependencies = {
+    async lookup(hostname) {
+      lookupCalls += 1;
+      if (options.privateDns) return [{ address: "127.0.0.1", family: 4 }];
+      const suffix = hostname.includes("runtime-2") ? "2" : "1";
+      if (options.rebindingDns && lookupCalls > 2) {
+        return [{ address: `1.1.1.${suffix}`, family: 4 }];
+      }
+      return [{ address: `8.8.8.${suffix}`, family: 4 }];
+    },
+    clientFactory(session) {
+      const client = {
+        session,
+        started: false,
+        stopped: false,
+        async start() {
+          this.started = true;
+          if (options.hungClientStart) return new Promise(() => {});
+        },
+        async request(method, params) {
+          protocolCalls.push({ runtimeId: session.runtimeId, method, params });
+          if (method === "account/read") return { account: { type: "chatgpt" } };
+          if (method === "model/list") {
+            if (options.modelOverflow) {
+              return { data: Array.from({ length: 4097 }, () => ({ id: "gpt-5.6-sol" })), nextCursor: null };
+            }
+            if (options.cyclicCatalog) {
+              return { data: [{ id: "gpt-5.6-sol" }], nextCursor: "same-page" };
+            }
+            return { data: [{ id: "gpt-5.6-sol" }], nextCursor: null };
+          }
+          throw new Error("unexpected method");
+        },
+        stop() {
+          this.stopped = true;
+        },
+      };
+      clients.push(client);
+      return client;
+    },
+  };
+
+  return {
+    options: { provider, exercise, workspacePath, dependencies },
+    provisionCalls,
+    runtimes,
+    retired,
+    subscribers,
+    exerciseCalls,
+    clients,
+    protocolCalls,
+    get exerciseDisposed() { return exerciseDisposed; },
+    get lookupCalls() { return lookupCalls; },
+  };
+}
+
+async function raceWithSentinel(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ status: "sentinel" }), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+test("provisions two distinct bot runtimes through the production controller", async (t) => {
+  assert.equal(typeof runRemoteProviderLiveGate, "function");
+  const harness = await liveGateHarness(t);
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.equal(result.status, "awaiting-computer-proof");
+  assert.equal(harness.provisionCalls.length, 2);
+  assert.notEqual(
+    harness.runtimes.get("runtime-1").runtimeId,
+    harness.runtimes.get("runtime-2").runtimeId,
+  );
+  assert.deepEqual(
+    harness.provisionCalls.map(({ botId, idempotencyKey }) => idempotencyKey),
+    harness.provisionCalls.map(({ botId }) => `codex-bot:${botId}`),
+  );
+  assert.deepEqual(harness.protocolCalls.map(({ method }) => method), [
+    "account/read", "model/list", "account/read", "model/list",
+  ]);
+  assert.equal(harness.clients.every(({ started, stopped }) => started && stopped), true);
+  assert.equal(harness.exerciseCalls.length, 0);
+  assert.equal(harness.exerciseDisposed, 1);
+  assert.equal(JSON.stringify(result).includes("authToken"), false);
+  assert.equal(JSON.stringify(result).includes("wss://"), false);
+});
+
+test("fails before Computer work for duplicate runtimes endpoints or owners", async (t) => {
+  assert.equal(typeof runRemoteProviderLiveGate, "function");
+  for (const collision of ["runtimeId", "endpoint", "ownerBotId"]) {
+    await t.test(collision, async (t) => {
+      const harness = await liveGateHarness(t, { collision });
+      await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+        code: "REMOTE_PROVIDER_GATE_FAILED",
+        message: "Remote provider verification failed.",
+      });
+      assert.equal(harness.exerciseCalls.length, 0);
+      assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+      assert.equal(harness.exerciseDisposed, 1);
+    });
+  }
+});
+
+test("rejects private DNS answers before constructing a remote client", async (t) => {
+  assert.equal(typeof runRemoteProviderLiveGate, "function");
+  const harness = await liveGateHarness(t, { privateDns: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+  });
+
+  assert.equal(harness.clients.length, 0);
+  assert.equal(harness.exerciseCalls.length, 0);
+});
+
+test("rejects DNS rebinding between preflight and client start", async (t) => {
+  const harness = await liveGateHarness(t, { rebindingDns: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+  });
+
+  assert.equal(harness.lookupCalls, 4);
+  assert.equal(harness.clients.every(({ started, stopped }) => !started && stopped), true);
+  assert.equal(harness.exerciseCalls.length, 0);
+});
+
+test("rejects cyclic remote model pagination before Computer work", async (t) => {
+  assert.equal(typeof runRemoteProviderLiveGate, "function");
+  const harness = await liveGateHarness(t, { cyclicCatalog: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+  });
+
+  assert.equal(harness.exerciseCalls.length, 0);
+  assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+});
+
+test("rejects an oversized remote model catalog", async (t) => {
+  const harness = await liveGateHarness(t, { modelOverflow: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+  });
+
+  assert.equal(harness.exerciseCalls.length, 0);
+  assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+});
+
+test("bounds a hung remote client start and still performs cleanup", async (t) => {
+  assert.equal(typeof runRemoteProviderLiveGate, "function");
+  const harness = await liveGateHarness(t, { hungClientStart: true });
+  harness.options.dependencies.operationTimeoutMs = 20;
+
+  const outcome = await raceWithSentinel(
+    runRemoteProviderLiveGate(harness.options).then(
+      () => ({ status: "resolved" }),
+      (error) => ({ status: "rejected", error }),
+    ),
+    500,
+  );
+
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.error.code, "REMOTE_PROVIDER_GATE_FAILED");
+  assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+  assert.equal(harness.exerciseDisposed, 1);
+});
+
+test("abort interrupts a hung remote client and still performs cleanup", async (t) => {
+  const harness = await liveGateHarness(t, { hungClientStart: true });
+  harness.options.dependencies.operationTimeoutMs = 500;
+  const controller = new AbortController();
+  harness.options.signal = controller.signal;
+  const abortTimer = setTimeout(() => controller.abort(), 20);
+  t.after(() => clearTimeout(abortTimer));
+
+  const outcome = await raceWithSentinel(
+    runRemoteProviderLiveGate(harness.options).then(
+      () => ({ status: "resolved" }),
+      (error) => ({ status: "rejected", error }),
+    ),
+    500,
+  );
+
+  assert.equal(outcome.status, "rejected");
+  assert.equal(outcome.error.code, "REMOTE_PROVIDER_GATE_FAILED");
+  assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+  assert.equal(harness.exerciseDisposed, 1);
 });
