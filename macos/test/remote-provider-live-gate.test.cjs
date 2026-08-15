@@ -446,6 +446,19 @@ async function liveGateHarness(t, options = {}) {
         }
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
+      if (options.eventFloodOnDispose && lastExerciseInput) {
+        for (let sequence = 2; sequence <= 302; sequence += 1) {
+          for (const callback of subscribers) {
+            callback({
+              runtimeId: lastExerciseInput.runtimeId,
+              type: "computer/cursor",
+              sequence,
+              payload: { x: sequence, y: sequence },
+            });
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
     },
   });
 
@@ -863,6 +876,17 @@ test("accepts a fresh action-scoped digest after a fully settled prior frame", a
 
   assert.equal(result.status, "PASS");
   assert.equal(harness.exerciseCalls.length, 1);
+});
+
+test("fails closed when provider evidence exceeds the bounded verifier ledger", async (t) => {
+  const harness = await liveGateHarness(t, { eventFloodOnDispose: true });
+  harness.options.dependencies.computerTimeoutMs = 500;
+  harness.options.dependencies.frameSettleMs = 80;
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
 });
 
 test("cleanup never retires a captured runtime after the authoritative bot receipt changes", async (t) => {

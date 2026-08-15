@@ -723,6 +723,59 @@ test("subscription events are deeply detached and frozen before delivery", () =>
   assert.deepEqual(seen[0].payload, { frames: [{ sequence: 1, pixels: [1, 2, 3] }] });
 });
 
+test("rejects proxied cyclic deep wide and oversized provider data before publication", async (t) => {
+  const cases = [];
+  cases.push(["proxy", new Proxy({
+    runtimeId: "runtime-bot-1",
+    type: "computer/frame",
+    sequence: 1,
+  }, {})]);
+
+  const cycle = { runtimeId: "runtime-bot-1", type: "computer/frame", sequence: 1 };
+  cycle.payload = cycle;
+  cases.push(["cycle", cycle]);
+
+  const deep = { runtimeId: "runtime-bot-1", type: "computer/frame", sequence: 1, payload: {} };
+  let cursor = deep.payload;
+  for (let index = 0; index < 40; index += 1) {
+    cursor.next = {};
+    cursor = cursor.next;
+  }
+  cases.push(["deep", deep]);
+
+  const widePayload = {};
+  for (let index = 0; index < 300; index += 1) widePayload[`field${index}`] = index;
+  cases.push(["wide", {
+    runtimeId: "runtime-bot-1",
+    type: "computer/frame",
+    sequence: 1,
+    payload: widePayload,
+  }]);
+  cases.push(["oversized string", {
+    runtimeId: "runtime-bot-1",
+    type: "computer/frame",
+    sequence: 1,
+    payload: { text: "x".repeat(300_000) },
+  }]);
+
+  for (const [name, event] of cases) {
+    await t.test(name, () => {
+      let retainedCallback;
+      let delivered = false;
+      const provider = validateProvider(fakeProvider({
+        subscribe(callback) {
+          retainedCallback = callback;
+          return () => {};
+        },
+      }));
+      provider.subscribe(() => { delivered = true; });
+      const error = captureThrow(() => retainedCallback(event));
+      assert.equal(error.message, "Remote runtime provider failed.");
+      assert.equal(delivered, false);
+    });
+  }
+});
+
 test("unsubscribe deactivates first, ignores retained callbacks, and is idempotent", () => {
   let retainedCallback;
   let underlyingUnsubscribeCalls = 0;

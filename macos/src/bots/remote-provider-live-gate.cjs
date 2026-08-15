@@ -17,6 +17,7 @@ const BLOCKED_MESSAGE = "Remote provider verification is not configured.";
 const FAILED_CODE = "REMOTE_PROVIDER_GATE_FAILED";
 const FAILED_MESSAGE = "Remote provider verification failed.";
 const YOUTUBE_URL = "https://www.youtube.com/";
+const MAX_GATE_EVENTS = 256;
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const NON_PUBLIC_IPV4_CIDRS = Object.freeze([
@@ -296,6 +297,18 @@ function withCooperativeDeadline(start, timeoutMs, signal) {
   });
 }
 
+function boundedEventLog() {
+  return { items: [], overflow: false };
+}
+
+function appendBoundedEvent(log, event) {
+  if (log.items.length >= MAX_GATE_EVENTS) {
+    log.overflow = true;
+    return;
+  }
+  log.items.push(event);
+}
+
 function runtimeProviderRecorder(provider, receipts, ingressEvents, options) {
   let defaultSignal = options.signal;
   const inflight = new Set();
@@ -336,7 +349,7 @@ function runtimeProviderRecorder(provider, receipts, ingressEvents, options) {
     retire: (input) => invoke("retire", { runtimeId: input.runtimeId }, input.signal ?? defaultSignal),
     subscribe(callback) {
       return provider.subscribe((event) => {
-        ingressEvents.push(Object.freeze({
+        appendBoundedEvent(ingressEvents, Object.freeze({
           runtimeId: event.runtimeId,
           type: event.type,
           sequence: event.sequence,
@@ -711,12 +724,12 @@ async function waitForYouTubeFrame({
   signal,
 }) {
   const actionId = `exercise-${randomUUID()}`;
-  const ingressStart = ingressEvents.length;
+  const ingressStart = ingressEvents.items.length;
   const waiter = computerFrameWaiter({
     controller,
     receipt: botA,
-    priorEvents: runtimeEvents,
-    ingressEvents,
+    priorEvents: runtimeEvents.items,
+    ingressEvents: ingressEvents.items,
     ingressStart,
     timeoutMs,
     settleMs,
@@ -902,8 +915,8 @@ async function runRemoteProviderLiveGate(options) {
   const readyReceipts = new Map();
   let controller = null;
   let store = null;
-  const runtimeEvents = [];
-  const ingressEvents = [];
+  const runtimeEvents = boundedEventLog();
+  const ingressEvents = boundedEventLog();
   const startedAt = new Date().toISOString();
   let result = null;
   let failure = null;
@@ -953,7 +966,7 @@ async function runRemoteProviderLiveGate(options) {
     }
     store = new BotStore({ filePath: storeFilePath });
     controller = new BotRuntimeController({ store, provider: recordedProvider });
-    controller.on("runtime-event", (event) => runtimeEvents.push(event));
+    controller.on("runtime-event", (event) => appendBoundedEvent(runtimeEvents, event));
     const botA = await readyBot(controller, recordedProvider);
     if (signal?.aborted) throw failedError();
     const botB = await readyBot(controller, recordedProvider);
@@ -1063,7 +1076,9 @@ async function runRemoteProviderLiveGate(options) {
     cleanupTimeoutMs,
   });
   const monitored = computerMonitor?.finish() ?? Object.freeze({ clean: false, crossBotFrameCount: 0 });
-  if (failure || !cleanup.safe || !result || !monitored.clean || monitored.crossBotFrameCount !== 0) {
+  if (failure || !cleanup.safe || !result
+    || runtimeEvents.overflow || ingressEvents.overflow
+    || !monitored.clean || monitored.crossBotFrameCount !== 0) {
     throw failedError();
   }
   return Object.freeze({

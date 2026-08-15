@@ -1,4 +1,5 @@
 const { isIP } = require("node:net");
+const { types } = require("node:util");
 
 const REQUIRED_METHODS = Object.freeze([
   "capabilities",
@@ -20,6 +21,11 @@ const PROVISION_STATES = new Set(["ready", "provisioning"]);
 const RETIRE_STATES = new Set(["retired", "detached"]);
 const PROVIDER_FAILURE = "Remote runtime provider failed.";
 const UNAVAILABLE = "Remote computer unavailable.";
+const MAX_PROVIDER_DATA_DEPTH = 24;
+const MAX_PROVIDER_DATA_FIELDS = 256;
+const MAX_PROVIDER_DATA_NODES = 4_096;
+const MAX_PROVIDER_STRING_BYTES = 65_536;
+const MAX_PROVIDER_TOTAL_STRING_BYTES = 262_144;
 
 function requiredObject(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -201,12 +207,26 @@ function deepFreeze(value, seen = new Set()) {
   return Object.freeze(value);
 }
 
-function cloneProviderData(value, seen) {
+function cloneProviderData(value, seen, budget, depth = 0) {
+  budget.nodes += 1;
+  if (budget.nodes > MAX_PROVIDER_DATA_NODES || depth > MAX_PROVIDER_DATA_DEPTH) {
+    throw new TypeError("Provider data exceeds bounded complexity.");
+  }
+  if (typeof value === "string") {
+    const bytes = Buffer.byteLength(value, "utf8");
+    budget.stringBytes += bytes;
+    if (bytes > MAX_PROVIDER_STRING_BYTES
+      || budget.stringBytes > MAX_PROVIDER_TOTAL_STRING_BYTES) {
+      throw new TypeError("Provider data exceeds bounded size.");
+    }
+    return value;
+  }
   if (value === null || ["undefined", "string", "number", "boolean", "bigint"].includes(typeof value)) {
     return value;
   }
   if (typeof value !== "object") throw new TypeError("Provider data must contain values only.");
-  if (seen.has(value)) return seen.get(value);
+  if (types.isProxy(value)) throw new TypeError("Provider data cannot contain proxies.");
+  if (seen.has(value)) throw new TypeError("Provider data cannot contain cycles or aliases.");
 
   const array = Array.isArray(value);
   const prototype = Object.getPrototypeOf(value);
@@ -215,7 +235,9 @@ function cloneProviderData(value, seen) {
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   const keys = Reflect.ownKeys(descriptors);
-  if (keys.some((key) => typeof key !== "string")) {
+  if (keys.length > MAX_PROVIDER_DATA_FIELDS
+    || (array && descriptors.length?.value > MAX_PROVIDER_DATA_FIELDS)
+    || keys.some((key) => typeof key !== "string")) {
     throw new TypeError("Provider data cannot contain symbol fields.");
   }
   for (const key of keys) {
@@ -228,7 +250,7 @@ function cloneProviderData(value, seen) {
     if (array && key === "length") continue;
     const descriptor = descriptors[key];
     Object.defineProperty(clone, key, {
-      value: cloneProviderData(descriptor.value, seen),
+      value: cloneProviderData(descriptor.value, seen, budget, depth + 1),
       enumerable: descriptor.enumerable,
       configurable: true,
       writable: true,
@@ -240,7 +262,7 @@ function cloneProviderData(value, seen) {
 
 function detachProviderData(value) {
   try {
-    return cloneProviderData(value, new Map());
+    return cloneProviderData(value, new Map(), { nodes: 0, stringBytes: 0 });
   } catch {
     throw sanitizedProviderFailure();
   }
