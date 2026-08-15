@@ -6,38 +6,33 @@
   "use strict";
 
   const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  const MODEL_CATALOG = Object.freeze([
-    Object.freeze({
-      model: "gpt-5.6-sol",
-      label: "GPT-5.6 Sol",
-      efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
-    }),
-    Object.freeze({
-      model: "gpt-5.6-terra",
-      label: "GPT-5.6 Terra",
-      efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
-    }),
-    Object.freeze({
-      model: "gpt-5.5",
-      label: "GPT-5.5",
-      efforts: Object.freeze(["low", "medium", "high", "xhigh"]),
-    }),
+  const OPTIONAL_MODEL_CATALOG = Object.freeze([
     Object.freeze({
       model: "claude-fable-5",
       label: "Claude Fable 5",
       efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      provider: "cliproxy-anthropic",
+      serviceTier: null,
+      catalogGeneration: 1,
     }),
     Object.freeze({
       model: "claude-opus-5",
       label: "Claude Opus 5",
       efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      provider: "cliproxy-anthropic",
+      serviceTier: null,
+      catalogGeneration: 1,
     }),
     Object.freeze({
       model: "claude-sonnet-5",
       label: "Claude Sonnet 5",
       efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      provider: "cliproxy-anthropic",
+      serviceTier: null,
+      catalogGeneration: 1,
     }),
   ]);
+  const MODEL_CATALOG = OPTIONAL_MODEL_CATALOG;
   const EFFORT_LABELS = Object.freeze({
     low: "Light",
     medium: "Medium",
@@ -107,9 +102,102 @@
     });
   }
 
+  function normalizeModelCatalog(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || value.status !== "ready" || !Number.isSafeInteger(value.generation)
+      || value.generation < 1 || !Array.isArray(value.models)) {
+      throw new Error("Model catalog is unavailable.");
+    }
+    const official = [];
+    const names = new Set();
+    for (const raw of value.models) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)
+        || typeof raw.id !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(raw.id)
+        || typeof raw.displayName !== "string" || raw.displayName.length < 1
+        || raw.displayName.length > 160 || !Array.isArray(raw.supportedReasoningEfforts)
+        || raw.supportedReasoningEfforts.length < 1 || names.has(raw.id)) {
+        throw new Error("Model catalog is unavailable.");
+      }
+      const efforts = Object.freeze([...raw.supportedReasoningEfforts]);
+      if (efforts.some((effort) => typeof effort !== "string"
+        || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))) {
+        throw new Error("Model catalog is unavailable.");
+      }
+      names.add(raw.id);
+      official.push(Object.freeze({
+        model: raw.id,
+        label: raw.displayName,
+        efforts,
+        provider: "openai-codex",
+        serviceTier: null,
+        catalogGeneration: value.generation,
+      }));
+    }
+    return Object.freeze([
+      ...official,
+      ...OPTIONAL_MODEL_CATALOG.map((entry) => Object.freeze({
+        ...entry,
+        provider: "cliproxy-anthropic",
+        serviceTier: null,
+        catalogGeneration: 1,
+      })),
+    ]);
+  }
+
+  function normalizeModelSelection(value, botId, catalog = MODEL_CATALOG) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Model selection is unavailable.");
+    }
+    let descriptors;
+    let prototype;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(value);
+      prototype = Object.getPrototypeOf(value);
+    } catch {
+      throw new Error("Model selection is unavailable.");
+    }
+    const fields = [
+      "botId", "provider", "model", "reasoningEffort", "serviceTier",
+      "catalogGeneration", "generation",
+    ];
+    if ((prototype !== Object.prototype && prototype !== null)
+      || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+        || !fields.includes(key) || !("value" in descriptors[key]))
+      || fields.some((field) => !descriptors[field])) {
+      throw new Error("Model selection is unavailable.");
+    }
+    const read = (field) => descriptors[field].value;
+    const model = catalog.find((entry) => entry.model === read("model"));
+    if (read("botId") !== botId || !model || !model.efforts.includes(read("reasoningEffort"))
+      || read("provider") !== model.provider
+      || read("serviceTier") !== model.serviceTier
+      || read("catalogGeneration") !== model.catalogGeneration
+      || !(read("serviceTier") === null || (typeof read("serviceTier") === "string"
+        && /^[a-z][a-z0-9_-]{0,31}$/.test(read("serviceTier"))))
+      || !Number.isSafeInteger(read("catalogGeneration")) || read("catalogGeneration") < 0
+      || !Number.isSafeInteger(read("generation")) || read("generation") < 0) {
+      throw new Error("Model selection is unavailable.");
+    }
+    return Object.freeze(Object.fromEntries(fields.map((field) => [field, read(field)])));
+  }
+
+  function isPendingOfficialSelection(value, botId) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    try {
+      const prototype = Object.getPrototypeOf(value);
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      return (prototype === Object.prototype || prototype === null)
+        && descriptors.botId && "value" in descriptors.botId
+        && descriptors.botId.value === botId
+        && descriptors.provider && "value" in descriptors.provider
+        && descriptors.provider.value === "openai-codex";
+    } catch { return false; }
+  }
+
   function createBotUiController({
     facade,
     runtimeFacade = null,
+    accountFacade = null,
     onSelectionChanged = () => {},
     onRuntimeEvent = () => {},
     onStateChanged = () => {},
@@ -128,8 +216,15 @@
     let activeBotId = null;
     let unsubscribe = null;
     let runtimeUnsubscribe = null;
+    let catalogUnsubscribe = null;
     let disposed = false;
     let selectionEpoch = 0;
+    let selectionFlight = null;
+    let selectionPending = false;
+    let modelSelection = null;
+    let modelCatalog = OPTIONAL_MODEL_CATALOG;
+    let catalogGeneration = -1;
+    let catalogStatus = "loading";
 
     function activeBot() {
       return activeBotId == null ? null : bots.get(activeBotId) ?? null;
@@ -143,7 +238,12 @@
         activeBotId,
         activeBot: selected,
         runtime: runtimePresentation(selected?.runtime.state),
+        modelSelection,
+        modelCatalog,
+        catalogGeneration,
+        catalogStatus,
         selectionEpoch,
+        selectionPending,
       });
     }
 
@@ -157,42 +257,135 @@
       if (disposed) throw new Error("Bot controls are unavailable.");
       const record = normalizeBot(value);
       bots.set(record.botId, record);
-      if (activeBotId == null) selectBot(record.botId);
+      if (activeBotId == null) void selectBot(record.botId).catch(() => {});
       else publish();
       return record;
     }
 
-    function selectBot(botId) {
+    function applyCatalog(value, { refreshSelection = true } = {}) {
+      if (disposed) return false;
+      const generation = value && typeof value === "object" && !Array.isArray(value)
+        && Number.isSafeInteger(value.generation) && value.generation >= 0
+        ? value.generation
+        : null;
+      if (generation !== null && generation < catalogGeneration) return false;
+
+      let nextCatalog = OPTIONAL_MODEL_CATALOG;
+      let nextStatus = "unavailable";
+      if (value && typeof value === "object" && !Array.isArray(value)
+        && value.status === "ready") {
+        try {
+          nextCatalog = normalizeModelCatalog(value);
+          nextStatus = "ready";
+        } catch {}
+      } else if (value && typeof value === "object" && !Array.isArray(value)
+        && typeof value.status === "string" && value.status.length > 0) {
+        nextStatus = value.status;
+      }
+
+      if (generation !== null) catalogGeneration = generation;
+      catalogStatus = nextStatus;
+      modelCatalog = nextCatalog;
+      let retainedSelection = null;
+      if (modelSelection && activeBotId) {
+        try {
+          retainedSelection = normalizeModelSelection(modelSelection, activeBotId, nextCatalog);
+        } catch {}
+      }
+      const selectionInvalidated = modelSelection !== null && retainedSelection === null;
+      modelSelection = retainedSelection;
+      publish();
+      if (refreshSelection && nextStatus === "ready" && activeBotId
+        && (selectionInvalidated || modelSelection === null)) {
+        void selectBot(activeBotId, true).catch(() => {});
+      }
+      return true;
+    }
+
+    function selectBot(botId, force = false) {
       if (disposed || typeof botId !== "string" || !bots.has(botId)) {
         throw new Error("Bot selection is unavailable.");
       }
-      if (activeBotId === botId) return snapshot();
-      selectionEpoch += 1;
+      if (activeBotId === botId && !force) {
+        return selectionFlight?.botId === botId
+          ? selectionFlight.promise
+          : Promise.resolve(snapshot());
+      }
+      const previousBotId = activeBotId;
+      const previousModelSelection = modelSelection;
+      const epoch = ++selectionEpoch;
       try {
         onSelectionChanged(null);
       } catch {}
       activeBotId = botId;
-      if (runtimeFacade && typeof runtimeFacade.selectBot === "function") {
-        try {
-          void Promise.resolve(runtimeFacade.selectBot(botId)).catch(() => {});
-        } catch {}
-      }
-      try {
-        onSelectionChanged(botId);
-      } catch {}
+      modelSelection = null;
+      selectionPending = true;
       publish();
-      return snapshot();
+      const operation = (async () => {
+        try {
+          let selectedResult = null;
+          if (runtimeFacade && typeof runtimeFacade.selectBot === "function") {
+            selectedResult = await runtimeFacade.selectBot(botId);
+          }
+          const stored = runtimeFacade && typeof runtimeFacade.readModel === "function"
+            ? await runtimeFacade.readModel(botId)
+            : selectedResult;
+          if (disposed || epoch !== selectionEpoch || activeBotId !== botId) {
+            throw new Error("Bot selection changed.");
+          }
+          if (stored && typeof stored === "object") {
+            try {
+              modelSelection = normalizeModelSelection(stored, botId, modelCatalog);
+            } catch (error) {
+              if (catalogStatus === "ready" || !isPendingOfficialSelection(stored, botId)) throw error;
+              modelSelection = null;
+            }
+          }
+          selectionPending = false;
+          try { onSelectionChanged(botId); } catch {}
+          publish();
+          return snapshot();
+        } catch (error) {
+          if (!disposed && epoch === selectionEpoch && activeBotId === botId) {
+            activeBotId = previousBotId;
+            modelSelection = previousModelSelection;
+            selectionPending = false;
+            try { onSelectionChanged(previousBotId); } catch {}
+            publish();
+          }
+          throw error;
+        }
+      })();
+      selectionFlight = { botId, epoch, promise: operation };
+      const clear = () => {
+        if (selectionFlight?.epoch === epoch) selectionFlight = null;
+      };
+      operation.then(clear, clear);
+      return operation;
     }
 
     async function initialize() {
       if (disposed) throw new Error("Bot controls are unavailable.");
+      if (accountFacade && typeof accountFacade.onCatalogChanged === "function") {
+        const candidateCatalog = accountFacade.onCatalogChanged((value) => {
+          applyCatalog(value);
+        });
+        catalogUnsubscribe = typeof candidateCatalog === "function" ? candidateCatalog : null;
+      }
+      if (accountFacade && typeof accountFacade.catalog === "function") {
+        try { applyCatalog(await accountFacade.catalog(), { refreshSelection: false }); }
+        catch { applyCatalog(null, { refreshSelection: false }); }
+      }
       const records = await facade.list();
       if (!Array.isArray(records)) throw new Error("Bot controls are unavailable.");
       for (const value of records) {
         const record = normalizeBot(value);
         bots.set(record.botId, record);
       }
-      if (bots.size > 0) selectBot(bots.keys().next().value);
+      if (bots.size > 0) {
+        try { await selectBot(bots.keys().next().value); }
+        catch { publish(); }
+      }
       else publish();
       const candidate = facade.onChanged((value) => {
         try {
@@ -223,17 +416,21 @@
       }
       const record = normalizeBot(await facade.create());
       bots.set(record.botId, record);
-      selectBot(record.botId);
+      await selectBot(record.botId);
       return record;
     }
 
     async function connectProvider(provider) {
-      if (
-        disposed ||
-        !new Set(["codex", "claude", "kimi"]).has(provider) ||
-        runtimeFacade == null ||
-        typeof runtimeFacade.connectProvider !== "function"
-      ) {
+      if (disposed || !new Set(["codex", "claude", "kimi"]).has(provider)) {
+        throw new Error("Provider connection is unavailable.");
+      }
+      if (provider === "codex") {
+        if (!accountFacade || typeof accountFacade.login !== "function") {
+          throw new Error("Provider connection is unavailable.");
+        }
+        return accountFacade.login("browser");
+      }
+      if (runtimeFacade == null || typeof runtimeFacade.connectProvider !== "function") {
         throw new Error("Provider connection is unavailable.");
       }
       return runtimeFacade.connectProvider(provider);
@@ -269,17 +466,16 @@
 
     async function selectModel(model, reasoningEffort) {
       const bot = activeBot();
-      const catalog = MODEL_CATALOG.find((entry) => entry.model === model);
+      const catalog = modelCatalog.find((entry) => entry.model === model);
       if (
         disposed ||
         !bot ||
-        bot.runtime.state !== "ready" ||
         !catalog ||
         !catalog.efforts.includes(reasoningEffort) ||
         runtimeFacade == null ||
         typeof runtimeFacade.selectModel !== "function"
       ) {
-        throw new Error("Model selection is unavailable until the remote computer is ready.");
+        throw new Error("Model selection is unavailable.");
       }
       const epoch = selectionEpoch;
       const selection = Object.freeze({
@@ -291,6 +487,10 @@
       if (disposed || epoch !== selectionEpoch || activeBotId !== bot.botId) {
         throw new Error("Model selection changed.");
       }
+      if (result && typeof result === "object") {
+        modelSelection = normalizeModelSelection(result, bot.botId, modelCatalog);
+        publish();
+      }
       return result;
     }
 
@@ -299,10 +499,14 @@
       disposed = true;
       if (unsubscribe) unsubscribe();
       if (runtimeUnsubscribe) runtimeUnsubscribe();
+      if (catalogUnsubscribe) catalogUnsubscribe();
       unsubscribe = null;
       runtimeUnsubscribe = null;
+      catalogUnsubscribe = null;
       bots.clear();
       activeBotId = null;
+      modelSelection = null;
+      selectionPending = false;
     }
 
     return Object.freeze({
@@ -500,11 +704,6 @@
     providerRow.append(providerSelect, connectProvider);
     const modelSelect = element(documentRef, "select", "codex-model-select");
     modelSelect.setAttribute("aria-label", "Codex model");
-    for (const entry of MODEL_CATALOG) {
-      const option = element(documentRef, "option", "", entry.label);
-      option.value = entry.model;
-      modelSelect.append(option);
-    }
     const reasoningView = createReasoningView(documentRef);
     const reasoning = reasoningView.input;
     const reasoningLabel = element(documentRef, "output", "codex-reasoning-label");
@@ -557,13 +756,25 @@
       status.dataset.tone = next.runtime.tone;
       retry.hidden = !next.runtime.retryVisible;
       retry.disabled = !next.runtime.retryVisible;
-      const enabled = next.runtime.controlsEnabled;
+      const enabled = selected != null && !next.selectionPending && next.modelCatalog.length > 0;
+      modelSelect.replaceChildren();
+      for (const entry of next.modelCatalog) {
+        const option = element(documentRef, "option", "", entry.label);
+        option.value = entry.model;
+        option.selected = entry.model === next.modelSelection?.model;
+        modelSelect.append(option);
+      }
       modelSelect.disabled = !enabled;
       reasoning.disabled = !enabled;
-      const model = MODEL_CATALOG.find((entry) => entry.model === modelSelect.value) ?? MODEL_CATALOG[0];
+      const model = next.modelCatalog.find((entry) => entry.model === next.modelSelection?.model)
+        ?? next.modelCatalog.find((entry) => entry.model === modelSelect.value)
+        ?? next.modelCatalog[0];
+      if (!model) return;
       if (modelSelect.value !== model.model) modelSelect.value = model.model;
       reasoning.max = String(model.efforts.length - 1);
-      if (Number(reasoning.value) >= model.efforts.length) reasoning.value = "0";
+      if (next.modelSelection?.model === model.model) {
+        reasoning.value = String(Math.max(0, model.efforts.indexOf(next.modelSelection.reasoningEffort)));
+      } else if (Number(reasoning.value) >= model.efforts.length) reasoning.value = "0";
       const effort = model.efforts[Number(reasoning.value)] ?? model.efforts[0];
       const enteredUltra = isUltraEffect(effort) && !isUltraEffect(lastEffort);
       updateReasoningView(reasoningView, model.efforts, Number(reasoning.value), { enteredUltra });
@@ -588,6 +799,7 @@
     controller = createBotUiController({
       facade,
       runtimeFacade: windowRef.codexRuntime,
+      accountFacade: windowRef.codexAccount,
       onStateChanged: render,
       onSelectionChanged(botId) {
         panel.dataset.activeBotId = botId ?? "";
@@ -615,7 +827,7 @@
       });
     });
     const submitModel = () => {
-      const model = MODEL_CATALOG.find((entry) => entry.model === modelSelect.value);
+      const model = lastSnapshot?.modelCatalog.find((entry) => entry.model === modelSelect.value);
       const effort = model?.efforts[Number(reasoning.value)];
       if (model && effort) void controller.selectModel(model.model, effort).catch(() => {});
       render(controller.snapshot());

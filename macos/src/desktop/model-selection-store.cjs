@@ -6,16 +6,17 @@ const { randomUUID } = require("node:crypto");
 
 const SCHEMA_VERSION = 1;
 const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const MODEL_EFFORTS = Object.freeze({
-  "gpt-5.6-sol": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
-  "gpt-5.6-terra": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
-  "gpt-5.5": Object.freeze(["low", "medium", "high", "xhigh"]),
-  "claude-fable-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-  "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-  "claude-sonnet-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-});
-const SELECTION_FIELDS = new Set(["botId", "model", "reasoningEffort", "generation"]);
-const REQUEST_FIELDS = new Set(["botId", "model", "reasoningEffort"]);
+const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const EFFORT = /^[a-z][a-z0-9_-]{0,31}$/;
+const SERVICE_TIER = /^[a-z][a-z0-9_-]{0,31}$/;
+const PROVIDERS = new Set(["openai-codex", "cliproxy-anthropic"]);
+const SELECTION_FIELDS = new Set([
+  "botId", "provider", "model", "reasoningEffort", "serviceTier",
+  "catalogGeneration", "generation",
+]);
+const REQUEST_FIELDS = new Set([
+  "botId", "provider", "model", "reasoningEffort", "serviceTier", "catalogGeneration",
+]);
 
 function ownData(value, allowed, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -49,8 +50,12 @@ function normalizeBotId(value) {
 function normalizeSelection(value) {
   const selection = ownData(value, SELECTION_FIELDS, "Model selection");
   const botId = normalizeBotId(selection.botId);
-  const efforts = MODEL_EFFORTS[selection.model];
-  if (!efforts || !efforts.includes(selection.reasoningEffort)) {
+  if (!PROVIDERS.has(selection.provider) || typeof selection.model !== "string"
+    || !MODEL_ID.test(selection.model) || typeof selection.reasoningEffort !== "string"
+    || !EFFORT.test(selection.reasoningEffort)
+    || !(selection.serviceTier === null || (typeof selection.serviceTier === "string"
+      && SERVICE_TIER.test(selection.serviceTier)))
+    || !Number.isSafeInteger(selection.catalogGeneration) || selection.catalogGeneration < 0) {
     throw new Error("Model selection is invalid.");
   }
   if (!Number.isSafeInteger(selection.generation) || selection.generation < 0) {
@@ -58,8 +63,11 @@ function normalizeSelection(value) {
   }
   return Object.freeze({
     botId,
+    provider: selection.provider,
     model: selection.model,
     reasoningEffort: selection.reasoningEffort,
+    serviceTier: selection.serviceTier,
+    catalogGeneration: selection.catalogGeneration,
     generation: selection.generation,
   });
 }
@@ -67,14 +75,21 @@ function normalizeSelection(value) {
 function normalizeSelectionRequest(value) {
   const selection = ownData(value, REQUEST_FIELDS, "Model selection");
   const botId = normalizeBotId(selection.botId);
-  const efforts = MODEL_EFFORTS[selection.model];
-  if (!efforts || !efforts.includes(selection.reasoningEffort)) {
+  if (!PROVIDERS.has(selection.provider) || typeof selection.model !== "string"
+    || !MODEL_ID.test(selection.model) || typeof selection.reasoningEffort !== "string"
+    || !EFFORT.test(selection.reasoningEffort)
+    || !(selection.serviceTier === null || (typeof selection.serviceTier === "string"
+      && SERVICE_TIER.test(selection.serviceTier)))
+    || !Number.isSafeInteger(selection.catalogGeneration) || selection.catalogGeneration < 0) {
     throw new Error("Model selection is invalid.");
   }
   return Object.freeze({
     botId,
+    provider: selection.provider,
     model: selection.model,
     reasoningEffort: selection.reasoningEffort,
+    serviceTier: selection.serviceTier,
+    catalogGeneration: selection.catalogGeneration,
   });
 }
 
@@ -96,13 +111,20 @@ function normalizeState(value) {
     }
     const normalized = normalizeSelection({
       botId,
+      provider: raw.provider ?? (String(raw.model).startsWith("claude-")
+        ? "cliproxy-anthropic" : "openai-codex"),
       model: raw.model,
       reasoningEffort: raw.reasoningEffort,
+      serviceTier: raw.serviceTier ?? null,
+      catalogGeneration: raw.catalogGeneration ?? 0,
       generation: raw.generation,
     });
     selections[botId] = {
       model: normalized.model,
       reasoningEffort: normalized.reasoningEffort,
+      provider: normalized.provider,
+      serviceTier: normalized.serviceTier,
+      catalogGeneration: normalized.catalogGeneration,
       generation: normalized.generation,
       updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : null,
     };
@@ -133,7 +155,9 @@ class ModelSelectionStore {
       const state = await this.#readState();
       const selection = state.selections[normalizedBotId];
       return selection ? Object.freeze({ botId: normalizedBotId, model: selection.model,
-        reasoningEffort: selection.reasoningEffort, generation: selection.generation }) : null;
+        provider: selection.provider, reasoningEffort: selection.reasoningEffort,
+        serviceTier: selection.serviceTier, catalogGeneration: selection.catalogGeneration,
+        generation: selection.generation }) : null;
     });
   }
 
@@ -145,6 +169,57 @@ class ModelSelectionStore {
     });
   }
 
+  ensure(botId, fallback) {
+    const requested = normalizeSelectionRequest({ botId, ...fallback });
+    return this.#mutate((state) => {
+      state.activeBotId = requested.botId;
+      const current = state.selections[requested.botId];
+      if (current) {
+        return Object.freeze({
+          botId: requested.botId,
+          provider: current.provider,
+          model: current.model,
+          reasoningEffort: current.reasoningEffort,
+          serviceTier: current.serviceTier,
+          catalogGeneration: current.catalogGeneration,
+          generation: current.generation,
+        });
+      }
+      const selection = Object.freeze({ ...requested, generation: 0 });
+      state.selections[requested.botId] = {
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
+        provider: selection.provider,
+        serviceTier: selection.serviceTier,
+        catalogGeneration: selection.catalogGeneration,
+        generation: selection.generation,
+        updatedAt: this.#now(),
+      };
+      return selection;
+    });
+  }
+
+  writeNext(value) {
+    const requested = normalizeSelectionRequest(value);
+    return this.#mutate((state) => {
+      const current = state.selections[requested.botId];
+      const generation = current ? current.generation + 1 : 0;
+      if (!Number.isSafeInteger(generation)) throw new Error("Model selection generation is invalid.");
+      const selection = Object.freeze({ ...requested, generation });
+      state.activeBotId = selection.botId;
+      state.selections[selection.botId] = {
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
+        provider: selection.provider,
+        serviceTier: selection.serviceTier,
+        catalogGeneration: selection.catalogGeneration,
+        generation: selection.generation,
+        updatedAt: this.#now(),
+      };
+      return selection;
+    });
+  }
+
   async write(value) {
     const selection = normalizeSelection(value);
     return this.#mutate((state) => {
@@ -152,6 +227,9 @@ class ModelSelectionStore {
       state.selections[selection.botId] = {
         model: selection.model,
         reasoningEffort: selection.reasoningEffort,
+        provider: selection.provider,
+        serviceTier: selection.serviceTier,
+        catalogGeneration: selection.catalogGeneration,
         generation: selection.generation,
         updatedAt: this.#now(),
       };
@@ -209,7 +287,6 @@ class ModelSelectionStore {
 
 module.exports = {
   BOT_ID,
-  MODEL_EFFORTS,
   ModelSelectionStore,
   normalizeSelection,
   normalizeSelectionRequest,

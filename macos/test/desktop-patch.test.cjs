@@ -37,3 +37,26 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.throws(() => patchMainSource(main), /already|anchor/i);
   assert.throws(() => patchPreloadSource(preload), /already|anchor/i);
 });
+
+test("desktop packaging includes every direct inference runtime module in the audited ASAR", () => {
+  const { DESKTOP_FILES } = require(patchPath);
+  const { ALLOWED_MUTATIONS } = require(path.join(__dirname, "..", "scripts", "patch-app.cjs"));
+  const required = [
+    "bridge/inference-socket-client.cjs",
+    "desktop/cliproxy-inference-transport.cjs",
+    "desktop/codex-account-controller.cjs",
+    "desktop/codex-app-server-manager.cjs",
+    "desktop/codex-direct-inference-transport.cjs",
+    "desktop/codex-runtime-integrity.cjs",
+    "desktop/inference-bridge-server.cjs",
+    "desktop/inference-provider-router.cjs",
+  ];
+  for (const relative of required) {
+    assert.equal(DESKTOP_FILES.includes(relative), true, `${relative} must be copied`);
+    assert.equal(
+      ALLOWED_MUTATIONS.includes(`dist/codex/${relative}`),
+      true,
+      `${relative} must be included in the exact mutation audit`,
+    );
+  }
+});

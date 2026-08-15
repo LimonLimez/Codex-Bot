@@ -247,7 +247,7 @@ test("starts one verified packaged Codex flight with an empty cwd minimal accoun
     method: "initialize",
     params: {
       clientInfo: { name: "codex-bot", title: "Codex Bot", version: "0.1.4-macos.1" },
-      capabilities: { experimentalApi: false, optOutNotificationMethods: [] },
+      capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
     },
   });
   child.receive({ id: 1, result: { serverInfo: { name: "codex", version: "0.147.0" } } });
@@ -332,6 +332,47 @@ test("automatically denies every server request and never exposes a local execut
     error: { code: -32601, message: "Codex Bot does not permit local tool requests." },
   })));
   assert.equal(manager.state, "ready");
+});
+
+test("exposes only bounded dynamic tool requests for the direct inference adapter to decline", async (t) => {
+  const { manager, children: [child] } = harness(t);
+  await startReady(manager, child);
+  const received = [];
+  manager.on("dynamic-tool-call", (value) => received.push(value));
+  child.receive({
+    id: 44,
+    method: "item/tool/call",
+    params: {
+      arguments: { message: "hello" },
+      callId: "call-1",
+      namespace: null,
+      threadId: "thread-1",
+      tool: "send_message",
+      turnId: "turn-1",
+    },
+  });
+  await tick();
+  assert.deepEqual(received, [{
+    id: 44,
+    method: "item/tool/call",
+    params: {
+      arguments: { message: "hello" },
+      callId: "call-1",
+      namespace: null,
+      threadId: "thread-1",
+      tool: "send_message",
+      turnId: "turn-1",
+    },
+  }]);
+  assert.equal(Object.isFrozen(received[0]), true);
+  assert.equal(Object.isFrozen(received[0].params.arguments), true);
+  assert.equal(child.writes.some((value) => value.id === 44), false);
+  manager.declineDynamicToolCall(44);
+  assert.deepEqual(child.writes.at(-1), {
+    id: 44,
+    result: { contentItems: [], success: false },
+  });
+  assert.throws(() => manager.declineDynamicToolCall(44), /tool|request|available/i);
 });
 
 test("fails closed on malformed oversized and invalid UTF-8 stdout without leaking diagnostics", async (t) => {

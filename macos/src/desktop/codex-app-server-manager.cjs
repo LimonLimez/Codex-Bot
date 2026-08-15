@@ -18,6 +18,7 @@ const MAX_PENDING_REQUESTS = 128;
 const MAX_TIMED_OUT_IDS = 128;
 const MAX_PREINIT_NOTIFICATIONS = 128;
 const MAX_PREINIT_NOTIFICATION_BYTES = 65_536;
+const MAX_DYNAMIC_TOOL_REQUESTS = 128;
 const MAX_METHOD_BYTES = 256;
 const MAX_DEPTH = 32;
 const MAX_COLLECTION_ITEMS = 8_192;
@@ -272,6 +273,7 @@ class CodexAppServerManager extends EventEmitter {
   #generation = 0;
   #nextRequestId = 1;
   #pending = new Map();
+  #dynamicToolRequests = new Map();
   #timedOutIds = new Set();
 
   constructor(rawOptions = {}) {
@@ -422,7 +424,7 @@ class CodexAppServerManager extends EventEmitter {
       ));
       await this.#sendRequest(active, "initialize", {
         clientInfo: { name: "codex-bot", title: "Codex Bot", version: this.#clientVersion },
-        capabilities: { experimentalApi: false, optOutNotificationMethods: [] },
+        capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       }, DEFAULT_TIMEOUT_MS);
       if (!this.#isCurrent(active) || !this.#isStarting(starting)) return;
       this.#write(active, { method: "initialized" });
@@ -577,6 +579,22 @@ class CodexAppServerManager extends EventEmitter {
     }
   }
 
+  declineDynamicToolCall(id) {
+    if (!Number.isSafeInteger(id) || id < 0) {
+      throw codexError("CODEX_DYNAMIC_TOOL_UNAVAILABLE", "Codex tool request is unavailable.");
+    }
+    const entry = this.#dynamicToolRequests.get(id);
+    if (!entry || !this.#isCurrent(entry.active)) {
+      throw codexError("CODEX_DYNAMIC_TOOL_UNAVAILABLE", "Codex tool request is unavailable.");
+    }
+    this.#dynamicToolRequests.delete(id);
+    this.#cancelTimer(entry.timer);
+    this.#write(entry.active, {
+      id,
+      result: { contentItems: [], success: false },
+    });
+  }
+
   #handleStdout(active, rawChunk) {
     if (!this.#isCurrent(active)) return;
     let chunk;
@@ -670,6 +688,25 @@ class CodexAppServerManager extends EventEmitter {
         this.#protocolFailure(active);
         return;
       }
+      if (message.method === "item/tool/call"
+        && this.rawListeners("dynamic-tool-call").length > 0
+        && this.#dynamicToolRequests.size < MAX_DYNAMIC_TOOL_REQUESTS) {
+        let dynamicRequest;
+        try { dynamicRequest = deepFreeze(cloneJson(message)); }
+        catch {
+          this.#protocolFailure(active);
+          return;
+        }
+        const entry = { active, timer: null };
+        entry.timer = this.#setTimeout(() => {
+          if (this.#dynamicToolRequests.get(message.id) !== entry) return;
+          try { this.declineDynamicToolCall(message.id); } catch {}
+        }, DEFAULT_TIMEOUT_MS);
+        entry.timer?.unref?.();
+        this.#dynamicToolRequests.set(message.id, entry);
+        this.emit("dynamic-tool-call", dynamicRequest);
+        return;
+      }
       try {
         this.#write(active, {
           id: message.id,
@@ -728,6 +765,11 @@ class CodexAppServerManager extends EventEmitter {
       this.#pending.delete(id);
       this.#cancelTimer(entry.timer);
       entry.reject(error);
+    }
+    for (const [id, entry] of [...this.#dynamicToolRequests]) {
+      if (entry.active !== active) continue;
+      this.#dynamicToolRequests.delete(id);
+      this.#cancelTimer(entry.timer);
     }
     const starting = this.#starting;
     if (starting && starting.epoch === active.epoch) {

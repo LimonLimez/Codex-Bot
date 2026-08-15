@@ -10,6 +10,42 @@ const runtimePath = path.join(__dirname, "..", "src", "desktop", "runtime.cjs");
 const selectionPath = path.join(__dirname, "..", "src", "desktop", "model-selection-store.cjs");
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 
+function readyCatalog(generation = 7) {
+  const entry = (id, efforts, defaultReasoningEffort = efforts[0], isDefault = false) => Object.freeze({
+    id,
+    displayName: id,
+    defaultReasoningEffort,
+    supportedReasoningEfforts: Object.freeze(efforts),
+    inputModalities: Object.freeze(["text", "image"]),
+    supportsPersonality: false,
+    isDefault,
+  });
+  return Object.freeze({
+    generation,
+    status: "ready",
+    models: Object.freeze([
+      entry("gpt-5.6-sol", ["low", "medium", "high", "xhigh", "max", "ultra"], "medium", true),
+      entry("gpt-5.6-terra", ["low", "medium", "high", "xhigh", "max", "ultra"], "medium"),
+      entry("gpt-5.6-luna", ["low", "medium", "high", "xhigh", "max"], "medium"),
+    ]),
+  });
+}
+
+function accountWithCatalog(catalog = readyCatalog(), onStart = async () => {}) {
+  return {
+    async start() { return onStart(); },
+    accountState() { return Object.freeze({}); },
+    catalogState() { return catalog; },
+    async login() { throw new Error("unused"); },
+    async cancelLogin() {},
+    async logout() {},
+    async refresh() {},
+    on() {},
+    off() {},
+    dispose() {},
+  };
+}
+
 function tempRoot(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-desktop-runtime-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -44,6 +80,7 @@ test("desktop runtime loads only an exact sealed sidecar receipt", (t) => {
 test("desktop factories own direct Codex immediately but keep CLIProxy entirely lazy", async (t) => {
   const {
     createDirectCodexManager,
+    createInferenceBridgeRuntime,
     createLazySidecarManager,
   } = require(runtimePath);
   const root = tempRoot(t);
@@ -109,6 +146,70 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   }]);
   lazy.stop();
   assert.equal(stops, 1);
+
+  const constructed = [];
+  class DirectTransportFixture {
+    constructor(options) { this.kind = "direct"; constructed.push(["direct", options]); }
+  }
+  class OptionalTransportFixture {
+    constructor(options) { this.kind = "optional"; constructed.push(["optional", options]); }
+  }
+  class RouterFixture {
+    constructor(options) { this.options = options; constructed.push(["router", options]); }
+  }
+  class BridgeFixture {
+    constructor(options) { this.options = options; constructed.push(["bridge", options]); }
+  }
+  const selectionStore = {
+    async read(botId) {
+      return {
+        botId,
+        provider: botId === BOT_A ? "openai-codex" : "cliproxy-anthropic",
+        model: botId === BOT_A ? "gpt-5.6-sol" : "claude-fable-5",
+        reasoningEffort: botId === BOT_A ? "ultra" : "ultra-code",
+        serviceTier: null,
+        catalogGeneration: botId === BOT_A ? 7 : 1,
+        generation: 4,
+      };
+    },
+  };
+  const inference = createInferenceBridgeRuntime({
+    codexManager: direct,
+    selectionStore,
+    sidecarManager: lazy,
+    stateRoot,
+    capability: "b".repeat(64),
+    DirectTransportClass: DirectTransportFixture,
+    OptionalTransportClass: OptionalTransportFixture,
+    RouterClass: RouterFixture,
+    BridgeClass: BridgeFixture,
+  });
+  assert.equal(inference instanceof BridgeFixture, true);
+  assert.deepEqual(constructed.map(([name]) => name), ["direct", "router", "bridge"]);
+  assert.equal(constructed[0][1].manager, direct);
+  assert.equal(constructed[0][1].workspacePath, path.join(stateRoot, "direct-codex", "empty-workspace"));
+  assert.equal(constructed[2][1].capability, "b".repeat(64));
+  assert.deepEqual(await constructed[1][1].readSelection(BOT_A), {
+    botId: BOT_A,
+    generation: 4,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+  });
+  const optionalBot = "bot-22222222-2222-4222-8222-222222222222";
+  assert.deepEqual(await constructed[1][1].readSelection(optionalBot), {
+    botId: optionalBot,
+    generation: 4,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "ultra-code",
+    serviceTier: null,
+  });
+  const optional = await constructed[1][1].createOptionalTransport("cliproxy-anthropic");
+  assert.equal(optional.kind, "optional");
+  assert.equal(starts, 2);
+  assert.deepEqual(constructed.map(([name]) => name), ["direct", "router", "bridge", "optional"]);
 });
 
 test("desktop runtime registers the exact frozen bot/model boundary and keeps create zero-argument", async (t) => {
@@ -143,8 +244,16 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     dispose() { calls.push(["dispose"]); },
   };
   const selectionStore = {
-    async selectBot(botId) { calls.push(["select-bot", botId]); return botId; },
-    async write(selection) { calls.push(["select-model", selection]); return selection; },
+    async ensure(botId, fallback) {
+      const selection = { botId, ...fallback, generation: 0 };
+      calls.push(["ensure-model", selection]);
+      return selection;
+    },
+    async writeNext(selection) {
+      const next = { ...selection, generation: 1 };
+      calls.push(["select-model", next]);
+      return next;
+    },
     async read(botId) { calls.push(["read-model", botId]); return null; },
   };
   const sidecarManager = {
@@ -161,9 +270,20 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     async start() { calls.push(["direct-start"]); },
     stop() { calls.push(["direct-stop"]); },
   };
+  const inferenceBridge = {
+    async start() {
+      calls.push(["inference-bridge-start"]);
+      const session = { endpoint: "tcp://127.0.0.1:43210" };
+      Object.defineProperty(session, "capability", { value: "a".repeat(64), enumerable: false });
+      return Object.freeze(session);
+    },
+    dispose() { calls.push(["inference-bridge-dispose"]); },
+  };
   t.after(() => {
     delete process.env.CODEX_BOT_CLIPROXY_URL;
     delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
+    delete process.env.CODEX_BOT_INFERENCE_ENDPOINT;
+    delete process.env.CODEX_BOT_INFERENCE_CAPABILITY;
   });
   const electron = {
     app: { once() {} },
@@ -183,8 +303,10 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   const installed = installDesktopRuntime(electron, {
     controller,
     selectionStore,
+    accountController: accountWithCatalog(readyCatalog(), () => codexManager.start()),
     sidecarManager,
     codexManager,
+    inferenceBridge,
   });
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
     "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy",
@@ -196,13 +318,24 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
   assert.deepEqual(calls.filter(([name]) => name === "sidecar-start"), []);
+  assert.deepEqual(calls.filter(([name]) => name === "inference-bridge-start"), [["inference-bridge-start"]]);
+  assert.equal(process.env.CODEX_BOT_INFERENCE_ENDPOINT, "tcp://127.0.0.1:43210");
+  assert.equal(process.env.CODEX_BOT_INFERENCE_CAPABILITY, "a".repeat(64));
 
   await handlers.get(IPC_CHANNELS.create)({ sender: {} });
   assert.deepEqual(calls.find(([name]) => name === "create"), ["create", 0]);
   await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A);
-  assert.deepEqual(calls.find(([name, selection]) => name === "select-model" && selection.reasoningEffort === "medium"), [
-    "select-model",
-    { botId: BOT_A, model: "gpt-5.6-sol", reasoningEffort: "medium", generation: 7 },
+  assert.deepEqual(calls.find(([name]) => name === "ensure-model"), [
+    "ensure-model",
+    {
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 7,
+      generation: 0,
+    },
   ]);
   const selected = await handlers.get(IPC_CHANNELS.selectModel)({}, {
     botId: BOT_A,
@@ -211,16 +344,23 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   });
   assert.deepEqual(selected, {
     botId: BOT_A,
+    provider: "openai-codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "ultra",
-    generation: 7,
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 1,
   });
   assert.doesNotMatch(JSON.stringify(selected), /endpoint|authToken|opaque-private|runtime-a/);
   assert.equal(await handlers.get(IPC_CHANNELS.connectProvider)({}, "claude"), undefined);
   assert.deepEqual(calls.find(([name]) => name === "connect-provider"), ["connect-provider", "claude"]);
-  assert.deepEqual(calls.find(([name]) => name === "sidecar-start"), ["sidecar-start"]);
-  assert.equal(process.env.CODEX_BOT_CLIPROXY_URL, "http://127.0.0.1:54321/v1");
-  assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, "f".repeat(64));
+  await assert.rejects(handlers.get(IPC_CHANNELS.connectProvider)({}, "codex"), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  assert.equal(calls.filter(([name]) => name === "connect-provider").length, 1);
+  assert.equal(calls.find(([name]) => name === "sidecar-start"), undefined);
+  assert.equal(process.env.CODEX_BOT_CLIPROXY_URL, undefined);
+  assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, undefined);
   listeners.get("bot-changed")({ botId: BOT_A, bot });
   assert.deepEqual(sends, [["codex-bot:changed", bot]]);
   listeners.get("runtime-changed")({
@@ -233,8 +373,12 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   installed.dispose();
   assert.equal(process.env.CODEX_BOT_CLIPROXY_URL, undefined);
   assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, undefined);
+  assert.equal(process.env.CODEX_BOT_INFERENCE_ENDPOINT, undefined);
+  assert.equal(process.env.CODEX_BOT_INFERENCE_CAPABILITY, undefined);
   assert.equal(handlers.size, 0);
-  assert.deepEqual(calls.slice(-3), [["direct-stop"], ["sidecar-stop"], ["dispose"]]);
+  assert.deepEqual(calls.slice(-4), [
+    ["inference-bridge-dispose"], ["direct-stop"], ["sidecar-stop"], ["dispose"],
+  ]);
 });
 
 test("desktop account boundary opens browser login only in main and publishes frozen sanitized account and catalog generations", async () => {
@@ -352,35 +496,27 @@ test("desktop account boundary opens browser login only in main and publishes fr
   assert.deepEqual(calls.slice(-1), [["account-dispose"]]);
 });
 
-test("selecting a bot refreshes a retained model selection to the current runtime generation", async () => {
+test("selecting a bot retains its local model generation across remote runtime changes", async () => {
   const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
   const handlers = new Map();
-  const writes = [];
+  let runtimeReads = 0;
   const bot = Object.freeze({ botId: BOT_A, name: "New Bot", runtime: Object.freeze({ state: "ready" }) });
   const controller = {
     on() {}, off() {}, dispose() {},
     async readBot() { return bot; },
-    async runtimeSession() {
-      return Object.freeze({
-        provider: "fixture",
-        runtimeId: "runtime-current",
-        endpoint: "wss://runtime.invalid/app-server",
-        authToken: "opaque-private-token-value",
-        generation: 12,
-      });
-    },
+    async runtimeSession() { runtimeReads += 1; throw new Error("must not run"); },
   };
+  const retained = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-terra",
+    reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 11,
+  });
   const selectionStore = {
-    async selectBot() {},
-    async read() {
-      return Object.freeze({
-        botId: BOT_A,
-        model: "gpt-5.6-terra",
-        reasoningEffort: "max",
-        generation: 11,
-      });
-    },
-    async write(value) { writes.push(value); return value; },
+    async read() { return retained; },
   };
   const electron = {
     app: { once() {} },
@@ -390,16 +526,82 @@ test("selecting a bot refreshes a retained model selection to the current runtim
     },
     BrowserWindow: { getAllWindows: () => [] },
   };
-  const installed = installDesktopRuntime(electron, { controller, selectionStore });
-  const selected = await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A);
-  assert.deepEqual(selected, {
-    botId: BOT_A,
-    model: "gpt-5.6-terra",
-    reasoningEffort: "max",
-    generation: 12,
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore,
+    accountController: accountWithCatalog(),
   });
-  assert.deepEqual(writes, [selected]);
-  assert.doesNotMatch(JSON.stringify(selected), /endpoint|authToken|runtime-current|opaque-private/);
+  const selected = await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A);
+  assert.equal(selected, retained);
+  assert.equal(runtimeReads, 0);
+  installed.dispose();
+});
+
+test("official Codex selection remains usable when the bot's remote Work runtime is unavailable", async () => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  const calls = [];
+  const bot = Object.freeze({
+    botId: BOT_A,
+    name: "New Bot",
+    runtime: Object.freeze({ state: "unavailable" }),
+  });
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async readBot(botId) { calls.push(["read", botId]); return bot; },
+    async runtimeSession() { throw new Error("remote Work runtime must not gate local Codex"); },
+  };
+  const initial = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 0,
+  });
+  const changed = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 1,
+  });
+  const selectionStore = {
+    async ensure(botId, fallback) { calls.push(["ensure", botId, fallback]); return initial; },
+    async read(botId) { calls.push(["read-model", botId]); return initial; },
+    async writeNext(value) { calls.push(["write-next", value]); return changed; },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { getAllWindows: () => [] },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore,
+    accountController: accountWithCatalog(),
+  });
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A), initial);
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.selectModel)({}, {
+    botId: BOT_A,
+    model: "gpt-5.6-luna",
+    reasoningEffort: "max",
+  }), changed);
+  assert.equal(calls.some(([name]) => name === "session"), false);
+  assert.deepEqual(calls.find(([name]) => name === "write-next"), ["write-next", {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 7,
+  }]);
   installed.dispose();
 });
 
@@ -442,14 +644,20 @@ test("model selection registry is atomic, private, exact, and contains no runtim
   await store.selectBot(BOT_A);
   const written = await store.write({
     botId: BOT_A,
+    provider: "openai-codex",
     model: "gpt-5.6-terra",
     reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 7,
     generation: 4,
   });
   assert.deepEqual(written, {
     botId: BOT_A,
+    provider: "openai-codex",
     model: "gpt-5.6-terra",
     reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 7,
     generation: 4,
   });
   assert.deepEqual(await store.read(BOT_A), written);
@@ -462,13 +670,126 @@ test("model selection registry is atomic, private, exact, and contains no runtim
   );
   assert.deepEqual(await store.write({
     botId: BOT_A,
+    provider: "cliproxy-anthropic",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
+    serviceTier: null,
+    catalogGeneration: 1,
     generation: 5,
   }), {
     botId: BOT_A,
+    provider: "cliproxy-anthropic",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
+    serviceTier: null,
+    catalogGeneration: 1,
     generation: 5,
   });
+});
+
+test("model selection registry owns an atomic generation independent from remote Work sessions", async (t) => {
+  const { ModelSelectionStore } = require(selectionPath);
+  const filePath = path.join(tempRoot(t), "state", "model-selections.v1.json");
+  const store = new ModelSelectionStore({ filePath, now: () => "2026-08-14T12:00:00.000Z" });
+  const initial = await store.ensure(BOT_A, {
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 7,
+  });
+  assert.deepEqual(initial, {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 0,
+  });
+  assert.deepEqual(await store.ensure(BOT_A, {
+    provider: "openai-codex",
+    model: "gpt-5.6-terra",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+    catalogGeneration: 7,
+  }), initial);
+  const first = await store.writeNext({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 7,
+  });
+  const second = await store.writeNext({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.4",
+    reasoningEffort: "xhigh",
+    serviceTier: null,
+    catalogGeneration: 7,
+  });
+  assert.equal(first.generation, 1);
+  assert.equal(second.generation, 2);
+  assert.deepEqual(await store.read(BOT_A), second);
+});
+
+test("model selection policy persists the complete live-catalog routing tuple and rejects stale catalog entries", async (t) => {
+  const { ModelSelectionStore } = require(selectionPath);
+  const { resolveModelSelection, selectionMatchesCatalog } = require(runtimePath);
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([
+      Object.freeze({
+        id: "gpt-live-only",
+        displayName: "GPT Live Only",
+        defaultReasoningEffort: "high",
+        supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
+        inputModalities: Object.freeze(["text", "image"]),
+        supportsPersonality: false,
+        isDefault: true,
+      }),
+    ]),
+  });
+  const official = resolveModelSelection({
+    botId: BOT_A,
+    model: "gpt-live-only",
+    reasoningEffort: "ultra",
+  }, catalog);
+  assert.deepEqual(official, {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-live-only",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+    catalogGeneration: 12,
+  });
+  const optional = resolveModelSelection({
+    botId: BOT_A,
+    model: "claude-fable-5",
+    reasoningEffort: "ultra-code",
+  }, catalog);
+  assert.equal(optional.provider, "cliproxy-anthropic");
+  assert.equal(optional.catalogGeneration, 1);
+  assert.equal(selectionMatchesCatalog({ ...official, generation: 4 }, catalog), true);
+  assert.equal(selectionMatchesCatalog({ ...official, catalogGeneration: 11, generation: 4 }, catalog), false);
+  assert.throws(() => resolveModelSelection({
+    botId: BOT_A,
+    model: "gpt-removed",
+    reasoningEffort: "high",
+  }, catalog), { code: "CODEX_BOT_OPERATION_FAILED" });
+
+  const filePath = path.join(tempRoot(t), "state", "model-selections.v1.json");
+  const store = new ModelSelectionStore({ filePath, now: () => "2026-08-14T12:00:00.000Z" });
+  const persisted = await store.write({ ...official, generation: 4 });
+  assert.deepEqual(persisted, { ...official, generation: 4 });
+  assert.deepEqual(await store.read(BOT_A), persisted);
+  await assert.rejects(store.write({
+    botId: BOT_A,
+    model: "gpt-live-only",
+    reasoningEffort: "ultra",
+    generation: 5,
+  }), /selection/i);
 });

@@ -6,9 +6,17 @@ const { replaceUnique } = require("./anchors.cjs");
 
 const DESKTOP_FILES = Object.freeze([
   "desktop/cliproxy-manager.cjs",
+  "desktop/cliproxy-inference-transport.cjs",
+  "desktop/codex-account-controller.cjs",
+  "desktop/codex-app-server-manager.cjs",
+  "desktop/codex-direct-inference-transport.cjs",
+  "desktop/codex-runtime-integrity.cjs",
+  "desktop/inference-bridge-server.cjs",
+  "desktop/inference-provider-router.cjs",
   "desktop/model-selection-store.cjs",
   "desktop/runtime.cjs",
   "bridge/codex-client.cjs",
+  "bridge/inference-socket-client.cjs",
   "bridge/message-codec.cjs",
   "bridge/redaction.cjs",
   "bridge/runtime-config.cjs",

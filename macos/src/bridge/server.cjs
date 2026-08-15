@@ -1,6 +1,7 @@
 "use strict";
 
 const { CodexClient, BridgeDisposedError } = require("./codex-client.cjs");
+const { InferenceSocketClient } = require("./inference-socket-client.cjs");
 const { loadRuntimeConfig } = require("./runtime-config.cjs");
 
 class BridgeSessionError extends Error {
@@ -47,10 +48,12 @@ function sameConfig(left, right) {
     right != null &&
     left.botId === right.botId &&
     left.generation === right.generation &&
+    left.provider === right.provider &&
     left.endpoint === right.endpoint &&
     left.credential === right.credential &&
     left.model === right.model &&
-    left.reasoningEffort === right.reasoningEffort
+    left.reasoningEffort === right.reasoningEffort &&
+    left.serviceTier === right.serviceTier
   );
 }
 
@@ -95,11 +98,14 @@ class PromptSession {
   #client;
   #config;
   #middleware;
+  #release;
+  #disposed = false;
 
-  constructor(client, config, middleware) {
+  constructor(client, config, middleware, release) {
     this.#client = client;
     this.#config = config;
     this.#middleware = middleware;
+    this.#release = release;
   }
 
   getExecutor(state) {
@@ -112,7 +118,10 @@ class PromptSession {
   }
 
   dispose() {
+    if (this.#disposed) return;
+    this.#disposed = true;
     this.#client.dispose();
+    this.#release();
   }
 }
 
@@ -120,8 +129,10 @@ function createBridge({
   loadConfig = (options) => loadRuntimeConfig(process.env, options),
   fetchImpl = globalThis.fetch,
   isCurrent,
+  SocketClientClass = InferenceSocketClient,
 } = {}) {
-  if (typeof loadConfig !== "function" || typeof fetchImpl !== "function") {
+  if (typeof loadConfig !== "function" || typeof fetchImpl !== "function"
+    || typeof SocketClientClass !== "function") {
     throw new BridgeSessionError();
   }
   let disposed = false;
@@ -155,8 +166,15 @@ function createBridge({
                 return false;
               }
             };
-      const client = new CodexClient({ config, fetchImpl, isCurrent: current });
-      const session = new PromptSession(client, config, middleware);
+      const client = config.provider == null
+        ? new CodexClient({ config, fetchImpl, isCurrent: current })
+        : new SocketClientClass({
+          config,
+          conversationId: normalized.conversationId,
+          isCurrent: current,
+        });
+      let session;
+      session = new PromptSession(client, config, middleware, () => sessions.delete(session));
       sessions.add(session);
       return session;
     },

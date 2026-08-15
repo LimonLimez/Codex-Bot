@@ -9,7 +9,11 @@ const BOT_UUID =
 const MODEL_EFFORTS = Object.freeze({
   "gpt-5.6-sol": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
   "gpt-5.6-terra": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+  "gpt-5.6-luna": Object.freeze(["low", "medium", "high", "xhigh", "max"]),
   "gpt-5.5": Object.freeze(["low", "medium", "high", "xhigh"]),
+  "gpt-5.4": Object.freeze(["low", "medium", "high", "xhigh"]),
+  "gpt-5.4-mini": Object.freeze(["low", "medium", "high", "xhigh"]),
+  "gpt-5.3-codex-spark": Object.freeze(["low", "medium", "high", "xhigh"]),
   "claude-fable-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
   "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
   "claude-sonnet-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
@@ -23,6 +27,11 @@ const CONFIG_KEYS = Object.freeze([
   "reasoningEffort",
 ]);
 const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const INFERENCE_CAPABILITY = /^[a-f0-9]{64}$/;
+const SERVICE_TIER = /^[a-z][a-z0-9_-]{0,31}$/;
+const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const EFFORT = /^[a-z][a-z0-9_-]{0,31}$/;
+const OPTIONAL_MODELS = new Set(["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]);
 
 class BridgeConfigError extends Error {
   constructor() {
@@ -98,6 +107,63 @@ function normalizeCredential(value) {
     fail();
   }
   return value;
+}
+
+function normalizeInferenceEndpoint(value) {
+  if (typeof value !== "string" || value.trim() !== value) fail();
+  let parsed;
+  try { parsed = new URL(value); } catch { fail(); }
+  if (parsed.protocol !== "tcp:" || parsed.hostname !== "127.0.0.1"
+    || parsed.username !== "" || parsed.password !== "" || parsed.pathname !== ""
+    || parsed.search !== "" || parsed.hash !== "" || !/^\d+$/.test(parsed.port)) fail();
+  const port = Number(parsed.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535
+    || value !== `tcp://127.0.0.1:${port}`) fail();
+  return value;
+}
+
+function createInferenceRuntimeConfig({
+  botId,
+  generation,
+  endpoint,
+  credential,
+  provider,
+  model,
+  reasoningEffort,
+  serviceTier = null,
+}) {
+  if (typeof botId !== "string" || !BOT_UUID.test(botId)
+    || !Number.isSafeInteger(generation) || generation < 0) fail();
+  if (!new Set(["openai-codex", "cliproxy-anthropic"]).has(provider)
+    || typeof model !== "string" || !MODEL_ID.test(model)
+    || typeof reasoningEffort !== "string" || !EFFORT.test(reasoningEffort)
+    || (reasoningEffort === "ultra-code" && provider !== "cliproxy-anthropic")
+    || !(serviceTier === null || (typeof serviceTier === "string" && SERVICE_TIER.test(serviceTier)))) fail();
+  const config = {
+    botId,
+    generation,
+    provider,
+    model,
+    reasoningEffort,
+    serviceTier,
+  };
+  Object.defineProperties(config, {
+    endpoint: {
+      value: normalizeInferenceEndpoint(endpoint),
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    },
+    credential: {
+      value: typeof credential === "string" && INFERENCE_CAPABILITY.test(credential)
+        ? credential
+        : fail(),
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    },
+  });
+  return Object.freeze(config);
 }
 
 function createRuntimeConfig(value) {
@@ -230,6 +296,21 @@ function loadRuntimeConfig(environment = process.env, options = {}) {
     const selectedBot = selectedBotId(environment, registry, options);
     const selection = registry.selections[selectedBot];
     if (!selection || typeof selection !== "object" || Array.isArray(selection)) fail();
+    const hasInferenceBridge = environment.CODEX_BOT_INFERENCE_ENDPOINT !== undefined
+      || environment.CODEX_BOT_INFERENCE_CAPABILITY !== undefined;
+    if (hasInferenceBridge) {
+      return createInferenceRuntimeConfig({
+        botId: selectedBot.slice(4),
+        generation: selection.generation,
+        endpoint: environment.CODEX_BOT_INFERENCE_ENDPOINT,
+        credential: environment.CODEX_BOT_INFERENCE_CAPABILITY,
+        provider: selection.provider ?? (OPTIONAL_MODELS.has(selection.model)
+          ? "cliproxy-anthropic" : "openai-codex"),
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
+        serviceTier: selection.serviceTier ?? null,
+      });
+    }
     return createRuntimeConfig({
       botId: selectedBot.slice(4),
       generation: selection.generation,

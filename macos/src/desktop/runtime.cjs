@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { BotStore } = require("../bots/bot-store.cjs");
@@ -8,7 +9,11 @@ const { unavailableProvider, validateProvider } = require("../bots/runtime-provi
 const { CLIProxyManager } = require("./cliproxy-manager.cjs");
 const { CodexAccountController } = require("./codex-account-controller.cjs");
 const { CodexAppServerManager } = require("./codex-app-server-manager.cjs");
-const { ModelSelectionStore, normalizeSelectionRequest } = require("./model-selection-store.cjs");
+const { CodexDirectInferenceTransport } = require("./codex-direct-inference-transport.cjs");
+const { CLIProxyInferenceTransport } = require("./cliproxy-inference-transport.cjs");
+const { InferenceBridgeServer } = require("./inference-bridge-server.cjs");
+const { InferenceProviderRouter } = require("./inference-provider-router.cjs");
+const { BOT_ID, ModelSelectionStore } = require("./model-selection-store.cjs");
 
 const IPC_CHANNELS = Object.freeze({
   accountRead: "codex-account:read",
@@ -34,6 +39,11 @@ const RUNTIME_EVENT_CHANNEL = "codex-runtime:event";
 const ACCOUNT_CHANGE_CHANNEL = "codex-account:changed";
 const CATALOG_CHANGE_CHANNEL = "codex-catalog:changed";
 const INSTALLED = Symbol.for("codex.bot.macos.desktop-runtime");
+const OPTIONAL_MODEL_EFFORTS = Object.freeze({
+  "claude-fable-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+  "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+  "claude-sonnet-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+});
 
 function sanitizedFailure() {
   const error = new Error("Codex bot operation failed.");
@@ -41,19 +51,92 @@ function sanitizedFailure() {
   return error;
 }
 
-function setSidecarEnvironment(session) {
-  if (
-    !session ||
-    typeof session.endpoint !== "string" ||
-    !/^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(session.endpoint) ||
-    typeof session.credential !== "string" ||
-    session.credential.length < 32 ||
-    session.credential.length > 256
-  ) {
+function selectionRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw sanitizedFailure();
+  let descriptors;
+  let prototype;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    prototype = Object.getPrototypeOf(value);
+  } catch { throw sanitizedFailure(); }
+  const fields = ["botId", "model", "reasoningEffort"];
+  if ((prototype !== Object.prototype && prototype !== null)
+    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+      || !fields.includes(key) || !("value" in descriptors[key]))
+    || fields.some((field) => !descriptors[field])) throw sanitizedFailure();
+  const result = Object.fromEntries(fields.map((field) => [field, descriptors[field].value]));
+  if (typeof result.botId !== "string" || !BOT_ID.test(result.botId)) throw sanitizedFailure();
+  return result;
+}
+
+function catalogModels(catalog) {
+  if (!catalog || typeof catalog !== "object" || catalog.status !== "ready"
+    || !Number.isSafeInteger(catalog.generation) || catalog.generation < 1
+    || !Array.isArray(catalog.models) || catalog.models.length < 1) throw sanitizedFailure();
+  return catalog.models;
+}
+
+function resolveModelSelection(rawSelection, catalog) {
+  const requested = selectionRequest(rawSelection);
+  const optionalEfforts = OPTIONAL_MODEL_EFFORTS[requested.model];
+  if (optionalEfforts) {
+    if (!optionalEfforts.includes(requested.reasoningEffort)) throw sanitizedFailure();
+    return Object.freeze({
+      botId: requested.botId,
+      provider: "cliproxy-anthropic",
+      model: requested.model,
+      reasoningEffort: requested.reasoningEffort,
+      serviceTier: null,
+      catalogGeneration: 1,
+    });
+  }
+  const models = catalogModels(catalog);
+  const model = models.find((entry) => entry?.id === requested.model);
+  if (!model || !Array.isArray(model.supportedReasoningEfforts)
+    || !model.supportedReasoningEfforts.includes(requested.reasoningEffort)) throw sanitizedFailure();
+  return Object.freeze({
+    botId: requested.botId,
+    provider: "openai-codex",
+    model: requested.model,
+    reasoningEffort: requested.reasoningEffort,
+    serviceTier: null,
+    catalogGeneration: catalog.generation,
+  });
+}
+
+function selectionMatchesCatalog(value, catalog) {
+  try {
+    if (!value || !Number.isSafeInteger(value.generation) || value.generation < 0) return false;
+    const current = resolveModelSelection({
+      botId: value.botId,
+      model: value.model,
+      reasoningEffort: value.reasoningEffort,
+    }, catalog);
+    return current.provider === value.provider && current.model === value.model
+      && current.reasoningEffort === value.reasoningEffort
+      && current.serviceTier === value.serviceTier
+      && current.catalogGeneration === value.catalogGeneration;
+  } catch { return false; }
+}
+
+function defaultModelSelection(botId, catalog) {
+  const models = catalogModels(catalog);
+  const model = models.find((entry) => entry?.isDefault === true) ?? models[0];
+  return resolveModelSelection({
+    botId,
+    model: model.id,
+    reasoningEffort: model.defaultReasoningEffort,
+  }, catalog);
+}
+
+function setInferenceBridgeEnvironment(session) {
+  if (!session || typeof session.endpoint !== "string"
+    || !/^tcp:\/\/127\.0\.0\.1:\d+$/.test(session.endpoint)
+    || typeof session.capability !== "string" || !/^[a-f0-9]{64}$/.test(session.capability)) {
     throw sanitizedFailure();
   }
-  process.env.CODEX_BOT_CLIPROXY_URL = session.endpoint;
-  process.env.CODEX_BOT_CLIPROXY_TOKEN = session.credential;
+  process.env.CODEX_BOT_INFERENCE_ENDPOINT = session.endpoint;
+  process.env.CODEX_BOT_INFERENCE_CAPABILITY = session.capability;
 }
 
 function loadConfiguredProvider() {
@@ -147,6 +230,56 @@ function createLazySidecarManager({
   });
 }
 
+function createInferenceBridgeRuntime({
+  codexManager,
+  selectionStore,
+  sidecarManager,
+  readCatalog = null,
+  stateRoot,
+  capability = crypto.randomBytes(32).toString("hex"),
+  DirectTransportClass = CodexDirectInferenceTransport,
+  OptionalTransportClass = CLIProxyInferenceTransport,
+  RouterClass = InferenceProviderRouter,
+  BridgeClass = InferenceBridgeServer,
+} = {}) {
+  if (!codexManager || typeof codexManager !== "object"
+    || !selectionStore || typeof selectionStore.read !== "function"
+    || !sidecarManager || typeof sidecarManager.start !== "function"
+    || !(readCatalog === null || typeof readCatalog === "function")
+    || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
+    || typeof capability !== "string" || !/^[a-f0-9]{64}$/.test(capability)
+    || [DirectTransportClass, OptionalTransportClass, RouterClass, BridgeClass]
+      .some((value) => typeof value !== "function")) throw sanitizedFailure();
+  const directTransport = new DirectTransportClass({
+    manager: codexManager,
+    workspacePath: path.join(stateRoot, "direct-codex", "empty-workspace"),
+  });
+  const router = new RouterClass({
+    async readSelection(botId) {
+      const stored = await selectionStore.read(botId);
+      if (!stored || typeof stored !== "object") throw sanitizedFailure();
+      if (readCatalog !== null && !selectionMatchesCatalog(stored, readCatalog())) {
+        throw sanitizedFailure();
+      }
+      return Object.freeze({
+        botId: stored.botId,
+        generation: stored.generation,
+        provider: stored.provider,
+        model: stored.model,
+        reasoningEffort: stored.reasoningEffort,
+        serviceTier: stored.serviceTier,
+      });
+    },
+    directTransport,
+    async createOptionalTransport(provider) {
+      if (provider !== "cliproxy-anthropic") throw sanitizedFailure();
+      const session = await sidecarManager.start();
+      return new OptionalTransportClass({ session });
+    },
+  });
+  return new BridgeClass({ router, capability });
+}
+
 function productionDependencies(electron) {
   const stateRoot = path.join(electron.app.getPath("userData"), "codex-bot");
   const botStore = new BotStore({ filePath: path.join(stateRoot, "bots.v1.json") });
@@ -164,13 +297,30 @@ function productionDependencies(electron) {
     resourcesPath: process.resourcesPath,
     stateRoot,
   });
+  const inferenceBridge = createInferenceBridgeRuntime({
+    codexManager,
+    selectionStore,
+    sidecarManager,
+    readCatalog: () => accountController.catalogState(),
+    stateRoot,
+  });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
   process.env.CODEX_BOT_MODEL_SELECTIONS = modelSelectionsPath;
   delete process.env.CODEX_BOT_CLIPROXY_URL;
   delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
+  delete process.env.CODEX_BOT_INFERENCE_ENDPOINT;
+  delete process.env.CODEX_BOT_INFERENCE_CAPABILITY;
   void controller.reconcile().catch(() => {});
-  return { accountController, codexManager, controller, selectionStore, sidecarManager, store: botStore };
+  return {
+    accountController,
+    codexManager,
+    controller,
+    inferenceBridge,
+    selectionStore,
+    sidecarManager,
+    store: botStore,
+  };
 }
 
 function installDesktopRuntime(electron, injected = {}) {
@@ -201,9 +351,22 @@ function installDesktopRuntime(electron, injected = {}) {
     async connectProvider() { throw sanitizedFailure(); },
     stop() {},
   });
+  const inferenceBridge = dependencies.inferenceBridge || null;
   const registered = [];
   let disposed = false;
   void accountController.start().catch(() => {});
+  if (inferenceBridge && typeof inferenceBridge.start === "function") {
+    void Promise.resolve()
+      .then(() => inferenceBridge.start())
+      .then((session) => {
+        if (disposed) return;
+        setInferenceBridgeEnvironment(session);
+      })
+      .catch(() => {
+        delete process.env.CODEX_BOT_INFERENCE_ENDPOINT;
+        delete process.env.CODEX_BOT_INFERENCE_CAPABILITY;
+      });
+  }
 
   function broadcast(bot) {
     const record = bot?.bot && typeof bot.bot === "object" ? bot.bot : bot;
@@ -245,6 +408,27 @@ function installDesktopRuntime(electron, injected = {}) {
     registered.push(channel);
   }
 
+  async function currentModelSelection(botId) {
+    const catalog = accountController.catalogState();
+    const current = await selectionStore.read(botId);
+    if (current && selectionMatchesCatalog(current, catalog)) return current;
+    let requested;
+    if (current) {
+      try {
+        requested = resolveModelSelection({
+          botId,
+          model: current.model,
+          reasoningEffort: current.reasoningEffort,
+        }, catalog);
+      } catch {
+        requested = defaultModelSelection(botId, catalog);
+      }
+      return selectionStore.writeNext(requested);
+    }
+    requested = defaultModelSelection(botId, catalog);
+    return selectionStore.ensure(botId, requested);
+  }
+
   handle(IPC_CHANNELS.list, () => controller.listBots());
   handle(IPC_CHANNELS.accountRead, () => accountController.accountState());
   handle(IPC_CHANNELS.catalogList, () => accountController.catalogState());
@@ -272,8 +456,8 @@ function installDesktopRuntime(electron, injected = {}) {
     return controller.ensureRuntime(adopted.botId);
   });
   handle(IPC_CHANNELS.connectProvider, async (provider) => {
+    if (!new Set(["claude", "kimi"]).has(provider)) throw sanitizedFailure();
     await sidecarManager.connectProvider(provider);
-    setSidecarEnvironment(await sidecarManager.start());
   });
   handle(IPC_CHANNELS.read, (botId) => controller.readBot(botId));
   handle(IPC_CHANNELS.rename, (botId, name) => controller.renameBot(botId, name));
@@ -282,28 +466,17 @@ function installDesktopRuntime(electron, injected = {}) {
   handle(IPC_CHANNELS.selectBot, async (botId) => {
     const bot = await controller.readBot(botId);
     if (!bot) throw sanitizedFailure();
-    await selectionStore.selectBot(bot.botId);
-    const current = await selectionStore.read(bot.botId);
-    const session = await controller.runtimeSession(bot.botId);
-    if (!session || !Number.isSafeInteger(session.generation) || session.generation < 0) {
-      return current || bot.botId;
-    }
-    if (current && current.generation === session.generation) return current;
-    return selectionStore.write({
-      botId: bot.botId,
-      model: current?.model || "gpt-5.6-sol",
-      reasoningEffort: current?.reasoningEffort || "medium",
-      generation: session.generation,
-    });
+    return currentModelSelection(bot.botId);
   });
-  handle(IPC_CHANNELS.readModel, (botId) => selectionStore.read(botId));
+  handle(IPC_CHANNELS.readModel, (botId) => currentModelSelection(botId));
   handle(IPC_CHANNELS.selectModel, async (rawSelection) => {
-    const requested = normalizeSelectionRequest(rawSelection);
-    const session = await controller.runtimeSession(requested.botId);
-    if (!session || !Number.isSafeInteger(session.generation) || session.generation < 0) {
-      throw sanitizedFailure();
-    }
-    return selectionStore.write({ ...requested, generation: session.generation });
+    const requested = selectionRequest(rawSelection);
+    const bot = await controller.readBot(requested.botId);
+    if (!bot) throw sanitizedFailure();
+    return selectionStore.writeNext(resolveModelSelection(
+      requested,
+      accountController.catalogState(),
+    ));
   });
 
   const onBotChanged = (event) => broadcast(event);
@@ -331,10 +504,13 @@ function installDesktopRuntime(electron, injected = {}) {
       accountController.off?.("account-changed", onAccountChanged);
       accountController.off?.("catalog-changed", onCatalogChanged);
       accountController.dispose();
+      inferenceBridge?.dispose?.();
       codexManager.stop();
       sidecarManager.stop();
       delete process.env.CODEX_BOT_CLIPROXY_URL;
       delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
+      delete process.env.CODEX_BOT_INFERENCE_ENDPOINT;
+      delete process.env.CODEX_BOT_INFERENCE_CAPABILITY;
       controller.dispose();
       try { delete electron.app[INSTALLED]; } catch {}
     },
@@ -351,8 +527,12 @@ module.exports = {
   IPC_CHANNELS,
   RUNTIME_EVENT_CHANNEL,
   createDirectCodexManager,
+  createInferenceBridgeRuntime,
   createLazySidecarManager,
   installDesktopRuntime,
   loadConfiguredProvider,
   loadSidecarReceipt,
+  resolveModelSelection,
+  selectionMatchesCatalog,
+  setInferenceBridgeEnvironment,
 };

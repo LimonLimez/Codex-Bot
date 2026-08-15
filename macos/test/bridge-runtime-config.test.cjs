@@ -142,6 +142,38 @@ test("runtime config has no permissive endpoint, token, identity, or model fallb
   assert.equal(createRuntimeConfig({ ...valid, reasoningEffort: "none" }).reasoningEffort, "none");
 });
 
+test("direct runtime config accepts every model advertised by the pinned official Codex catalog", () => {
+  const { loadRuntimeConfig } = require(runtimePath);
+  const advertised = [
+    ["gpt-5.6-sol", "ultra"],
+    ["gpt-5.6-terra", "ultra"],
+    ["gpt-5.6-luna", "max"],
+    ["gpt-5.5", "xhigh"],
+    ["gpt-5.4", "xhigh"],
+    ["gpt-5.4-mini", "xhigh"],
+    ["gpt-5.3-codex-spark", "xhigh"],
+  ];
+  for (const [model, reasoningEffort] of advertised) {
+    const registry = temporaryRegistry({ after() {} });
+    fs.writeFileSync(registry, `${JSON.stringify({
+      schemaVersion: 1,
+      activeBotId: `bot-${BOT_ID}`,
+      selections: {
+        [`bot-${BOT_ID}`]: { model, reasoningEffort, generation: 0, updatedAt: null },
+      },
+    })}\n`, { mode: 0o600 });
+    const config = loadRuntimeConfig({
+      CODEX_BOT_MODEL_SELECTIONS: registry,
+      CODEX_BOT_INFERENCE_ENDPOINT: "tcp://127.0.0.1:43123",
+      CODEX_BOT_INFERENCE_CAPABILITY: "a".repeat(64),
+    });
+    assert.equal(config.model, model);
+    assert.equal(config.reasoningEffort, reasoningEffort);
+    assert.equal(config.generation, 0);
+    fs.rmSync(path.dirname(registry), { recursive: true, force: true });
+  }
+});
+
 test("environment loading requires all exact private fields and a fresh strong credential can be generated", () => {
   const { generateCredential, loadRuntimeConfig } = require(runtimePath);
   const first = generateCredential();
@@ -190,6 +222,86 @@ test("bridge loads the active main-owned bot model from the private registry wit
   assert.equal(config.model, "gpt-5.6-terra");
   assert.equal(config.reasoningEffort, "ultra");
   assert.doesNotMatch(fs.readFileSync(registry, "utf8"), /43123|runtime-secret|endpoint|credential/);
+});
+
+test("official and optional selections use only the private main-process inference bridge", (t) => {
+  const { loadRuntimeConfig } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  fs.writeFileSync(registry, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId: `bot-${BOT_ID}`,
+    selections: {
+      [`bot-${BOT_ID}`]: {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "ultra",
+        generation: 31,
+        updatedAt: null,
+      },
+      [`bot-${BOT_ID_B}`]: {
+        model: "claude-fable-5",
+        reasoningEffort: "ultra-code",
+        generation: 32,
+        updatedAt: null,
+      },
+    },
+  })}\n`, { mode: 0o600 });
+  const environment = {
+    CODEX_BOT_MODEL_SELECTIONS: registry,
+    CODEX_BOT_CONVERSATION_BINDINGS: path.join(path.dirname(registry), "bindings.json"),
+    CODEX_BOT_INFERENCE_ENDPOINT: "tcp://127.0.0.1:43210",
+    CODEX_BOT_INFERENCE_CAPABILITY: "a".repeat(64),
+  };
+  const direct = loadRuntimeConfig(environment, { conversationId: "official" });
+  assert.deepEqual(Object.keys(direct), [
+    "botId", "generation", "provider", "model", "reasoningEffort", "serviceTier",
+  ]);
+  assert.equal(direct.provider, "openai-codex");
+  assert.equal(direct.reasoningEffort, "ultra");
+  assert.equal(direct.serviceTier, null);
+  assert.equal(direct.endpoint, "tcp://127.0.0.1:43210");
+  assert.equal(direct.credential, "a".repeat(64));
+  assert.doesNotMatch(JSON.stringify(direct), /43210|aaaa|credential|endpoint/);
+
+  fs.writeFileSync(registry, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId: `bot-${BOT_ID_B}`,
+    selections: JSON.parse(fs.readFileSync(registry, "utf8")).selections,
+  })}\n`, { mode: 0o600 });
+  const optional = loadRuntimeConfig(environment, { conversationId: "optional" });
+  assert.equal(optional.provider, "cliproxy-anthropic");
+  assert.equal(optional.model, "claude-fable-5");
+  assert.equal(optional.reasoningEffort, "ultra-code");
+  assert.equal(optional.serviceTier, null);
+  assert.equal(environment.CODEX_BOT_CLIPROXY_URL, undefined);
+  assert.equal(environment.CODEX_BOT_CLIPROXY_TOKEN, undefined);
+});
+
+test("the private inference bridge accepts a live official model not compiled into the app", (t) => {
+  const { loadRuntimeConfig } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  fs.writeFileSync(registry, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId: `bot-${BOT_ID}`,
+    selections: {
+      [`bot-${BOT_ID}`]: {
+        provider: "openai-codex",
+        model: "gpt-live-only",
+        reasoningEffort: "high",
+        serviceTier: null,
+        catalogGeneration: 44,
+        generation: 9,
+        updatedAt: null,
+      },
+    },
+  })}\n`, { mode: 0o600 });
+  const config = loadRuntimeConfig({
+    CODEX_BOT_MODEL_SELECTIONS: registry,
+    CODEX_BOT_INFERENCE_ENDPOINT: "tcp://127.0.0.1:43210",
+    CODEX_BOT_INFERENCE_CAPABILITY: "b".repeat(64),
+  });
+  assert.equal(config.provider, "openai-codex");
+  assert.equal(config.model, "gpt-live-only");
+  assert.equal(config.reasoningEffort, "high");
 });
 
 test("CLIProxyAPI-backed Fable Ultra Code stays distinct in UI storage and maps to upstream max reasoning", (t) => {
