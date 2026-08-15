@@ -249,13 +249,20 @@ function runtimeProviderRecorder(provider, receipts, ingressEvents) {
     capabilities: (...args) => provider.capabilities(...args),
     async provision(input) {
       const result = await provider.provision(input);
-      receipts.push(Object.freeze({
+      const receipt = {
         botId: input.botId,
+        idempotencyKey: input.idempotencyKey,
         provider: result.provider,
         runtimeId: result.runtimeId,
         endpoint: result.endpoint,
-        authToken: result.authToken,
-      }));
+      };
+      Object.defineProperty(receipt, "authToken", {
+        value: result.authToken,
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      });
+      receipts.push(Object.freeze(receipt));
       return result;
     },
     inspect: (...args) => provider.inspect(...args),
@@ -587,6 +594,8 @@ async function minimalCleanup({
   controller,
   provider,
   receipts,
+  readyReceipts,
+  store,
   storeFilePath,
 }) {
   let safe = true;
@@ -608,18 +617,49 @@ async function minimalCleanup({
   for (const receipt of [...receipts].reverse()) {
     if (retired.has(receipt.runtimeId)) continue;
     try {
-      const inspected = await provider.inspect({ runtimeId: receipt.runtimeId });
-      if (inspected.ownerBotId !== receipt.botId) {
-        safe = false;
-        continue;
+      const readyReceipt = readyReceipts.get(receipt.runtimeId);
+      let result;
+      let terminal;
+      const retireExactIssuance = async () => {
+        const recovered = await provider.provision({
+          botId: receipt.botId,
+          idempotencyKey: receipt.idempotencyKey,
+        });
+        if (recovered.provider !== receipt.provider
+          || recovered.runtimeId !== receipt.runtimeId
+          || recovered.ownerBotId !== receipt.botId
+          || recovered.endpoint !== receipt.endpoint
+          || recovered.authToken !== receipt.authToken
+          || recovered.state !== "ready") throw failedError();
+        const inspected = await provider.inspect({ runtimeId: receipt.runtimeId });
+        if (inspected.runtimeId !== receipt.runtimeId
+          || inspected.ownerBotId !== receipt.botId
+          || inspected.state !== "ready") throw failedError();
+        result = await provider.retire({ runtimeId: receipt.runtimeId });
+        terminal = await provider.inspect({ runtimeId: receipt.runtimeId });
+      };
+
+      if (readyReceipt) {
+        const currentSession = await controller.runtimeSession(readyReceipt.botId);
+        if (!currentSession
+          || currentSession.provider !== readyReceipt.provider
+          || currentSession.runtimeId !== readyReceipt.runtimeId
+          || currentSession.generation !== readyReceipt.generation) throw failedError();
+        await store.runtimeTransaction(readyReceipt.botId, {}, async ({ bot }) => {
+          if (bot.runtime.provider !== readyReceipt.provider
+            || bot.runtime.remoteRuntimeId !== readyReceipt.runtimeId
+            || bot.runtime.state !== "ready") throw failedError();
+          await retireExactIssuance();
+        });
+      } else {
+        await retireExactIssuance();
       }
-      const result = await provider.retire({ runtimeId: receipt.runtimeId });
+
       if (result.runtimeId !== receipt.runtimeId
         || (result.state !== "retired" && result.state !== "detached")) safe = false;
       else {
         retired.add(receipt.runtimeId);
         retiredRuntimeCount += 1;
-        const terminal = await provider.inspect({ runtimeId: receipt.runtimeId });
         if (terminal.runtimeId === receipt.runtimeId
           && terminal.ownerBotId === receipt.botId
           && (terminal.state === "retired" || terminal.state === "detached")) {
@@ -674,7 +714,9 @@ async function runRemoteProviderLiveGate(options) {
 
   const clients = [];
   const receipts = [];
+  const readyReceipts = new Map();
   let controller = null;
+  let store = null;
   const runtimeEvents = [];
   const ingressEvents = [];
   const startedAt = new Date().toISOString();
@@ -715,12 +757,24 @@ async function runRemoteProviderLiveGate(options) {
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
-    const store = new BotStore({ filePath: storeFilePath });
+    store = new BotStore({ filePath: storeFilePath });
     controller = new BotRuntimeController({ store, provider: recordedProvider });
     controller.on("runtime-event", (event) => runtimeEvents.push(event));
     const botA = await readyBot(controller, recordedProvider);
     if (signal?.aborted) throw failedError();
     const botB = await readyBot(controller, recordedProvider);
+    for (const bot of [botA, botB]) {
+      const provisionReceipt = receipts.find((receipt) => (
+        receipt.botId === bot.botId && receipt.runtimeId === bot.session.runtimeId
+      ));
+      if (!provisionReceipt) throw failedError();
+      readyReceipts.set(bot.session.runtimeId, Object.freeze({
+        botId: bot.botId,
+        provider: bot.session.provider,
+        runtimeId: bot.session.runtimeId,
+        generation: bot.session.generation,
+      }));
+    }
     if (botA.session.runtimeId === botB.session.runtimeId
       || botA.session.endpoint === botB.session.endpoint) throw failedError();
 
@@ -781,6 +835,8 @@ async function runRemoteProviderLiveGate(options) {
     controller,
     provider,
     receipts,
+    readyReceipts,
+    store,
     storeFilePath,
   });
   if (failure || !cleanup.safe || !result) throw failedError();

@@ -29,6 +29,7 @@ try {
 }
 
 const BOT_ID = "bot-00000000-0000-4000-8000-000000000001";
+const { BotStore } = require("../src/bots/bot-store.cjs");
 const { validateProvider } = require("../src/bots/runtime-provider.cjs");
 
 async function temporaryDirectory(t) {
@@ -237,6 +238,7 @@ test("exercise adapter rejects hostile shapes and mismatched acknowledgements wi
 async function liveGateHarness(t, options = {}) {
   const workspacePath = await temporaryDirectory(t);
   const provisionCalls = [];
+  const idempotentProvision = new Map();
   const runtimes = new Map();
   const retired = [];
   const subscribers = new Set();
@@ -257,6 +259,8 @@ async function liveGateHarness(t, options = {}) {
       };
     },
     async provision(input) {
+      const recovered = idempotentProvision.get(input.idempotencyKey);
+      if (recovered) return { ...recovered };
       const index = provisionCalls.length;
       provisionCalls.push(input);
       const runtimeId = options.collision === "runtimeId" ? "runtime-shared" : `runtime-${index + 1}`;
@@ -273,6 +277,7 @@ async function liveGateHarness(t, options = {}) {
         state: "ready",
       };
       runtimes.set(runtimeId, { ...record });
+      idempotentProvision.set(input.idempotencyKey, { ...record });
       return record;
     },
     async inspect({ runtimeId }) {
@@ -342,6 +347,22 @@ async function liveGateHarness(t, options = {}) {
     },
     async dispose() {
       exerciseDisposed += 1;
+      if (options.successorOnDispose) {
+        const store = new BotStore({ filePath: path.join(workspacePath, "bots.json") });
+        await store.updateRuntime(provisionCalls[0].botId, {
+          provider: "fixture-provider",
+          remoteRuntimeId: "runtime-successor",
+          state: "ready",
+          lastErrorCode: null,
+        });
+      }
+      if (options.sameIdSuccessorOnDispose) {
+        const original = idempotentProvision.get(provisionCalls[0].idempotencyKey);
+        idempotentProvision.set(provisionCalls[0].idempotencyKey, {
+          ...original,
+          authToken: "fixture-private-successor-auth-token-value",
+        });
+      }
     },
   });
 
@@ -634,6 +655,28 @@ test("successful proof records terminal cleanup and removes the verifier store",
   await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
     code: "ENOENT",
   });
+});
+
+test("cleanup never retires a captured runtime after the authoritative bot receipt changes", async (t) => {
+  const harness = await liveGateHarness(t, { successorOnDispose: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+  assert.deepEqual(harness.retired, ["runtime-2"]);
+  assert.equal(harness.runtimes.get("runtime-1").state, "ready");
+});
+
+test("cleanup refuses same-ID same-owner issuance replacement with different credentials", async (t) => {
+  const harness = await liveGateHarness(t, { sameIdSuccessorOnDispose: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+  assert.deepEqual(harness.retired, ["runtime-2"]);
+  assert.equal(harness.runtimes.get("runtime-1").state, "ready");
 });
 
 test("rejects acknowledgement without an exact current YouTube frame", async (t) => {
