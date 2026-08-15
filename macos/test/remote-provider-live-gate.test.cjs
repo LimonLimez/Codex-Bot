@@ -212,6 +212,26 @@ test("loads exact reviewed module bytes without transitive files or require-cach
     message: "Remote provider verification is not configured.",
   });
 
+  const processEscapeSource = [
+    'const createRequire = process.getBuiltinModule("node:module").createRequire;',
+    'module.exports = createRequire(__filename)("./helper.cjs");',
+    "",
+  ].join("\n");
+  const processEscapePath = await writePrivateModule(
+    directory,
+    "process-escape.cjs",
+    processEscapeSource,
+  );
+  assert.throws(() => loadLiveGateDependencies({
+    providerModulePath: processEscapePath,
+    providerModuleSha256: sha256Text(processEscapeSource),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  }), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+    message: "Remote provider verification is not configured.",
+  });
+
   const firstSource = providerSource();
   const providerModulePath = await writePrivateModule(directory, "replaceable.cjs", firstSource);
   const first = loadLiveGateDependencies({

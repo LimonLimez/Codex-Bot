@@ -106,12 +106,43 @@ function publicIpAddress(address) {
   return false;
 }
 
+function intrinsicObjectPrototype(prototype) {
+  if (prototype === null || prototype === Object.prototype) return true;
+  try {
+    if (Object.getPrototypeOf(prototype) !== null) return false;
+    const actual = Object.getOwnPropertyDescriptors(prototype);
+    const expected = Object.getOwnPropertyDescriptors(Object.prototype);
+    const actualKeys = Reflect.ownKeys(actual);
+    const expectedKeys = Reflect.ownKeys(expected);
+    if (actualKeys.length !== expectedKeys.length
+      || expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(actual, key))) return false;
+    return expectedKeys.every((key) => {
+      const left = actual[key];
+      const right = expected[key];
+      if (left.enumerable !== right.enumerable || left.configurable !== right.configurable) return false;
+      if ("value" in right) {
+        if (!("value" in left) || left.writable !== right.writable) return false;
+        if (typeof right.value === "function") {
+          return typeof left.value === "function"
+            && Function.prototype.toString.call(left.value) === Function.prototype.toString.call(right.value);
+        }
+        return left.value === right.value;
+      }
+      return !("value" in left)
+        && Function.prototype.toString.call(left.get) === Function.prototype.toString.call(right.get)
+        && Function.prototype.toString.call(left.set) === Function.prototype.toString.call(right.set);
+    });
+  } catch {
+    return false;
+  }
+}
+
 function objectDescriptors(value, label, expectedKeys) {
   if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) {
     throw new TypeError(`${label} must be a plain object.`);
   }
   const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
+  if (!intrinsicObjectPrototype(prototype)) {
     throw new TypeError(`${label} must be a plain object.`);
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
@@ -152,23 +183,49 @@ function reviewedModuleSource(value, expectedSha256) {
 }
 
 function executeReviewedModule(modulePath, source) {
-  const builtins = new Set(Module.builtinModules);
-  const forbiddenBuiltins = new Set(["module", "vm"]);
-  const restrictedRequire = (specifier) => {
-    if (typeof specifier !== "string") throw blockedError();
-    const bare = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
-    if (!builtins.has(bare) || forbiddenBuiltins.has(bare)) throw blockedError();
-    return require(specifier.startsWith("node:") ? specifier : `node:${specifier}`);
-  };
-  const moduleRecord = { exports: {} };
-  Object.defineProperties(moduleRecord, {
-    filename: { value: modulePath, enumerable: true },
-    require: { value: restrictedRequire, enumerable: true },
+  const safeEnvironment = Object.freeze(Object.assign(Object.create(null), process.env));
+  const safeVersions = Object.freeze(Object.assign(Object.create(null), { node: process.versions.node }));
+  const safeProcess = Object.freeze(Object.assign(Object.create(null), {
+    arch: process.arch,
+    env: safeEnvironment,
+    platform: process.platform,
+    versions: safeVersions,
+  }));
+  const sandbox = Object.assign(Object.create(null), {
+    AbortController,
+    AbortSignal,
+    Buffer,
+    TextDecoder,
+    TextEncoder,
+    URL,
+    URLSearchParams,
+    clearInterval,
+    clearTimeout,
+    process: safeProcess,
+    queueMicrotask,
+    setInterval,
+    setTimeout,
+    structuredClone,
   });
-  const wrapper = vm.runInThisContext(Module.wrap(source), {
+  if (typeof fetch === "function") sandbox.fetch = fetch;
+  if (typeof WebSocket === "function") sandbox.WebSocket = WebSocket;
+  if (globalThis.crypto) sandbox.crypto = globalThis.crypto;
+  const context = vm.createContext(sandbox, {
+    codeGeneration: { strings: false, wasm: false },
+    name: "codex-bot-reviewed-adapter",
+  });
+  const restrictedRequire = vm.runInContext(
+    "(function require() { throw new Error('Module imports are unavailable.'); })",
+    context,
+  );
+  const moduleRecord = vm.runInContext("Object.create(null)", context);
+  moduleRecord.exports = vm.runInContext("Object.create(null)", context);
+  moduleRecord.filename = modulePath;
+  moduleRecord.require = restrictedRequire;
+  const wrapper = new vm.Script(Module.wrap(source), {
     filename: modulePath,
     displayErrors: false,
-  });
+  }).runInContext(context, { timeout: 1_000 });
   wrapper.call(
     moduleRecord.exports,
     moduleRecord.exports,

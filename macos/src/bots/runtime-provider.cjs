@@ -207,6 +207,66 @@ function deepFreeze(value, seen = new Set()) {
   return Object.freeze(value);
 }
 
+function intrinsicObjectPrototype(prototype) {
+  if (prototype === null || prototype === Object.prototype) return true;
+  try {
+    if (Object.getPrototypeOf(prototype) !== null) return false;
+    const actual = Object.getOwnPropertyDescriptors(prototype);
+    const expected = Object.getOwnPropertyDescriptors(Object.prototype);
+    const actualKeys = Reflect.ownKeys(actual);
+    const expectedKeys = Reflect.ownKeys(expected);
+    if (actualKeys.length !== expectedKeys.length
+      || expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(actual, key))) return false;
+    return expectedKeys.every((key) => {
+      const left = actual[key];
+      const right = expected[key];
+      if (left.enumerable !== right.enumerable || left.configurable !== right.configurable) return false;
+      if ("value" in right) {
+        if (!("value" in left) || left.writable !== right.writable) return false;
+        if (typeof right.value === "function") {
+          return typeof left.value === "function"
+            && Function.prototype.toString.call(left.value) === Function.prototype.toString.call(right.value);
+        }
+        return left.value === right.value;
+      }
+      return !("value" in left)
+        && Function.prototype.toString.call(left.get) === Function.prototype.toString.call(right.get)
+        && Function.prototype.toString.call(left.set) === Function.prototype.toString.call(right.set);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function intrinsicArrayPrototype(prototype) {
+  if (prototype === Array.prototype) return true;
+  try {
+    if (!intrinsicObjectPrototype(Object.getPrototypeOf(prototype))) return false;
+    const actual = Object.getOwnPropertyDescriptors(prototype);
+    const expected = Object.getOwnPropertyDescriptors(Array.prototype);
+    const actualKeys = Reflect.ownKeys(actual);
+    const expectedKeys = Reflect.ownKeys(expected);
+    if (actualKeys.length !== expectedKeys.length
+      || expectedKeys.some((key) => !Object.prototype.hasOwnProperty.call(actual, key))) return false;
+    return expectedKeys.every((key) => {
+      const left = actual[key];
+      const right = expected[key];
+      if (left.enumerable !== right.enumerable || left.configurable !== right.configurable) return false;
+      if ("value" in right) {
+        if (!("value" in left) || left.writable !== right.writable) return false;
+        if (typeof right.value === "function") {
+          return typeof left.value === "function"
+            && Function.prototype.toString.call(left.value) === Function.prototype.toString.call(right.value);
+        }
+        return left.value === right.value;
+      }
+      return false;
+    });
+  } catch {
+    return false;
+  }
+}
+
 function cloneProviderData(value, seen, budget, depth = 0) {
   if (value && typeof value === "object") {
     if (types.isProxy(value)) throw new TypeError("Provider data cannot contain proxies.");
@@ -232,7 +292,8 @@ function cloneProviderData(value, seen, budget, depth = 0) {
 
   const array = Array.isArray(value);
   const prototype = Object.getPrototypeOf(value);
-  if ((array && prototype !== Array.prototype) || (!array && prototype !== Object.prototype && prototype !== null)) {
+  if ((array && !intrinsicArrayPrototype(prototype))
+    || (!array && !intrinsicObjectPrototype(prototype))) {
     throw new TypeError("Provider data must use plain objects and arrays.");
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
