@@ -33,6 +33,18 @@ function sha256File(file) {
   return hash.digest("hex");
 }
 
+function assertExactReleaseNames(installerApp, output, release) {
+  const expectedInstaller = release
+    ? "Install OpenBot.app"
+    : "Install OpenBot DEVELOPMENT.app";
+  const expectedDmg = release
+    ? "OpenBot-0.2.0-macos.1.dmg"
+    : "OpenBot-0.2.0-macos.1-DEVELOPMENT.dmg";
+  if (path.basename(installerApp) !== expectedInstaller || path.basename(output) !== expectedDmg) {
+    throw new Error(`OpenBot ${release ? "release" : "DEVELOPMENT"} packaging requires ${expectedInstaller} and ${expectedDmg}`);
+  }
+}
+
 function parseArgs(argv) {
   const parsed = { release: false };
   const allowed = new Set(["installer-app", "output", "signing-identity"]);
@@ -52,12 +64,14 @@ function parseArgs(argv) {
   if (parsed.release && !/^Developer ID Application: /.test(parsed["signing-identity"] || "")) {
     throw new Error("A Developer ID Application identity is required for a release DMG");
   }
+  assertExactReleaseNames(parsed["installer-app"], parsed.output, parsed.release);
   return parsed;
 }
 
 function packageDmg(options) {
   const installerApp = path.resolve(options["installer-app"]);
   const output = path.resolve(options.output);
+  assertExactReleaseNames(installerApp, output, Boolean(options.release));
   const appStat = fs.lstatSync(installerApp);
   if (!appStat.isDirectory() || appStat.isSymbolicLink() || !installerApp.endsWith(".app")) {
     throw new Error("Installer app must be a real application bundle");
@@ -70,7 +84,7 @@ function packageDmg(options) {
   fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o755 });
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-dmg-build-"));
   const stage = path.join(temporary, "stage");
-  const temporaryDmg = path.join(temporary, "Codex-Bot.dmg");
+  const temporaryDmg = path.join(temporary, "OpenBot-0.2.0-macos.1.dmg");
   fs.mkdirSync(stage, { mode: 0o700 });
   try {
     fs.cpSync(installerApp, path.join(stage, expectedAppName), { recursive: true, errorOnExist: true, force: false });
@@ -78,7 +92,7 @@ function packageDmg(options) {
     run("/usr/bin/hdiutil", [
       "create", "-quiet", "-fs", "HFS+", "-format", "UDZO",
       "-imagekey", "zlib-level=9", "-volname",
-      development ? "Codex Bot DEVELOPMENT" : "Codex Bot Installer",
+      development ? "OpenBot DEVELOPMENT" : "OpenBot Installer",
       "-srcfolder", stage, temporaryDmg,
     ]);
     if (!development) {

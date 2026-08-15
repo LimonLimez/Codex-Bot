@@ -111,7 +111,7 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
       sourceSha256: sourceHash,
       targetSha256: sha256File(target),
       vendorVersion: "0.20.0",
-      releaseVersion: "0.1.4-macos.1",
+      releaseVersion: "0.2.0-macos.1",
       mutations: [
         "dist/codex/bots/bot-store.cjs",
         "dist/codex/bots/chatgpt-relay-codec.cjs",
@@ -134,6 +134,7 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/desktop/inference-bridge-server.cjs",
         "dist/codex/desktop/inference-provider-router.cjs",
         "dist/codex/desktop/model-selection-store.cjs",
+        "dist/codex/desktop/openbot-user-data.cjs",
         "dist/codex/desktop/runtime.cjs",
         "dist/codex/node_modules/ws/LICENSE",
         "dist/codex/node_modules/ws/README.md",
@@ -187,9 +188,9 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
     },
     {
       name: "sand",
-      productName: "Codex Bot",
-      version: "0.1.4-macos.1",
-      description: "Codex Bot desktop agent",
+      productName: "OpenBot",
+      version: "0.2.0-macos.1",
+      description: "OpenBot desktop agent",
       author: "SpaceXAI",
       homepage: "https://github.com/LimonLimez/Codex-Bot",
       codexBot: {
@@ -217,6 +218,7 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
   for (const relative of [
     "desktop/runtime.cjs",
     "desktop/model-selection-store.cjs",
+    "desktop/openbot-user-data.cjs",
     "bots/bot-store.cjs",
     "bots/runtime-controller.cjs",
     "bots/runtime-provider.cjs",

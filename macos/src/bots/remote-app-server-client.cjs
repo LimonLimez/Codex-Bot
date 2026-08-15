@@ -1236,8 +1236,8 @@ class RemoteAppServerClient extends EventEmitter {
     if (this.#active !== connection || connection.terminal || connection.epoch !== this.#socketEpoch) return;
     const initialization = this.#sendRequest(connection, "initialize", {
       clientInfo: {
-        name: "codex-bot",
-        title: "Codex Bot",
+        name: "openbot",
+        title: "OpenBot",
         version: this.#clientVersion,
       },
       capabilities: {

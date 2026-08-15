@@ -11,7 +11,7 @@ const ASSETS = Object.freeze([
   "reasoning-control.js",
 ]);
 const TITLE = "<title>Grok Bot</title>";
-const CODEX_TITLE = "<title>Codex Bot</title>";
+const CODEX_TITLE = "<title>OpenBot</title>";
 const HEAD_END = "  </head>";
 const CODEX_HEAD = `    <link rel="stylesheet" href="./codex/codex-ui.css">
     <script src="./codex/model-controls.js" defer></script>

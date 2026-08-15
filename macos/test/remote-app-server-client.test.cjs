@@ -227,7 +227,7 @@ async function startReady(client, socket) {
     id: initializeId,
     method: "initialize",
     params: {
-      clientInfo: { name: "codex-bot", title: "Codex Bot", version: "1.0.0" },
+      clientInfo: { name: "openbot", title: "OpenBot", version: "1.0.0" },
       capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
     },
   });

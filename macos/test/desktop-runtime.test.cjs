@@ -86,7 +86,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
     createLazySidecarManager,
   } = require(runtimePath);
   const root = tempRoot(t);
-  const resourcesPath = path.join(root, "Codex Bot.app", "Contents", "Resources");
+  const resourcesPath = path.join(root, "OpenBot.app", "Contents", "Resources");
   const stateRoot = path.join(root, "state");
   const homeDirectory = path.join(root, "home");
   const directCalls = [];
@@ -106,7 +106,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
     stateRoot: path.join(stateRoot, "direct-codex"),
     homeDirectory,
     environment: { HOME: homeDirectory, OPENAI_API_KEY: "must-not-forward" },
-    clientVersion: "0.1.4-macos.1",
+    clientVersion: "0.2.0-macos.1",
   }]);
 
   const sidecarCalls = [];

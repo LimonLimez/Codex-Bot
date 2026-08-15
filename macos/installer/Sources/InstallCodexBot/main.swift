@@ -59,14 +59,16 @@ private final class InstallerModel: ObservableObject {
               let codexRuntimeBytes = (Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeBytes") as? NSNumber)?.intValue,
               let codexRuntimeSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeSHA256") as? String,
               let codexRuntimeLicenseBytes = (Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeLicenseBytes") as? NSNumber)?.intValue,
-              let codexRuntimeLicenseSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeLicenseSHA256") as? String else {
+              let codexRuntimeLicenseSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeLicenseSHA256") as? String,
+              let profilePublisherBytes = (Bundle.main.object(forInfoDictionaryKey: "OpenBotProfilePublisherBytes") as? NSNumber)?.intValue,
+              let profilePublisherSHA256 = Bundle.main.object(forInfoDictionaryKey: "OpenBotProfilePublisherSHA256") as? String else {
             state = "Installer resources or vendor input are unavailable."
             return
         }
         let payload = resources.appendingPathComponent("Patcher", isDirectory: true)
         let paths = InstallerPaths(
             vendorApp: vendorApp,
-            destinationApp: destinationDirectory.appendingPathComponent("Codex Bot.app", isDirectory: true),
+            destinationApp: destinationDirectory.appendingPathComponent("OpenBot.app", isDirectory: true),
             workingDirectory: destinationDirectory,
             verifierScript: payload.appendingPathComponent("scripts/verify-vendor-app.cjs"),
             vendorManifest: payload.appendingPathComponent("assets/grok-bot-0.20.0-darwin-arm64.manifest.json"),
@@ -85,11 +87,14 @@ private final class InstallerModel: ObservableObject {
             expectedCodexRuntimeSHA256: codexRuntimeSHA256,
             expectedCodexRuntimeLicenseBytes: codexRuntimeLicenseBytes,
             expectedCodexRuntimeLicenseSHA256: codexRuntimeLicenseSHA256,
+            profilePublisher: resources.appendingPathComponent("OpenBotMigration/openbot-profile-publish"),
+            expectedProfilePublisherBytes: profilePublisherBytes,
+            expectedProfilePublisherSHA256: profilePublisherSHA256,
             signingIdentity: "-"
         )
         installing = true
         installed = false
-        state = "Verifying and creating a separate Codex Bot app…"
+        state = "Verifying and creating a separate OpenBot app…"
         Task {
             let succeeded = await Task.detached(priority: .userInitiated) {
                 do {
@@ -102,8 +107,8 @@ private final class InstallerModel: ObservableObject {
             installing = false
             installed = succeeded
             state = succeeded
-                ? "Codex Bot was installed without modifying Grok Bot."
-                : "Installation stopped safely. Grok Bot and any previous Codex Bot were preserved."
+                ? "OpenBot was installed without modifying Grok Bot."
+                : "Installation stopped safely. Grok Bot and any previous OpenBot or Codex Bot were preserved."
         }
     }
 }
@@ -118,14 +123,14 @@ private struct InstallerView: View {
                     .font(.system(size: 34))
                     .foregroundStyle(.blue)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Install Codex Bot")
+                    Text("Install OpenBot")
                         .font(.title2.weight(.semibold))
-                    Text("macOS Apple Silicon · 0.1.4-macos.1")
+                    Text("macOS Apple Silicon · 0.2.0-macos.1")
                         .foregroundStyle(.secondary)
                 }
             }
 
-            Text("This installer verifies your exact Grok Bot 0.20.0 app, copies it, applies the reviewed Codex patch, and creates a separate Codex Bot app. Grok Bot is never modified. No account, conversation, log, or developer profile is included in this installer.")
+            Text("This installer verifies your exact Grok Bot 0.20.0 app, copies it, applies the reviewed OpenBot patch, and creates a separate OpenBot app. Grok Bot and any previous Codex Bot are never modified. No account, conversation, log, or developer profile is included in this installer.")
                 .fixedSize(horizontal: false, vertical: true)
 
             GroupBox("Verified source app") {

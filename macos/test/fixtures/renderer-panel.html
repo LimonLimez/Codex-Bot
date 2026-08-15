@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Codex Bot control evidence</title>
+    <title>OpenBot control evidence</title>
     <style>
       :root { --fixture-bg: #181818; --fixture-text: #eee; --fixture-side: #202020; --fixture-card: #2b2b2b; --fixture-muted: #bbb; --fixture-border: #303030; --fixture-composer: #252525; --fixture-copy: #777; --fixture-heading: #aaa; }
       :root[data-theme="light"] { --fixture-bg: #f4f5f7; --fixture-text: #202124; --fixture-side: #eceef1; --fixture-card: #fff; --fixture-muted: #4f5865; --fixture-border: #d4d8de; --fixture-composer: #fff; --fixture-copy: #667080; --fixture-heading: #4f5865; }
@@ -13,7 +13,7 @@
       .fixture-sidebar strong { display: block; padding: 8px; }
       .fixture-sidebar div { margin-top: 5px; padding: 9px; border-radius: 8px; background: var(--fixture-card); color: var(--fixture-muted); }
       .fixture-main { position: relative; display: grid; grid-template-rows: 1fr auto; min-width: 0; color: var(--fixture-copy); }
-      .fixture-main::before { content: "Codex Bot  •  Grok 0.20 shell preserved"; position: absolute; top: 17px; left: 24px; color: var(--fixture-heading); }
+      .fixture-main::before { content: "OpenBot  •  Grok 0.20 shell preserved"; position: absolute; top: 17px; left: 24px; color: var(--fixture-heading); }
       .fixture-main p { align-self: center; justify-self: center; max-width: 360px; text-align: center; line-height: 1.6; }
       .fixture-composer { margin: 0 auto 20px; width: min(720px, calc(100% - 40px)); padding: 10px; border: 1px solid var(--fixture-border); border-radius: 18px; background: var(--fixture-composer); }
       :root[data-layout="narrow"] .fixture-composer { width: min(380px, calc(100% - 40px)); }
@@ -91,7 +91,7 @@
     <script src="../../src/renderer/bot-runtime-ui.js" defer></script>
   </head>
   <body>
-    <aside class="fixture-sidebar" data-codex-bot-sidebar-host><strong>Codex Bot</strong><div>New Bot</div><div>Plugins</div><div>Routines</div><div>Settings</div></aside>
+    <aside class="fixture-sidebar" data-codex-bot-sidebar-host><strong>OpenBot</strong><div>New Bot</div><div>Plugins</div><div>Routines</div><div>Settings</div></aside>
     <main class="fixture-main"><p>Stock conversation, attachment, skill, connector, approval, computer, and group-chat surfaces remain in the underlying 0.20 shell.</p><form class="fixture-composer" data-codex-bot-composer-host><textarea placeholder="Ask anything, or drop a file."></textarea></form></main>
   </body>
 </html>

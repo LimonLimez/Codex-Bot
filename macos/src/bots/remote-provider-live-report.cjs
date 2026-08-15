@@ -196,7 +196,7 @@ function validatedPublicReport(input) {
 
 function markdownReport(report) {
   return [
-    "# Codex Bot Remote Provider Live Gate",
+    "# OpenBot Remote Provider Live Gate",
     "",
     `REMOTE_PROVIDER_GATE=${report.status}`,
     "",

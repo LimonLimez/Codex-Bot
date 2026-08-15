@@ -14,6 +14,7 @@ const DESKTOP_FILES = Object.freeze([
   "desktop/inference-bridge-server.cjs",
   "desktop/inference-provider-router.cjs",
   "desktop/model-selection-store.cjs",
+  "desktop/openbot-user-data.cjs",
   "desktop/runtime.cjs",
   "bridge/codex-client.cjs",
   "bridge/inference-socket-client.cjs",

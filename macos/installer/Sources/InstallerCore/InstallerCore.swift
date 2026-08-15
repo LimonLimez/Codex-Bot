@@ -131,6 +131,9 @@ public struct InstallerPaths: Sendable {
     public var expectedCodexRuntimeSHA256: String
     public var expectedCodexRuntimeLicenseBytes: Int
     public var expectedCodexRuntimeLicenseSHA256: String
+    public var profilePublisher: URL
+    public var expectedProfilePublisherBytes: Int
+    public var expectedProfilePublisherSHA256: String
     public var signingIdentity: String
 
     public init(
@@ -154,6 +157,9 @@ public struct InstallerPaths: Sendable {
         expectedCodexRuntimeSHA256: String,
         expectedCodexRuntimeLicenseBytes: Int,
         expectedCodexRuntimeLicenseSHA256: String,
+        profilePublisher: URL,
+        expectedProfilePublisherBytes: Int,
+        expectedProfilePublisherSHA256: String,
         signingIdentity: String
     ) {
         self.vendorApp = vendorApp
@@ -176,6 +182,9 @@ public struct InstallerPaths: Sendable {
         self.expectedCodexRuntimeSHA256 = expectedCodexRuntimeSHA256
         self.expectedCodexRuntimeLicenseBytes = expectedCodexRuntimeLicenseBytes
         self.expectedCodexRuntimeLicenseSHA256 = expectedCodexRuntimeLicenseSHA256
+        self.profilePublisher = profilePublisher
+        self.expectedProfilePublisherBytes = expectedProfilePublisherBytes
+        self.expectedProfilePublisherSHA256 = expectedProfilePublisherSHA256
         self.signingIdentity = signingIdentity
     }
 }
@@ -209,6 +218,25 @@ private func checked(_ runner: CommandRunning, _ call: CommandCall) throws {
     guard result.status == 0 else { throw InstallerFailure.commandFailed }
 }
 
+private func canonicalRealDirectory(_ url: URL) throws -> URL {
+    try realItem(url, directory: true)
+    return url.resolvingSymlinksInPath().standardizedFileURL
+}
+
+private func isSameOrDescendant(_ candidate: URL, of directory: URL) -> Bool {
+    let candidatePath = candidate.standardizedFileURL.path
+    let directoryPath = directory.standardizedFileURL.path
+    return candidatePath == directoryPath || candidatePath.hasPrefix(directoryPath + "/")
+}
+
+private func pathEntryExists(_ url: URL) throws -> Bool {
+    var information = stat()
+    let status = url.path.withCString { lstat($0, &information) }
+    if status == 0 { return true }
+    if errno == ENOENT { return false }
+    throw InstallerFailure.unsafePath
+}
+
 public final class InstallerTransaction: @unchecked Sendable {
     private let paths: InstallerPaths
     private let runner: CommandRunning
@@ -222,7 +250,6 @@ public final class InstallerTransaction: @unchecked Sendable {
 
     public func install() throws -> InstallerReceipt {
         try validateInputs()
-        try files.createDirectory(at: paths.workingDirectory, withIntermediateDirectories: true)
         try realItem(paths.workingDirectory, directory: true)
         let lockURL = paths.workingDirectory.appendingPathComponent(".codex-bot-installer.lock")
         let lock = open(lockURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IWUSR)
@@ -235,7 +262,7 @@ public final class InstallerTransaction: @unchecked Sendable {
 
         let token = UUID().uuidString.lowercased()
         let stageRoot = paths.workingDirectory.appendingPathComponent(".codex-bot-stage-\(token)", isDirectory: true)
-        let stagedApp = stageRoot.appendingPathComponent("Codex Bot.app", isDirectory: true)
+        let stagedApp = stageRoot.appendingPathComponent("OpenBot.app", isDirectory: true)
         let backup = paths.workingDirectory.appendingPathComponent(".codex-bot-backup-\(token).app", isDirectory: true)
         var movedPrevious = false
         var installed = false
@@ -303,8 +330,16 @@ public final class InstallerTransaction: @unchecked Sendable {
         try realItem(paths.codexRuntimeBinary, directory: false)
         try realItem(paths.codexRuntimeReceipt, directory: false)
         try realItem(paths.codexRuntimeLicense, directory: false)
-        guard paths.destinationApp.isFileURL,
-              paths.destinationApp.lastPathComponent == "Codex Bot.app",
+        try realItem(paths.profilePublisher, directory: false)
+        let canonicalVendor = try canonicalRealDirectory(paths.vendorApp)
+        let expectedDestination = paths.workingDirectory
+            .appendingPathComponent("OpenBot.app", isDirectory: true)
+            .standardizedFileURL
+        guard paths.workingDirectory.isFileURL,
+              !paths.workingDirectory.lastPathComponent.isEmpty,
+              paths.destinationApp.isFileURL,
+              paths.destinationApp.lastPathComponent == "OpenBot.app",
+              paths.destinationApp.standardizedFileURL == expectedDestination,
               paths.destinationApp.standardizedFileURL != paths.vendorApp.standardizedFileURL,
               paths.signingIdentity == "-",
               paths.expectedSidecarBytes > 0,
@@ -314,7 +349,9 @@ public final class InstallerTransaction: @unchecked Sendable {
               paths.expectedCodexRuntimeBytes > 0,
               paths.expectedCodexRuntimeSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
               paths.expectedCodexRuntimeLicenseBytes > 0,
-              paths.expectedCodexRuntimeLicenseSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
+              paths.expectedCodexRuntimeLicenseSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              paths.expectedProfilePublisherBytes > 0,
+              paths.expectedProfilePublisherSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
         else { throw InstallerFailure.unsafePath }
         let sidecar = try Data(contentsOf: paths.sidecarBinary, options: .mappedIfSafe)
         let digest = SHA256.hash(data: sidecar).map { String(format: "%02x", $0) }.joined()
@@ -362,6 +399,51 @@ public final class InstallerTransaction: @unchecked Sendable {
               runtimeLicenseDigest == paths.expectedCodexRuntimeLicenseSHA256 else {
             throw InstallerFailure.invalidInput
         }
+        let profilePublisher = try Data(contentsOf: paths.profilePublisher, options: .mappedIfSafe)
+        let profilePublisherDigest = SHA256.hash(data: profilePublisher).map { String(format: "%02x", $0) }.joined()
+        guard profilePublisher.count == paths.expectedProfilePublisherBytes,
+              profilePublisherDigest == paths.expectedProfilePublisherSHA256 else {
+            throw InstallerFailure.invalidInput
+        }
+        try prepareWorkingDirectory(canonicalVendor: canonicalVendor)
+    }
+
+    private func prepareWorkingDirectory(canonicalVendor: URL) throws {
+        if try pathEntryExists(paths.workingDirectory) {
+            let canonicalWorking = try canonicalRealDirectory(paths.workingDirectory)
+            guard !isSameOrDescendant(canonicalWorking, of: canonicalVendor) else {
+                throw InstallerFailure.unsafePath
+            }
+            return
+        }
+
+        let requestedParent = paths.workingDirectory.deletingLastPathComponent()
+        let canonicalParent = try canonicalRealDirectory(requestedParent)
+        guard !isSameOrDescendant(canonicalParent, of: canonicalVendor) else {
+            throw InstallerFailure.unsafePath
+        }
+        let parentDescriptor = open(canonicalParent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard parentDescriptor >= 0 else { throw InstallerFailure.unsafePath }
+        var created = false
+        var accepted = false
+        defer {
+            if created && !accepted {
+                _ = paths.workingDirectory.lastPathComponent.withCString {
+                    unlinkat(parentDescriptor, $0, AT_REMOVEDIR)
+                }
+            }
+            close(parentDescriptor)
+        }
+        let createdStatus = paths.workingDirectory.lastPathComponent.withCString {
+            mkdirat(parentDescriptor, $0, S_IRWXU)
+        }
+        guard createdStatus == 0 else { throw InstallerFailure.transactionFailed }
+        created = true
+        let canonicalWorking = try canonicalRealDirectory(paths.workingDirectory)
+        guard !isSameOrDescendant(canonicalWorking, of: canonicalVendor) else {
+            throw InstallerFailure.unsafePath
+        }
+        accepted = true
     }
 
     private func patch(stagedApp: URL, nodeExecutable: URL) throws {
@@ -415,6 +497,12 @@ public final class InstallerTransaction: @unchecked Sendable {
         try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedRuntime.path)
         try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: installedRuntimeReceipt.path)
         try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: installedRuntimeLicense.path)
+
+        let nativeRoot = resources.appendingPathComponent("codex/native", isDirectory: true)
+        try files.createDirectory(at: nativeRoot, withIntermediateDirectories: true)
+        let installedProfilePublisher = nativeRoot.appendingPathComponent("openbot-profile-publish")
+        try files.copyItem(at: paths.profilePublisher, to: installedProfilePublisher)
+        try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedProfilePublisher.path)
     }
 
     private func updatePlist(stagedApp: URL, sidecarBytes: Int, sidecarSHA256: String) throws {
@@ -423,20 +511,27 @@ public final class InstallerTransaction: @unchecked Sendable {
         guard var plist = try PropertyListSerialization.propertyList(
             from: Data(contentsOf: plistURL), options: [], format: nil
         ) as? [String: Any] else { throw InstallerFailure.invalidInput }
-        plist["CFBundleIdentifier"] = "com.limonlimez.codex-bot"
-        plist["CFBundleDisplayName"] = "Codex Bot"
-        plist["CFBundleShortVersionString"] = "0.1.4-macos.1"
-        plist["CFBundleVersion"] = "0.1.4.1"
+        plist["CFBundleIdentifier"] = "com.limonlimez.openbot"
+        plist["CFBundleDisplayName"] = "OpenBot"
+        plist["CFBundleShortVersionString"] = "0.2.0-macos.1"
+        plist["CFBundleVersion"] = "0.2.0.1"
         plist["CodexBotSidecarBytes"] = sidecarBytes
         plist["CodexBotSidecarSHA256"] = sidecarSHA256
         plist["CodexBotCodexRuntimeBytes"] = paths.expectedCodexRuntimeBytes
         plist["CodexBotCodexRuntimeSHA256"] = paths.expectedCodexRuntimeSHA256
+        plist["OpenBotProfilePublisherBytes"] = paths.expectedProfilePublisherBytes
+        plist["OpenBotProfilePublisherSHA256"] = paths.expectedProfilePublisherSHA256
         plist["SUFeedURL"] = nil
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
         try data.write(to: plistURL, options: .atomic)
     }
 
     private func signAndVerify(stagedApp: URL) throws {
+        let profilePublisher = stagedApp.appendingPathComponent("Contents/Resources/codex/native/openbot-profile-publish")
+        try checked(runner, CommandCall(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: signingArguments(for: profilePublisher)
+        ))
         let sidecar = stagedApp.appendingPathComponent("Contents/Resources/codex/cliproxy/cli-proxy-api")
         try checked(runner, CommandCall(
             executable: URL(fileURLWithPath: "/usr/bin/codesign"),

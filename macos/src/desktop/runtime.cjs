@@ -14,6 +14,7 @@ const { CLIProxyInferenceTransport } = require("./cliproxy-inference-transport.c
 const { InferenceBridgeServer } = require("./inference-bridge-server.cjs");
 const { InferenceProviderRouter } = require("./inference-provider-router.cjs");
 const { BOT_ID, ModelSelectionStore } = require("./model-selection-store.cjs");
+const { prepareOpenBotUserData } = require("./openbot-user-data.cjs");
 
 const IPC_CHANNELS = Object.freeze({
   accountRead: "codex-account:read",
@@ -210,7 +211,7 @@ function createDirectCodexManager({
     stateRoot: path.join(stateRoot, "direct-codex"),
     homeDirectory,
     environment,
-    clientVersion: "0.1.4-macos.1",
+    clientVersion: "0.2.0-macos.1",
   });
 }
 
@@ -294,7 +295,22 @@ function createInferenceBridgeRuntime({
   return new BridgeClass({ router, capability });
 }
 
+function prepareProductionUserData(electron, publisherPath = path.join(
+  process.resourcesPath,
+  "codex",
+  "native",
+  "openbot-profile-publish",
+)) {
+  const migration = prepareOpenBotUserData({
+    appDataPath: electron.app.getPath("appData"),
+    publisherPath,
+  });
+  electron.app.setPath("userData", migration.userDataPath);
+  return migration;
+}
+
 function productionDependencies(electron) {
+  prepareProductionUserData(electron);
   const stateRoot = path.join(electron.app.getPath("userData"), "codex-bot");
   const botStore = new BotStore({ filePath: path.join(stateRoot, "bots.v1.json") });
   const controller = new BotRuntimeController({ store: botStore, provider: loadConfiguredProvider() });
@@ -342,7 +358,7 @@ function installDesktopRuntime(electron, injected = {}) {
     throw new Error("Codex desktop runtime requires Electron.");
   }
   if (electron.app[INSTALLED]) return electron.app[INSTALLED];
-  try { electron.app.setName?.("Codex Bot"); } catch {}
+  try { electron.app.setName?.("OpenBot"); } catch {}
   const dependencies = injected.controller && injected.selectionStore
     ? injected
     : productionDependencies(electron);
@@ -549,6 +565,7 @@ module.exports = {
   installDesktopRuntime,
   loadConfiguredProvider,
   loadSidecarReceipt,
+  prepareProductionUserData,
   resolveModelSelection,
   selectionMatchesCatalog,
   setInferenceBridgeEnvironment,

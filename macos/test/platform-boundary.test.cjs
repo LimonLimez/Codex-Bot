@@ -57,8 +57,8 @@ test("the macOS package has an independent release and command surface", () => {
       node: packageJson.engines?.node,
     },
     {
-      name: "codex-bot-macos",
-      version: "0.1.4-macos.1",
+      name: "openbot-macos",
+      version: "0.2.0-macos.1",
       private: true,
       license: "MIT",
       node: ">=22.13.0",

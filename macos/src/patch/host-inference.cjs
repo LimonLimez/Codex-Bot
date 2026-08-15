@@ -19,7 +19,7 @@ const CODEX_SUMMARY_SESSION_OPTIONS =
 const MAX_HOST_BYTES = 32 * 1024 * 1024;
 
 const CODEX_INFERENCE =
-  'function E4i(t){let bridgePath=process.env.CODEX_BOT_BRIDGE;if(typeof bridgePath!=="string"||bridgePath.trim()==="")throw new Error("Codex Bot bridge is unavailable.");let bridge=require(bridgePath);if(bridge==null||typeof bridge.createPromptSession!=="function")throw new Error("Codex Bot bridge is unavailable.");return{resolvePrivacyMode:()=>Promise.resolve(qt.NO_TRAINING),getGeminiVideoAttachedMediaUrlProvider:()=>void 0,createSession(o,s){return bridge.createPromptSession({...s,onRequestId:o,botId:void 0,modelId:void 0},ETn)},recordPostTurnLabeling(){}}}';
+  'function E4i(t){let bridgePath=process.env.CODEX_BOT_BRIDGE;if(typeof bridgePath!=="string"||bridgePath.trim()==="")throw new Error("OpenBot bridge is unavailable.");let bridge=require(bridgePath);if(bridge==null||typeof bridge.createPromptSession!=="function")throw new Error("OpenBot bridge is unavailable.");return{resolvePrivacyMode:()=>Promise.resolve(qt.NO_TRAINING),getGeminiVideoAttachedMediaUrlProvider:()=>void 0,createSession(o,s){return bridge.createPromptSession({...s,onRequestId:o,botId:void 0,modelId:void 0},ETn)},recordPostTurnLabeling(){}}}';
 
 function uniqueIndex(source, anchor, label) {
   const first = source.indexOf(anchor);

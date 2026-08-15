@@ -1,7 +1,7 @@
 {
-  "name": "codex-bot-macos",
-  "version": "0.1.4-macos.1",
-  "description": "macOS preserve-and-patch installer and Codex runtime for a verified user-owned Grok Bot 0.20.0 shell",
+  "name": "openbot-macos",
+  "version": "0.2.0-macos.1",
+  "description": "OpenBot macOS preserve-and-patch installer and multi-provider runtime for a verified user-owned Grok Bot 0.20.0 shell",
   "private": true,
   "license": "MIT",
   "homepage": "https://github.com/LimonLimez/Codex-Bot",

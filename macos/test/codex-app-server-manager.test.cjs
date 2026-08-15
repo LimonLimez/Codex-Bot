@@ -162,9 +162,9 @@ function tick() {
 
 function harness(t, { children = [new FakeChild()], clock, environment } = {}) {
   const root = tempRoot(t);
-  const resourcesPath = path.join(root, "Codex Bot.app", "Contents", "Resources");
+  const resourcesPath = path.join(root, "OpenBot.app", "Contents", "Resources");
   const binaryPath = path.join(resourcesPath, "codex", "runtime", "codex");
-  const stateRoot = path.join(root, "Library", "Application Support", "Codex Bot", "direct-codex");
+  const stateRoot = path.join(root, "Library", "Application Support", "OpenBot", "direct-codex");
   const homeDirectory = path.join(root, "person-home");
   fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
   fs.mkdirSync(homeDirectory, { recursive: true });
@@ -185,7 +185,7 @@ function harness(t, { children = [new FakeChild()], clock, environment } = {}) {
       OPENAI_API_KEY: "must-not-cross",
       CLIPROXY_API_KEY: "must-not-cross-either",
     },
-    clientVersion: "0.1.4-macos.1",
+    clientVersion: "0.2.0-macos.1",
     loadRuntime: async (actualResourcesPath) => {
       loadCalls += 1;
       assert.equal(actualResourcesPath, resourcesPath);
@@ -246,7 +246,7 @@ test("starts one verified packaged Codex flight with an empty cwd minimal accoun
     id: 1,
     method: "initialize",
     params: {
-      clientInfo: { name: "codex-bot", title: "Codex Bot", version: "0.1.4-macos.1" },
+      clientInfo: { name: "openbot", title: "OpenBot", version: "0.2.0-macos.1" },
       capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
     },
   });
@@ -329,7 +329,7 @@ test("automatically denies every server request and never exposes a local execut
   assert.equal(serverRequestEvents, 0);
   assert.deepEqual(child.writes.slice(-8), [...Array(8)].map((_, index) => ({
     id: 41 + index,
-    error: { code: -32601, message: "Codex Bot does not permit local tool requests." },
+    error: { code: -32601, message: "OpenBot does not permit local tool requests." },
   })));
   assert.equal(manager.state, "ready");
 });

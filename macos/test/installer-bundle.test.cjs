@@ -59,6 +59,13 @@ test("installer bundles the macOS privacy notice instead of Windows release poli
   assert.match(source, /\/usr\/bin\/strip/);
   assert.match(source, /verify-codex-runtime\.cjs/);
   assert.match(source, /Resources["'],\s*["']CodexRuntime/);
+  assert.match(source, /native["'],\s*["']openbot-profile-publish\.c/);
+  assert.match(source, /\/usr\/bin\/cc/);
+  assert.match(source, /["']-arch["'],\s*["']arm64["']/);
+  assert.match(source, /\/usr\/bin\/lipo/);
+  assert.match(source, /OpenBotMigration["'],\s*["']openbot-profile-publish/);
+  assert.match(source, /OpenBotProfilePublisherBytes/);
+  assert.match(source, /OpenBotProfilePublisherSHA256/);
   assert.match(source, /--options["'],\s*["']runtime/);
   assert.match(source, /--timestamp/);
   assert.doesNotMatch(source, /<key>CodexBotSigningIdentity<\/key>/);
@@ -93,9 +100,13 @@ test("exact pinned inputs build an isolated signed development installer bundle"
   assert.equal(fs.lstatSync(receipt.app).isDirectory(), true);
   const resources = path.join(receipt.app, "Contents", "Resources");
   assert.equal(fs.statSync(path.join(resources, "CLIProxy", "cli-proxy-api")).mode & 0o111, 0o111);
+  const profilePublisher = path.join(resources, "OpenBotMigration", "openbot-profile-publish");
+  assert.equal(fs.statSync(profilePublisher).mode & 0o111, 0o111);
   const plist = fs.readFileSync(path.join(receipt.app, "Contents", "Info.plist"), "utf8");
   assert.match(plist, new RegExp(`<key>CodexBotSidecarBytes</key><integer>${fs.statSync(path.join(resources, "CLIProxy", "cli-proxy-api")).size}</integer>`));
   assert.match(plist, new RegExp(`<key>CodexBotSidecarSHA256</key><string>${require("node:crypto").createHash("sha256").update(fs.readFileSync(path.join(resources, "CLIProxy", "cli-proxy-api"))).digest("hex")}</string>`));
+  assert.match(plist, new RegExp(`<key>OpenBotProfilePublisherBytes</key><integer>${fs.statSync(profilePublisher).size}</integer>`));
+  assert.match(plist, new RegExp(`<key>OpenBotProfilePublisherSHA256</key><string>${require("node:crypto").createHash("sha256").update(fs.readFileSync(profilePublisher)).digest("hex")}</string>`));
   assert.equal(JSON.parse(fs.readFileSync(path.join(resources, "Patcher", "node_modules", "ws", "package.json"), "utf8")).version, "8.21.3");
   const packagedRuntime = path.join(resources, "CodexRuntime", "codex");
   const runtimeReceipt = JSON.parse(fs.readFileSync(path.join(resources, "CodexRuntime", "receipt.json"), "utf8"));

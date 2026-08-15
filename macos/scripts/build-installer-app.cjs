@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { writeInstallerManifest } = require("./audit-release.cjs");
 
-const VERSION = "0.1.4-macos.1";
+const VERSION = "0.2.0-macos.1";
 const SIDECAR_BYTES = 58558850;
 const SIDECAR_SHA256 = "a46fe86e32845876832c6f2c7e66587ab7d9ee70d899ee5a7112de29f7d70cd6";
 const SIDECAR_LICENSE_BYTES = 1116;
@@ -88,6 +88,7 @@ function run(executable, args, options = {}) {
       .slice(0, 500);
     throw new Error(`Installer build command failed: ${path.basename(executable)}${detail ? ` (${detail})` : ""}`);
   }
+  return result;
 }
 
 function parseArgs(argv) {
@@ -127,20 +128,22 @@ function plist(
   codexRuntimeSHA256,
   codexRuntimeLicenseBytes,
   codexRuntimeLicenseSHA256,
+  profilePublisherBytes,
+  profilePublisherSHA256,
 ) {
   const warning = development ? "DEVELOPMENT BUILD - NOT NOTARIZED FOR PUBLIC RELEASE" : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleDevelopmentRegion</key><string>en</string>
-  <key>CFBundleDisplayName</key><string>Install Codex Bot${development ? " DEVELOPMENT" : ""}</string>
+  <key>CFBundleDisplayName</key><string>Install OpenBot${development ? " DEVELOPMENT" : ""}</string>
   <key>CFBundleExecutable</key><string>InstallCodexBot</string>
-  <key>CFBundleIdentifier</key><string>com.limonlimez.codex-bot.installer</string>
+  <key>CFBundleIdentifier</key><string>com.limonlimez.openbot.installer</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>Install Codex Bot${development ? " DEVELOPMENT" : ""}</string>
+  <key>CFBundleName</key><string>Install OpenBot${development ? " DEVELOPMENT" : ""}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-  <key>CFBundleVersion</key><string>0.1.4.1</string>
+  <key>CFBundleVersion</key><string>0.2.0.1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CodexBotBuildWarning</key><string>${warning}</string>
@@ -152,6 +155,8 @@ function plist(
   <key>CodexBotCodexRuntimeSHA256</key><string>${codexRuntimeSHA256}</string>
   <key>CodexBotCodexRuntimeLicenseBytes</key><integer>${codexRuntimeLicenseBytes}</integer>
   <key>CodexBotCodexRuntimeLicenseSHA256</key><string>${codexRuntimeLicenseSHA256}</string>
+  <key>OpenBotProfilePublisherBytes</key><integer>${profilePublisherBytes}</integer>
+  <key>OpenBotProfilePublisherSHA256</key><string>${profilePublisherSHA256}</string>
 </dict></plist>
 `;
 }
@@ -227,7 +232,7 @@ function buildInstaller(options) {
 
   fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o755 });
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-installer-build-"));
-  const appName = options.release ? "Install Codex Bot.app" : "Install Codex Bot DEVELOPMENT.app";
+  const appName = options.release ? "Install OpenBot.app" : "Install OpenBot DEVELOPMENT.app";
   const app = path.join(temporary, appName);
   const contents = path.join(app, "Contents");
   const resources = path.join(contents, "Resources");
@@ -237,6 +242,20 @@ function buildInstaller(options) {
     const installedExecutable = path.join(contents, "MacOS", "InstallCodexBot");
     copyFile(installerBinary, installedExecutable, 0o755);
     run("/usr/bin/strip", ["-S", "-x", installedExecutable]);
+
+    const profilePublisher = path.join(resources, "OpenBotMigration", "openbot-profile-publish");
+    fs.mkdirSync(path.dirname(profilePublisher), { recursive: true, mode: 0o755 });
+    run("/usr/bin/cc", [
+      "-std=c11", "-Oz", "-arch", "arm64", "-mmacosx-version-min=13.0",
+      path.join(macRoot, "native", "openbot-profile-publish.c"),
+      "-o", profilePublisher,
+    ]);
+    fs.chmodSync(profilePublisher, 0o755);
+    run("/usr/bin/strip", ["-S", "-x", profilePublisher]);
+    const publisherArchitectures = run("/usr/bin/lipo", ["-archs", profilePublisher]).stdout.trim();
+    if (publisherArchitectures !== "arm64") {
+      throw new Error("OpenBot profile publisher has an invalid architecture");
+    }
 
     const patcherRoot = path.join(resources, "Patcher");
     for (const script of [
@@ -288,6 +307,7 @@ function buildInstaller(options) {
     );
 
     run("/usr/bin/xattr", ["-cr", app]);
+    run("/usr/bin/codesign", signingArguments(signingIdentity, profilePublisher, !options.release));
     run("/usr/bin/codesign", signingArguments(signingIdentity, installedSidecar, !options.release));
     fs.writeFileSync(
       path.join(contents, "Info.plist"),
@@ -301,6 +321,8 @@ function buildInstaller(options) {
         sha256File(installedCodexRuntime),
         fs.statSync(path.join(codexRuntimeRoot, "LICENSE")).size,
         sha256File(path.join(codexRuntimeRoot, "LICENSE")),
+        fs.statSync(profilePublisher).size,
+        sha256File(profilePublisher),
       ),
       { mode: 0o644 },
     );

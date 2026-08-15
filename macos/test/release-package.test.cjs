@@ -12,7 +12,7 @@ const packagePath = path.join(__dirname, "..", "scripts", "package-dmg.cjs");
 test("release audit rejects state, secrets, personal paths, symlinks, and extra roots", () => {
   const { auditTree, writeInstallerManifest } = require(auditPath);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-release-audit-test-"));
-  const app = path.join(root, "Install Codex Bot DEVELOPMENT.app");
+  const app = path.join(root, "Install OpenBot DEVELOPMENT.app");
   fs.mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
   fs.writeFileSync(path.join(app, "Contents", "MacOS", "InstallCodexBot"), "safe\n");
   fs.writeFileSync(path.join(app, "Contents", "Info.plist"), "safe\n");
@@ -46,14 +46,32 @@ test("release audit rejects state, secrets, personal paths, symlinks, and extra 
 });
 
 test("DMG parser requires an explicit installer and release identity", () => {
-  const { parseArgs } = require(packagePath);
-  assert.deepEqual(parseArgs(["--installer-app", "/tmp/Test.app", "--output", "/tmp/Test.dmg"]), {
+  const { packageDmg, parseArgs } = require(packagePath);
+  assert.deepEqual(parseArgs([
+    "--installer-app", "/tmp/Install OpenBot DEVELOPMENT.app",
+    "--output", "/tmp/OpenBot-0.2.0-macos.1-DEVELOPMENT.dmg",
+  ]), {
     release: false,
-    "installer-app": "/tmp/Test.app",
-    output: "/tmp/Test.dmg",
+    "installer-app": "/tmp/Install OpenBot DEVELOPMENT.app",
+    output: "/tmp/OpenBot-0.2.0-macos.1-DEVELOPMENT.dmg",
   });
   assert.throws(() => parseArgs(["--release", "--installer-app", "/tmp/Test.app", "--output", "/tmp/Test.dmg"]), /Developer ID Application/i);
   assert.throws(() => parseArgs(["--shell", "unsafe"]), /invalid/i);
+  assert.throws(() => parseArgs([
+    "--release",
+    "--installer-app", "/tmp/Wrong Product.app",
+    "--output", "/tmp/Wrong-9.9.9.dmg",
+    "--signing-identity", "Developer ID Application: Example (ABCDE12345)",
+  ]), /OpenBot/i);
+  assert.throws(() => parseArgs([
+    "--installer-app", "/tmp/Install OpenBot.app",
+    "--output", "/tmp/OpenBot-0.2.0-macos.1.dmg",
+  ]), /DEVELOPMENT/i);
+  assert.throws(() => packageDmg({
+    "installer-app": "/tmp/Wrong Product.app",
+    output: "/tmp/Wrong-9.9.9.dmg",
+    release: false,
+  }), /OpenBot.*DEVELOPMENT/i);
 });
 
 test("exact installer packages to a mounted privacy-clean development DMG", {
@@ -63,7 +81,7 @@ test("exact installer packages to a mounted privacy-clean development DMG", {
   const { packageDmg } = require(packagePath);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-dmg-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const output = path.join(root, "Codex-Bot-0.1.4-macos.1-DEVELOPMENT.dmg");
+  const output = path.join(root, "OpenBot-0.2.0-macos.1-DEVELOPMENT.dmg");
   const receipt = packageDmg({
     "installer-app": process.env.CODEX_BOT_INSTALLER_APP,
     output,
@@ -73,7 +91,7 @@ test("exact installer packages to a mounted privacy-clean development DMG", {
   assert.equal(receipt.dmg, output);
   assert.equal(receipt.sha256.length, 64);
   assert.equal(fs.statSync(output).isFile(), true);
-  const audit = auditDmg(output, { expectedAppName: "Install Codex Bot DEVELOPMENT.app" });
+  const audit = auditDmg(output, { expectedAppName: "Install OpenBot DEVELOPMENT.app" });
   assert.equal(audit.fileCount > 20, true);
   assert.equal(audit.personalPathMatches, 0);
   assert.equal(audit.secretMatches, 0);

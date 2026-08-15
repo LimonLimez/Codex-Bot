@@ -1,7 +1,8 @@
 # Privacy on macOS
 
-Codex Bot for macOS keeps its application state in the current macOS user's
-private Electron user-data directory, under the `codex-bot` subdirectory. That
+OpenBot for macOS keeps its application state in the current macOS user's
+private `OpenBot` Electron user-data directory, under the legacy-compatible
+`codex-bot` subdirectory. That
 state can include bot records, conversation bindings, selected models, official
 Codex account status, and optional CLIProxyAPI provider authorization. The
 embedded official Codex runtime uses the current user's standard `~/.codex`
@@ -26,17 +27,19 @@ Each Work bot is assigned its own explicitly configured remote runtime. Prompts,
 requested tool actions, computer frames, keyboard or pointer input, and data
 entered into websites may be processed by that remote-runtime provider and by
 the websites used inside the runtime. If the remote provider is unavailable,
-Codex Bot fails closed; it does not silently use this Mac, a shared computer, or
+OpenBot fails closed; it does not silently use this Mac, a shared computer, or
 an xAI inference fallback.
 
-Codex Bot does not add project telemetry. Runtime errors and public events are
+OpenBot does not add project telemetry. Runtime errors and public events are
 sanitized to remove authorization values, endpoints, provider diagnostics, and
 other private session material. The app cannot control or make privacy promises
 for the upstream model providers, remote-runtime provider, vendor shell, or
 websites selected by the user.
 
 The installer reads a user-owned, exact Grok Bot 0.20.0 application and creates
-a separate Codex Bot application. It does not modify the source Grok Bot app.
-The Codex Bot DMG contains no Grok Bot application, user profile, conversation,
+a separate OpenBot application. It does not modify the source Grok Bot app.
+On first launch, a legacy Codex Bot profile is copied atomically into OpenBot;
+the legacy application and profile are retained for compatibility and rollback.
+The OpenBot DMG contains no Grok Bot application, user profile, conversation,
 cookie, browser history, development log, screenshot, credential, or personal
 absolute path. A mounted-image audit enforces that release boundary.

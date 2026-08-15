@@ -1,22 +1,22 @@
-# Codex Bot for macOS
+# OpenBot for macOS
 
-This directory is the macOS Apple Silicon release line for Codex Bot. The
+This directory is the macOS Apple Silicon release line for OpenBot. The
 existing Windows implementation at the repository root remains unchanged and
 continues to be owned, tested, packaged, and released independently.
 
-The macOS product preserves the verified Grok Bot 0.20.0 shell and replaces only
+OpenBot preserves the verified Grok Bot 0.20.0 shell and replaces only
 the reviewed authentication, inference, product identity, model controls, and
 remote-runtime boundaries needed for Codex. It is not a standalone imitation of
 the Grok interface.
 
 ## Vendor application boundary
 
-The Codex Bot DMG does not contain Grok Bot, its `app.asar`, an
+The OpenBot DMG does not contain Grok Bot, its `app.asar`, an
 extracted frontend, or any other proprietary vendor binary or asset. The
 repository keeps the same boundary.
 The installer uses an already installed or mounted, user-owned exact Grok Bot
 0.20.0 application selected by the user. It verifies the complete input before
-creating a separate Codex Bot application. The original Grok Bot app is never
+creating a separate OpenBot application. The original Grok Bot app is never
 modified, and the installer does not download vendor software on the user's
 behalf.
 
@@ -38,6 +38,15 @@ Every Work bot requires its own explicitly configured and authorized remote
 runtime. When that provider is unavailable, the app reports that state and
 disables the affected action; there is no local computer, on-device browser, or
 shared-machine fallback.
+
+## Compatibility and migration
+
+OpenBot is the user-visible product name. Legacy `codex-*` IPC channels,
+`CODEX_BOT_*` environment variables, internal `codex` module paths, and the
+`InstallCodexBot` Swift target remain compatibility identifiers and are not
+provider or product claims. On first launch, OpenBot atomically copies a valid
+legacy `Codex Bot` Electron profile into its private `OpenBot` profile, retains
+the source, and refuses unsafe or partial migration rather than launching blank.
 
 ## Development
 

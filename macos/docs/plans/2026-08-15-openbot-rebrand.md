@@ -29,6 +29,9 @@ construction. Change only visible/release identities and their exact tests.
 - Record RED before the module exists.
 - Implement `src/desktop/openbot-user-data.cjs` with dependency injection for
   deterministic failures and no ambient home-directory reads in tests.
+- Compile and bundle the reviewed macOS `RENAME_EXCL` publisher, pin its exact
+  installer receipt, copy it into the installed app, and sign it before the
+  outer app so publication cannot overwrite a concurrent target.
 - Wire it only into production desktop startup before dependency construction;
   keep injected unit-test startup unchanged.
 - Add the module to patch staging and exact mutation tests.

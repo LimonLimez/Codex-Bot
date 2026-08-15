@@ -59,8 +59,10 @@ The transaction is deliberately conservative:
 3. If neither profile exists, create a private OpenBot directory.
 4. If only the legacy profile exists, copy the complete real directory tree to
    a private sibling temporary directory, rejecting symlinks and special files.
-5. Apply owner-only permissions and atomically rename the completed temporary
-   copy to `OpenBot`.
+5. Compare stable before/after metadata and content receipts, apply owner-only
+   permissions, and publish the completed copy to `OpenBot` with a bundled,
+   signed native `renamex_np(..., RENAME_EXCL)` helper. The target can never be
+   overwritten, even if another process creates it during migration.
 6. Retain the legacy profile and legacy application. No destructive move,
    merge, or deletion occurs.
 7. On any validation, copy, fsync, or rename failure, remove only the transaction's
@@ -82,7 +84,9 @@ idempotency marker; OpenBot never overwrites or merges an existing target.
 - release volume: `OpenBot Installer`
 - development names retain an explicit `DEVELOPMENT` suffix
 
-The DMG continues to contain only the installer and its sealed, exact inputs.
+The DMG continues to contain only the installer and its sealed, exact inputs,
+including the integrity-pinned profile-publication helper that the installer
+copies into the signed OpenBot bundle.
 It contains no source checkout, `.git`, test data, developer paths, logs,
 credentials, profiles, conversations, environment files, signing identities,
 or local runtime state. Signing and notarization use the configured macOS

@@ -757,7 +757,7 @@
     const panel = element(documentRef, "aside", "codex-bot-controls");
     panel.id = "codex-bot-controls";
     panel.dataset.codexMountState = "pending";
-    panel.setAttribute("aria-label", "Codex bot and remote computer controls");
+    panel.setAttribute("aria-label", "OpenBot and remote computer controls");
     const header = element(documentRef, "div", "codex-bot-header");
     const botSelect = element(documentRef, "select", "codex-bot-select");
     botSelect.setAttribute("aria-label", "Active bot");
@@ -781,11 +781,11 @@
     const modelDock = element(documentRef, "section", "codex-model-dock");
     modelDock.id = "codex-model-dock";
     modelDock.dataset.codexMountState = "pending";
-    modelDock.setAttribute("aria-label", "Codex Power controls");
+    modelDock.setAttribute("aria-label", "OpenBot Power controls");
     const providerRow = element(documentRef, "div", "codex-provider-row");
     const providerSelect = element(documentRef, "select", "codex-provider-select");
-    providerSelect.setAttribute("aria-label", "CLIProxyAPI provider");
-    for (const [value, label] of [["codex", "Codex"], ["claude", "Claude"], ["kimi", "Kimi"]]) {
+    providerSelect.setAttribute("aria-label", "Inference provider");
+    for (const [value, label] of [["codex", "OpenAI Codex"], ["claude", "Claude"], ["kimi", "Kimi"]]) {
       const option = element(documentRef, "option", "", label);
       option.value = value;
       providerSelect.append(option);

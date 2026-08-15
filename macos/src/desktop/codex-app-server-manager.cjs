@@ -294,7 +294,7 @@ class CodexAppServerManager extends EventEmitter {
     if (!absolutePath(options.resourcesPath)
       || !absolutePath(options.stateRoot)
       || !absolutePath(options.homeDirectory)
-      || !validClientVersion(options.clientVersion || "0.1.4-macos.1")
+      || !validClientVersion(options.clientVersion || "0.2.0-macos.1")
       || (options.loadRuntime !== undefined && typeof options.loadRuntime !== "function")
       || (options.spawnImpl !== undefined && typeof options.spawnImpl !== "function")
       || (options.setTimeout !== undefined && typeof options.setTimeout !== "function")
@@ -305,7 +305,7 @@ class CodexAppServerManager extends EventEmitter {
     this.#stateRoot = options.stateRoot;
     this.#homeDirectory = options.homeDirectory;
     this.#environment = environment;
-    this.#clientVersion = options.clientVersion || "0.1.4-macos.1";
+    this.#clientVersion = options.clientVersion || "0.2.0-macos.1";
     this.#loadRuntime = options.loadRuntime || loadPackagedCodexRuntime;
     this.#spawn = options.spawnImpl || childProcess.spawn;
     this.#setTimeout = options.setTimeout || setTimeout;
@@ -423,7 +423,7 @@ class CodexAppServerManager extends EventEmitter {
         { kill: false },
       ));
       await this.#sendRequest(active, "initialize", {
-        clientInfo: { name: "codex-bot", title: "Codex Bot", version: this.#clientVersion },
+        clientInfo: { name: "openbot", title: "OpenBot", version: this.#clientVersion },
         capabilities: { experimentalApi: true, optOutNotificationMethods: [] },
       }, DEFAULT_TIMEOUT_MS);
       if (!this.#isCurrent(active) || !this.#isStarting(starting)) return;
@@ -710,7 +710,7 @@ class CodexAppServerManager extends EventEmitter {
       try {
         this.#write(active, {
           id: message.id,
-          error: { code: -32601, message: "Codex Bot does not permit local tool requests." },
+          error: { code: -32601, message: "OpenBot does not permit local tool requests." },
         });
       } catch {
         // The transport terminal owns the failure.

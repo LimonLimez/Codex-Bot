@@ -35,7 +35,7 @@ function tempRoot(t) {
 test("stock renderer index receives one self-hosted Codex control layer", () => {
   const { patchRendererIndexSource } = require(patchPath);
   const patched = patchRendererIndexSource(STOCK_INDEX);
-  assert.match(patched, /<title>Codex Bot<\/title>/);
+  assert.match(patched, /<title>OpenBot<\/title>/);
   assert.equal((patched.match(/\.\/codex\/codex-ui\.css/g) ?? []).length, 1);
   for (const file of ["model-controls.js", "reasoning-control.js", "bot-runtime-ui.js"]) {
     assert.equal((patched.match(new RegExp(`\\.\\/codex\\/${file.replace(".", "\\.")}`, "g")) ?? []).length, 1);

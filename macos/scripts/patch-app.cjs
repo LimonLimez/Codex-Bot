@@ -15,7 +15,7 @@ const { patchRenderer } = require("../src/patch/renderer.cjs");
 const VENDOR_APP_ASAR_SHA256 =
   "1e41f9da52be5d2ff24892b150a74d3d0145659cf6cbd83e9476d025865fb997";
 const VENDOR_VERSION = "0.20.0";
-const RELEASE_VERSION = "0.1.4-macos.1";
+const RELEASE_VERSION = "0.2.0-macos.1";
 const ALLOWED_MUTATIONS = Object.freeze([
   "dist/codex/bots/bot-store.cjs",
   "dist/codex/bots/chatgpt-relay-codec.cjs",
@@ -38,6 +38,7 @@ const ALLOWED_MUTATIONS = Object.freeze([
   "dist/codex/desktop/inference-bridge-server.cjs",
   "dist/codex/desktop/inference-provider-router.cjs",
   "dist/codex/desktop/model-selection-store.cjs",
+  "dist/codex/desktop/openbot-user-data.cjs",
   "dist/codex/desktop/runtime.cjs",
   ...WS_FILES.map((relative) => `dist/codex/node_modules/ws/${relative}`),
   "dist/electron-main/main.cjs",
@@ -83,9 +84,9 @@ function patchPackage(extractedRoot, sourceSha256) {
   ) {
     throw new Error("Unsupported Grok Bot 0.20.0 package metadata");
   }
-  packageJson.productName = "Codex Bot";
+  packageJson.productName = "OpenBot";
   packageJson.version = RELEASE_VERSION;
-  packageJson.description = "Codex Bot desktop agent";
+  packageJson.description = "OpenBot desktop agent";
   packageJson.homepage = "https://github.com/LimonLimez/Codex-Bot";
   packageJson.codexBot = {
     platform: "darwin-arm64",
