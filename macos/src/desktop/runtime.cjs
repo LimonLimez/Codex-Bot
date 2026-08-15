@@ -6,6 +6,7 @@ const { BotStore } = require("../bots/bot-store.cjs");
 const { BotRuntimeController } = require("../bots/runtime-controller.cjs");
 const { unavailableProvider, validateProvider } = require("../bots/runtime-provider.cjs");
 const { CLIProxyManager } = require("./cliproxy-manager.cjs");
+const { CodexAppServerManager } = require("./codex-app-server-manager.cjs");
 const { ModelSelectionStore, normalizeSelectionRequest } = require("./model-selection-store.cjs");
 
 const IPC_CHANNELS = Object.freeze({
@@ -85,6 +86,58 @@ function loadSidecarReceipt(resourcesPath) {
   }
 }
 
+function createDirectCodexManager({
+  resourcesPath,
+  stateRoot,
+  homeDirectory,
+  environment = process.env,
+  ManagerClass = CodexAppServerManager,
+} = {}) {
+  if (typeof resourcesPath !== "string" || !path.isAbsolute(resourcesPath)
+    || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
+    || typeof homeDirectory !== "string" || !path.isAbsolute(homeDirectory)
+    || typeof ManagerClass !== "function") {
+    throw sanitizedFailure();
+  }
+  return new ManagerClass({
+    resourcesPath,
+    stateRoot: path.join(stateRoot, "direct-codex"),
+    homeDirectory,
+    environment,
+    clientVersion: "0.1.4-macos.1",
+  });
+}
+
+function createLazySidecarManager({
+  resourcesPath,
+  stateRoot,
+  loadReceipt = loadSidecarReceipt,
+  ManagerClass = CLIProxyManager,
+} = {}) {
+  if (typeof resourcesPath !== "string" || !path.isAbsolute(resourcesPath)
+    || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
+    || typeof loadReceipt !== "function" || typeof ManagerClass !== "function") {
+    throw sanitizedFailure();
+  }
+  let manager = null;
+  function current() {
+    if (manager) return manager;
+    const receipt = loadReceipt(resourcesPath);
+    manager = new ManagerClass({
+      binaryPath: path.join(resourcesPath, "codex", "cliproxy", "cli-proxy-api"),
+      stateRoot: path.join(stateRoot, "cliproxy"),
+      expectedBinaryBytes: receipt.bytes,
+      expectedBinarySha256: receipt.sha256,
+    });
+    return manager;
+  }
+  return Object.freeze({
+    connectProvider(provider) { return current().connectProvider(provider); },
+    start() { return current().start(); },
+    stop() { manager?.stop(); },
+  });
+}
+
 function productionDependencies(electron) {
   const stateRoot = path.join(electron.app.getPath("userData"), "codex-bot");
   const botStore = new BotStore({ filePath: path.join(stateRoot, "bots.v1.json") });
@@ -92,26 +145,22 @@ function productionDependencies(electron) {
   const modelSelectionsPath = path.join(stateRoot, "model-selections.v1.json");
   const conversationBindingsPath = path.join(stateRoot, "conversation-bindings.v1.json");
   const selectionStore = new ModelSelectionStore({ filePath: modelSelectionsPath });
-  const sidecarReceipt = loadSidecarReceipt(process.resourcesPath);
-  const sidecarManager = new CLIProxyManager({
-    binaryPath: path.join(process.resourcesPath, "codex", "cliproxy", "cli-proxy-api"),
-    stateRoot: path.join(stateRoot, "cliproxy"),
-    expectedBinaryBytes: sidecarReceipt.bytes,
-    expectedBinarySha256: sidecarReceipt.sha256,
+  const codexManager = createDirectCodexManager({
+    resourcesPath: process.resourcesPath,
+    stateRoot,
+    homeDirectory: electron.app.getPath("home"),
+  });
+  const sidecarManager = createLazySidecarManager({
+    resourcesPath: process.resourcesPath,
+    stateRoot,
   });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
   process.env.CODEX_BOT_MODEL_SELECTIONS = modelSelectionsPath;
   delete process.env.CODEX_BOT_CLIPROXY_URL;
   delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
-  void sidecarManager.start().then((session) => {
-    setSidecarEnvironment(session);
-  }).catch(() => {
-    delete process.env.CODEX_BOT_CLIPROXY_URL;
-    delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
-  });
   void controller.reconcile().catch(() => {});
-  return { controller, selectionStore, sidecarManager, store: botStore };
+  return { codexManager, controller, selectionStore, sidecarManager, store: botStore };
 }
 
 function installDesktopRuntime(electron, injected = {}) {
@@ -124,12 +173,17 @@ function installDesktopRuntime(electron, injected = {}) {
     ? injected
     : productionDependencies(electron);
   const { controller, selectionStore, store } = dependencies;
+  const codexManager = dependencies.codexManager || Object.freeze({
+    async start() {},
+    stop() {},
+  });
   const sidecarManager = dependencies.sidecarManager || Object.freeze({
     async connectProvider() { throw sanitizedFailure(); },
     stop() {},
   });
   const registered = [];
   let disposed = false;
+  void codexManager.start().catch(() => {});
 
   function broadcast(bot) {
     const record = bot?.bot && typeof bot.bot === "object" ? bot.bot : bot;
@@ -222,6 +276,7 @@ function installDesktopRuntime(electron, injected = {}) {
       controller.off?.("bot-changed", onBotChanged);
       controller.off?.("runtime-changed", onRuntimeChanged);
       controller.off?.("runtime-event", onRuntimeEvent);
+      codexManager.stop();
       sidecarManager.stop();
       delete process.env.CODEX_BOT_CLIPROXY_URL;
       delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
@@ -238,6 +293,8 @@ module.exports = {
   CHANGE_CHANNEL,
   IPC_CHANNELS,
   RUNTIME_EVENT_CHANNEL,
+  createDirectCodexManager,
+  createLazySidecarManager,
   installDesktopRuntime,
   loadConfiguredProvider,
   loadSidecarReceipt,

@@ -41,6 +41,76 @@ test("desktop runtime loads only an exact sealed sidecar receipt", (t) => {
   assert.throws(() => loadSidecarReceipt(root), /receipt/i);
 });
 
+test("desktop factories own direct Codex immediately but keep CLIProxy entirely lazy", async (t) => {
+  const {
+    createDirectCodexManager,
+    createLazySidecarManager,
+  } = require(runtimePath);
+  const root = tempRoot(t);
+  const resourcesPath = path.join(root, "Codex Bot.app", "Contents", "Resources");
+  const stateRoot = path.join(root, "state");
+  const homeDirectory = path.join(root, "home");
+  const directCalls = [];
+  class DirectFixture {
+    constructor(options) { directCalls.push(options); }
+  }
+  const direct = createDirectCodexManager({
+    resourcesPath,
+    stateRoot,
+    homeDirectory,
+    environment: { HOME: homeDirectory, OPENAI_API_KEY: "must-not-forward" },
+    ManagerClass: DirectFixture,
+  });
+  assert.equal(direct instanceof DirectFixture, true);
+  assert.deepEqual(directCalls, [{
+    resourcesPath,
+    stateRoot: path.join(stateRoot, "direct-codex"),
+    homeDirectory,
+    environment: { HOME: homeDirectory, OPENAI_API_KEY: "must-not-forward" },
+    clientVersion: "0.1.4-macos.1",
+  }]);
+
+  const sidecarCalls = [];
+  let receiptReads = 0;
+  let managerCreations = 0;
+  let providerConnections = 0;
+  let starts = 0;
+  let stops = 0;
+  class SidecarFixture {
+    constructor(options) { managerCreations += 1; sidecarCalls.push(options); }
+    async connectProvider(provider) { providerConnections += 1; assert.equal(provider, "claude"); }
+    async start() { starts += 1; return "optional-session"; }
+    stop() { stops += 1; }
+  }
+  const lazy = createLazySidecarManager({
+    resourcesPath,
+    stateRoot,
+    loadReceipt() {
+      receiptReads += 1;
+      return { bytes: 123, sha256: "a".repeat(64) };
+    },
+    ManagerClass: SidecarFixture,
+  });
+  assert.equal(receiptReads, 0);
+  assert.equal(managerCreations, 0);
+  assert.equal(starts, 0);
+  assert.equal(fs.existsSync(path.join(stateRoot, "cliproxy")), false);
+  assert.equal(await lazy.connectProvider("claude"), undefined);
+  assert.equal(await lazy.start(), "optional-session");
+  assert.equal(receiptReads, 1);
+  assert.equal(managerCreations, 1);
+  assert.equal(providerConnections, 1);
+  assert.equal(starts, 1);
+  assert.deepEqual(sidecarCalls, [{
+    binaryPath: path.join(resourcesPath, "codex", "cliproxy", "cli-proxy-api"),
+    stateRoot: path.join(stateRoot, "cliproxy"),
+    expectedBinaryBytes: 123,
+    expectedBinarySha256: "a".repeat(64),
+  }]);
+  lazy.stop();
+  assert.equal(stops, 1);
+});
+
 test("desktop runtime registers the exact frozen bot/model boundary and keeps create zero-argument", async (t) => {
   const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
   const handlers = new Map();
@@ -87,6 +157,10 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     },
     stop() { calls.push(["sidecar-stop"]); },
   };
+  const codexManager = {
+    async start() { calls.push(["direct-start"]); },
+    stop() { calls.push(["direct-stop"]); },
+  };
   t.after(() => {
     delete process.env.CODEX_BOT_CLIPROXY_URL;
     delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
@@ -106,13 +180,21 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
       },
     },
   };
-  const installed = installDesktopRuntime(electron, { controller, selectionStore, sidecarManager });
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore,
+    sidecarManager,
+    codexManager,
+  });
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
     "adoptLegacy", "connectProvider", "create", "list", "read", "readModel", "rename", "retryRuntime",
     "selectBot", "selectModel", "updateProfile",
   ]);
   assert.equal(handlers.size, 11);
   assert.equal(Object.isFrozen(installed), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
+  assert.deepEqual(calls.filter(([name]) => name === "sidecar-start"), []);
 
   await handlers.get(IPC_CHANNELS.create)({ sender: {} });
   assert.deepEqual(calls.find(([name]) => name === "create"), ["create", 0]);
@@ -151,7 +233,7 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   assert.equal(process.env.CODEX_BOT_CLIPROXY_URL, undefined);
   assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, undefined);
   assert.equal(handlers.size, 0);
-  assert.deepEqual(calls.slice(-2), [["sidecar-stop"], ["dispose"]]);
+  assert.deepEqual(calls.slice(-3), [["direct-stop"], ["sidecar-stop"], ["dispose"]]);
 });
 
 test("selecting a bot refreshes a retained model selection to the current runtime generation", async () => {
