@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -46,6 +47,10 @@ async function writePrivateModule(directory, name, source, mode = 0o600) {
   await fs.writeFile(filePath, source, { encoding: "utf8", mode });
   await fs.chmod(filePath, mode);
   return filePath;
+}
+
+function sha256Text(source) {
+  return createHash("sha256").update(source, "utf8").digest("hex");
 }
 
 function providerSource(extraExport = "") {
@@ -106,9 +111,13 @@ module.exports = {
 
 async function validModulePaths(t) {
   const directory = await temporaryDirectory(t);
+  const provider = providerSource();
+  const exercise = exerciseSource();
   return {
-    providerModulePath: await writePrivateModule(directory, "provider.cjs", providerSource()),
-    exerciseModulePath: await writePrivateModule(directory, "exercise.cjs", exerciseSource()),
+    providerModulePath: await writePrivateModule(directory, "provider.cjs", provider),
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath: await writePrivateModule(directory, "exercise.cjs", exercise),
+    exerciseModuleSha256: sha256Text(exercise),
   };
 }
 
@@ -148,12 +157,13 @@ test("rejects missing relative symlinked public and extra-export modules", async
   await fs.symlink(valid.providerModulePath, providerLink);
 
   const cases = [
-    { providerModulePath: path.join(directory, "missing.cjs"), exerciseModulePath: valid.exerciseModulePath },
-    { providerModulePath: "relative-provider.cjs", exerciseModulePath: valid.exerciseModulePath },
-    { providerModulePath: providerLink, exerciseModulePath: valid.exerciseModulePath },
-    { providerModulePath: publicProvider, exerciseModulePath: valid.exerciseModulePath },
-    { providerModulePath: extraProvider, exerciseModulePath: valid.exerciseModulePath },
-    { providerModulePath: valid.providerModulePath, exerciseModulePath: extraExercise },
+    { ...valid, providerModulePath: path.join(directory, "missing.cjs") },
+    { ...valid, providerModulePath: "relative-provider.cjs" },
+    { ...valid, providerModulePath: providerLink },
+    { ...valid, providerModulePath: publicProvider, providerModuleSha256: sha256Text(providerSource()) },
+    { ...valid, providerModulePath: extraProvider, providerModuleSha256: sha256Text(providerSource("extra: true,")) },
+    { ...valid, exerciseModulePath: extraExercise, exerciseModuleSha256: sha256Text(exerciseSource("extra: true,")) },
+    { ...valid, providerModuleSha256: "0".repeat(64) },
   ];
 
   for (const options of cases) {
@@ -162,6 +172,51 @@ test("rejects missing relative symlinked public and extra-export modules", async
       message: "Remote provider verification is not configured.",
     });
   }
+});
+
+test("loads exact reviewed module bytes without transitive files or require-cache drift", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const helper = await writePrivateModule(directory, "helper.cjs", providerSource());
+  void helper;
+  const transitiveSource = 'module.exports = require("./helper.cjs");\n';
+  const transitivePath = await writePrivateModule(directory, "transitive.cjs", transitiveSource);
+  const exercise = exerciseSource();
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  assert.throws(() => loadLiveGateDependencies({
+    providerModulePath: transitivePath,
+    providerModuleSha256: sha256Text(transitiveSource),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  }), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+    message: "Remote provider verification is not configured.",
+  });
+
+  const firstSource = providerSource();
+  const providerModulePath = await writePrivateModule(directory, "replaceable.cjs", firstSource);
+  const first = loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(firstSource),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  });
+  assert.equal((await first.provider.provision({
+    botId: BOT_ID,
+    idempotencyKey: "first",
+  })).provider, "fixture-provider");
+
+  const secondSource = firstSource.replaceAll("fixture-provider", "fixture-provider-two");
+  await fs.writeFile(providerModulePath, secondSource, { encoding: "utf8", mode: 0o600 });
+  const second = loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(secondSource),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  });
+  assert.equal((await second.provider.provision({
+    botId: BOT_ID,
+    idempotencyKey: "second",
+  })).provider, "fixture-provider-two");
 });
 
 test("narrows freezes and validates remote exercise acknowledgements", async () => {
@@ -528,6 +583,7 @@ async function liveGateHarness(t, options = {}) {
             if (options.cyclicCatalog) {
               return { data: [{ id: "gpt-5.6-sol" }], nextCursor: "same-page" };
             }
+            if (options.emptyCatalog) return { data: [], nextCursor: null };
             return { data: [{ id: "gpt-5.6-sol" }], nextCursor: null };
           }
           throw new Error("unexpected method");
@@ -723,6 +779,16 @@ test("rejects an oversized remote model catalog", async (t) => {
 
   assert.equal(harness.exerciseCalls.length, 0);
   assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+});
+
+test("rejects an empty remote model catalog before Computer work", async (t) => {
+  const harness = await liveGateHarness(t, { emptyCatalog: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+  assert.equal(harness.exerciseCalls.length, 0);
 });
 
 test("bounds a hung remote client start and still performs cleanup", async (t) => {
@@ -976,7 +1042,7 @@ test("CLI main maps injected PASS and FAIL without printing report paths", async
     env: {},
     loadDependencies: () => dependencies,
     createWorkspace: async () => "/private/tmp/private-workspace",
-    resolveOutputDirectory: async () => "/private/tmp/private-output",
+    resolveOutputDirectory: async () => ({ directory: "/private/tmp/private-output", owned: false }),
     removeWorkspace: async () => undefined,
     buildReport: () => Object.freeze({ status: "PASS" }),
     writeReport: async () => Object.freeze({
@@ -1043,6 +1109,35 @@ test("CLI rejects positional arguments before loading provider code", async () =
   assert.doesNotMatch(stdout.value(), /Users|provider\.cjs/);
 });
 
+test("CLI removes its private default report directory after a failed gate", async () => {
+  const stdout = outputSink();
+  const removed = [];
+  const code = await runCliMain({
+    argv: [],
+    env: {},
+    stdout: stdout.stream,
+    stderr: outputSink().stream,
+    loadDependencies: () => Object.freeze({
+      provider: Object.freeze({}),
+      exercise: Object.freeze({ async dispose() {} }),
+    }),
+    createWorkspace: async () => "/private/tmp/private-workspace",
+    resolveOutputDirectory: async () => ({
+      directory: "/private/tmp/owned-private-output",
+      owned: true,
+    }),
+    removeWorkspace: async () => undefined,
+    removeOutputDirectory: async (directory) => { removed.push(directory); },
+    async runGate() {
+      throw new Error("private failure");
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.deepEqual(removed, ["/private/tmp/owned-private-output"]);
+  assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
+});
+
 test("CLI waits for workspace cleanup and forwards cancellation before PASS", async () => {
   assert.ifError(cliLoadError);
   const stdout = outputSink();
@@ -1060,7 +1155,7 @@ test("CLI waits for workspace cleanup and forwards cancellation before PASS", as
       exercise: Object.freeze({ async dispose() {} }),
     }),
     createWorkspace: async () => "/private/tmp/private-workspace",
-    resolveOutputDirectory: async () => "/private/tmp/private-output",
+    resolveOutputDirectory: async () => ({ directory: "/private/tmp/private-output", owned: false }),
     buildReport: () => Object.freeze({ status: "PASS" }),
     writeReport: async () => undefined,
     async runGate(options) {

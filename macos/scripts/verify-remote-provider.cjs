@@ -29,7 +29,10 @@ async function createPrivateWorkspace() {
 async function resolveOutputDirectory(env) {
   const configured = env.CODEX_BOT_REMOTE_GATE_OUTPUT_DIR;
   if (configured === undefined) {
-    return privateTemporaryDirectory("codex-bot-remote-report-");
+    return Object.freeze({
+      directory: await privateTemporaryDirectory("codex-bot-remote-report-"),
+      owned: true,
+    });
   }
   if (typeof configured !== "string" || !path.isAbsolute(configured)) {
     throw new TypeError("Invalid remote provider report directory.");
@@ -38,7 +41,7 @@ async function resolveOutputDirectory(env) {
   if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
     throw new TypeError("Invalid remote provider report directory.");
   }
-  return configured;
+  return Object.freeze({ directory: configured, owned: false });
 }
 
 async function removePrivateWorkspace(workspacePath) {
@@ -58,10 +61,13 @@ async function main({
   createWorkspace = createPrivateWorkspace,
   resolveOutputDirectory: outputDirectory = resolveOutputDirectory,
   removeWorkspace = removePrivateWorkspace,
+  removeOutputDirectory = removePrivateWorkspace,
 } = {}) {
   void stderr;
   let dependencies = null;
   let workspacePath = null;
+  let reportDirectory = null;
+  let reportDirectoryOwned = false;
   let gateStarted = false;
   let status = "FAIL";
   let code = 1;
@@ -72,10 +78,19 @@ async function main({
     }
     dependencies = loadDependencies({
       providerModulePath: env.CODEX_BOT_REMOTE_PROVIDER_MODULE,
+      providerModuleSha256: env.CODEX_BOT_REMOTE_PROVIDER_SHA256,
       exerciseModulePath: env.CODEX_BOT_REMOTE_EXERCISE_MODULE,
+      exerciseModuleSha256: env.CODEX_BOT_REMOTE_EXERCISE_SHA256,
     });
     workspacePath = await createWorkspace();
-    const reportDirectory = await outputDirectory(env);
+    const destination = await outputDirectory(env);
+    if (!destination || typeof destination !== "object"
+      || typeof destination.directory !== "string"
+      || typeof destination.owned !== "boolean") {
+      throw new TypeError("Invalid remote provider report directory.");
+    }
+    reportDirectory = destination.directory;
+    reportDirectoryOwned = destination.owned;
     gateStarted = true;
     const result = await runGate({
       provider: dependencies.provider,
@@ -89,6 +104,7 @@ async function main({
     workspacePath = null;
     status = "PASS";
     code = 0;
+    reportDirectoryOwned = false;
   } catch (error) {
     if (error?.code === BLOCKED_CODE) {
       status = "BLOCKED";
@@ -106,6 +122,15 @@ async function main({
     if (dependencies && !gateStarted) {
       try {
         await dependencies.exercise?.dispose?.();
+      } catch {
+        status = "FAIL";
+        code = 1;
+      }
+    }
+    if (reportDirectoryOwned && reportDirectory !== null) {
+      try {
+        await removeOutputDirectory(reportDirectory);
+        reportDirectoryOwned = false;
       } catch {
         status = "FAIL";
         code = 1;

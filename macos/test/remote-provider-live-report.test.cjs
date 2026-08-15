@@ -118,6 +118,25 @@ test("writes atomic private JSON and Markdown reports without secret material", 
   assert.deepEqual((await fs.readdir(directory)).sort(), ["result.json", "result.md"]);
 });
 
+test("serializes report ownership so concurrent writers cannot mix JSON and Markdown", async (t) => {
+  const directory = await outputDirectory(t);
+  const first = publicGateReport(privateResult({ provider: "provider-first" }));
+  const second = publicGateReport(privateResult({ provider: "provider-second" }));
+
+  const outcomes = await Promise.allSettled([
+    writeGateReport({ report: first, outputDirectory: directory }),
+    writeGateReport({ report: second, outputDirectory: directory }),
+  ]);
+
+  assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter(({ status }) => status === "rejected").length, 1);
+  const json = await fs.readFile(path.join(directory, "result.json"), "utf8");
+  const markdown = await fs.readFile(path.join(directory, "result.md"), "utf8");
+  const provider = JSON.parse(json).provider;
+  assert.match(markdown, new RegExp(`Provider: ${provider}`));
+  assert.deepEqual((await fs.readdir(directory)).sort(), ["result.json", "result.md"]);
+});
+
 test("rejects hostile report inputs and unsafe output destinations", async (t) => {
   assert.ifError(moduleLoadError);
   const hostile = new Proxy({}, { ownKeys() { throw new Error("private-proxy-path"); } });

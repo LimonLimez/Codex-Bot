@@ -243,10 +243,15 @@ async function writeExclusive(filePath, content) {
 async function writeGateReport(options) {
   const ownedTemps = [];
   const committed = [];
+  let lockHandle = null;
+  let ownedLockPath = null;
   try {
     const map = descriptors(options, ["report", "outputDirectory"]);
     const report = validatedPublicReport(value(map, "report"));
     const directory = await privateOutputDirectory(value(map, "outputDirectory"));
+    const lockPath = path.join(directory, ".remote-provider-gate.lock");
+    lockHandle = await fs.open(lockPath, "wx", 0o600);
+    ownedLockPath = lockPath;
     const jsonPath = path.join(directory, "result.json");
     const markdownPath = path.join(directory, "result.md");
     await absentDestination(jsonPath);
@@ -272,8 +277,20 @@ async function writeGateReport(options) {
     } finally {
       await directoryHandle.close();
     }
+    await lockHandle.close();
+    lockHandle = null;
+    await fs.unlink(ownedLockPath);
+    ownedLockPath = null;
     return Object.freeze({ jsonPath, markdownPath });
   } catch {
+    if (lockHandle) {
+      try { await lockHandle.close(); } catch {}
+      lockHandle = null;
+    }
+    if (ownedLockPath) {
+      try { await fs.unlink(ownedLockPath); } catch {}
+      ownedLockPath = null;
+    }
     for (const filePath of [...ownedTemps, ...committed]) {
       try {
         await fs.unlink(filePath);

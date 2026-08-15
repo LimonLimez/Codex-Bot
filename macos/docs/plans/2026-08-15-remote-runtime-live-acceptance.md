@@ -608,7 +608,7 @@ git commit -m "fix(mac): retire live-gate runtimes safely"
 - Modify: `macos/test/remote-provider-live-gate.test.cjs`
 
 **Interfaces:**
-- Reads: `CODEX_BOT_REMOTE_PROVIDER_MODULE` and `CODEX_BOT_REMOTE_EXERCISE_MODULE` only as absolute module paths.
+- Reads: `CODEX_BOT_REMOTE_PROVIDER_MODULE` and `CODEX_BOT_REMOTE_EXERCISE_MODULE` only as absolute module paths, paired with exact lowercase-hex `CODEX_BOT_REMOTE_PROVIDER_SHA256` and `CODEX_BOT_REMOTE_EXERCISE_SHA256` values.
 - Reads: optional `CODEX_BOT_REMOTE_GATE_OUTPUT_DIR` only when it is an absolute verifier-owned private directory.
 - Prints exactly one sanitized line: `REMOTE_PROVIDER_GATE=<PASS|BLOCKED|FAIL>`.
 - Exits `0` for `PASS`, `2` for `BLOCKED`, and `1` for `FAIL`.
@@ -670,7 +670,9 @@ async function main({
   try {
     const dependencies = loadDependencies({
       providerModulePath: env.CODEX_BOT_REMOTE_PROVIDER_MODULE,
+      providerModuleSha256: env.CODEX_BOT_REMOTE_PROVIDER_SHA256,
       exerciseModulePath: env.CODEX_BOT_REMOTE_EXERCISE_MODULE,
+      exerciseModuleSha256: env.CODEX_BOT_REMOTE_EXERCISE_SHA256,
     });
     const privateResult = await runGate(dependencies);
     await writeReport({
@@ -770,7 +772,9 @@ For each confirmed finding, add one deterministic named test to the relevant liv
 ```bash
 cd macos
 env -u CODEX_BOT_REMOTE_PROVIDER_MODULE \
+    -u CODEX_BOT_REMOTE_PROVIDER_SHA256 \
     -u CODEX_BOT_REMOTE_EXERCISE_MODULE \
+    -u CODEX_BOT_REMOTE_EXERCISE_SHA256 \
     node scripts/verify-remote-provider.cjs
 ```
 
@@ -782,7 +786,9 @@ Expected: stdout is exactly `REMOTE_PROVIDER_GATE=BLOCKED`, stderr is empty, and
 
 **Files:**
 - Read only: reviewed provider module named by `CODEX_BOT_REMOTE_PROVIDER_MODULE`.
+- Read only: provider SHA-256 named by `CODEX_BOT_REMOTE_PROVIDER_SHA256`.
 - Read only: reviewed exercise module named by `CODEX_BOT_REMOTE_EXERCISE_MODULE`.
+- Read only: exercise SHA-256 named by `CODEX_BOT_REMOTE_EXERCISE_SHA256`.
 - Generate privately: verifier-owned report directory outside the repository.
 
 **Interfaces:**
@@ -793,7 +799,9 @@ Expected: stdout is exactly `REMOTE_PROVIDER_GATE=BLOCKED`, stderr is empty, and
 
 ```bash
 test -n "$CODEX_BOT_REMOTE_PROVIDER_MODULE"
+test -n "$CODEX_BOT_REMOTE_PROVIDER_SHA256"
 test -n "$CODEX_BOT_REMOTE_EXERCISE_MODULE"
+test -n "$CODEX_BOT_REMOTE_EXERCISE_SHA256"
 test -f "$CODEX_BOT_REMOTE_PROVIDER_MODULE"
 test -f "$CODEX_BOT_REMOTE_EXERCISE_MODULE"
 ```

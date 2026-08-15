@@ -59,8 +59,11 @@ Chrome, AppleScript, local browser automation, a local hypervisor, or SSH.
 `macos/scripts/verify-remote-provider.cjs` will be an explicit live command,
 not part of ordinary unit tests or application startup. It will:
 
-1. load an absolute provider module through the existing production validator;
-2. load its reviewed Computer exercise adapter;
+1. load an absolute provider module only when its private regular-file bytes
+   match the configured SHA-256 and execute those exact bytes without local or
+   package-file imports;
+2. load its separately hashed reviewed Computer exercise adapter under the
+   same single-file rule;
 3. create two fresh temporary canonical bot UUIDs;
 4. subscribe before provisioning so early lifecycle events are not lost;
 5. run the exact lifecycle, protocol, isolation, exercise, and cleanup checks;
@@ -78,11 +81,12 @@ chat.
 The exercise adapter receives an opaque current-runtime handle rather than raw
 provider secrets. Its narrow operation is equivalent to:
 
-`openRemoteUrl({ botId, runtimeId, generation, url })`
+`openRemoteUrl({ actionId, botId, runtimeId, generation, url })`
 
-It must return a bounded acknowledgement tied to the same bot, runtime, and
-generation. Success still requires the controller's normal scoped Computer
-event path; the acknowledgement alone is not proof that the browser opened.
+It must return a bounded acknowledgement tied to the same opaque action, bot,
+runtime, and generation. Success still requires the controller's normal scoped
+Computer event path with that action ID and a new SHA-256 frame digest; the
+acknowledgement alone is not proof that the browser opened.
 The adapter is provider-specific because the generic lifecycle contract does
 not define mouse, keyboard, browser, or Computer RPCs.
 
@@ -113,7 +117,8 @@ provider responses are otherwise discarded.
 ### Preflight
 
 1. Confirm the provider and exercise modules are absolute, regular, private,
-   reviewed files with the required exports.
+   reviewed single-file bundles whose bytes match separately configured
+   SHA-256 values and whose exports are exact.
 2. Confirm the provider advertises provision, inspect, retire, events, remote
    app-server, and Computer/browser capabilities.
 3. Reject `file:`, `http:`, local socket, loopback, link-local, private-network,

@@ -1,11 +1,13 @@
 "use strict";
 
 const fs = require("node:fs");
-const { randomUUID } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const dns = require("node:dns/promises");
+const Module = require("node:module");
 const { isIP } = require("node:net");
 const path = require("node:path");
 const { types } = require("node:util");
+const vm = require("node:vm");
 
 const { BotStore } = require("./bot-store.cjs");
 const { RemoteAppServerClient } = require("./remote-app-server-client.cjs");
@@ -18,6 +20,8 @@ const FAILED_CODE = "REMOTE_PROVIDER_GATE_FAILED";
 const FAILED_MESSAGE = "Remote provider verification failed.";
 const YOUTUBE_URL = "https://www.youtube.com/";
 const MAX_GATE_EVENTS = 256;
+const MAX_ADAPTER_MODULE_BYTES = 1_048_576;
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const NON_PUBLIC_IPV4_CIDRS = Object.freeze([
@@ -123,20 +127,64 @@ function objectDescriptors(value, label, expectedKeys) {
   return descriptors;
 }
 
-function privateModulePath(value) {
+function reviewedModuleSource(value, expectedSha256) {
+  let descriptor = null;
   try {
-    if (typeof value !== "string" || !path.isAbsolute(value)) throw blockedError();
-    const stat = fs.lstatSync(value);
-    if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) throw blockedError();
-    return value;
+    if (typeof value !== "string" || !path.isAbsolute(value)
+      || typeof expectedSha256 !== "string" || !SHA256_PATTERN.test(expectedSha256)) {
+      throw blockedError();
+    }
+    descriptor = fs.openSync(value, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || (stat.mode & 0o077) !== 0
+      || stat.size < 1 || stat.size > MAX_ADAPTER_MODULE_BYTES) throw blockedError();
+    const bytes = fs.readFileSync(descriptor);
+    if (bytes.length !== stat.size
+      || createHash("sha256").update(bytes).digest("hex") !== expectedSha256) throw blockedError();
+    return bytes.toString("utf8");
   } catch {
     throw blockedError();
+  } finally {
+    if (descriptor !== null) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
   }
 }
 
-function configuredModule(modulePath, factoryName) {
+function executeReviewedModule(modulePath, source) {
+  const builtins = new Set(Module.builtinModules);
+  const restrictedRequire = (specifier) => {
+    if (typeof specifier !== "string") throw blockedError();
+    const bare = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
+    if (!builtins.has(bare)) throw blockedError();
+    return require(specifier.startsWith("node:") ? specifier : `node:${specifier}`);
+  };
+  const moduleRecord = { exports: {} };
+  Object.defineProperties(moduleRecord, {
+    filename: { value: modulePath, enumerable: true },
+    require: { value: restrictedRequire, enumerable: true },
+  });
+  const wrapper = vm.runInThisContext(Module.wrap(source), {
+    filename: modulePath,
+    displayErrors: false,
+  });
+  wrapper.call(
+    moduleRecord.exports,
+    moduleRecord.exports,
+    restrictedRequire,
+    moduleRecord,
+    modulePath,
+    path.dirname(modulePath),
+  );
+  return moduleRecord.exports;
+}
+
+function configuredModule(modulePath, expectedSha256, factoryName) {
   try {
-    const loaded = require(privateModulePath(modulePath));
+    const loaded = executeReviewedModule(
+      modulePath,
+      reviewedModuleSource(modulePath, expectedSha256),
+    );
     const descriptors = objectDescriptors(loaded, "Remote provider module", [factoryName]);
     const factory = descriptors[factoryName].value;
     if (typeof factory !== "function") throw blockedError();
@@ -246,10 +294,23 @@ function loadLiveGateDependencies(options) {
     const descriptors = objectDescriptors(
       options,
       "Remote provider gate configuration",
-      ["providerModulePath", "exerciseModulePath"],
+      [
+        "providerModulePath",
+        "providerModuleSha256",
+        "exerciseModulePath",
+        "exerciseModuleSha256",
+      ],
     );
-    const rawProvider = configuredModule(descriptors.providerModulePath.value, "createProvider");
-    const rawExercise = configuredModule(descriptors.exerciseModulePath.value, "createExercise");
+    const rawProvider = configuredModule(
+      descriptors.providerModulePath.value,
+      descriptors.providerModuleSha256.value,
+      "createProvider",
+    );
+    const rawExercise = configuredModule(
+      descriptors.exerciseModulePath.value,
+      descriptors.exerciseModuleSha256.value,
+      "createExercise",
+    );
     const provider = validateProvider(rawProvider);
     const exercise = validateComputerExercise(rawExercise);
     return Object.freeze({ provider, exercise });
@@ -506,7 +567,10 @@ async function readRemoteProtocol(client, { timeoutMs, signal }) {
     modelCount += result.data.length;
     if (modelCount > 4096) throw failedError();
     const next = result.nextCursor ?? null;
-    if (next === null) return Object.freeze({ accountReadable: true, modelCount });
+    if (next === null) {
+      if (modelCount < 1) throw failedError();
+      return Object.freeze({ accountReadable: true, modelCount });
+    }
     if (typeof next !== "string" || next.length < 1 || next.length > 512
       || seenCursors.has(next)) throw failedError();
     seenCursors.add(next);
