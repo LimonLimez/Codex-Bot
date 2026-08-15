@@ -273,6 +273,9 @@ async function liveGateHarness(t, options = {}) {
       return { runtimeId, ownerBotId: record.ownerBotId, state: record.state };
     },
     async retire({ runtimeId }) {
+      if (options.retireFailure && runtimeId === "runtime-1") {
+        throw new Error("provider endpoint token private-retire-diagnostic");
+      }
       const record = runtimes.get(runtimeId);
       if (record) record.state = "retired";
       retired.push(runtimeId);
@@ -459,8 +462,31 @@ test("fails before Computer work for duplicate runtimes endpoints or owners", as
       assert.equal(harness.exerciseCalls.length, 0);
       assert.equal(harness.clients.every(({ stopped }) => stopped), true);
       assert.equal(harness.exerciseDisposed, 1);
+      await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
+        code: "ENOENT",
+      });
     });
   }
+});
+
+test("retirement failure keeps the gate failed while closing clients and removing local state", async (t) => {
+  const harness = await liveGateHarness(t, { retireFailure: true });
+  harness.options.dependencies.computerTimeoutMs = 500;
+  harness.options.dependencies.frameSettleMs = 80;
+
+  const error = await runRemoteProviderLiveGate(harness.options).then(
+    () => null,
+    (failure) => failure,
+  );
+
+  assert.equal(error?.code, "REMOTE_PROVIDER_GATE_FAILED");
+  assert.equal(error?.message, "Remote provider verification failed.");
+  assert.doesNotMatch(String(error?.stack), /endpoint|token|private-retire/i);
+  assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+  assert.equal(harness.exerciseDisposed, 1);
+  await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
+    code: "ENOENT",
+  });
 });
 
 test("rejects private DNS answers before constructing a remote client", async (t) => {
@@ -576,6 +602,24 @@ test("passes only after Bot A remote Chrome shows YouTube", async (t) => {
   assert.equal(JSON.stringify(result).includes("fixture-frame"), false);
 });
 
+test("successful proof records terminal cleanup and removes the verifier store", async (t) => {
+  const harness = await liveGateHarness(t);
+  harness.options.dependencies.computerTimeoutMs = 500;
+  harness.options.dependencies.frameSettleMs = 80;
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.deepEqual(result.cleanup, {
+    safe: true,
+    retiredRuntimeCount: 2,
+    terminalRuntimeCount: 2,
+    storeRemoved: true,
+  });
+  await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
+    code: "ENOENT",
+  });
+});
+
 test("rejects acknowledgement without an exact current YouTube frame", async (t) => {
   for (const frameMutation of [
     "no-frame",
@@ -599,6 +643,10 @@ test("rejects acknowledgement without an exact current YouTube frame", async (t)
       });
       assert.equal(harness.clients.every(({ stopped }) => stopped), true);
       assert.equal(harness.exerciseDisposed, 1);
+      assert.deepEqual([...new Set(harness.retired)].sort(), ["runtime-1", "runtime-2"]);
+      await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
+        code: "ENOENT",
+      });
     });
   }
 });

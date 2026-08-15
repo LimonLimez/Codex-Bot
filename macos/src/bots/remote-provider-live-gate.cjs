@@ -581,8 +581,17 @@ async function waitForYouTubeFrame({
   }
 }
 
-async function minimalCleanup({ clients, exercise, controller, provider, receipts }) {
+async function minimalCleanup({
+  clients,
+  exercise,
+  controller,
+  provider,
+  receipts,
+  storeFilePath,
+}) {
   let safe = true;
+  let retiredRuntimeCount = 0;
+  let terminalRuntimeCount = 0;
   for (const client of clients) {
     try {
       client.stop();
@@ -607,7 +616,18 @@ async function minimalCleanup({ clients, exercise, controller, provider, receipt
       const result = await provider.retire({ runtimeId: receipt.runtimeId });
       if (result.runtimeId !== receipt.runtimeId
         || (result.state !== "retired" && result.state !== "detached")) safe = false;
-      else retired.add(receipt.runtimeId);
+      else {
+        retired.add(receipt.runtimeId);
+        retiredRuntimeCount += 1;
+        const terminal = await provider.inspect({ runtimeId: receipt.runtimeId });
+        if (terminal.runtimeId === receipt.runtimeId
+          && terminal.ownerBotId === receipt.botId
+          && (terminal.state === "retired" || terminal.state === "detached")) {
+          terminalRuntimeCount += 1;
+        } else {
+          safe = false;
+        }
+      }
     } catch {
       safe = false;
     }
@@ -617,7 +637,21 @@ async function minimalCleanup({ clients, exercise, controller, provider, receipt
   } catch {
     safe = false;
   }
-  return safe;
+  let storeRemoved = false;
+  try {
+    const stat = fs.lstatSync(storeFilePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw failedError();
+    fs.unlinkSync(storeFilePath);
+    storeRemoved = true;
+  } catch (error) {
+    if (error?.code === "ENOENT") storeRemoved = true;
+    else safe = false;
+  }
+  safe = safe
+    && retiredRuntimeCount === receipts.length
+    && terminalRuntimeCount === receipts.length
+    && storeRemoved;
+  return Object.freeze({ safe, retiredRuntimeCount, terminalRuntimeCount, storeRemoved });
 }
 
 async function runRemoteProviderLiveGate(options) {
@@ -643,6 +677,7 @@ async function runRemoteProviderLiveGate(options) {
   let controller = null;
   const runtimeEvents = [];
   const ingressEvents = [];
+  const startedAt = new Date().toISOString();
   let result = null;
   let failure = null;
   const lookup = typeof dependencies.lookup === "function"
@@ -665,6 +700,7 @@ async function runRemoteProviderLiveGate(options) {
     || frameSettleMs > 1_000
     || frameSettleMs >= computerTimeoutMs) throw failedError();
   const recordedProvider = runtimeProviderRecorder(provider, receipts, ingressEvents);
+  const storeFilePath = path.join(workspacePath, "bots.json");
 
   try {
     if (signal?.aborted) throw failedError();
@@ -673,7 +709,13 @@ async function runRemoteProviderLiveGate(options) {
     const capabilities = await recordedProvider.capabilities();
     if (Object.values(capabilities).some((value) => value !== true)) throw failedError();
 
-    const store = new BotStore({ filePath: path.join(workspacePath, "bots.json") });
+    try {
+      fs.lstatSync(storeFilePath);
+      throw failedError();
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const store = new BotStore({ filePath: storeFilePath });
     controller = new BotRuntimeController({ store, provider: recordedProvider });
     controller.on("runtime-event", (event) => runtimeEvents.push(event));
     const botA = await readyBot(controller, recordedProvider);
@@ -715,10 +757,17 @@ async function runRemoteProviderLiveGate(options) {
     });
     result = Object.freeze({
       status: "PASS",
+      startedAt,
       provider: receipts[0]?.provider,
-      botCount: 2,
+      bots: Object.freeze([
+        Object.freeze({ botId: botA.botId, runtimeId: botA.session.runtimeId, generation: botA.session.generation }),
+        Object.freeze({ botId: botB.botId, runtimeId: botB.session.runtimeId, generation: botB.session.generation }),
+      ]),
       capabilities,
-      protocol: Object.freeze(protocol),
+      protocol: Object.freeze([
+        Object.freeze({ botId: botA.botId, ...protocol[0] }),
+        Object.freeze({ botId: botB.botId, ...protocol[1] }),
+      ]),
       computer,
       isolation: Object.freeze({ crossBotFrameCount: 0, passed: true }),
     });
@@ -726,9 +775,20 @@ async function runRemoteProviderLiveGate(options) {
     failure = failedError();
   }
 
-  const cleanupSafe = await minimalCleanup({ clients, exercise, controller, provider, receipts });
-  if (failure || !cleanupSafe || !result) throw failedError();
-  return result;
+  const cleanup = await minimalCleanup({
+    clients,
+    exercise,
+    controller,
+    provider,
+    receipts,
+    storeFilePath,
+  });
+  if (failure || !cleanup.safe || !result) throw failedError();
+  return Object.freeze({
+    ...result,
+    finishedAt: new Date().toISOString(),
+    cleanup,
+  });
 }
 
 module.exports = {
