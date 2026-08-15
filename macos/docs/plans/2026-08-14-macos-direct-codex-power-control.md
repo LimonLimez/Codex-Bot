@@ -10,13 +10,13 @@ optional providers and the Grok 0.20 shell, then sign, notarize, privacy-audit,
 install, and push the isolated macOS release.
 
 **Design:**
-`docs/superpowers/specs/2026-08-14-macos-direct-codex-power-control-design.md`
+`macos/docs/specs/2026-08-14-macos-direct-codex-power-control-design.md`
 
 ## Task 1: Pin and verify official Codex 0.147.0
 
 **Files:**
 
-- Create `macos/assets/codex-0.147.0-darwin-arm64.json`
+- Create `macos/assets/openai-codex-0.147.0-darwin-arm64.json`
 - Create `macos/scripts/verify-codex-runtime.cjs`
 - Create `macos/test/codex-runtime-integrity.test.cjs`
 - Modify installer/package/audit scripts only as required by the verified

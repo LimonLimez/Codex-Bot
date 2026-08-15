@@ -6,7 +6,8 @@
 
 **Platform:** macOS Apple Silicon only
 
-**Extends:** `2026-08-14-macos-grok-020-preserve-patch-design.md`
+**Extends:**
+`../../../docs/superpowers/specs/2026-08-14-macos-grok-020-preserve-patch-design.md`
 
 ## Decision
 

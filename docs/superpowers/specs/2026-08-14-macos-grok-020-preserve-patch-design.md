@@ -10,7 +10,8 @@
 
 > **2026-08-14 amendment:** Direct Codex account/runtime and the final native
 > Power-control contract are defined by
-> `2026-08-14-macos-direct-codex-power-control-design.md`. That document
+> `macos/docs/specs/2026-08-14-macos-direct-codex-power-control-design.md`.
+> That document
 > supersedes this file wherever this file makes CLIProxyAPI mandatory for Codex
 > or treats the earlier approximate control as final. Preservation, bot,
 > remote-runtime, privacy, installer, and Windows-isolation requirements here

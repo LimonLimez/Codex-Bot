@@ -26,7 +26,8 @@ Swift 6/SwiftPM, AppKit/SwiftUI installer UI, macOS `hdiutil`, `codesign`,
 
 > **Continuation:** The direct Codex runtime, optional-provider split, final
 > native Power control, and public signing work continue in
-> `2026-08-14-macos-direct-codex-power-control.md`. That plan supersedes any
+> `macos/docs/plans/2026-08-14-macos-direct-codex-power-control.md`. That plan
+> supersedes any
 > remaining task here that assumes CLIProxyAPI is mandatory for Codex.
 
 ## Global rules

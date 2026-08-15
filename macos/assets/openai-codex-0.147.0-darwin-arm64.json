@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "product": "Codex",
+  "version": "0.147.0",
+  "releaseTag": "rust-v0.147.0",
+  "publishedAt": "2026-08-07T01:41:49Z",
+  "upstreamRepository": "https://github.com/openai/codex",
+  "platform": "darwin-arm64",
+  "archive": {
+    "name": "codex-aarch64-apple-darwin.tar.gz",
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-aarch64-apple-darwin.tar.gz",
+    "bytes": 87984231,
+    "sha256": "75984b81f92a71b0c0f4b3b5cad80e5c57177e4d8c8b4b1e13db703b20dc4358"
+  },
+  "executable": {
+    "name": "codex-aarch64-apple-darwin",
+    "bytes": 219997536,
+    "sha256": "19c4f144c5226a9f17c58e6f0fa854843b0f77a6eb420f40e2745a12f10f5d37",
+    "identifier": "codex",
+    "architecture": "arm64",
+    "version": "0.147.0",
+    "signer": "Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)",
+    "teamIdentifier": "2DC432GLL2",
+    "cdHash": "95686307357ad315175f553a68dce5c62d0ff435",
+    "hardenedRuntime": true,
+    "timestamped": true
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "url": "https://raw.githubusercontent.com/openai/codex/rust-v0.147.0/LICENSE"
+  }
+}
