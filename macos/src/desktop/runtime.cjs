@@ -6,10 +6,17 @@ const { BotStore } = require("../bots/bot-store.cjs");
 const { BotRuntimeController } = require("../bots/runtime-controller.cjs");
 const { unavailableProvider, validateProvider } = require("../bots/runtime-provider.cjs");
 const { CLIProxyManager } = require("./cliproxy-manager.cjs");
+const { CodexAccountController } = require("./codex-account-controller.cjs");
 const { CodexAppServerManager } = require("./codex-app-server-manager.cjs");
 const { ModelSelectionStore, normalizeSelectionRequest } = require("./model-selection-store.cjs");
 
 const IPC_CHANNELS = Object.freeze({
+  accountRead: "codex-account:read",
+  accountLogin: "codex-account:login",
+  accountCancelLogin: "codex-account:login-cancel",
+  accountLogout: "codex-account:logout",
+  accountRetry: "codex-account:retry",
+  catalogList: "codex-catalog:list",
   list: "codex-bot:list",
   create: "codex-bot:create",
   adoptLegacy: "codex-bot:adopt-legacy",
@@ -24,6 +31,8 @@ const IPC_CHANNELS = Object.freeze({
 });
 const CHANGE_CHANNEL = "codex-bot:changed";
 const RUNTIME_EVENT_CHANNEL = "codex-runtime:event";
+const ACCOUNT_CHANGE_CHANNEL = "codex-account:changed";
+const CATALOG_CHANGE_CHANNEL = "codex-catalog:changed";
 const INSTALLED = Symbol.for("codex.bot.macos.desktop-runtime");
 
 function sanitizedFailure() {
@@ -150,6 +159,7 @@ function productionDependencies(electron) {
     stateRoot,
     homeDirectory: electron.app.getPath("home"),
   });
+  const accountController = new CodexAccountController({ manager: codexManager });
   const sidecarManager = createLazySidecarManager({
     resourcesPath: process.resourcesPath,
     stateRoot,
@@ -160,7 +170,7 @@ function productionDependencies(electron) {
   delete process.env.CODEX_BOT_CLIPROXY_URL;
   delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
   void controller.reconcile().catch(() => {});
-  return { codexManager, controller, selectionStore, sidecarManager, store: botStore };
+  return { accountController, codexManager, controller, selectionStore, sidecarManager, store: botStore };
 }
 
 function installDesktopRuntime(electron, injected = {}) {
@@ -177,13 +187,23 @@ function installDesktopRuntime(electron, injected = {}) {
     async start() {},
     stop() {},
   });
+  const accountController = dependencies.accountController || Object.freeze({
+    start() { return codexManager.start(); },
+    accountState() { throw sanitizedFailure(); },
+    catalogState() { throw sanitizedFailure(); },
+    async login() { throw sanitizedFailure(); },
+    async cancelLogin() { throw sanitizedFailure(); },
+    async logout() { throw sanitizedFailure(); },
+    async refresh() { throw sanitizedFailure(); },
+    dispose() {},
+  });
   const sidecarManager = dependencies.sidecarManager || Object.freeze({
     async connectProvider() { throw sanitizedFailure(); },
     stop() {},
   });
   const registered = [];
   let disposed = false;
-  void codexManager.start().catch(() => {});
+  void accountController.start().catch(() => {});
 
   function broadcast(bot) {
     const record = bot?.bot && typeof bot.bot === "object" ? bot.bot : bot;
@@ -204,6 +224,15 @@ function installDesktopRuntime(electron, injected = {}) {
     }
   }
 
+  function broadcastChannel(channel, value) {
+    if (!value || typeof value !== "object") return;
+    for (const window of electron.BrowserWindow.getAllWindows()) {
+      try {
+        if (!window.webContents.isDestroyed()) window.webContents.send(channel, value);
+      } catch {}
+    }
+  }
+
   function handle(channel, operation) {
     electron.ipcMain.handle(channel, async (_event, ...args) => {
       if (disposed) throw sanitizedFailure();
@@ -217,6 +246,25 @@ function installDesktopRuntime(electron, injected = {}) {
   }
 
   handle(IPC_CHANNELS.list, () => controller.listBots());
+  handle(IPC_CHANNELS.accountRead, () => accountController.accountState());
+  handle(IPC_CHANNELS.catalogList, () => accountController.catalogState());
+  handle(IPC_CHANNELS.accountLogin, async (mode) => {
+    const login = await accountController.login(mode);
+    if (typeof login?.openUrl === "string") {
+      try {
+        if (disposed || !electron.shell || typeof electron.shell.openExternal !== "function") throw sanitizedFailure();
+        await electron.shell.openExternal(login.openUrl);
+        if (disposed) throw sanitizedFailure();
+      } catch {
+        try { await accountController.cancelLogin(); } catch {}
+        throw sanitizedFailure();
+      }
+    }
+    return login.state;
+  });
+  handle(IPC_CHANNELS.accountCancelLogin, () => accountController.cancelLogin());
+  handle(IPC_CHANNELS.accountLogout, () => accountController.logout());
+  handle(IPC_CHANNELS.accountRetry, () => accountController.refresh());
   handle(IPC_CHANNELS.create, () => controller.createBot());
   handle(IPC_CHANNELS.adoptLegacy, async (value) => {
     if (!store || typeof store.adoptLegacy !== "function") throw sanitizedFailure();
@@ -264,9 +312,13 @@ function installDesktopRuntime(electron, injected = {}) {
     void controller.readBot(event.botId).then(broadcast).catch(() => {});
   };
   const onRuntimeEvent = (event) => broadcastRuntimeEvent(event);
+  const onAccountChanged = (event) => broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
+  const onCatalogChanged = (event) => broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
   controller.on?.("bot-changed", onBotChanged);
   controller.on?.("runtime-changed", onRuntimeChanged);
   controller.on?.("runtime-event", onRuntimeEvent);
+  accountController.on?.("account-changed", onAccountChanged);
+  accountController.on?.("catalog-changed", onCatalogChanged);
 
   const api = Object.freeze({
     dispose() {
@@ -276,6 +328,9 @@ function installDesktopRuntime(electron, injected = {}) {
       controller.off?.("bot-changed", onBotChanged);
       controller.off?.("runtime-changed", onRuntimeChanged);
       controller.off?.("runtime-event", onRuntimeEvent);
+      accountController.off?.("account-changed", onAccountChanged);
+      accountController.off?.("catalog-changed", onCatalogChanged);
+      accountController.dispose();
       codexManager.stop();
       sidecarManager.stop();
       delete process.env.CODEX_BOT_CLIPROXY_URL;
@@ -290,6 +345,8 @@ function installDesktopRuntime(electron, injected = {}) {
 }
 
 module.exports = {
+  ACCOUNT_CHANGE_CHANNEL,
+  CATALOG_CHANGE_CHANNEL,
   CHANGE_CHANNEL,
   IPC_CHANNELS,
   RUNTIME_EVENT_CHANNEL,

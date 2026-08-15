@@ -187,10 +187,11 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     codexManager,
   });
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
-    "adoptLegacy", "connectProvider", "create", "list", "read", "readModel", "rename", "retryRuntime",
+    "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy",
+    "catalogList", "connectProvider", "create", "list", "read", "readModel", "rename", "retryRuntime",
     "selectBot", "selectModel", "updateProfile",
   ]);
-  assert.equal(handlers.size, 11);
+  assert.equal(handlers.size, 17);
   assert.equal(Object.isFrozen(installed), true);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
@@ -234,6 +235,121 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, undefined);
   assert.equal(handlers.size, 0);
   assert.deepEqual(calls.slice(-3), [["direct-stop"], ["sidecar-stop"], ["dispose"]]);
+});
+
+test("desktop account boundary opens browser login only in main and publishes frozen sanitized account and catalog generations", async () => {
+  const {
+    ACCOUNT_CHANGE_CHANNEL,
+    CATALOG_CHANGE_CHANNEL,
+    installDesktopRuntime,
+    IPC_CHANNELS,
+  } = require(runtimePath);
+  const handlers = new Map();
+  const listeners = new Map();
+  const sends = [];
+  const opened = [];
+  let rejectBrowserOpen = false;
+  const calls = [];
+  const account = Object.freeze({
+    generation: 4,
+    status: "signed-out",
+    authMode: null,
+    planType: null,
+    requiresOpenaiAuth: true,
+    login: null,
+    rateLimits: null,
+  });
+  const catalog = Object.freeze({
+    generation: 7,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "dynamic-model",
+      displayName: "Dynamic Model",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "ultra"]),
+      inputModalities: Object.freeze(["text"]),
+      supportsPersonality: true,
+      isDefault: true,
+    })]),
+  });
+  const accountController = {
+    on(event, listener) { listeners.set(event, listener); },
+    off(event, listener) { if (listeners.get(event) === listener) listeners.delete(event); },
+    async start() { calls.push(["account-start"]); },
+    accountState() { calls.push(["account-read"]); return account; },
+    catalogState() { calls.push(["catalog-list"]); return catalog; },
+    async login(mode) {
+      calls.push(["account-login", mode]);
+      const state = Object.freeze({ ...account, generation: account.generation + 1, status: "signing-in", login: Object.freeze({ mode }) });
+      const result = { state };
+      if (mode === "browser") Object.defineProperty(result, "openUrl", { value: "https://chatgpt.com/auth/codex?state=private", enumerable: false });
+      return Object.freeze(result);
+    },
+    async cancelLogin() { calls.push(["account-cancel"]); return account; },
+    async logout() { calls.push(["account-logout"]); return account; },
+    async refresh() { calls.push(["account-retry"]); return { account, catalog }; },
+    dispose() { calls.push(["account-dispose"]); },
+  };
+  const controller = {
+    on() {}, off() {}, dispose() {},
+  };
+  const electron = {
+    app: { once() {} },
+    shell: {
+      async openExternal(url) {
+        opened.push(url);
+        if (rejectBrowserOpen) throw new Error("private browser /Users/person token");
+      },
+    },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      getAllWindows: () => [{ webContents: { isDestroyed: () => false, send: (...args) => sends.push(args) } }],
+    },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore: {},
+    accountController,
+    codexManager: { stop() {} },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.shift(), ["account-start"]);
+  assert.equal(await handlers.get(IPC_CHANNELS.accountRead)({}), account);
+  assert.equal(await handlers.get(IPC_CHANNELS.catalogList)({}), catalog);
+  const browser = await handlers.get(IPC_CHANNELS.accountLogin)({}, "browser");
+  assert.equal(browser.status, "signing-in");
+  assert.deepEqual(opened, ["https://chatgpt.com/auth/codex?state=private"]);
+  assert.doesNotMatch(JSON.stringify(browser), /https:|state=private|loginId|accessToken|email/);
+  rejectBrowserOpen = true;
+  await assert.rejects(
+    handlers.get(IPC_CHANNELS.accountLogin)({}, "browser"),
+    (error) => {
+      assert.equal(error.code, "CODEX_BOT_OPERATION_FAILED");
+      assert.doesNotMatch(String(error), /private|Users|token|chatgpt\.com/);
+      return true;
+    },
+  );
+  assert.deepEqual(calls.at(-1), ["account-cancel"]);
+  rejectBrowserOpen = false;
+  await handlers.get(IPC_CHANNELS.accountLogin)({}, "device-code");
+  assert.equal(opened.length, 2);
+  await handlers.get(IPC_CHANNELS.accountCancelLogin)({});
+  await handlers.get(IPC_CHANNELS.accountLogout)({});
+  await handlers.get(IPC_CHANNELS.accountRetry)({});
+  listeners.get("account-changed")(account);
+  listeners.get("catalog-changed")(catalog);
+  assert.deepEqual(sends, [
+    [ACCOUNT_CHANGE_CHANNEL, account],
+    [CATALOG_CHANGE_CHANNEL, catalog],
+  ]);
+  assert.doesNotMatch(JSON.stringify(sends), /private|authUrl|loginId|accessToken|email|endpoint/);
+  installed.dispose();
+  assert.equal(listeners.size, 0);
+  assert.equal(handlers.size, 0);
+  assert.deepEqual(calls.slice(-1), [["account-dispose"]]);
 });
 
 test("selecting a bot refreshes a retained model selection to the current runtime generation", async () => {

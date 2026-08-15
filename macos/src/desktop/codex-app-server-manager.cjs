@@ -635,6 +635,7 @@ class CodexAppServerManager extends EventEmitter {
     const hasMethod = Object.hasOwn(message, "method");
     const hasResult = Object.hasOwn(message, "result");
     const hasError = Object.hasOwn(message, "error");
+    const hasEmittedAt = Object.hasOwn(message, "emittedAtMs");
 
     if (hasId && (hasResult || hasError)) {
       if (!Number.isSafeInteger(message.id) || message.id <= 0 || hasMethod || hasResult === hasError
@@ -682,7 +683,8 @@ class CodexAppServerManager extends EventEmitter {
 
     if (!hasId && hasMethod) {
       if (typeof message.method !== "string" || !METHOD_PATTERN.test(message.method) || hasResult || hasError
-        || keys.some((key) => !["method", "params"].includes(key))) {
+        || (hasEmittedAt && (!Number.isSafeInteger(message.emittedAtMs) || message.emittedAtMs < 0))
+        || keys.some((key) => !["method", "params", "emittedAtMs"].includes(key))) {
         this.#protocolFailure(active);
         return;
       }

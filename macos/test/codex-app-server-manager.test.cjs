@@ -267,10 +267,23 @@ test("terminates a spawned child that does not expose the required private stdio
 });
 
 test("routes bounded requests and deeply frozen sanitized notifications without exposing private keys", async (t) => {
-  const { manager, children: [child] } = harness(t);
-  await startReady(manager, child);
   const notifications = [];
+  const { manager, children: [child] } = harness(t);
   manager.on("notification", (message) => notifications.push(message));
+  const starting = manager.start();
+  await tick();
+  child.receive({
+    method: "remoteControl/status/changed",
+    params: { status: "disabled" },
+    emittedAtMs: 1_780_000_000_123,
+  });
+  child.receive({ id: 1, result: { serverInfo: { name: "codex", version: "0.147.0" } } });
+  await starting;
+  assert.deepEqual(notifications.shift(), {
+    method: "remoteControl/status/changed",
+    params: { status: "disabled" },
+    emittedAtMs: 1_780_000_000_123,
+  });
   const request = manager.request("model/list", { cursor: null }, { timeoutMs: 30_000 });
   const sent = child.writes.at(-1);
   assert.deepEqual(sent, { id: 2, method: "model/list", params: { cursor: null } });
