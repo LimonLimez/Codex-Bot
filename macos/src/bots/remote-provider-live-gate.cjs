@@ -244,7 +244,7 @@ function loadLiveGateDependencies(options) {
   }
 }
 
-function runtimeProviderRecorder(provider, receipts) {
+function runtimeProviderRecorder(provider, receipts, ingressEvents) {
   return Object.freeze({
     capabilities: (...args) => provider.capabilities(...args),
     async provision(input) {
@@ -260,7 +260,16 @@ function runtimeProviderRecorder(provider, receipts) {
     },
     inspect: (...args) => provider.inspect(...args),
     retire: (...args) => provider.retire(...args),
-    subscribe: (...args) => provider.subscribe(...args),
+    subscribe(callback) {
+      return provider.subscribe((event) => {
+        ingressEvents.push(Object.freeze({
+          runtimeId: event.runtimeId,
+          type: event.type,
+          sequence: event.sequence,
+        }));
+        callback(event);
+      });
+    },
   });
 }
 
@@ -377,6 +386,201 @@ async function readyBot(controller, provider) {
   return Object.freeze({ botId: bot.botId, session });
 }
 
+function validFrameDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) return false;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  if (Reflect.ownKeys(descriptors).some((key) => (
+    typeof key !== "string" || !("value" in descriptors[key])
+  ))) return false;
+  const width = descriptors.width?.value;
+  const height = descriptors.height?.value;
+  const digest = descriptors.digest?.value;
+  return Number.isSafeInteger(width) && width >= 320 && width <= 8192
+    && Number.isSafeInteger(height) && height >= 240 && height <= 8192
+    && typeof digest === "string"
+    && /^sha256:[A-Za-z0-9._:-]{8,128}$/.test(digest);
+}
+
+function youtubeProofFromEvent(value, receipt, minimumSequence) {
+  if (!value || typeof value !== "object"
+    || value.botId !== receipt.botId
+    || value.generation !== receipt.session.generation
+    || value.runtime?.remoteRuntimeId !== receipt.session.runtimeId
+    || value.runtime?.state !== "ready"
+    || value.event?.runtimeId !== receipt.session.runtimeId
+    || value.event?.type !== "computer/frame"
+    || !Number.isSafeInteger(value.event.sequence)
+    || value.event.sequence <= minimumSequence) throw failedError();
+
+  const browser = value.event.payload?.browser;
+  let browserUrl;
+  try {
+    browserUrl = new URL(browser?.url);
+  } catch {
+    throw failedError();
+  }
+  if (browser?.name !== "Google Chrome"
+    || browserUrl.protocol !== "https:"
+    || browserUrl.hostname !== "www.youtube.com"
+    || browserUrl.username
+    || browserUrl.password
+    || typeof browser.title !== "string"
+    || !browser.title.includes("YouTube")
+    || !validFrameDescriptor(value.event.payload?.frame)) throw failedError();
+
+  return Object.freeze({
+    sequence: value.event.sequence,
+    public: Object.freeze({
+      browser: "Google Chrome",
+      host: "www.youtube.com",
+      titleMarker: "YouTube",
+      frameReceived: true,
+    }),
+  });
+}
+
+function computerFrameWaiter({
+  controller,
+  receipt,
+  priorEvents,
+  ingressEvents,
+  ingressStart,
+  timeoutMs,
+  settleMs,
+  signal,
+}) {
+  const priorSequence = priorEvents.reduce((maximum, value) => (
+    value?.botId === receipt.botId
+      && value?.event?.runtimeId === receipt.session.runtimeId
+      && value?.event?.type === "computer/frame"
+      && Number.isSafeInteger(value.event.sequence)
+      ? Math.max(maximum, value.event.sequence)
+      : maximum
+  ), 0);
+  let settled = false;
+  let matched = null;
+  let timeoutTimer = null;
+  let settleTimer = null;
+  let resolvePromise;
+  let rejectPromise;
+  const consumedIngress = new Set();
+  const promise = new Promise((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
+
+  const detach = () => {
+    clearTimeout(timeoutTimer);
+    clearTimeout(settleTimer);
+    signal?.removeEventListener("abort", onAbort);
+    controller.removeListener("runtime-event", onEvent);
+  };
+  const fail = () => {
+    if (settled) return;
+    settled = true;
+    detach();
+    rejectPromise(failedError());
+  };
+  const complete = () => {
+    if (settled || !matched) return;
+    settled = true;
+    detach();
+    resolvePromise(matched.public);
+  };
+  const onAbort = () => fail();
+  const consumeFreshIngress = (event) => {
+    for (let index = ingressStart; index < ingressEvents.length; index += 1) {
+      if (consumedIngress.has(index)) continue;
+      const ingress = ingressEvents[index];
+      if (ingress.runtimeId === event.event.runtimeId
+        && ingress.type === event.event.type
+        && ingress.sequence === event.event.sequence) {
+        consumedIngress.add(index);
+        return true;
+      }
+    }
+    return false;
+  };
+  const onEvent = (event) => {
+    if (settled || event?.event?.type !== "computer/frame") return;
+    if (!consumeFreshIngress(event)) {
+      fail();
+      return;
+    }
+    if (event.botId !== receipt.botId) {
+      fail();
+      return;
+    }
+    let proof;
+    try {
+      proof = youtubeProofFromEvent(event, receipt, priorSequence);
+    } catch {
+      fail();
+      return;
+    }
+    if (matched) {
+      if (proof.sequence <= matched.sequence) fail();
+      else fail();
+      return;
+    }
+    matched = proof;
+    settleTimer = setTimeout(complete, settleMs);
+  };
+
+  controller.on("runtime-event", onEvent);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  timeoutTimer = setTimeout(fail, timeoutMs);
+  if (signal?.aborted) fail();
+
+  return Object.freeze({
+    promise,
+    cancel: fail,
+  });
+}
+
+async function waitForYouTubeFrame({
+  controller,
+  botA,
+  botB,
+  exercise,
+  runtimeEvents,
+  ingressEvents,
+  timeoutMs,
+  settleMs,
+  signal,
+}) {
+  const ingressStart = ingressEvents.length;
+  const waiter = computerFrameWaiter({
+    controller,
+    receipt: botA,
+    priorEvents: runtimeEvents,
+    ingressEvents,
+    ingressStart,
+    timeoutMs,
+    settleMs,
+    signal,
+  });
+  void waiter.promise.catch(() => {});
+  try {
+    await withDeadline(exercise.openRemoteUrl(Object.freeze({
+      botId: botA.botId,
+      runtimeId: botA.session.runtimeId,
+      generation: botA.session.generation,
+      url: YOUTUBE_URL,
+    })), timeoutMs, signal);
+    const proof = await waiter.promise;
+    const currentA = await controller.runtimeSession(botA.botId);
+    const currentB = await controller.runtimeSession(botB.botId);
+    if (!currentA || currentA.runtimeId !== botA.session.runtimeId
+      || currentA.generation !== botA.session.generation
+      || !currentB || currentB.runtimeId !== botB.session.runtimeId
+      || currentB.generation !== botB.session.generation) throw failedError();
+    return proof;
+  } finally {
+    waiter.cancel();
+  }
+}
+
 async function minimalCleanup({ clients, exercise, controller, provider, receipts }) {
   let safe = true;
   for (const client of clients) {
@@ -437,6 +641,8 @@ async function runRemoteProviderLiveGate(options) {
   const clients = [];
   const receipts = [];
   let controller = null;
+  const runtimeEvents = [];
+  const ingressEvents = [];
   let result = null;
   let failure = null;
   const lookup = typeof dependencies.lookup === "function"
@@ -449,7 +655,16 @@ async function runRemoteProviderLiveGate(options) {
   if (!Number.isSafeInteger(operationTimeoutMs)
     || operationTimeoutMs < 10
     || operationTimeoutMs > 60_000) throw failedError();
-  const recordedProvider = runtimeProviderRecorder(provider, receipts);
+  const computerTimeoutMs = dependencies.computerTimeoutMs ?? 30_000;
+  const frameSettleMs = dependencies.frameSettleMs ?? 250;
+  if (!Number.isSafeInteger(computerTimeoutMs)
+    || computerTimeoutMs < 50
+    || computerTimeoutMs > 60_000
+    || !Number.isSafeInteger(frameSettleMs)
+    || frameSettleMs < 10
+    || frameSettleMs > 1_000
+    || frameSettleMs >= computerTimeoutMs) throw failedError();
+  const recordedProvider = runtimeProviderRecorder(provider, receipts, ingressEvents);
 
   try {
     if (signal?.aborted) throw failedError();
@@ -460,6 +675,7 @@ async function runRemoteProviderLiveGate(options) {
 
     const store = new BotStore({ filePath: path.join(workspacePath, "bots.json") });
     controller = new BotRuntimeController({ store, provider: recordedProvider });
+    controller.on("runtime-event", (event) => runtimeEvents.push(event));
     const botA = await readyBot(controller, recordedProvider);
     if (signal?.aborted) throw failedError();
     const botB = await readyBot(controller, recordedProvider);
@@ -486,12 +702,25 @@ async function runRemoteProviderLiveGate(options) {
     const protocol = [];
     protocol.push(await readRemoteProtocol(clientA, { timeoutMs: operationTimeoutMs, signal }));
     protocol.push(await readRemoteProtocol(clientB, { timeoutMs: operationTimeoutMs, signal }));
+    const computer = await waitForYouTubeFrame({
+      controller,
+      botA,
+      botB,
+      exercise,
+      runtimeEvents,
+      ingressEvents,
+      timeoutMs: computerTimeoutMs,
+      settleMs: frameSettleMs,
+      signal,
+    });
     result = Object.freeze({
-      status: "awaiting-computer-proof",
+      status: "PASS",
       provider: receipts[0]?.provider,
       botCount: 2,
       capabilities,
       protocol: Object.freeze(protocol),
+      computer,
+      isolation: Object.freeze({ crossBotFrameCount: 0, passed: true }),
     });
   } catch {
     failure = failedError();

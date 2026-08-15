@@ -287,6 +287,46 @@ async function liveGateHarness(t, options = {}) {
   const exercise = validateComputerExercise({
     async openRemoteUrl(input) {
       exerciseCalls.push(input);
+      if (options.frameMutation !== "no-frame" && options.frameMutation !== "cached") {
+        const runtimeId = options.frameMutation === "wrong-runtime"
+          ? "runtime-unknown"
+          : options.frameMutation === "wrong-bot"
+            ? "runtime-2"
+            : input.runtimeId;
+        const browserName = options.frameMutation === "wrong-browser" ? "Safari" : "Google Chrome";
+        const browserUrl = options.frameMutation === "wrong-host"
+          ? "https://example.com/"
+          : "https://www.youtube.com/";
+        const title = options.frameMutation === "missing-title" ? "" : "YouTube";
+        const sequence = options.frameMutation === "stale-sequence" ? 0 : 1;
+        const frame = options.frameMutation === "malformed-frame"
+          ? { width: 0, height: 720, digest: "invalid" }
+          : { width: 1280, height: 720, digest: "sha256:fixture-frame" };
+        setImmediate(() => {
+          for (const callback of subscribers) {
+            callback({
+              runtimeId,
+              type: "computer/frame",
+              sequence,
+              payload: {
+                browser: { name: browserName, url: browserUrl, title },
+                frame,
+              },
+            });
+            if (options.frameMutation === "replayed") {
+              callback({
+                runtimeId,
+                type: "computer/frame",
+                sequence,
+                payload: {
+                  browser: { name: browserName, url: browserUrl, title },
+                  frame,
+                },
+              });
+            }
+          }
+        });
+      }
       return { accepted: true, ...input };
     },
     async dispose() {
@@ -317,6 +357,23 @@ async function liveGateHarness(t, options = {}) {
           protocolCalls.push({ runtimeId: session.runtimeId, method, params });
           if (method === "account/read") return { account: { type: "chatgpt" } };
           if (method === "model/list") {
+            if (options.frameMutation === "cached" && session.runtimeId === "runtime-2") {
+              for (const callback of subscribers) {
+                callback({
+                  runtimeId: "runtime-1",
+                  type: "computer/frame",
+                  sequence: 1,
+                  payload: {
+                    browser: {
+                      name: "Google Chrome",
+                      url: "https://www.youtube.com/",
+                      title: "YouTube",
+                    },
+                    frame: { width: 1280, height: 720, digest: "sha256:cached-frame" },
+                  },
+                });
+              }
+            }
             if (options.modelOverflow) {
               return { data: Array.from({ length: 4097 }, () => ({ id: "gpt-5.6-sol" })), nextCursor: null };
             }
@@ -370,7 +427,7 @@ test("provisions two distinct bot runtimes through the production controller", a
 
   const result = await runRemoteProviderLiveGate(harness.options);
 
-  assert.equal(result.status, "awaiting-computer-proof");
+  assert.equal(result.status, "PASS");
   assert.equal(harness.provisionCalls.length, 2);
   assert.notEqual(
     harness.runtimes.get("runtime-1").runtimeId,
@@ -384,7 +441,7 @@ test("provisions two distinct bot runtimes through the production controller", a
     "account/read", "model/list", "account/read", "model/list",
   ]);
   assert.equal(harness.clients.every(({ started, stopped }) => started && stopped), true);
-  assert.equal(harness.exerciseCalls.length, 0);
+  assert.equal(harness.exerciseCalls.length, 1);
   assert.equal(harness.exerciseDisposed, 1);
   assert.equal(JSON.stringify(result).includes("authToken"), false);
   assert.equal(JSON.stringify(result).includes("wss://"), false);
@@ -492,4 +549,56 @@ test("abort interrupts a hung remote client and still performs cleanup", async (
   assert.equal(outcome.error.code, "REMOTE_PROVIDER_GATE_FAILED");
   assert.equal(harness.clients.every(({ stopped }) => stopped), true);
   assert.equal(harness.exerciseDisposed, 1);
+});
+
+test("passes only after Bot A remote Chrome shows YouTube", async (t) => {
+  const harness = await liveGateHarness(t);
+  harness.options.dependencies.computerTimeoutMs = 500;
+  harness.options.dependencies.frameSettleMs = 80;
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.equal(result.status, "PASS");
+  assert.equal(harness.exerciseCalls.length, 1);
+  assert.deepEqual(harness.exerciseCalls[0], {
+    botId: harness.provisionCalls[0].botId,
+    runtimeId: "runtime-1",
+    generation: 1,
+    url: "https://www.youtube.com/",
+  });
+  assert.deepEqual(result.computer, {
+    browser: "Google Chrome",
+    host: "www.youtube.com",
+    titleMarker: "YouTube",
+    frameReceived: true,
+  });
+  assert.deepEqual(result.isolation, { crossBotFrameCount: 0, passed: true });
+  assert.equal(JSON.stringify(result).includes("fixture-frame"), false);
+});
+
+test("rejects acknowledgement without an exact current YouTube frame", async (t) => {
+  for (const frameMutation of [
+    "no-frame",
+    "wrong-runtime",
+    "wrong-bot",
+    "wrong-browser",
+    "wrong-host",
+    "missing-title",
+    "stale-sequence",
+    "malformed-frame",
+    "cached",
+    "replayed",
+  ]) {
+    await t.test(frameMutation, async (t) => {
+      const harness = await liveGateHarness(t, { frameMutation });
+      harness.options.dependencies.computerTimeoutMs = 120;
+      harness.options.dependencies.frameSettleMs = 80;
+      await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+        code: "REMOTE_PROVIDER_GATE_FAILED",
+        message: "Remote provider verification failed.",
+      });
+      assert.equal(harness.clients.every(({ stopped }) => stopped), true);
+      assert.equal(harness.exerciseDisposed, 1);
+    });
+  }
 });
