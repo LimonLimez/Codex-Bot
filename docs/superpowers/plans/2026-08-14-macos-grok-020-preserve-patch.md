@@ -24,6 +24,11 @@ Swift 6/SwiftPM, AppKit/SwiftUI installer UI, macOS `hdiutil`, `codesign`,
 **Design:**
 `docs/superpowers/specs/2026-08-14-macos-grok-020-preserve-patch-design.md`
 
+> **Continuation:** The direct Codex runtime, optional-provider split, final
+> native Power control, and public signing work continue in
+> `2026-08-14-macos-direct-codex-power-control.md`. That plan supersedes any
+> remaining task here that assumes CLIProxyAPI is mandatory for Codex.
+
 ## Global rules
 
 - Use test-driven development for every behavior change: capture a focused RED,
