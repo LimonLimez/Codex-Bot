@@ -62,11 +62,38 @@ private func makeFixture(at root: URL) throws -> InstallerPaths {
     let auditor = payload.appendingPathComponent("audit-grok-contract.cjs")
     let sidecar = payload.appendingPathComponent("cli-proxy-api")
     let license = payload.appendingPathComponent("CLIProxyAPI-LICENSE")
-    for file in [verifier, manifest, patcher, auditor, sidecar, license] {
+    let codexRuntime = payload.appendingPathComponent("codex")
+    let codexLicense = payload.appendingPathComponent("Codex-LICENSE")
+    for file in [verifier, manifest, patcher, auditor, sidecar, license, codexRuntime, codexLicense] {
         try Data(file.lastPathComponent.utf8).write(to: file)
     }
+    try Data(("Apache License\n" + String(repeating: "reviewed fixture\n", count: 10)).utf8).write(to: codexLicense)
     let sidecarData = try Data(contentsOf: sidecar)
     let sidecarHash = SHA256.hash(data: sidecarData).map { String(format: "%02x", $0) }.joined()
+    let sidecarLicenseData = try Data(contentsOf: license)
+    let sidecarLicenseHash = SHA256.hash(data: sidecarLicenseData).map { String(format: "%02x", $0) }.joined()
+    let codexData = try Data(contentsOf: codexRuntime)
+    let codexHash = SHA256.hash(data: codexData).map { String(format: "%02x", $0) }.joined()
+    let codexLicenseData = try Data(contentsOf: codexLicense)
+    let codexLicenseHash = SHA256.hash(data: codexLicenseData).map { String(format: "%02x", $0) }.joined()
+    let codexReceipt = payload.appendingPathComponent("codex-receipt.json")
+    let receipt = try JSONSerialization.data(withJSONObject: [
+        "schemaVersion": 1,
+        "version": "0.147.0",
+        "bytes": codexData.count,
+        "sha256": codexHash,
+        "identity": [
+            "identifier": "codex",
+            "architecture": "arm64",
+            "version": "0.147.0",
+            "signer": "Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)",
+            "teamIdentifier": "2DC432GLL2",
+            "cdHash": "95686307357ad315175f553a68dce5c62d0ff435",
+            "hardenedRuntime": true,
+            "timestamped": true,
+        ],
+    ], options: [.sortedKeys])
+    try receipt.write(to: codexReceipt)
     return InstallerPaths(
         vendorApp: vendor,
         destinationApp: root.appendingPathComponent("Applications/Codex Bot.app", isDirectory: true),
@@ -79,6 +106,15 @@ private func makeFixture(at root: URL) throws -> InstallerPaths {
         sidecarLicense: license,
         expectedSidecarBytes: sidecarData.count,
         expectedSidecarSHA256: sidecarHash,
+        expectedSidecarLicenseBytes: sidecarLicenseData.count,
+        expectedSidecarLicenseSHA256: sidecarLicenseHash,
+        codexRuntimeBinary: codexRuntime,
+        codexRuntimeReceipt: codexReceipt,
+        codexRuntimeLicense: codexLicense,
+        expectedCodexRuntimeBytes: codexData.count,
+        expectedCodexRuntimeSHA256: codexHash,
+        expectedCodexRuntimeLicenseBytes: codexLicenseData.count,
+        expectedCodexRuntimeLicenseSHA256: codexLicenseHash,
         signingIdentity: "-"
     )
 }
@@ -122,6 +158,11 @@ struct InstallerCoreTestMain {
         try expect(try Data(contentsOf: paths.vendorApp.appendingPathComponent("Contents/Resources/app.asar")) == original, "vendor mutated")
         try expect(String(data: try Data(contentsOf: paths.destinationApp.appendingPathComponent("Contents/Resources/app.asar")), encoding: .utf8) == "patched-asar", "patch missing")
         try expect(FileManager.default.fileExists(atPath: paths.destinationApp.appendingPathComponent("Contents/Resources/codex/cliproxy/cli-proxy-api").path), "sidecar missing")
+        let installedRuntime = paths.destinationApp.appendingPathComponent("Contents/Resources/codex/runtime/codex")
+        try expect(FileManager.default.fileExists(atPath: installedRuntime.path), "official Codex runtime missing")
+        try expect(try Data(contentsOf: installedRuntime) == Data(contentsOf: paths.codexRuntimeBinary), "official Codex runtime changed")
+        try expect(FileManager.default.fileExists(atPath: paths.destinationApp.appendingPathComponent("Contents/Resources/codex/runtime/receipt.json").path), "official Codex receipt missing")
+        try expect(FileManager.default.fileExists(atPath: paths.destinationApp.appendingPathComponent("Contents/Resources/codex/runtime/LICENSE").path), "official Codex license missing")
         let sidecarReceipt = try JSONSerialization.jsonObject(with: Data(contentsOf: paths.destinationApp.appendingPathComponent("Contents/Resources/codex/cliproxy/receipt.json"))) as? [String: Any]
         let installedSidecarBytes = try Data(contentsOf: paths.destinationApp.appendingPathComponent("Contents/Resources/codex/cliproxy/cli-proxy-api")).count
         try expect(sidecarReceipt?["bytes"] as? Int == installedSidecarBytes, "signed sidecar receipt bytes mismatch")
@@ -134,6 +175,14 @@ struct InstallerCoreTestMain {
         try expect(installedInfo?["CFBundleName"] as? String == "Grok Bot", "Electron helper discovery name changed")
         try expect(runner.calls.contains { $0.environment["ELECTRON_RUN_AS_NODE"] == "1" && $0.arguments.contains("--source-asar") }, "node boundary missing")
         try expect(runner.calls.filter { $0.environment["ELECTRON_RUN_AS_NODE"] == "1" }.allSatisfy { $0.environment["ELECTRON_NO_ASAR"] == "1" }, "Electron ASAR virtualization was not disabled")
+        let signingCalls = runner.calls.filter {
+            $0.executable.path == "/usr/bin/codesign" && !$0.arguments.contains("--verify")
+        }
+        try expect(signingCalls.count == 2, "unexpected customer signing call count")
+        try expect(signingCalls.allSatisfy {
+            $0.arguments.contains("--timestamp=none") && $0.arguments.contains("-")
+                && !$0.arguments.contains("--timestamp") && !$0.arguments.contains("runtime")
+        }, "customer installation did not remain deliberately ad hoc")
     }
 
     static func testRejectsUnsafeVendor() throws {
@@ -168,6 +217,17 @@ struct InstallerCoreTestMain {
         try expect(String(data: try Data(contentsOf: paths.destinationApp.appendingPathComponent("marker")), encoding: .utf8) == "previous", "previous app changed")
     }
 
+    static func testCustomerInstallRejectsDeveloperIdentityBeforeMutation() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var paths = try makeFixture(at: root)
+        paths.signingIdentity = "Developer ID Application: Example (ABCDE12345)"
+        let runner = RecordingRunner()
+        try expectInstallerFailure { _ = try InstallerTransaction(paths: paths, runner: runner).install() }
+        try expect(runner.calls.isEmpty, "customer install attempted to use a developer private key")
+        try expect(!FileManager.default.fileExists(atPath: paths.destinationApp.path), "invalid identity mutated destination")
+    }
+
     static func testExactVendorIntegrationIfRequested() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let vendorPath = environment["CODEX_BOT_EXACT_VENDOR_APP"],
@@ -181,7 +241,13 @@ struct InstallerCoreTestMain {
             options: [], format: nil
         ) as? [String: Any]
         guard let expectedSidecarBytes = installerInfo?["CodexBotSidecarBytes"] as? Int,
-              let expectedSidecarSHA256 = installerInfo?["CodexBotSidecarSHA256"] as? String else {
+              let expectedSidecarSHA256 = installerInfo?["CodexBotSidecarSHA256"] as? String,
+              let expectedSidecarLicenseBytes = installerInfo?["CodexBotSidecarLicenseBytes"] as? Int,
+              let expectedSidecarLicenseSHA256 = installerInfo?["CodexBotSidecarLicenseSHA256"] as? String,
+              let expectedCodexRuntimeBytes = installerInfo?["CodexBotCodexRuntimeBytes"] as? Int,
+              let expectedCodexRuntimeSHA256 = installerInfo?["CodexBotCodexRuntimeSHA256"] as? String,
+              let expectedCodexRuntimeLicenseBytes = installerInfo?["CodexBotCodexRuntimeLicenseBytes"] as? Int,
+              let expectedCodexRuntimeLicenseSHA256 = installerInfo?["CodexBotCodexRuntimeLicenseSHA256"] as? String else {
             throw TestFailure.assertion("installer sidecar receipt missing")
         }
         let requestedOutput = environment["CODEX_BOT_EXACT_OUTPUT_DIRECTORY"]
@@ -214,6 +280,15 @@ struct InstallerCoreTestMain {
             sidecarLicense: resources.appendingPathComponent("CLIProxy/LICENSE"),
             expectedSidecarBytes: expectedSidecarBytes,
             expectedSidecarSHA256: expectedSidecarSHA256,
+            expectedSidecarLicenseBytes: expectedSidecarLicenseBytes,
+            expectedSidecarLicenseSHA256: expectedSidecarLicenseSHA256,
+            codexRuntimeBinary: resources.appendingPathComponent("CodexRuntime/codex"),
+            codexRuntimeReceipt: resources.appendingPathComponent("CodexRuntime/receipt.json"),
+            codexRuntimeLicense: resources.appendingPathComponent("CodexRuntime/LICENSE"),
+            expectedCodexRuntimeBytes: expectedCodexRuntimeBytes,
+            expectedCodexRuntimeSHA256: expectedCodexRuntimeSHA256,
+            expectedCodexRuntimeLicenseBytes: expectedCodexRuntimeLicenseBytes,
+            expectedCodexRuntimeLicenseSHA256: expectedCodexRuntimeLicenseSHA256,
             signingIdentity: "-"
         )
         let receipt = try InstallerTransaction(paths: paths, runner: ExactIntegrationRunner()).install()
@@ -226,6 +301,7 @@ struct InstallerCoreTestMain {
         try expect(info?["CFBundleIdentifier"] as? String == "com.limonlimez.codex-bot", "installed bundle identifier mismatch")
         try expect(info?["CFBundleShortVersionString"] as? String == "0.1.4-macos.1", "installed version mismatch")
         try expect(FileManager.default.fileExists(atPath: paths.destinationApp.appendingPathComponent("Contents/Resources/codex/cliproxy/cli-proxy-api").path), "installed pinned sidecar missing")
+        try expect(FileManager.default.fileExists(atPath: paths.destinationApp.appendingPathComponent("Contents/Resources/codex/runtime/codex").path), "installed official Codex runtime missing")
         try expect(!FileManager.default.fileExists(atPath: paths.destinationApp.appendingPathComponent("Contents/Resources/.codex-vendor.asar").path), "vendor staging artifact leaked")
         print("PASS exact Grok Bot 0.20.0 integration installs an isolated verified Codex Bot app")
     }
@@ -237,6 +313,8 @@ struct InstallerCoreTestMain {
         print("PASS installer rejects symlinked vendor input before mutation")
         try testRestoresPreviousApp()
         print("PASS failed installation preserves the exact previous Codex Bot app")
+        try testCustomerInstallRejectsDeveloperIdentityBeforeMutation()
+        print("PASS customer installation cannot request a developer private key")
         try testExactVendorIntegrationIfRequested()
     }
 }

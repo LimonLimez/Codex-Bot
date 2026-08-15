@@ -5,10 +5,17 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { writeInstallerManifest } = require("./audit-release.cjs");
 
 const VERSION = "0.1.4-macos.1";
-const SIDECAR_BYTES = 58509266;
-const SIDECAR_SHA256 = "1d7a12c5a1974b492dd2f21e3ecfb39db66d3465a67fd7039a844ce2c40e55df";
+const SIDECAR_BYTES = 58558850;
+const SIDECAR_SHA256 = "a46fe86e32845876832c6f2c7e66587ab7d9ee70d899ee5a7112de29f7d70cd6";
+const SIDECAR_LICENSE_BYTES = 1116;
+const SIDECAR_LICENSE_SHA256 = "879792e89cf1bdd6a8d446033ec87e30496f97dcafc4656dc53f641509b346a6";
+const CODEX_RUNTIME_BYTES = 219997536;
+const CODEX_RUNTIME_SHA256 = "19c4f144c5226a9f17c58e6f0fa854843b0f77a6eb420f40e2745a12f10f5d37";
+const CODEX_RUNTIME_LICENSE_BYTES = 10926;
+const CODEX_RUNTIME_LICENSE_SHA256 = "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc";
 const NODE_PACKAGES = Object.freeze([
   "@electron/asar",
   "balanced-match",
@@ -89,6 +96,9 @@ function parseArgs(argv) {
     "output",
     "sidecar",
     "sidecar-license",
+    "codex-archive",
+    "codex-runtime",
+    "codex-license",
     "installer-binary",
     "signing-identity",
   ]);
@@ -107,7 +117,17 @@ function parseArgs(argv) {
   return parsed;
 }
 
-function plist(identity, development, sidecarBytes, sidecarSHA256) {
+function plist(
+  development,
+  sidecarBytes,
+  sidecarSHA256,
+  sidecarLicenseBytes,
+  sidecarLicenseSHA256,
+  codexRuntimeBytes,
+  codexRuntimeSHA256,
+  codexRuntimeLicenseBytes,
+  codexRuntimeLicenseSHA256,
+) {
   const warning = development ? "DEVELOPMENT BUILD - NOT NOTARIZED FOR PUBLIC RELEASE" : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -123,12 +143,23 @@ function plist(identity, development, sidecarBytes, sidecarSHA256) {
   <key>CFBundleVersion</key><string>0.1.4.1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>CodexBotSigningIdentity</key><string>${identity.replace(/[&<>"']/g, "")}</string>
   <key>CodexBotBuildWarning</key><string>${warning}</string>
   <key>CodexBotSidecarBytes</key><integer>${sidecarBytes}</integer>
   <key>CodexBotSidecarSHA256</key><string>${sidecarSHA256}</string>
+  <key>CodexBotSidecarLicenseBytes</key><integer>${sidecarLicenseBytes}</integer>
+  <key>CodexBotSidecarLicenseSHA256</key><string>${sidecarLicenseSHA256}</string>
+  <key>CodexBotCodexRuntimeBytes</key><integer>${codexRuntimeBytes}</integer>
+  <key>CodexBotCodexRuntimeSHA256</key><string>${codexRuntimeSHA256}</string>
+  <key>CodexBotCodexRuntimeLicenseBytes</key><integer>${codexRuntimeLicenseBytes}</integer>
+  <key>CodexBotCodexRuntimeLicenseSHA256</key><string>${codexRuntimeLicenseSHA256}</string>
 </dict></plist>
 `;
+}
+
+function signingArguments(identity, target, development) {
+  return development
+    ? ["--force", "--timestamp=none", "--sign", identity, target]
+    : ["--force", "--options", "runtime", "--timestamp", "--sign", identity, target];
 }
 
 function buildInstaller(options) {
@@ -142,6 +173,43 @@ function buildInstaller(options) {
     throw new Error("CLIProxyAPI executable failed the pinned integrity check");
   }
   const sidecarLicense = realFile(options["sidecar-license"], "CLIProxyAPI license").file;
+  if (fs.statSync(sidecarLicense).size !== SIDECAR_LICENSE_BYTES
+    || sha256File(sidecarLicense) !== SIDECAR_LICENSE_SHA256) {
+    throw new Error("CLIProxyAPI license failed the pinned integrity check");
+  }
+  const codexArchive = realFile(options["codex-archive"], "Codex runtime archive").file;
+  const codexRuntime = realFile(options["codex-runtime"], "Codex runtime executable").file;
+  const codexRuntimeStat = fs.statSync(codexRuntime);
+  if (codexRuntimeStat.size !== CODEX_RUNTIME_BYTES || sha256File(codexRuntime) !== CODEX_RUNTIME_SHA256) {
+    throw new Error("Codex runtime executable failed the pinned integrity check");
+  }
+  const codexLicense = realFile(options["codex-license"], "Codex runtime license").file;
+  if (fs.statSync(codexLicense).size !== CODEX_RUNTIME_LICENSE_BYTES
+    || sha256File(codexLicense) !== CODEX_RUNTIME_LICENSE_SHA256) {
+    throw new Error("Codex runtime license failed the pinned integrity check");
+  }
+  const codexManifest = JSON.parse(fs.readFileSync(
+    path.join(macRoot, "assets", "openai-codex-0.147.0-darwin-arm64.json"),
+    "utf8",
+  ));
+  const verifyCodexRuntime = path.join(macRoot, "scripts", "verify-codex-runtime.cjs");
+  run(process.execPath, [verifyCodexRuntime, "--archive", codexArchive, "--binary", codexRuntime]);
+  const codexReceipt = Object.freeze({
+    schemaVersion: 1,
+    version: codexManifest.version,
+    bytes: codexManifest.executable.bytes,
+    sha256: codexManifest.executable.sha256,
+    identity: Object.freeze({
+      identifier: codexManifest.executable.identifier,
+      architecture: codexManifest.executable.architecture,
+      version: codexManifest.executable.version,
+      signer: codexManifest.executable.signer,
+      teamIdentifier: codexManifest.executable.teamIdentifier,
+      cdHash: codexManifest.executable.cdHash,
+      hardenedRuntime: codexManifest.executable.hardenedRuntime,
+      timestamped: codexManifest.executable.timestamped,
+    }),
+  });
   const signingIdentity = options["signing-identity"] || "-";
   if (options.release && !/^Developer ID Application: /.test(signingIdentity)) {
     throw new Error("A Developer ID Application identity is required for a release installer");
@@ -171,15 +239,21 @@ function buildInstaller(options) {
     run("/usr/bin/strip", ["-S", "-x", installedExecutable]);
 
     const patcherRoot = path.join(resources, "Patcher");
-    for (const script of ["patch-app.cjs", "verify-vendor-app.cjs", "audit-grok-contract.cjs"]) {
+    for (const script of [
+      "patch-app.cjs",
+      "verify-vendor-app.cjs",
+      "audit-grok-contract.cjs",
+      "verify-codex-runtime.cjs",
+    ]) {
       copyFile(path.join(macRoot, "scripts", script), path.join(patcherRoot, "scripts", script));
     }
     copyTree(path.join(macRoot, "src"), path.join(patcherRoot, "src"));
     for (const asset of [
       "grok-bot-0.20.0-contract.json",
       "grok-bot-0.20.0-darwin-arm64.manifest.json",
-      "cliproxyapi-7.2.130-darwin-aarch64.json",
+      "cliproxyapi-7.2.132-darwin-aarch64.json",
       "cliproxyapi-model-catalog-2026-08-14.json",
+      "openai-codex-0.147.0-darwin-arm64.json",
     ]) {
       copyFile(path.join(macRoot, "assets", asset), path.join(patcherRoot, "assets", asset));
     }
@@ -192,8 +266,17 @@ function buildInstaller(options) {
     const installedSidecar = path.join(resources, "CLIProxy", "cli-proxy-api");
     copyFile(sidecar, installedSidecar, 0o755);
     copyFile(sidecarLicense, path.join(resources, "CLIProxy", "LICENSE"));
+    const codexRuntimeRoot = path.join(contents, "Resources", "CodexRuntime");
+    const installedCodexRuntime = path.join(codexRuntimeRoot, "codex");
+    copyFile(codexRuntime, installedCodexRuntime, 0o755);
+    fs.writeFileSync(
+      path.join(codexRuntimeRoot, "receipt.json"),
+      `${JSON.stringify(codexReceipt)}\n`,
+      { mode: 0o644 },
+    );
+    copyFile(codexLicense, path.join(codexRuntimeRoot, "LICENSE"));
     copyFile(path.join(repoRoot, "LICENSE"), path.join(resources, "Notices", "LICENSE"));
-    copyFile(path.join(repoRoot, "NOTICE.md"), path.join(resources, "Notices", "NOTICE.md"));
+    copyFile(path.join(macRoot, "NOTICE.md"), path.join(resources, "Notices", "NOTICE.md"));
     copyFile(path.join(macRoot, "PRIVACY.md"), path.join(resources, "Notices", "PRIVACY.md"));
     copyFile(path.join(macRoot, "README.md"), path.join(resources, "Notices", "README.md"));
     fs.writeFileSync(
@@ -205,19 +288,25 @@ function buildInstaller(options) {
     );
 
     run("/usr/bin/xattr", ["-cr", app]);
-    run("/usr/bin/codesign", [
-      "--force", "--timestamp=none", "--sign", signingIdentity,
-      installedSidecar,
-    ]);
+    run("/usr/bin/codesign", signingArguments(signingIdentity, installedSidecar, !options.release));
     fs.writeFileSync(
       path.join(contents, "Info.plist"),
-      plist(signingIdentity, !options.release, fs.statSync(installedSidecar).size, sha256File(installedSidecar)),
+      plist(
+        !options.release,
+        fs.statSync(installedSidecar).size,
+        sha256File(installedSidecar),
+        fs.statSync(path.join(resources, "CLIProxy", "LICENSE")).size,
+        sha256File(path.join(resources, "CLIProxy", "LICENSE")),
+        fs.statSync(installedCodexRuntime).size,
+        sha256File(installedCodexRuntime),
+        fs.statSync(path.join(codexRuntimeRoot, "LICENSE")).size,
+        sha256File(path.join(codexRuntimeRoot, "LICENSE")),
+      ),
       { mode: 0o644 },
     );
+    writeInstallerManifest(app);
     run("/usr/bin/xattr", ["-cr", app]);
-    run("/usr/bin/codesign", [
-      "--force", "--timestamp=none", "--sign", signingIdentity, app,
-    ]);
+    run("/usr/bin/codesign", signingArguments(signingIdentity, app, !options.release));
     run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app]);
     fs.renameSync(temporary, output);
     return Object.freeze({ app: path.join(output, appName), development: !options.release, version: VERSION });
@@ -239,4 +328,17 @@ if (require.main === module) {
   }
 }
 
-module.exports = { NODE_PACKAGES, SIDECAR_BYTES, SIDECAR_SHA256, VERSION, buildInstaller, parseArgs };
+module.exports = {
+  CODEX_RUNTIME_BYTES,
+  CODEX_RUNTIME_LICENSE_BYTES,
+  CODEX_RUNTIME_LICENSE_SHA256,
+  CODEX_RUNTIME_SHA256,
+  NODE_PACKAGES,
+  SIDECAR_BYTES,
+  SIDECAR_LICENSE_BYTES,
+  SIDECAR_LICENSE_SHA256,
+  SIDECAR_SHA256,
+  VERSION,
+  buildInstaller,
+  parseArgs,
+};

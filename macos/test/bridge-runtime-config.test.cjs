@@ -9,7 +9,7 @@ const macRoot = path.resolve(__dirname, "..");
 const manifestPath = path.join(
   macRoot,
   "assets",
-  "cliproxyapi-7.2.130-darwin-aarch64.json",
+  "cliproxyapi-7.2.132-darwin-aarch64.json",
 );
 const runtimePath = path.join(macRoot, "src", "bridge", "runtime-config.cjs");
 const modelCatalogPath = path.join(
@@ -28,34 +28,34 @@ function temporaryRegistry(t) {
   return path.join(root, "model-selections.v1.json");
 }
 
-test("pins the reviewed CLIProxyAPI 7.2.130 macOS arm64 release", () => {
+test("pins the reviewed CLIProxyAPI 7.2.132 macOS arm64 release", () => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assert.deepEqual(manifest, {
     schemaVersion: 1,
     product: "CLIProxyAPI",
-    version: "7.2.130",
+    version: "7.2.132",
     upstreamRepository: "https://github.com/router-for-me/CLIProxyAPI",
-    releaseTag: "v7.2.130",
-    publishedAt: "2026-08-12T10:30:26Z",
+    releaseTag: "v7.2.132",
+    publishedAt: "2026-08-14T20:36:46Z",
     asset: {
-      name: "CLIProxyAPI_7.2.130_darwin_aarch64.tar.gz",
-      url: "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.130/CLIProxyAPI_7.2.130_darwin_aarch64.tar.gz",
-      bytes: 19329951,
-      sha256: "a644a75f70cbd045b9f7caa9ff3866353448a7ed67ef8472eacc11c48b1c86f0",
+      name: "CLIProxyAPI_7.2.132_darwin_aarch64.tar.gz",
+      url: "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.132/CLIProxyAPI_7.2.132_darwin_aarch64.tar.gz",
+      bytes: 19354178,
+      sha256: "360f410c7a30df1dc197949bfd2f272930a9420ce9357889c27b40d8ad9f17f9",
     },
     executable: {
       name: "cli-proxy-api",
       platform: "darwin",
       architecture: "arm64",
-      bytes: 58509266,
-      sha256: "1d7a12c5a1974b492dd2f21e3ecfb39db66d3465a67fd7039a844ce2c40e55df",
-      reportedCommit: "f43aad76",
-      reportedBuiltAt: "2026-08-12T10:31:20Z",
+      bytes: 58558850,
+      sha256: "a46fe86e32845876832c6f2c7e66587ab7d9ee70d899ee5a7112de29f7d70cd6",
+      reportedCommit: "78f0c407",
+      reportedBuiltAt: "2026-08-14T20:37:41Z",
     },
     license: {
       spdx: "MIT",
       pathInArchive: "LICENSE",
-      url: "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/v7.2.130/LICENSE",
+      url: "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/v7.2.132/LICENSE",
     },
   });
   assert.doesNotMatch(JSON.stringify(manifest), /\/Users\/|harlin|token|auth/i);

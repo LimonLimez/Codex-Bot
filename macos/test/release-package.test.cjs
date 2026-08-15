@@ -10,12 +10,13 @@ const auditPath = path.join(__dirname, "..", "scripts", "audit-release.cjs");
 const packagePath = path.join(__dirname, "..", "scripts", "package-dmg.cjs");
 
 test("release audit rejects state, secrets, personal paths, symlinks, and extra roots", () => {
-  const { auditTree } = require(auditPath);
+  const { auditTree, writeInstallerManifest } = require(auditPath);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-release-audit-test-"));
   const app = path.join(root, "Install Codex Bot DEVELOPMENT.app");
   fs.mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
   fs.writeFileSync(path.join(app, "Contents", "MacOS", "InstallCodexBot"), "safe\n");
   fs.writeFileSync(path.join(app, "Contents", "Info.plist"), "safe\n");
+  writeInstallerManifest(app);
   assert.doesNotThrow(() => auditTree(root, { expectedAppName: path.basename(app) }));
 
   const reject = (relative, contents = "unsafe\n", makeLink = false) => {
@@ -36,6 +37,7 @@ test("release audit rejects state, secrets, personal paths, symlinks, and extra 
   reject("Resources/dev.log");
   reject("Resources/leak.txt", "/Users/private-developer/secret\n");
   reject("Resources/compiled.bin", Buffer.from(`binary\0${os.homedir()}/private-source\0`));
+  reject("Resources/unexpected-member.bin", Buffer.from("binary\0/Users/foreign-builder/private/source\0"));
   reject("Resources/key.txt", "-----BEGIN PRIVATE KEY-----\n");
   reject("Resources/link", "", true);
   fs.writeFileSync(path.join(root, "extra.txt"), "extra\n");

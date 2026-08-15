@@ -22,18 +22,22 @@ behalf.
 
 ## Runtime boundary
 
-Codex conversations use an authenticated loopback bridge and have no xAI/Cursor
-inference fallback. Every Work bot requires its own explicitly configured and
-authorized remote runtime. When that provider is unavailable, the app reports
-that state and disables the affected action; there is no local computer,
-on-device browser, or shared-machine fallback.
+Official Codex conversations use the verified, unmodified Codex 0.147.0 macOS
+arm64 runtime and its authenticated private loopback bridge. The official Codex
+account and live model catalog work without ChatGPT.app being open and without
+CLIProxyAPI. There is no xAI/Cursor inference fallback.
 
-The bridge uses the pinned macOS arm64 CLIProxyAPI sidecar. Its reviewed model
-catalog includes the Codex models plus Claude Fable 5, Claude Opus 5, and Claude
-Sonnet 5 when the user's CLIProxyAPI provider/account actually exposes them.
-The Claude choices add a local `Ultra Code` presentation mode that reuses the
+CLIProxyAPI 7.2.132 is bundled only for reviewed optional providers. Its
+catalog can expose Claude Fable 5, Claude Opus 5, Claude Sonnet 5, and other
+reviewed models when the user's configured account actually supports them. The
+Claude choices add a local `Ultra Code` presentation mode that reuses the
 approved Ultra animation and maps explicitly to the upstream `max` reasoning
 level; it is not sent as an invented provider value.
+
+Every Work bot requires its own explicitly configured and authorized remote
+runtime. When that provider is unavailable, the app reports that state and
+disables the affected action; there is no local computer, on-device browser, or
+shared-machine fallback.
 
 ## Development
 

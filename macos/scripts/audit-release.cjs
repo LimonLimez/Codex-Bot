@@ -1,6 +1,7 @@
 "use strict";
 
 const childProcess = require("node:child_process");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -17,6 +18,31 @@ const TEXT_SUFFIXES = new Set([
 ]);
 const PERSONAL_PATH = /(?:\/Users\/[^/\s"'<>]+|\/home\/[^/\s"'<>]+|[A-Za-z]:\\Users\\[^\\\s"'<>]+)/;
 const PRIVATE_SECRET = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:ghp|github_pat|sk|sess)-[A-Za-z0-9_\-]{20,}\b|\bBearer\s+[A-Za-z0-9_./+\-=]{20,}\b|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*["'][A-Za-z0-9_./+\-=]{24,}["']/i;
+const MANIFEST_RELATIVE = "Contents/Resources/INSTALLER-MANIFEST.json";
+const SIGNATURE_RELATIVES = new Set([
+  "Contents/_CodeSignature",
+  "Contents/_CodeSignature/CodeResources",
+]);
+const REVIEWED_UPSTREAM_BINARIES = new Set([
+  "Contents/Resources/CLIProxy/cli-proxy-api",
+  "Contents/Resources/CodexRuntime/codex",
+]);
+
+function sha256File(file) {
+  const hash = crypto.createHash("sha256");
+  const descriptor = fs.openSync(file, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    for (;;) {
+      const bytes = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytes === 0) break;
+      hash.update(buffer.subarray(0, bytes));
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return hash.digest("hex");
+}
 
 function containsBytes(file, needle) {
   if (!Buffer.isBuffer(needle) || needle.length < 2) return false;
@@ -41,6 +67,119 @@ function fail(reason) {
   throw new Error(`Release privacy audit failed: ${reason}`);
 }
 
+function safeRelative(relative) {
+  return typeof relative === "string"
+    && (relative === "Contents" || relative.startsWith("Contents/"))
+    && !path.isAbsolute(relative)
+    && relative.split("/").every((segment) => segment && segment !== "." && segment !== "..");
+}
+
+function collectManifestEntries(app) {
+  const entries = [];
+  const walk = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolute = path.join(directory, entry.name);
+      const relative = path.relative(app, absolute).split(path.sep).join("/");
+      if (relative === MANIFEST_RELATIVE || relative === "Contents/_CodeSignature"
+        || relative.startsWith("Contents/_CodeSignature/")) continue;
+      const stat = fs.lstatSync(absolute);
+      if (stat.isSymbolicLink()) fail(`symlink is forbidden: ${relative}`);
+      if (stat.isDirectory()) {
+        entries.push(Object.freeze({ path: relative, type: "directory" }));
+        walk(absolute);
+      } else if (stat.isFile()) {
+        entries.push(Object.freeze(relative === "Contents/MacOS/InstallCodexBot"
+          ? { path: relative, type: "signed-code" }
+          : {
+              path: relative,
+              type: "file",
+              bytes: stat.size,
+              sha256: sha256File(absolute),
+            }));
+      } else {
+        fail(`unsupported filesystem entry: ${relative}`);
+      }
+    }
+  };
+  walk(app);
+  return entries.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function writeInstallerManifest(app) {
+  const resolved = path.resolve(app);
+  const stat = fs.lstatSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) fail("installer app is not a real directory");
+  const manifestPath = path.join(resolved, ...MANIFEST_RELATIVE.split("/"));
+  if (fs.existsSync(manifestPath)) fail("installer manifest already exists");
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true, mode: 0o755 });
+  const manifest = { schemaVersion: 1, entries: collectManifestEntries(resolved) };
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`, { mode: 0o644, flag: "wx" });
+  return manifestPath;
+}
+
+function loadInstallerManifest(app) {
+  const manifestPath = path.join(app, ...MANIFEST_RELATIVE.split("/"));
+  let stat;
+  try { stat = fs.lstatSync(manifestPath); } catch { fail("installer manifest is missing"); }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 100 || stat.size > 1024 * 1024) {
+    fail("installer manifest is invalid");
+  }
+  let manifest;
+  try { manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")); } catch { fail("installer manifest is invalid"); }
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)
+    || Object.keys(manifest).sort().join(",") !== "entries,schemaVersion"
+    || manifest.schemaVersion !== 1 || !Array.isArray(manifest.entries)
+    || manifest.entries.length < 1 || manifest.entries.length > 10_000) {
+    fail("installer manifest is invalid");
+  }
+  const expected = new Map();
+  let previous = "";
+  for (const entry of manifest.entries) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || !safeRelative(entry.path)
+      || entry.path.localeCompare(previous) <= 0 || expected.has(entry.path)) fail("installer manifest is invalid");
+    previous = entry.path;
+    if (entry.type === "directory") {
+      if (Object.keys(entry).sort().join(",") !== "path,type") fail("installer manifest is invalid");
+    } else if (entry.type === "file") {
+      if (Object.keys(entry).sort().join(",") !== "bytes,path,sha256,type"
+        || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0
+        || typeof entry.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(entry.sha256)) {
+        fail("installer manifest is invalid");
+      }
+    } else if (entry.type === "signed-code") {
+      if (entry.path !== "Contents/MacOS/InstallCodexBot"
+        || Object.keys(entry).sort().join(",") !== "path,type") {
+        fail("installer manifest is invalid");
+      }
+    } else {
+      fail("installer manifest is invalid");
+    }
+    expected.set(entry.path, entry);
+  }
+  return expected;
+}
+
+function scanFile(file, relative) {
+  if (REVIEWED_UPSTREAM_BINARIES.has(relative)) return;
+  const descriptor = fs.openSync(file, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024 + 1024);
+  let carry = 0;
+  try {
+    for (;;) {
+      const bytes = fs.readSync(descriptor, buffer, carry, 1024 * 1024, null);
+      const length = carry + bytes;
+      const contents = buffer.subarray(0, length).toString("latin1");
+      if (PERSONAL_PATH.test(contents)) fail(`personal absolute path found in ${relative}`);
+      if (PRIVATE_SECRET.test(contents)) fail(`credential material found in ${relative}`);
+      if (bytes === 0) break;
+      carry = Math.min(1024, length);
+      buffer.copyWithin(0, length - carry, length);
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function run(executable, args) {
   const result = childProcess.spawnSync(executable, args, {
     encoding: "utf8",
@@ -61,6 +200,9 @@ function auditTree(root, options = {}) {
     fail("image root must contain exactly the expected installer app");
   }
 
+  const app = path.join(resolved, expectedAppName);
+  const expected = loadInstallerManifest(app);
+  const seen = new Set();
   let fileCount = 0;
   let totalBytes = 0;
   let personalPathMatches = 0;
@@ -69,16 +211,28 @@ function auditTree(root, options = {}) {
   const walk = (directory) => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const absolute = path.join(directory, entry.name);
-      const relative = path.relative(resolved, absolute);
+      const relative = path.relative(app, absolute).split(path.sep).join("/");
       const stat = fs.lstatSync(absolute);
       if (stat.isSymbolicLink()) fail(`symlink is forbidden: ${relative}`);
+      const special = relative === MANIFEST_RELATIVE || SIGNATURE_RELATIVES.has(relative);
+      const expectedEntry = expected.get(relative);
+      if (!special && !expectedEntry) fail(`unexpected installer member: ${relative}`);
       if (stat.isDirectory()) {
+        if (!special && expectedEntry.type !== "directory") fail(`installer member type mismatch: ${relative}`);
+        if (!special) seen.add(relative);
         const normalized = entry.name.toLowerCase();
         if (FORBIDDEN_SEGMENTS.has(normalized)) fail(`development or user-state directory is forbidden: ${relative}`);
         walk(absolute);
         continue;
       }
       if (!stat.isFile()) fail(`unsupported filesystem entry: ${relative}`);
+      if (!special) {
+        if (expectedEntry.type === "signed-code") {
+          if (stat.size < 1) fail(`installer member mismatch: ${relative}`);
+        } else if (expectedEntry.type !== "file" || expectedEntry.bytes !== stat.size
+          || expectedEntry.sha256 !== sha256File(absolute)) fail(`installer member mismatch: ${relative}`);
+        seen.add(relative);
+      }
       fileCount += 1;
       totalBytes += stat.size;
       const normalized = entry.name.toLowerCase();
@@ -89,20 +243,15 @@ function auditTree(root, options = {}) {
         personalPathMatches += 1;
         fail(`local developer path found in ${relative}`);
       }
-      if (TEXT_SUFFIXES.has(path.extname(normalized)) && stat.size <= 16 * 1024 * 1024) {
-        const contents = fs.readFileSync(absolute, "utf8");
-        if (PERSONAL_PATH.test(contents)) {
-          personalPathMatches += 1;
-          fail(`personal absolute path found in ${relative}`);
-        }
-        if (PRIVATE_SECRET.test(contents)) {
-          secretMatches += 1;
-          fail(`credential material found in ${relative}`);
-        }
+      try { scanFile(absolute, relative); } catch (error) {
+        if (/personal absolute path/.test(error.message)) personalPathMatches += 1;
+        if (/credential material/.test(error.message)) secretMatches += 1;
+        throw error;
       }
     }
   };
-  walk(resolved);
+  walk(app);
+  if (seen.size !== expected.size) fail("installer manifest member is missing");
   if (fileCount === 0) fail("installer app is empty");
   return Object.freeze({ fileCount, totalBytes, personalPathMatches, secretMatches });
 }
@@ -154,4 +303,10 @@ if (require.main === module) {
   }
 }
 
-module.exports = { auditDmg, auditTree, containsBytes, parseArgs };
+module.exports = {
+  auditDmg,
+  auditTree,
+  containsBytes,
+  parseArgs,
+  writeInstallerManifest,
+};

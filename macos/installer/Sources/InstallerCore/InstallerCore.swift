@@ -122,6 +122,15 @@ public struct InstallerPaths: Sendable {
     public var sidecarLicense: URL
     public var expectedSidecarBytes: Int
     public var expectedSidecarSHA256: String
+    public var expectedSidecarLicenseBytes: Int
+    public var expectedSidecarLicenseSHA256: String
+    public var codexRuntimeBinary: URL
+    public var codexRuntimeReceipt: URL
+    public var codexRuntimeLicense: URL
+    public var expectedCodexRuntimeBytes: Int
+    public var expectedCodexRuntimeSHA256: String
+    public var expectedCodexRuntimeLicenseBytes: Int
+    public var expectedCodexRuntimeLicenseSHA256: String
     public var signingIdentity: String
 
     public init(
@@ -136,6 +145,15 @@ public struct InstallerPaths: Sendable {
         sidecarLicense: URL,
         expectedSidecarBytes: Int,
         expectedSidecarSHA256: String,
+        expectedSidecarLicenseBytes: Int,
+        expectedSidecarLicenseSHA256: String,
+        codexRuntimeBinary: URL,
+        codexRuntimeReceipt: URL,
+        codexRuntimeLicense: URL,
+        expectedCodexRuntimeBytes: Int,
+        expectedCodexRuntimeSHA256: String,
+        expectedCodexRuntimeLicenseBytes: Int,
+        expectedCodexRuntimeLicenseSHA256: String,
         signingIdentity: String
     ) {
         self.vendorApp = vendorApp
@@ -149,6 +167,15 @@ public struct InstallerPaths: Sendable {
         self.sidecarLicense = sidecarLicense
         self.expectedSidecarBytes = expectedSidecarBytes
         self.expectedSidecarSHA256 = expectedSidecarSHA256
+        self.expectedSidecarLicenseBytes = expectedSidecarLicenseBytes
+        self.expectedSidecarLicenseSHA256 = expectedSidecarLicenseSHA256
+        self.codexRuntimeBinary = codexRuntimeBinary
+        self.codexRuntimeReceipt = codexRuntimeReceipt
+        self.codexRuntimeLicense = codexRuntimeLicense
+        self.expectedCodexRuntimeBytes = expectedCodexRuntimeBytes
+        self.expectedCodexRuntimeSHA256 = expectedCodexRuntimeSHA256
+        self.expectedCodexRuntimeLicenseBytes = expectedCodexRuntimeLicenseBytes
+        self.expectedCodexRuntimeLicenseSHA256 = expectedCodexRuntimeLicenseSHA256
         self.signingIdentity = signingIdentity
     }
 }
@@ -273,16 +300,66 @@ public final class InstallerTransaction: @unchecked Sendable {
         try realItem(paths.contractAuditor, directory: false)
         try realItem(paths.sidecarBinary, directory: false)
         try realItem(paths.sidecarLicense, directory: false)
+        try realItem(paths.codexRuntimeBinary, directory: false)
+        try realItem(paths.codexRuntimeReceipt, directory: false)
+        try realItem(paths.codexRuntimeLicense, directory: false)
         guard paths.destinationApp.isFileURL,
               paths.destinationApp.lastPathComponent == "Codex Bot.app",
               paths.destinationApp.standardizedFileURL != paths.vendorApp.standardizedFileURL,
-              paths.signingIdentity == "-" || !paths.signingIdentity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              paths.signingIdentity == "-",
               paths.expectedSidecarBytes > 0,
-              paths.expectedSidecarSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
+              paths.expectedSidecarSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              paths.expectedSidecarLicenseBytes > 0,
+              paths.expectedSidecarLicenseSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              paths.expectedCodexRuntimeBytes > 0,
+              paths.expectedCodexRuntimeSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              paths.expectedCodexRuntimeLicenseBytes > 0,
+              paths.expectedCodexRuntimeLicenseSHA256.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
         else { throw InstallerFailure.unsafePath }
         let sidecar = try Data(contentsOf: paths.sidecarBinary, options: .mappedIfSafe)
         let digest = SHA256.hash(data: sidecar).map { String(format: "%02x", $0) }.joined()
         guard sidecar.count == paths.expectedSidecarBytes, digest == paths.expectedSidecarSHA256 else {
+            throw InstallerFailure.invalidInput
+        }
+        let sidecarLicense = try Data(contentsOf: paths.sidecarLicense, options: .mappedIfSafe)
+        let sidecarLicenseDigest = SHA256.hash(data: sidecarLicense).map { String(format: "%02x", $0) }.joined()
+        guard sidecarLicense.count == paths.expectedSidecarLicenseBytes,
+              sidecarLicenseDigest == paths.expectedSidecarLicenseSHA256 else {
+            throw InstallerFailure.invalidInput
+        }
+        let runtime = try Data(contentsOf: paths.codexRuntimeBinary, options: .mappedIfSafe)
+        let runtimeDigest = SHA256.hash(data: runtime).map { String(format: "%02x", $0) }.joined()
+        guard runtime.count == paths.expectedCodexRuntimeBytes,
+              runtimeDigest == paths.expectedCodexRuntimeSHA256 else {
+            throw InstallerFailure.invalidInput
+        }
+        let receiptData = try Data(contentsOf: paths.codexRuntimeReceipt)
+        guard receiptData.count >= 100, receiptData.count <= 2_048,
+              let receipt = try JSONSerialization.jsonObject(with: receiptData) as? [String: Any],
+              Set(receipt.keys) == Set(["schemaVersion", "version", "bytes", "sha256", "identity"]),
+              receipt["schemaVersion"] as? Int == 1,
+              receipt["version"] as? String == "0.147.0",
+              receipt["bytes"] as? Int == paths.expectedCodexRuntimeBytes,
+              receipt["sha256"] as? String == paths.expectedCodexRuntimeSHA256,
+              let identity = receipt["identity"] as? [String: Any],
+              Set(identity.keys) == Set([
+                "identifier", "architecture", "version", "signer", "teamIdentifier",
+                "cdHash", "hardenedRuntime", "timestamped",
+              ]),
+              identity["identifier"] as? String == "codex",
+              identity["architecture"] as? String == "arm64",
+              identity["version"] as? String == "0.147.0",
+              identity["signer"] as? String == "Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)",
+              identity["teamIdentifier"] as? String == "2DC432GLL2",
+              identity["cdHash"] as? String == "95686307357ad315175f553a68dce5c62d0ff435",
+              identity["hardenedRuntime"] as? Bool == true,
+              identity["timestamped"] as? Bool == true else {
+            throw InstallerFailure.invalidInput
+        }
+        let runtimeLicense = try Data(contentsOf: paths.codexRuntimeLicense, options: .mappedIfSafe)
+        let runtimeLicenseDigest = SHA256.hash(data: runtimeLicense).map { String(format: "%02x", $0) }.joined()
+        guard runtimeLicense.count == paths.expectedCodexRuntimeLicenseBytes,
+              runtimeLicenseDigest == paths.expectedCodexRuntimeLicenseSHA256 else {
             throw InstallerFailure.invalidInput
         }
     }
@@ -326,6 +403,18 @@ public final class InstallerTransaction: @unchecked Sendable {
         try files.copyItem(at: paths.sidecarLicense, to: installedLicense)
         try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedSidecar.path)
         try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: installedLicense.path)
+
+        let runtimeRoot = resources.appendingPathComponent("codex/runtime", isDirectory: true)
+        try files.createDirectory(at: runtimeRoot, withIntermediateDirectories: true)
+        let installedRuntime = runtimeRoot.appendingPathComponent("codex")
+        let installedRuntimeReceipt = runtimeRoot.appendingPathComponent("receipt.json")
+        let installedRuntimeLicense = runtimeRoot.appendingPathComponent("LICENSE")
+        try files.copyItem(at: paths.codexRuntimeBinary, to: installedRuntime)
+        try files.copyItem(at: paths.codexRuntimeReceipt, to: installedRuntimeReceipt)
+        try files.copyItem(at: paths.codexRuntimeLicense, to: installedRuntimeLicense)
+        try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: installedRuntime.path)
+        try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: installedRuntimeReceipt.path)
+        try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: installedRuntimeLicense.path)
     }
 
     private func updatePlist(stagedApp: URL, sidecarBytes: Int, sidecarSHA256: String) throws {
@@ -340,6 +429,8 @@ public final class InstallerTransaction: @unchecked Sendable {
         plist["CFBundleVersion"] = "0.1.4.1"
         plist["CodexBotSidecarBytes"] = sidecarBytes
         plist["CodexBotSidecarSHA256"] = sidecarSHA256
+        plist["CodexBotCodexRuntimeBytes"] = paths.expectedCodexRuntimeBytes
+        plist["CodexBotCodexRuntimeSHA256"] = paths.expectedCodexRuntimeSHA256
         plist["SUFeedURL"] = nil
         let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
         try data.write(to: plistURL, options: .atomic)
@@ -349,7 +440,7 @@ public final class InstallerTransaction: @unchecked Sendable {
         let sidecar = stagedApp.appendingPathComponent("Contents/Resources/codex/cliproxy/cli-proxy-api")
         try checked(runner, CommandCall(
             executable: URL(fileURLWithPath: "/usr/bin/codesign"),
-            arguments: ["--force", "--timestamp=none", "--sign", paths.signingIdentity, sidecar.path]
+            arguments: signingArguments(for: sidecar)
         ))
         let sidecarData = try Data(contentsOf: sidecar, options: .mappedIfSafe)
         let sidecarSHA256 = SHA256.hash(data: sidecarData).map { String(format: "%02x", $0) }.joined()
@@ -363,11 +454,15 @@ public final class InstallerTransaction: @unchecked Sendable {
         try updatePlist(stagedApp: stagedApp, sidecarBytes: sidecarData.count, sidecarSHA256: sidecarSHA256)
         try checked(runner, CommandCall(
             executable: URL(fileURLWithPath: "/usr/bin/codesign"),
-            arguments: ["--force", "--timestamp=none", "--sign", paths.signingIdentity, stagedApp.path]
+            arguments: signingArguments(for: stagedApp)
         ))
         try checked(runner, CommandCall(
             executable: URL(fileURLWithPath: "/usr/bin/codesign"),
             arguments: ["--verify", "--deep", "--strict", stagedApp.path]
         ))
+    }
+
+    private func signingArguments(for target: URL) -> [String] {
+        ["--force", "--timestamp=none", "--sign", "-", target.path]
     }
 }

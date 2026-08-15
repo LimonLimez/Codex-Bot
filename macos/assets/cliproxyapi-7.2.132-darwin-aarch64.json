@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "product": "CLIProxyAPI",
+  "version": "7.2.132",
+  "upstreamRepository": "https://github.com/router-for-me/CLIProxyAPI",
+  "releaseTag": "v7.2.132",
+  "publishedAt": "2026-08-14T20:36:46Z",
+  "asset": {
+    "name": "CLIProxyAPI_7.2.132_darwin_aarch64.tar.gz",
+    "url": "https://github.com/router-for-me/CLIProxyAPI/releases/download/v7.2.132/CLIProxyAPI_7.2.132_darwin_aarch64.tar.gz",
+    "bytes": 19354178,
+    "sha256": "360f410c7a30df1dc197949bfd2f272930a9420ce9357889c27b40d8ad9f17f9"
+  },
+  "executable": {
+    "name": "cli-proxy-api",
+    "platform": "darwin",
+    "architecture": "arm64",
+    "bytes": 58558850,
+    "sha256": "a46fe86e32845876832c6f2c7e66587ab7d9ee70d899ee5a7112de29f7d70cd6",
+    "reportedCommit": "78f0c407",
+    "reportedBuiltAt": "2026-08-14T20:37:41Z"
+  },
+  "license": {
+    "spdx": "MIT",
+    "pathInArchive": "LICENSE",
+    "url": "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/v7.2.132/LICENSE"
+  }
+}

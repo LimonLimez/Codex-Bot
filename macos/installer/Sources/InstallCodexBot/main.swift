@@ -53,12 +53,17 @@ private final class InstallerModel: ObservableObject {
     func install() {
         guard !installing, let vendorApp, let resources = Bundle.main.resourceURL,
               let sidecarBytes = (Bundle.main.object(forInfoDictionaryKey: "CodexBotSidecarBytes") as? NSNumber)?.intValue,
-              let sidecarSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotSidecarSHA256") as? String else {
+              let sidecarSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotSidecarSHA256") as? String,
+              let sidecarLicenseBytes = (Bundle.main.object(forInfoDictionaryKey: "CodexBotSidecarLicenseBytes") as? NSNumber)?.intValue,
+              let sidecarLicenseSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotSidecarLicenseSHA256") as? String,
+              let codexRuntimeBytes = (Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeBytes") as? NSNumber)?.intValue,
+              let codexRuntimeSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeSHA256") as? String,
+              let codexRuntimeLicenseBytes = (Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeLicenseBytes") as? NSNumber)?.intValue,
+              let codexRuntimeLicenseSHA256 = Bundle.main.object(forInfoDictionaryKey: "CodexBotCodexRuntimeLicenseSHA256") as? String else {
             state = "Installer resources or vendor input are unavailable."
             return
         }
         let payload = resources.appendingPathComponent("Patcher", isDirectory: true)
-        let signingIdentity = Bundle.main.object(forInfoDictionaryKey: "CodexBotSigningIdentity") as? String ?? "-"
         let paths = InstallerPaths(
             vendorApp: vendorApp,
             destinationApp: destinationDirectory.appendingPathComponent("Codex Bot.app", isDirectory: true),
@@ -71,7 +76,16 @@ private final class InstallerModel: ObservableObject {
             sidecarLicense: resources.appendingPathComponent("CLIProxy/LICENSE"),
             expectedSidecarBytes: sidecarBytes,
             expectedSidecarSHA256: sidecarSHA256,
-            signingIdentity: signingIdentity
+            expectedSidecarLicenseBytes: sidecarLicenseBytes,
+            expectedSidecarLicenseSHA256: sidecarLicenseSHA256,
+            codexRuntimeBinary: resources.appendingPathComponent("CodexRuntime/codex"),
+            codexRuntimeReceipt: resources.appendingPathComponent("CodexRuntime/receipt.json"),
+            codexRuntimeLicense: resources.appendingPathComponent("CodexRuntime/LICENSE"),
+            expectedCodexRuntimeBytes: codexRuntimeBytes,
+            expectedCodexRuntimeSHA256: codexRuntimeSHA256,
+            expectedCodexRuntimeLicenseBytes: codexRuntimeLicenseBytes,
+            expectedCodexRuntimeLicenseSHA256: codexRuntimeLicenseSHA256,
+            signingIdentity: "-"
         )
         installing = true
         installed = false
