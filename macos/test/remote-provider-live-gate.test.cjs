@@ -192,6 +192,26 @@ test("loads exact reviewed module bytes without transitive files or require-cach
     message: "Remote provider verification is not configured.",
   });
 
+  const createRequireSource = [
+    'const createRequire = require("node:module").createRequire;',
+    'module.exports = createRequire(__filename)("./helper.cjs");',
+    "",
+  ].join("\n");
+  const createRequirePath = await writePrivateModule(
+    directory,
+    "create-require.cjs",
+    createRequireSource,
+  );
+  assert.throws(() => loadLiveGateDependencies({
+    providerModulePath: createRequirePath,
+    providerModuleSha256: sha256Text(createRequireSource),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  }), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+    message: "Remote provider verification is not configured.",
+  });
+
   const firstSource = providerSource();
   const providerModulePath = await writePrivateModule(directory, "replaceable.cjs", firstSource);
   const first = loadLiveGateDependencies({
@@ -271,6 +291,14 @@ test("exercise adapter rejects hostile shapes and mismatched acknowledgements wi
     { accepted: true, botId: BOT_ID, runtimeId: "runtime-b", generation: 1, url: "https://www.youtube.com/" },
     { accepted: true, botId: BOT_ID, runtimeId: "runtime-a", generation: 2, url: "https://www.youtube.com/" },
     { accepted: true, botId: BOT_ID, runtimeId: "runtime-a", generation: 1, url: "https://example.com/" },
+    {
+      accepted: true,
+      actionId: `${ACTION_ID}-wrong`,
+      botId: BOT_ID,
+      runtimeId: "runtime-a",
+      generation: 1,
+      url: "https://www.youtube.com/",
+    },
   ];
   for (const raw of acknowledgements) {
     await t.test(JSON.stringify(raw), async () => {
@@ -313,6 +341,8 @@ async function liveGateHarness(t, options = {}) {
   let lookupCalls = 0;
   let inspectCalls = 0;
   let lastExerciseInput = null;
+  let delayedProvision = false;
+  const retirementPolls = new Map();
 
   const pendingUntilAbort = (signal, counter) => new Promise((resolve, reject) => {
     if (!(signal instanceof AbortSignal)) return;
@@ -341,6 +371,11 @@ async function liveGateHarness(t, options = {}) {
       if (options.hungProvision && !idempotentProvision.has(input.idempotencyKey)) {
         return pendingUntilAbort(input.signal, "provider");
       }
+      if (options.lateProvisionAfterTimeout && !delayedProvision
+        && !idempotentProvision.has(input.idempotencyKey)) {
+        delayedProvision = true;
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
       const recovered = idempotentProvision.get(input.idempotencyKey);
       if (recovered) return { ...recovered };
       const index = provisionCalls.length;
@@ -364,7 +399,7 @@ async function liveGateHarness(t, options = {}) {
         authToken: options.collision === "authToken"
           ? "fixture-private-shared-auth-token-value"
           : `fixture-private-auth-token-${index + 1}-value`,
-        state: "ready",
+        state: options.partialProvision && index === 0 ? "provisioning" : "ready",
       };
       runtimes.set(runtimeId, { ...record });
       idempotentProvision.set(input.idempotencyKey, { ...record });
@@ -378,6 +413,11 @@ async function liveGateHarness(t, options = {}) {
       }
       const record = runtimes.get(runtimeId);
       if (!record) return { runtimeId, ownerBotId: BOT_ID, state: "retired" };
+      if (record.state === "retiring") {
+        const polls = (retirementPolls.get(runtimeId) ?? 0) + 1;
+        retirementPolls.set(runtimeId, polls);
+        if (polls >= 2) record.state = "retired";
+      }
       return { runtimeId, ownerBotId: record.ownerBotId, state: record.state };
     },
     async retire(input) {
@@ -387,7 +427,7 @@ async function liveGateHarness(t, options = {}) {
         throw new Error("provider endpoint token private-retire-diagnostic");
       }
       const record = runtimes.get(runtimeId);
-      if (record) record.state = "retired";
+      if (record) record.state = options.eventuallyConsistentRetire ? "retiring" : "retired";
       retired.push(runtimeId);
       return { runtimeId, state: "retired" };
     },
@@ -883,6 +923,45 @@ for (const [name, options, abortCounter] of [
     assert.ok(harness[abortCounter] >= 1);
   });
 }
+
+test("retires a provision that ignores abort and resolves after the operation timeout", async (t) => {
+  const harness = await liveGateHarness(t, { lateProvisionAfterTimeout: true });
+  harness.options.dependencies.operationTimeoutMs = 30;
+  harness.options.dependencies.cleanupTimeoutMs = 300;
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+  assert.deepEqual(harness.retired, ["runtime-1"]);
+  assert.equal(harness.runtimes.get("runtime-1").state, "retired");
+  await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
+    code: "ENOENT",
+  });
+});
+
+test("retires an exact partial provisioning issuance after readiness fails", async (t) => {
+  const harness = await liveGateHarness(t, { partialProvision: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+  assert.deepEqual(harness.retired, ["runtime-1"]);
+  assert.equal(harness.runtimes.get("runtime-1").state, "retired");
+});
+
+test("polls bounded provider inspection until retirement becomes authoritative", async (t) => {
+  const harness = await liveGateHarness(t, { eventuallyConsistentRetire: true });
+  harness.options.dependencies.operationTimeoutMs = 100;
+  harness.options.dependencies.cleanupTimeoutMs = 500;
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.equal(result.status, "PASS");
+  assert.equal(harness.runtimes.get("runtime-1").state, "retired");
+  assert.equal(harness.runtimes.get("runtime-2").state, "retired");
+});
 
 test("passes only after Bot A remote Chrome shows YouTube", async (t) => {
   const harness = await liveGateHarness(t);

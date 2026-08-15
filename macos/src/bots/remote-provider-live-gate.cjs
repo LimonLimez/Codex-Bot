@@ -153,10 +153,11 @@ function reviewedModuleSource(value, expectedSha256) {
 
 function executeReviewedModule(modulePath, source) {
   const builtins = new Set(Module.builtinModules);
+  const forbiddenBuiltins = new Set(["module", "vm"]);
   const restrictedRequire = (specifier) => {
     if (typeof specifier !== "string") throw blockedError();
     const bare = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
-    if (!builtins.has(bare)) throw blockedError();
+    if (!builtins.has(bare) || forbiddenBuiltins.has(bare)) throw blockedError();
     return require(specifier.startsWith("node:") ? specifier : `node:${specifier}`);
   };
   const moduleRecord = { exports: {} };
@@ -229,6 +230,7 @@ function normalizedAcknowledgement(value, expected) {
     throw failedError();
   }
   if (descriptors.accepted.value !== true
+    || descriptors.actionId.value !== expected.actionId
     || descriptors.botId.value !== expected.botId
     || descriptors.runtimeId.value !== expected.runtimeId
     || descriptors.generation.value !== expected.generation
@@ -370,12 +372,67 @@ function appendBoundedEvent(log, event) {
   log.items.push(event);
 }
 
+function cooperativeDelay(milliseconds, signal) {
+  if (signal?.aborted) return Promise.reject(failedError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(failedError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function waitForTerminalInspection(provider, receipt, timeoutMs, signal) {
+  return withCooperativeDeadline(async (operationSignal) => {
+    while (true) {
+      const inspected = await provider.inspect({
+        runtimeId: receipt.runtimeId,
+        signal: operationSignal,
+      });
+      if (inspected.runtimeId !== receipt.runtimeId
+        || inspected.ownerBotId !== receipt.botId) throw failedError();
+      if (inspected.state === "retired" || inspected.state === "detached") return inspected;
+      await cooperativeDelay(10, operationSignal);
+    }
+  }, timeoutMs, signal);
+}
+
 function runtimeProviderRecorder(provider, receipts, ingressEvents, options) {
   let defaultSignal = options.signal;
   const inflight = new Set();
-  const invoke = (method, fields, signal = defaultSignal) => withCooperativeDeadline(
+  const recordedProvisions = new Set();
+  const recordProvision = (input, result) => {
+    const key = `${input.botId}\0${input.idempotencyKey}`;
+    if (recordedProvisions.has(key)) return;
+    const receipt = {
+      botId: input.botId,
+      idempotencyKey: input.idempotencyKey,
+      provider: result.provider,
+      runtimeId: result.runtimeId,
+      endpoint: result.endpoint,
+    };
+    Object.defineProperty(receipt, "authToken", {
+      value: result.authToken,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    });
+    recordedProvisions.add(key);
+    receipts.push(Object.freeze(receipt));
+  };
+  const invoke = (method, fields, signal = defaultSignal, onResolved) => withCooperativeDeadline(
     (operationSignal) => {
-      const operation = Promise.resolve(provider[method](operationInput(fields, operationSignal)));
+      const operation = Promise.resolve(provider[method](operationInput(fields, operationSignal))).then(
+        (result) => {
+          onResolved?.(result);
+          return result;
+        },
+      );
       inflight.add(operation);
       void operation.finally(() => inflight.delete(operation)).catch(() => {});
       return operation;
@@ -386,25 +443,12 @@ function runtimeProviderRecorder(provider, receipts, ingressEvents, options) {
   const adapter = Object.freeze({
     capabilities: () => invoke("capabilities", {}),
     async provision(input) {
-      const result = await invoke("provision", {
+      return invoke("provision", {
         botId: input.botId,
         idempotencyKey: input.idempotencyKey,
-      }, input.signal ?? defaultSignal);
-      const receipt = {
-        botId: input.botId,
-        idempotencyKey: input.idempotencyKey,
-        provider: result.provider,
-        runtimeId: result.runtimeId,
-        endpoint: result.endpoint,
-      };
-      Object.defineProperty(receipt, "authToken", {
-        value: result.authToken,
-        enumerable: false,
-        configurable: false,
-        writable: false,
-      });
-      if (input.recordReceipt !== false) receipts.push(Object.freeze(receipt));
-      return result;
+      }, input.signal ?? defaultSignal, input.recordReceipt === false
+        ? undefined
+        : (result) => recordProvision(input, result));
     },
     inspect: (input) => invoke("inspect", { runtimeId: input.runtimeId }, input.signal ?? defaultSignal),
     retire: (input) => invoke("retire", { runtimeId: input.runtimeId }, input.signal ?? defaultSignal),
@@ -885,14 +929,22 @@ async function minimalCleanup({
           || recovered.runtimeId !== receipt.runtimeId
           || recovered.ownerBotId !== receipt.botId
           || recovered.endpoint !== receipt.endpoint
-          || recovered.authToken !== receipt.authToken
-          || recovered.state !== "ready") throw failedError();
+          || recovered.authToken !== receipt.authToken) throw failedError();
         const inspected = await provider.inspect({ runtimeId: receipt.runtimeId });
         if (inspected.runtimeId !== receipt.runtimeId
-          || inspected.ownerBotId !== receipt.botId
-          || inspected.state !== "ready") throw failedError();
-        result = await provider.retire({ runtimeId: receipt.runtimeId });
-        terminal = await provider.inspect({ runtimeId: receipt.runtimeId });
+          || inspected.ownerBotId !== receipt.botId) throw failedError();
+        if (inspected.state === "retired" || inspected.state === "detached") {
+          result = inspected;
+          terminal = inspected;
+        } else {
+          result = await provider.retire({ runtimeId: receipt.runtimeId });
+          terminal = await waitForTerminalInspection(
+            provider,
+            receipt,
+            operationTimeoutMs,
+            cleanupSignal,
+          );
+        }
       };
 
       if (readyReceipt) {
