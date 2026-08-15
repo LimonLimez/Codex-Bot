@@ -29,6 +29,9 @@ try {
 }
 
 const BOT_ID = "bot-00000000-0000-4000-8000-000000000001";
+const ACTION_ID = "exercise-00000000-0000-4000-8000-000000000001";
+const FRAME_DIGEST = `sha256:${"a".repeat(64)}`;
+const SECOND_FRAME_DIGEST = `sha256:${"b".repeat(64)}`;
 const { BotStore } = require("../src/bots/bot-store.cjs");
 const { validateProvider } = require("../src/bots/runtime-provider.cjs");
 
@@ -175,6 +178,7 @@ test("narrows freezes and validates remote exercise acknowledgements", async () 
     },
   });
   const input = {
+    actionId: ACTION_ID,
     botId: BOT_ID,
     runtimeId: "runtime-a",
     generation: 1,
@@ -223,6 +227,7 @@ test("exercise adapter rejects hostile shapes and mismatched acknowledgements wi
         async dispose() {},
       });
       const error = await exercise.openRemoteUrl({
+        actionId: ACTION_ID,
         botId: BOT_ID,
         runtimeId: "runtime-a",
         generation: 1,
@@ -252,6 +257,7 @@ async function liveGateHarness(t, options = {}) {
   let lookupAbortCount = 0;
   let lookupCalls = 0;
   let inspectCalls = 0;
+  let lastExerciseInput = null;
 
   const pendingUntilAbort = (signal, counter) => new Promise((resolve, reject) => {
     if (!(signal instanceof AbortSignal)) return;
@@ -339,6 +345,7 @@ async function liveGateHarness(t, options = {}) {
   const exercise = validateComputerExercise({
     async openRemoteUrl(input) {
       exerciseCalls.push(input);
+      lastExerciseInput = input;
       if (options.hungExerciseOpen) {
         return pendingUntilAbort(input.signal, "exercise");
       }
@@ -353,10 +360,21 @@ async function liveGateHarness(t, options = {}) {
           ? "https://example.com/"
           : "https://www.youtube.com/";
         const title = options.frameMutation === "missing-title" ? "" : "YouTube";
-        const sequence = options.frameMutation === "stale-sequence" ? 0 : 1;
+        const sequence = options.frameMutation === "stale-sequence"
+          ? 0
+          : options.frameMutation === "cached-new-sequence"
+            || options.frameMutation === "fresh-after-cached"
+            ? 2
+            : 1;
         const frame = options.frameMutation === "malformed-frame"
           ? { width: 0, height: 720, digest: "invalid" }
-          : { width: 1280, height: 720, digest: "sha256:fixture-frame" };
+          : {
+            width: 1280,
+            height: 720,
+            digest: options.frameMutation === "fresh-after-cached"
+              ? SECOND_FRAME_DIGEST
+              : FRAME_DIGEST,
+          };
         setImmediate(() => {
           for (const callback of subscribers) {
             callback({
@@ -364,6 +382,9 @@ async function liveGateHarness(t, options = {}) {
               type: "computer/frame",
               sequence,
               payload: {
+                actionId: options.frameMutation === "wrong-action"
+                  ? `${input.actionId}-wrong`
+                  : input.actionId,
                 browser: { name: browserName, url: browserUrl, title },
                 frame,
               },
@@ -374,6 +395,7 @@ async function liveGateHarness(t, options = {}) {
                 type: "computer/frame",
                 sequence,
                 payload: {
+                  actionId: input.actionId,
                   browser: { name: browserName, url: browserUrl, title },
                   frame,
                 },
@@ -404,6 +426,25 @@ async function liveGateHarness(t, options = {}) {
           ...original,
           authToken: "fixture-private-successor-auth-token-value",
         });
+      }
+      if (options.frameMutation === "late-frame" && lastExerciseInput) {
+        for (const callback of subscribers) {
+          callback({
+            runtimeId: lastExerciseInput.runtimeId,
+            type: "computer/frame",
+            sequence: 2,
+            payload: {
+              actionId: lastExerciseInput.actionId,
+              browser: {
+                name: "Google Chrome",
+                url: "https://www.youtube.com/",
+                title: "YouTube",
+              },
+              frame: { width: 1280, height: 720, digest: SECOND_FRAME_DIGEST },
+            },
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
       }
     },
   });
@@ -443,21 +484,29 @@ async function liveGateHarness(t, options = {}) {
           protocolCalls.push({ runtimeId: session.runtimeId, method, params });
           if (method === "account/read") return { account: { type: "chatgpt" } };
           if (method === "model/list") {
-            if (options.frameMutation === "cached" && session.runtimeId === "runtime-2") {
+            if ((options.frameMutation === "cached"
+              || options.frameMutation === "cached-new-sequence"
+              || options.frameMutation === "fresh-after-cached")
+              && session.runtimeId === "runtime-2") {
               for (const callback of subscribers) {
                 callback({
                   runtimeId: "runtime-1",
                   type: "computer/frame",
                   sequence: 1,
                   payload: {
+                    actionId: "exercise-prior-cached-action",
                     browser: {
                       name: "Google Chrome",
                       url: "https://www.youtube.com/",
                       title: "YouTube",
                     },
-                    frame: { width: 1280, height: 720, digest: "sha256:cached-frame" },
+                    frame: { width: 1280, height: 720, digest: FRAME_DIGEST },
                   },
                 });
+              }
+              if (options.frameMutation === "cached-new-sequence"
+                || options.frameMutation === "fresh-after-cached") {
+                await new Promise((resolve) => setTimeout(resolve, 30));
               }
             }
             if (options.modelOverflow) {
@@ -765,12 +814,18 @@ test("passes only after Bot A remote Chrome shows YouTube", async (t) => {
 
   assert.equal(result.status, "PASS");
   assert.equal(harness.exerciseCalls.length, 1);
-  assert.deepEqual(harness.exerciseCalls[0], {
+  assert.deepEqual({
+    botId: harness.exerciseCalls[0].botId,
+    runtimeId: harness.exerciseCalls[0].runtimeId,
+    generation: harness.exerciseCalls[0].generation,
+    url: harness.exerciseCalls[0].url,
+  }, {
     botId: harness.provisionCalls[0].botId,
     runtimeId: "runtime-1",
     generation: 1,
     url: "https://www.youtube.com/",
   });
+  assert.match(harness.exerciseCalls[0].actionId, /^exercise-[0-9a-f-]{36}$/);
   assert.deepEqual(result.computer, {
     browser: "Google Chrome",
     host: "www.youtube.com",
@@ -797,6 +852,17 @@ test("successful proof records terminal cleanup and removes the verifier store",
   await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
     code: "ENOENT",
   });
+});
+
+test("accepts a fresh action-scoped digest after a fully settled prior frame", async (t) => {
+  const harness = await liveGateHarness(t, { frameMutation: "fresh-after-cached" });
+  harness.options.dependencies.computerTimeoutMs = 500;
+  harness.options.dependencies.frameSettleMs = 80;
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.equal(result.status, "PASS");
+  assert.equal(harness.exerciseCalls.length, 1);
 });
 
 test("cleanup never retires a captured runtime after the authoritative bot receipt changes", async (t) => {
@@ -832,7 +898,10 @@ test("rejects acknowledgement without an exact current YouTube frame", async (t)
     "stale-sequence",
     "malformed-frame",
     "cached",
+    "cached-new-sequence",
     "replayed",
+    "wrong-action",
+    "late-frame",
   ]) {
     await t.test(frameMutation, async (t) => {
       const harness = await liveGateHarness(t, { frameMutation });

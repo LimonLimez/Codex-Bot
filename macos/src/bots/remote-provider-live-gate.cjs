@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("node:fs");
+const { randomUUID } = require("node:crypto");
 const dns = require("node:dns/promises");
 const { isIP } = require("node:net");
 const path = require("node:path");
@@ -147,22 +148,24 @@ function configuredModule(modulePath, factoryName) {
 function normalizedExerciseInput(value) {
   const descriptors = objectDescriptors(value, "Remote computer exercise input");
   const keys = Reflect.ownKeys(descriptors);
-  const allowed = new Set(["botId", "runtimeId", "generation", "url", "signal"]);
+  const allowed = new Set(["actionId", "botId", "runtimeId", "generation", "url", "signal"]);
   if (keys.some((key) => !allowed.has(key))
-    || ["botId", "runtimeId", "generation", "url"].some((key) => !descriptors[key])) {
+    || ["actionId", "botId", "runtimeId", "generation", "url"].some((key) => !descriptors[key])) {
     throw failedError();
   }
+  const actionId = descriptors.actionId.value;
   const botId = descriptors.botId.value;
   const runtimeId = descriptors.runtimeId.value;
   const generation = descriptors.generation.value;
   const url = descriptors.url.value;
   const signal = descriptors.signal?.value;
+  if (typeof actionId !== "string" || !/^exercise-[0-9a-f-]{36}$/.test(actionId)) throw failedError();
   if (typeof botId !== "string" || !BOT_ID_PATTERN.test(botId)) throw failedError();
   if (typeof runtimeId !== "string" || !SAFE_IDENTIFIER_PATTERN.test(runtimeId)) throw failedError();
   if (!Number.isSafeInteger(generation) || generation < 1) throw failedError();
   if (url !== YOUTUBE_URL) throw failedError();
   if (signal !== undefined && !(signal instanceof AbortSignal)) throw failedError();
-  return operationInput({ botId: botId.toLowerCase(), runtimeId, generation, url }, signal);
+  return operationInput({ actionId, botId: botId.toLowerCase(), runtimeId, generation, url }, signal);
 }
 
 function normalizedAcknowledgement(value, expected) {
@@ -172,7 +175,7 @@ function normalizedAcknowledgement(value, expected) {
   } catch {
     throw failedError();
   }
-  const required = ["accepted", "botId", "runtimeId", "generation", "url"];
+  const required = ["accepted", "actionId", "botId", "runtimeId", "generation", "url"];
   if (required.some((key) => !Object.prototype.hasOwnProperty.call(descriptors, key))) {
     throw failedError();
   }
@@ -513,22 +516,23 @@ async function readyBot(controller, provider) {
   return Object.freeze({ botId: bot.botId, session });
 }
 
-function validFrameDescriptor(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) return false;
+function frameDescriptor(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) return null;
   const descriptors = Object.getOwnPropertyDescriptors(value);
   if (Reflect.ownKeys(descriptors).some((key) => (
     typeof key !== "string" || !("value" in descriptors[key])
-  ))) return false;
+  ))) return null;
   const width = descriptors.width?.value;
   const height = descriptors.height?.value;
   const digest = descriptors.digest?.value;
-  return Number.isSafeInteger(width) && width >= 320 && width <= 8192
+  if (!(Number.isSafeInteger(width) && width >= 320 && width <= 8192
     && Number.isSafeInteger(height) && height >= 240 && height <= 8192
     && typeof digest === "string"
-    && /^sha256:[A-Za-z0-9._:-]{8,128}$/.test(digest);
+    && /^sha256:[0-9a-f]{64}$/.test(digest))) return null;
+  return Object.freeze({ width, height, digest });
 }
 
-function youtubeProofFromEvent(value, receipt, minimumSequence) {
+function youtubeProofFromEvent(value, receipt, minimumSequence, actionId, priorDigests) {
   if (!value || typeof value !== "object"
     || value.botId !== receipt.botId
     || value.generation !== receipt.session.generation
@@ -540,22 +544,26 @@ function youtubeProofFromEvent(value, receipt, minimumSequence) {
     || value.event.sequence <= minimumSequence) throw failedError();
 
   const browser = value.event.payload?.browser;
+  const frame = frameDescriptor(value.event.payload?.frame);
   let browserUrl;
   try {
     browserUrl = new URL(browser?.url);
   } catch {
     throw failedError();
   }
-  if (browser?.name !== "Google Chrome"
+  if (value.event.payload?.actionId !== actionId
+    || browser?.name !== "Google Chrome"
     || browserUrl.protocol !== "https:"
     || browserUrl.hostname !== "www.youtube.com"
     || browserUrl.username
     || browserUrl.password
     || typeof browser.title !== "string"
     || !browser.title.includes("YouTube")
-    || !validFrameDescriptor(value.event.payload?.frame)) throw failedError();
+    || !frame
+    || priorDigests.has(frame.digest)) throw failedError();
 
   return Object.freeze({
+    digest: frame.digest,
     sequence: value.event.sequence,
     public: Object.freeze({
       browser: "Google Chrome",
@@ -575,6 +583,7 @@ function computerFrameWaiter({
   timeoutMs,
   settleMs,
   signal,
+  actionId,
 }) {
   const priorSequence = priorEvents.reduce((maximum, value) => (
     value?.botId === receipt.botId
@@ -584,7 +593,17 @@ function computerFrameWaiter({
       ? Math.max(maximum, value.event.sequence)
       : maximum
   ), 0);
+  const priorDigests = new Set(priorEvents.flatMap((value) => {
+    if (value?.botId !== receipt.botId
+      || value?.event?.runtimeId !== receipt.session.runtimeId
+      || value?.event?.type !== "computer/frame") return [];
+    const frame = frameDescriptor(value.event.payload?.frame);
+    return frame ? [frame.digest] : [];
+  }));
   let settled = false;
+  let completed = false;
+  let violated = false;
+  let crossBotFrameCount = 0;
   let matched = null;
   let timeoutTimer = null;
   let settleTimer = null;
@@ -611,7 +630,9 @@ function computerFrameWaiter({
   const complete = () => {
     if (settled || !matched) return;
     settled = true;
-    detach();
+    completed = true;
+    clearTimeout(timeoutTimer);
+    clearTimeout(settleTimer);
     resolvePromise(matched.public);
   };
   const onAbort = () => fail();
@@ -629,7 +650,13 @@ function computerFrameWaiter({
     return false;
   };
   const onEvent = (event) => {
-    if (settled || event?.event?.type !== "computer/frame") return;
+    if (event?.event?.type !== "computer/frame") return;
+    if (event?.botId !== receipt.botId) crossBotFrameCount += 1;
+    if (completed) {
+      violated = true;
+      return;
+    }
+    if (settled) return;
     if (!consumeFreshIngress(event)) {
       fail();
       return;
@@ -640,7 +667,7 @@ function computerFrameWaiter({
     }
     let proof;
     try {
-      proof = youtubeProofFromEvent(event, receipt, priorSequence);
+      proof = youtubeProofFromEvent(event, receipt, priorSequence, actionId, priorDigests);
     } catch {
       fail();
       return;
@@ -662,6 +689,13 @@ function computerFrameWaiter({
   return Object.freeze({
     promise,
     cancel: fail,
+    finish() {
+      detach();
+      return Object.freeze({
+        clean: completed && !violated && !signal?.aborted,
+        crossBotFrameCount,
+      });
+    },
   });
 }
 
@@ -676,6 +710,7 @@ async function waitForYouTubeFrame({
   settleMs,
   signal,
 }) {
+  const actionId = `exercise-${randomUUID()}`;
   const ingressStart = ingressEvents.length;
   const waiter = computerFrameWaiter({
     controller,
@@ -686,11 +721,13 @@ async function waitForYouTubeFrame({
     timeoutMs,
     settleMs,
     signal,
+    actionId,
   });
   void waiter.promise.catch(() => {});
   try {
     await withCooperativeDeadline(
       (operationSignal) => exercise.openRemoteUrl(operationInput({
+        actionId,
         botId: botA.botId,
         runtimeId: botA.session.runtimeId,
         generation: botA.session.generation,
@@ -706,9 +743,10 @@ async function waitForYouTubeFrame({
       || currentA.generation !== botA.session.generation
       || !currentB || currentB.runtimeId !== botB.session.runtimeId
       || currentB.generation !== botB.session.generation) throw failedError();
-    return proof;
-  } finally {
+    return Object.freeze({ proof, monitor: waiter });
+  } catch (error) {
     waiter.cancel();
+    throw error;
   }
 }
 
@@ -869,6 +907,7 @@ async function runRemoteProviderLiveGate(options) {
   const startedAt = new Date().toISOString();
   let result = null;
   let failure = null;
+  let computerMonitor = null;
   const lookup = typeof dependencies.lookup === "function"
     ? dependencies.lookup
     : dns.lookup.bind(dns);
@@ -978,7 +1017,7 @@ async function runRemoteProviderLiveGate(options) {
       || clientB.runtimeId !== botB.session.runtimeId
       || clientB.generation !== botB.session.generation) throw failedError();
     protocol.push(await readRemoteProtocol(clientB, { timeoutMs: operationTimeoutMs, signal }));
-    const computer = await waitForYouTubeFrame({
+    const computerResult = await waitForYouTubeFrame({
       controller,
       botA,
       botB,
@@ -989,6 +1028,7 @@ async function runRemoteProviderLiveGate(options) {
       settleMs: frameSettleMs,
       signal,
     });
+    computerMonitor = computerResult.monitor;
     result = Object.freeze({
       status: "PASS",
       startedAt,
@@ -1002,7 +1042,7 @@ async function runRemoteProviderLiveGate(options) {
         Object.freeze({ botId: botA.botId, ...protocol[0] }),
         Object.freeze({ botId: botB.botId, ...protocol[1] }),
       ]),
-      computer,
+      computer: computerResult.proof,
       isolation: Object.freeze({ crossBotFrameCount: 0, passed: true }),
     });
   } catch {
@@ -1022,7 +1062,10 @@ async function runRemoteProviderLiveGate(options) {
     operationTimeoutMs,
     cleanupTimeoutMs,
   });
-  if (failure || !cleanup.safe || !result) throw failedError();
+  const monitored = computerMonitor?.finish() ?? Object.freeze({ clean: false, crossBotFrameCount: 0 });
+  if (failure || !cleanup.safe || !result || !monitored.clean || monitored.crossBotFrameCount !== 0) {
+    throw failedError();
+  }
   return Object.freeze({
     ...result,
     finishedAt: new Date().toISOString(),
