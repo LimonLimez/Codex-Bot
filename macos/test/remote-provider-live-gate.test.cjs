@@ -20,6 +20,14 @@ try {
   moduleLoadError = error;
 }
 
+let runCliMain;
+let cliLoadError = null;
+try {
+  ({ main: runCliMain } = require("../scripts/verify-remote-provider.cjs"));
+} catch (error) {
+  cliLoadError = error;
+}
+
 const BOT_ID = "bot-00000000-0000-4000-8000-000000000001";
 const { validateProvider } = require("../src/bots/runtime-provider.cjs");
 
@@ -424,6 +432,14 @@ async function raceWithSentinel(promise, timeoutMs) {
   }
 }
 
+function outputSink() {
+  const chunks = [];
+  return {
+    stream: { write(value) { chunks.push(String(value)); } },
+    value() { return chunks.join(""); },
+  };
+}
+
 test("provisions two distinct bot runtimes through the production controller", async (t) => {
   assert.equal(typeof runRemoteProviderLiveGate, "function");
   const harness = await liveGateHarness(t);
@@ -649,4 +665,156 @@ test("rejects acknowledgement without an exact current YouTube frame", async (t)
       });
     });
   }
+});
+
+test("CLI reports BLOCKED without configured modules and leaks no environment", async () => {
+  assert.ifError(cliLoadError);
+  const stdout = outputSink();
+  const stderr = outputSink();
+
+  const code = await runCliMain({
+    argv: [],
+    env: {
+      PRIVATE_TOKEN: "must-not-print",
+      HOME: "/Users/private",
+    },
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+  });
+
+  assert.equal(code, 2);
+  assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=BLOCKED\n");
+  assert.equal(stderr.value(), "");
+});
+
+test("CLI main maps injected PASS and FAIL without printing report paths", async () => {
+  assert.ifError(cliLoadError);
+  const dependencies = Object.freeze({
+    provider: Object.freeze({}),
+    exercise: Object.freeze({ async dispose() {} }),
+  });
+  const base = {
+    argv: [],
+    env: {},
+    loadDependencies: () => dependencies,
+    createWorkspace: async () => "/private/tmp/private-workspace",
+    resolveOutputDirectory: async () => "/private/tmp/private-output",
+    removeWorkspace: async () => undefined,
+    buildReport: () => Object.freeze({ status: "PASS" }),
+    writeReport: async () => Object.freeze({
+      jsonPath: "/private/tmp/private-output/result.json",
+      markdownPath: "/private/tmp/private-output/result.md",
+    }),
+  };
+
+  const passStdout = outputSink();
+  const passStderr = outputSink();
+  let receivedGateOptions;
+  const passCode = await runCliMain({
+    ...base,
+    stdout: passStdout.stream,
+    stderr: passStderr.stream,
+    async runGate(options) {
+      receivedGateOptions = options;
+      return Object.freeze({ status: "PASS" });
+    },
+  });
+  assert.equal(passCode, 0);
+  assert.equal(passStdout.value(), "REMOTE_PROVIDER_GATE=PASS\n");
+  assert.equal(passStderr.value(), "");
+  assert.equal(receivedGateOptions.workspacePath, "/private/tmp/private-workspace");
+  assert.equal(receivedGateOptions.provider, dependencies.provider);
+  assert.equal(receivedGateOptions.exercise, dependencies.exercise);
+
+  const failStdout = outputSink();
+  const failStderr = outputSink();
+  const failCode = await runCliMain({
+    ...base,
+    stdout: failStdout.stream,
+    stderr: failStderr.stream,
+    async runGate() {
+      const error = new Error("private endpoint token diagnostic");
+      error.code = "REMOTE_PROVIDER_GATE_FAILED";
+      throw error;
+    },
+  });
+  assert.equal(failCode, 1);
+  assert.equal(failStdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
+  assert.equal(failStderr.value(), "");
+});
+
+test("CLI rejects positional arguments before loading provider code", async () => {
+  assert.ifError(cliLoadError);
+  const stdout = outputSink();
+  let loaderCalls = 0;
+
+  const code = await runCliMain({
+    argv: ["--provider", "/Users/private/provider.cjs"],
+    env: {},
+    stdout: stdout.stream,
+    stderr: outputSink().stream,
+    loadDependencies() {
+      loaderCalls += 1;
+      return {};
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.equal(loaderCalls, 0);
+  assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
+  assert.doesNotMatch(stdout.value(), /Users|provider\.cjs/);
+});
+
+test("CLI waits for workspace cleanup and forwards cancellation before PASS", async () => {
+  assert.ifError(cliLoadError);
+  const stdout = outputSink();
+  const controller = new AbortController();
+  let removalAttempts = 0;
+
+  const code = await runCliMain({
+    argv: [],
+    env: {},
+    signal: controller.signal,
+    stdout: stdout.stream,
+    stderr: outputSink().stream,
+    loadDependencies: () => Object.freeze({
+      provider: Object.freeze({}),
+      exercise: Object.freeze({ async dispose() {} }),
+    }),
+    createWorkspace: async () => "/private/tmp/private-workspace",
+    resolveOutputDirectory: async () => "/private/tmp/private-output",
+    buildReport: () => Object.freeze({ status: "PASS" }),
+    writeReport: async () => undefined,
+    async runGate(options) {
+      assert.equal(options.signal, controller.signal);
+      return Object.freeze({ status: "PASS" });
+    },
+    async removeWorkspace() {
+      removalAttempts += 1;
+      throw new Error("private cleanup path");
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.equal(removalAttempts, 2);
+  assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
+});
+
+test("live gate and CLI contain no local browser execution path", async () => {
+  const source = [
+    await fs.readFile(path.join(__dirname, "../src/bots/remote-provider-live-gate.cjs"), "utf8"),
+    await fs.readFile(path.join(__dirname, "../scripts/verify-remote-provider.cjs"), "utf8"),
+  ].join("\n");
+  assert.doesNotMatch(
+    source,
+    /child_process|osascript|AppleScript|\bssh\b|playwright|localhost|127\.0\.0\.1/i,
+  );
+
+  const packageJson = JSON.parse(
+    await fs.readFile(path.join(__dirname, "../package.json"), "utf8"),
+  );
+  assert.equal(
+    packageJson.scripts["verify:remote-provider"],
+    "node scripts/verify-remote-provider.cjs",
+  );
 });

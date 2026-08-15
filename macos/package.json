@@ -15,6 +15,7 @@
   "scripts": {
     "test": "node --test test/*.test.cjs",
     "check": "node scripts/check-sources.cjs",
+    "verify:remote-provider": "node scripts/verify-remote-provider.cjs",
     "audit:release": "node scripts/audit-release.cjs",
     "build:installer": "node scripts/build-installer-app.cjs",
     "package:dmg": "node scripts/package-dmg.cjs"
