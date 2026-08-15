@@ -278,6 +278,34 @@ test("opens only the authorized endpoint with a bearer header and fixed subproto
   assert.doesNotMatch(publicText, /fixture-private|wss:|region=|authorized-provider|Authorization/i);
 });
 
+test("pins DNS lookup and rejects a socket connected outside the reviewed address set", async () => {
+  const lookup = (hostname, options, callback) => callback(null, "8.8.8.8", 4);
+  const goodSocket = new FakeSocket();
+  goodSocket._socket = { remoteAddress: "8.8.8.8" };
+  const good = makeClient({
+    sockets: [goodSocket],
+    lookup,
+    expectedRemoteAddresses: ["8.8.8.8"],
+  });
+  await startReady(good.client, goodSocket);
+  assert.equal(good.harness.calls[0].options.lookup, lookup);
+
+  const badSocket = new FakeSocket();
+  badSocket._socket = { remoteAddress: "127.0.0.1" };
+  const bad = makeClient({
+    sockets: [badSocket],
+    lookup,
+    expectedRemoteAddresses: ["8.8.8.8"],
+  });
+  const starting = bad.client.start();
+  badSocket.open();
+  await assert.rejects(starting, {
+    code: "REMOTE_TRANSPORT_ERROR",
+    message: "Remote Codex transport failed.",
+  });
+  assert.equal(badSocket.sent.length, 0);
+});
+
 test("performs one initialize flight for concurrent and repeated starts", async () => {
   const { client, harness } = makeClient();
   const first = client.start();

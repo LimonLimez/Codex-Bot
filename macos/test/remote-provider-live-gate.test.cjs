@@ -245,6 +245,7 @@ async function liveGateHarness(t, options = {}) {
   const exerciseCalls = [];
   const clients = [];
   const protocolCalls = [];
+  const pinnedTransports = [];
   let exerciseDisposed = 0;
   let providerAbortCount = 0;
   let exerciseAbortCount = 0;
@@ -418,7 +419,14 @@ async function liveGateHarness(t, options = {}) {
       }
       return [{ address: `8.8.8.${suffix}`, family: 4 }];
     },
-    clientFactory(session) {
+    clientFactory(session, transport) {
+      if (options.requirePinnedDns) {
+        if (!transport || typeof transport.lookup !== "function"
+          || !Array.isArray(transport.expectedRemoteAddresses)) {
+          throw new Error("missing pinned DNS transport");
+        }
+        pinnedTransports.push(transport);
+      }
       if (options.collision === "clientObject" && clients.length > 0) return clients[0];
       const client = {
         session,
@@ -480,6 +488,7 @@ async function liveGateHarness(t, options = {}) {
     exerciseCalls,
     clients,
     protocolCalls,
+    pinnedTransports,
     get exerciseDisposed() { return exerciseDisposed; },
     get providerAbortCount() { return providerAbortCount; },
     get exerciseAbortCount() { return exerciseAbortCount; },
@@ -613,9 +622,22 @@ test("rejects DNS rebinding between preflight and client start", async (t) => {
     code: "REMOTE_PROVIDER_GATE_FAILED",
   });
 
-  assert.equal(harness.lookupCalls, 4);
+  assert.equal(harness.lookupCalls, 3);
   assert.equal(harness.clients.every(({ started, stopped }) => !started && stopped), true);
   assert.equal(harness.exerciseCalls.length, 0);
+});
+
+test("pins each immediately revalidated public DNS set into its client connection", async (t) => {
+  const harness = await liveGateHarness(t, { requirePinnedDns: true });
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.equal(result.status, "PASS");
+  assert.equal(harness.pinnedTransports.length, 2);
+  assert.deepEqual(
+    harness.pinnedTransports.map(({ expectedRemoteAddresses }) => expectedRemoteAddresses),
+    [["8.8.8.1"], ["8.8.8.2"]],
+  );
 });
 
 test("rejects cyclic remote model pagination before Computer work", async (t) => {

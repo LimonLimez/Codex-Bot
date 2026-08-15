@@ -38,6 +38,8 @@ const SESSION_KEYS = Object.freeze([
 const OPTION_KEYS = new Set([
   "clearTimeout",
   "clientVersion",
+  "expectedRemoteAddresses",
+  "lookup",
   "session",
   "setTimeout",
   "webSocketFactory",
@@ -713,6 +715,26 @@ function validateOptions(options) {
   if (result.webSocketFactory !== undefined && typeof result.webSocketFactory !== "function") {
     throw new TypeError("Remote client options are invalid.");
   }
+  if (result.lookup !== undefined && typeof result.lookup !== "function") {
+    throw new TypeError("Remote client options are invalid.");
+  }
+  if (result.expectedRemoteAddresses !== undefined) {
+    if (!Array.isArray(result.expectedRemoteAddresses)
+      || types.isProxy(result.expectedRemoteAddresses)
+      || result.expectedRemoteAddresses.length < 1
+      || result.expectedRemoteAddresses.length > 16
+      || result.expectedRemoteAddresses.some((address) => typeof address !== "string" || isIP(address) === 0)
+      || new Set(result.expectedRemoteAddresses.map((address) => address.toLowerCase())).size
+        !== result.expectedRemoteAddresses.length) {
+      throw new TypeError("Remote client options are invalid.");
+    }
+    result.expectedRemoteAddresses = Object.freeze(
+      result.expectedRemoteAddresses.map((address) => address.toLowerCase()),
+    );
+  }
+  if ((result.lookup === undefined) !== (result.expectedRemoteAddresses === undefined)) {
+    throw new TypeError("Remote client options are invalid.");
+  }
   if (result.setTimeout !== undefined && typeof result.setTimeout !== "function") {
     throw new TypeError("Remote client options are invalid.");
   }
@@ -901,6 +923,8 @@ class RemoteAppServerClient extends EventEmitter {
   #setTimeout;
   #clearTimeout;
   #clientVersion;
+  #lookup;
+  #expectedRemoteAddresses;
   #active = null;
   #startFlight = null;
   #nextRequestId = 1;
@@ -930,6 +954,8 @@ class RemoteAppServerClient extends EventEmitter {
     this.#setTimeout = options.setTimeout || setTimeout;
     this.#clearTimeout = options.clearTimeout || clearTimeout;
     this.#clientVersion = options.clientVersion || "1.0.0";
+    this.#lookup = options.lookup;
+    this.#expectedRemoteAddresses = options.expectedRemoteAddresses;
   }
 
   get runtimeId() {
@@ -983,16 +1009,18 @@ class RemoteAppServerClient extends EventEmitter {
 
     let socket;
     try {
+      const socketOptions = {
+        followRedirects: false,
+        handshakeTimeout: DEFAULT_TIMEOUT_MS,
+        headers: { Authorization: `Bearer ${this.#session.authToken}` },
+        maxPayload: MAX_FRAME_BYTES,
+        perMessageDeflate: false,
+      };
+      if (this.#lookup) socketOptions.lookup = this.#lookup;
       socket = this.#webSocketFactory(
         this.#session.endpoint,
         [...SUBPROTOCOLS],
-        {
-          followRedirects: false,
-          handshakeTimeout: DEFAULT_TIMEOUT_MS,
-          headers: { Authorization: `Bearer ${this.#session.authToken}` },
-          maxPayload: MAX_FRAME_BYTES,
-          perMessageDeflate: false,
-        },
+        socketOptions,
       );
       if (!socket || typeof socket !== "object" || types.isProxy(socket)) throw new Error("invalid socket");
     } catch (error) {
@@ -1174,6 +1202,25 @@ class RemoteAppServerClient extends EventEmitter {
     if (connection.opened) {
       this.#protocolFailure(connection);
       return;
+    }
+    if (this.#expectedRemoteAddresses) {
+      try {
+        const socketDescriptor = Object.getOwnPropertyDescriptor(connection.socket, "_socket");
+        const remoteAddress = socketDescriptor?.value?.remoteAddress;
+        const normalized = typeof remoteAddress === "string"
+          ? remoteAddress.toLowerCase().replace(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/, "$1")
+          : null;
+        if (!normalized || !this.#expectedRemoteAddresses.includes(normalized)) {
+          throw new Error("unexpected remote address");
+        }
+      } catch {
+        this.#terminal(
+          connection,
+          remoteError("REMOTE_TRANSPORT_ERROR", "Remote Codex transport failed."),
+          { emitOffline: true, closeSocket: true },
+        );
+        return;
+      }
     }
     connection.opened = true;
     if (connection.openTimer !== null) {

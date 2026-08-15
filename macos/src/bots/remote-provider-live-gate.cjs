@@ -413,6 +413,35 @@ function canonicalEndpoint(endpoint) {
   }
 }
 
+function pinnedTransport(endpoint, addresses) {
+  let expectedHostname;
+  try {
+    expectedHostname = new URL(endpoint).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+    throw failedError();
+  }
+  const expectedRemoteAddresses = Object.freeze([...addresses]);
+  const lookup = (hostname, rawOptions, rawCallback) => {
+    const callback = typeof rawOptions === "function" ? rawOptions : rawCallback;
+    const options = typeof rawOptions === "object" && rawOptions !== null ? rawOptions : {};
+    if (typeof callback !== "function" || String(hostname).toLowerCase() !== expectedHostname) {
+      if (typeof callback === "function") callback(new Error("Remote DNS pin mismatch."));
+      return;
+    }
+    const family = options.family === 4 || options.family === 6 ? options.family : 0;
+    const candidates = expectedRemoteAddresses
+      .map((address) => ({ address, family: isIP(address) }))
+      .filter((candidate) => family === 0 || candidate.family === family);
+    if (candidates.length === 0) {
+      callback(new Error("Remote DNS pin mismatch."));
+      return;
+    }
+    if (options.all === true) callback(null, candidates);
+    else callback(null, candidates[0].address, candidates[0].family);
+  };
+  return Object.freeze({ lookup, expectedRemoteAddresses });
+}
+
 function withDeadline(promise, timeoutMs, signal) {
   if (signal?.aborted) return Promise.reject(failedError());
   return new Promise((resolve, reject) => {
@@ -845,7 +874,7 @@ async function runRemoteProviderLiveGate(options) {
     : dns.lookup.bind(dns);
   const clientFactory = typeof dependencies.clientFactory === "function"
     ? dependencies.clientFactory
-    : (session) => new RemoteAppServerClient({ session });
+    : (session, transport) => new RemoteAppServerClient({ session, ...transport });
   const operationTimeoutMs = dependencies.operationTimeoutMs ?? 30_000;
   if (!Number.isSafeInteger(operationTimeoutMs)
     || operationTimeoutMs < 10
@@ -917,29 +946,37 @@ async function runRemoteProviderLiveGate(options) {
       resolvedPublicAddresses(botA.session.endpoint, lookup, operationTimeoutMs, signal),
       resolvedPublicAddresses(botB.session.endpoint, lookup, operationTimeoutMs, signal),
     ]);
-    const clientA = clientFactory(botA.session);
-    const clientB = clientFactory(botB.session);
+    const secondAddressesA = await resolvedPublicAddresses(
+      botA.session.endpoint,
+      lookup,
+      operationTimeoutMs,
+      signal,
+    );
+    if (!sameAddresses(firstAddresses[0], secondAddressesA)) throw failedError();
+    const clientA = clientFactory(botA.session, pinnedTransport(botA.session.endpoint, secondAddressesA));
     if (clientA && typeof clientA.stop === "function") clients.push(clientA);
-    if (clientB && typeof clientB.stop === "function") clients.push(clientB);
     if (!clientA || typeof clientA.start !== "function" || typeof clientA.request !== "function"
-      || typeof clientA.stop !== "function" || !clientB || typeof clientB.start !== "function"
-      || typeof clientB.request !== "function" || typeof clientB.stop !== "function"
-      || clientA === clientB
+      || typeof clientA.stop !== "function"
       || clientA.provider !== botA.session.provider
       || clientA.runtimeId !== botA.session.runtimeId
-      || clientA.generation !== botA.session.generation
+      || clientA.generation !== botA.session.generation) throw failedError();
+    const protocol = [];
+    protocol.push(await readRemoteProtocol(clientA, { timeoutMs: operationTimeoutMs, signal }));
+
+    const secondAddressesB = await resolvedPublicAddresses(
+      botB.session.endpoint,
+      lookup,
+      operationTimeoutMs,
+      signal,
+    );
+    if (!sameAddresses(firstAddresses[1], secondAddressesB)) throw failedError();
+    const clientB = clientFactory(botB.session, pinnedTransport(botB.session.endpoint, secondAddressesB));
+    if (clientB && typeof clientB.stop === "function") clients.push(clientB);
+    if (!clientB || typeof clientB.start !== "function" || typeof clientB.request !== "function"
+      || typeof clientB.stop !== "function" || clientA === clientB
       || clientB.provider !== botB.session.provider
       || clientB.runtimeId !== botB.session.runtimeId
       || clientB.generation !== botB.session.generation) throw failedError();
-    const secondAddresses = await Promise.all([
-      resolvedPublicAddresses(botA.session.endpoint, lookup, operationTimeoutMs, signal),
-      resolvedPublicAddresses(botB.session.endpoint, lookup, operationTimeoutMs, signal),
-    ]);
-    if (!sameAddresses(firstAddresses[0], secondAddresses[0])
-      || !sameAddresses(firstAddresses[1], secondAddresses[1])) throw failedError();
-
-    const protocol = [];
-    protocol.push(await readRemoteProtocol(clientA, { timeoutMs: operationTimeoutMs, signal }));
     protocol.push(await readRemoteProtocol(clientB, { timeoutMs: operationTimeoutMs, signal }));
     const computer = await waitForYouTubeFrame({
       controller,
