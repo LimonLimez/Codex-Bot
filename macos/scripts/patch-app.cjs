@@ -9,7 +9,7 @@ const path = require("node:path");
 const asar = require("@electron/asar");
 const { auditTreeDiff, snapshotTree } = require("../src/patch/diff-audit.cjs");
 const { patchHostInference } = require("../src/patch/host-inference.cjs");
-const { patchDesktop } = require("../src/patch/desktop.cjs");
+const { patchDesktop, WS_FILES } = require("../src/patch/desktop.cjs");
 const { patchRenderer } = require("../src/patch/renderer.cjs");
 
 const VENDOR_APP_ASAR_SHA256 =
@@ -31,6 +31,7 @@ const ALLOWED_MUTATIONS = Object.freeze([
   "dist/codex/desktop/cliproxy-manager.cjs",
   "dist/codex/desktop/model-selection-store.cjs",
   "dist/codex/desktop/runtime.cjs",
+  ...WS_FILES.map((relative) => `dist/codex/node_modules/ws/${relative}`),
   "dist/electron-main/main.cjs",
   "dist/electron-preload/preload.cjs",
   "dist/host/host-main.cjs",

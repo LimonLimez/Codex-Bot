@@ -9,26 +9,40 @@
 }
 
 .codex-bot-controls {
-  position: fixed;
-  top: 12px;
-  right: 12px;
-  z-index: 2147483000;
+  position: relative;
   box-sizing: border-box;
-  width: min(360px, calc(100vw - 24px));
-  min-width: 292px;
-  padding: 10px;
+  width: 100%;
+  min-width: 0;
+  margin-top: 8px;
+  padding: 8px;
   color: #eee;
   background: #242424;
   border: 1px solid var(--codex-border);
-  border-radius: 12px;
-  box-shadow: 0 10px 30px #0007;
-  backdrop-filter: blur(18px) saturate(1.25);
+  border-radius: 10px;
   font: 500 12px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.codex-model-dock {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 2px 8px;
+  color: #eee;
+  background: transparent;
+  font: 500 12px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+[data-codex-mount-state="pending"] {
+  display: none !important;
 }
 
 .codex-bot-controls *,
 .codex-bot-controls *::before,
-.codex-bot-controls *::after {
+.codex-bot-controls *::after,
+.codex-model-dock *,
+.codex-model-dock *::before,
+.codex-model-dock *::after {
   box-sizing: border-box;
 }
 
@@ -68,9 +82,9 @@
   margin-top: 5px;
 }
 
-.codex-bot-controls select,
-.codex-bot-controls input,
-.codex-bot-controls button {
+:is(.codex-bot-controls, .codex-model-dock) select,
+:is(.codex-bot-controls, .codex-model-dock) input,
+:is(.codex-bot-controls, .codex-model-dock) button {
   min-width: 0;
   height: 28px;
   color: inherit;
@@ -81,6 +95,7 @@
 }
 
 .codex-bot-controls select,
+.codex-model-dock select,
 .codex-bot-controls input[type="text"],
 .codex-bot-rename {
   padding: 0 8px;
@@ -95,7 +110,7 @@
   background: #38404d;
 }
 
-.codex-bot-controls :focus-visible {
+:is(.codex-bot-controls, .codex-model-dock) :focus-visible {
   outline: 2px solid var(--codex-blue);
   outline-offset: 1px;
 }
@@ -337,11 +352,11 @@
   white-space: nowrap;
 }
 
-.codex-bot-controls.is-max .codex-reasoning-slider {
+.codex-model-dock.is-max .codex-reasoning-slider {
   accent-color: #2383ff;
 }
 
-.codex-bot-controls.is-max .codex-reasoning-label {
+.codex-model-dock.is-max .codex-reasoning-label {
   color: #1473e6;
 }
 
@@ -370,7 +385,7 @@
   animation: codex-reasoning-burst-particle 0.62s cubic-bezier(0.18, 0.72, 0.25, 1) both;
 }
 
-.codex-bot-controls.is-ultra .codex-reasoning-label {
+.codex-model-dock.is-ultra .codex-reasoning-label {
   color: var(--codex-purple-soft);
 }
 
@@ -410,10 +425,7 @@
 
 @media (max-width: 1100px) {
   .codex-bot-controls {
-    top: 8px;
-    right: 8px;
-    width: min(332px, calc(100vw - 16px));
-    padding: 8px;
+    padding: 7px;
   }
 
   .codex-bot-header {
@@ -423,7 +435,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   .codex-bot-controls,
-  .codex-bot-controls * {
+  .codex-bot-controls *,
+  .codex-model-dock,
+  .codex-model-dock * {
     animation: none !important;
     scroll-behavior: auto !important;
     transition: none !important;

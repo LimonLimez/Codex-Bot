@@ -127,6 +127,25 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/desktop/cliproxy-manager.cjs",
         "dist/codex/desktop/model-selection-store.cjs",
         "dist/codex/desktop/runtime.cjs",
+        "dist/codex/node_modules/ws/LICENSE",
+        "dist/codex/node_modules/ws/README.md",
+        "dist/codex/node_modules/ws/browser.js",
+        "dist/codex/node_modules/ws/index.js",
+        "dist/codex/node_modules/ws/lib/buffer-util.js",
+        "dist/codex/node_modules/ws/lib/constants.js",
+        "dist/codex/node_modules/ws/lib/event-target.js",
+        "dist/codex/node_modules/ws/lib/extension.js",
+        "dist/codex/node_modules/ws/lib/limiter.js",
+        "dist/codex/node_modules/ws/lib/permessage-deflate.js",
+        "dist/codex/node_modules/ws/lib/receiver.js",
+        "dist/codex/node_modules/ws/lib/sender.js",
+        "dist/codex/node_modules/ws/lib/stream.js",
+        "dist/codex/node_modules/ws/lib/subprotocol.js",
+        "dist/codex/node_modules/ws/lib/validation.js",
+        "dist/codex/node_modules/ws/lib/websocket-server.js",
+        "dist/codex/node_modules/ws/lib/websocket.js",
+        "dist/codex/node_modules/ws/package.json",
+        "dist/codex/node_modules/ws/wrapper.mjs",
         "dist/electron-main/main.cjs",
         "dist/electron-preload/preload.cjs",
         "dist/host/host-main.cjs",
@@ -199,6 +218,20 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
   ]) {
     assert.equal(fs.lstatSync(path.join(extracted, "dist", "codex", relative)).isFile(), true);
   }
+  const remoteClientPath = path.join(
+    extracted,
+    "dist",
+    "codex",
+    "bots",
+    "remote-app-server-client.cjs",
+  );
+  delete require.cache[require.resolve(remoteClientPath)];
+  const remoteClient = require(remoteClientPath);
+  assert.equal(typeof remoteClient.RemoteAppServerClient, "function");
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(extracted, "dist", "codex", "node_modules", "ws", "package.json"), "utf8")).version,
+    "8.21.3",
+  );
   const patchedHost = fs.readFileSync(
     path.join(extracted, "dist", "host", "host-main.cjs"),
     "utf8",

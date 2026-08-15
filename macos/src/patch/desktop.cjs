@@ -20,6 +20,27 @@ const DESKTOP_FILES = Object.freeze([
   "bots/runtime-controller.cjs",
   "bots/runtime-provider.cjs",
 ]);
+const WS_FILES = Object.freeze([
+  "LICENSE",
+  "README.md",
+  "browser.js",
+  "index.js",
+  "lib/buffer-util.js",
+  "lib/constants.js",
+  "lib/event-target.js",
+  "lib/extension.js",
+  "lib/limiter.js",
+  "lib/permessage-deflate.js",
+  "lib/receiver.js",
+  "lib/sender.js",
+  "lib/stream.js",
+  "lib/subprotocol.js",
+  "lib/validation.js",
+  "lib/websocket-server.js",
+  "lib/websocket.js",
+  "package.json",
+  "wrapper.mjs",
+]);
 
 const MAIN_ANCHOR = '"use strict";var fjn=Object.create;';
 const MAIN_PATCH = '"use strict";require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));var fjn=Object.create;';
@@ -65,6 +86,15 @@ function patchDesktop(extractedRoot) {
     fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(target, 0o644);
   }
+  const wsRoot = path.resolve(sourceRoot, "..", "node_modules", "ws");
+  for (const relative of WS_FILES) {
+    const source = path.join(wsRoot, ...relative.split("/"));
+    realFile(source, `Pinned ws source ${relative}`);
+    const target = path.join(targetRoot, "node_modules", "ws", ...relative.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 });
+    fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(target, 0o644);
+  }
   fs.writeFileSync(main, patchMainSource(fs.readFileSync(main, "utf8")), {
     encoding: "utf8",
     mode: mainStat.mode & 0o777,
@@ -75,4 +105,4 @@ function patchDesktop(extractedRoot) {
   });
 }
 
-module.exports = { DESKTOP_FILES, patchDesktop, patchMainSource, patchPreloadSource };
+module.exports = { DESKTOP_FILES, WS_FILES, patchDesktop, patchMainSource, patchPreloadSource };

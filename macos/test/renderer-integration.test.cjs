@@ -71,11 +71,15 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
   }
 });
 
-test("approved CSS keeps Max blue, Ultra purple-blue, compact sizing, and reduced motion", () => {
+test("approved CSS docks management in the sidebar and model controls at the composer", () => {
   const css = fs.readFileSync(cssPath, "utf8");
   const botUi = fs.readFileSync(botUiPath, "utf8");
-  assert.match(css, /\.codex-bot-controls\s*\{[^}]*width:\s*min\(360px,/s);
+  assert.match(css, /\.codex-bot-controls\s*\{[^}]*position:\s*relative[^}]*width:\s*100%/s);
   assert.match(css, /\.codex-bot-controls\s*\{[^}]*color:\s*#eee[^}]*background:\s*#242424/s);
+  assert.match(css, /\.codex-model-dock\s*\{[^}]*position:\s*relative[^}]*width:\s*100%/s);
+  assert.match(css, /\[data-codex-mount-state="pending"\][^}]*display:\s*none/s);
+  assert.doesNotMatch(css, /\.codex-bot-controls\s*\{[^}]*position:\s*fixed/s);
+  assert.doesNotMatch(css, /\.codex-bot-controls\s*\{[^}]*top:\s*12px/s);
   assert.doesNotMatch(css, /\bCanvas(?:Text)?\b/);
   assert.match(css, /\.codex-reasoning-control\.is-max[^}]*#2383ff/s);
   assert.match(css, /\.codex-reasoning-ultra-fill[^}]*linear-gradient\([^)]*#2383ff[^)]*(?:#7c3aed|#8b5cf6)[^)]*#2383ff/s);
@@ -86,4 +90,6 @@ test("approved CSS keeps Max blue, Ultra purple-blue, compact sizing, and reduce
   assert.doesNotMatch(css, /url\(|data:image|\/Users\/|\/private\/tmp\//);
   assert.match(botUi, /"button",\s*"codex-bot-rename-action",\s*"Rename"/);
   assert.match(botUi, /rename\.addEventListener\("keydown"[\s\S]*event\.key === "Enter"/);
+  assert.match(botUi, /findUiMounts/);
+  assert.match(botUi, /MutationObserver/);
 });

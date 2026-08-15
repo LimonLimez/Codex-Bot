@@ -326,6 +326,46 @@
     return node;
   }
 
+  function findUiMounts(documentRef) {
+    if (!documentRef || typeof documentRef.querySelector !== "function") {
+      return Object.freeze({ sidebarHost: null, composerHost: null });
+    }
+    const sidebarSelectors = [
+      "[data-codex-bot-sidebar-host]",
+      '[data-testid*="sidebar" i]',
+      '[aria-label*="sidebar" i]',
+      "nav[aria-label]",
+      "aside[aria-label]",
+      "nav",
+      "aside",
+    ];
+    let sidebarHost = null;
+    for (const selector of sidebarSelectors) {
+      const candidate = documentRef.querySelector(selector);
+      if (candidate && candidate.id !== "codex-bot-controls") {
+        sidebarHost = candidate;
+        break;
+      }
+    }
+
+    let composerHost = documentRef.querySelector("[data-codex-bot-composer-host]");
+    if (!composerHost && typeof documentRef.querySelectorAll === "function") {
+      const inputs = documentRef.querySelectorAll(
+        'textarea,[contenteditable="true"],input[placeholder]',
+      );
+      for (const input of inputs) {
+        const placeholder = input?.getAttribute?.("placeholder") || input?.placeholder || "";
+        const label = input?.getAttribute?.("aria-label") || "";
+        if (!/ask anything|drop a file|message|prompt/i.test(`${placeholder} ${label}`)) continue;
+        composerHost = input.closest?.(
+          '[data-testid*="composer" i],form,[role="form"],[class*="composer" i]',
+        ) || input.parentElement || null;
+        if (composerHost) break;
+      }
+    }
+    return Object.freeze({ sidebarHost, composerHost });
+  }
+
   function createReasoningView(documentRef) {
     if (!documentRef || typeof documentRef.createElement !== "function") {
       throw new Error("Reasoning control is unavailable.");
@@ -420,6 +460,7 @@
     if (!facade) return null;
     const panel = element(documentRef, "aside", "codex-bot-controls");
     panel.id = "codex-bot-controls";
+    panel.dataset.codexMountState = "pending";
     panel.setAttribute("aria-label", "Codex bot and remote computer controls");
     const header = element(documentRef, "div", "codex-bot-header");
     const botSelect = element(documentRef, "select", "codex-bot-select");
@@ -442,6 +483,10 @@
     retry.type = "button";
     statusRow.append(status, retry);
     const modelRow = element(documentRef, "div", "codex-model-row");
+    const modelDock = element(documentRef, "section", "codex-model-dock");
+    modelDock.id = "codex-model-dock";
+    modelDock.dataset.codexMountState = "pending";
+    modelDock.setAttribute("aria-label", "Model and reasoning controls");
     const providerRow = element(documentRef, "div", "codex-provider-row");
     const providerSelect = element(documentRef, "select", "codex-provider-select");
     providerSelect.setAttribute("aria-label", "CLIProxyAPI provider");
@@ -464,8 +509,34 @@
     const reasoning = reasoningView.input;
     const reasoningLabel = element(documentRef, "output", "codex-reasoning-label");
     modelRow.append(modelSelect, reasoningView.control, reasoningLabel);
-    panel.append(header, renameRow, providerRow, statusRow, modelRow, reasoningView.warning);
-    documentRef.body.append(panel);
+    panel.append(header, renameRow, providerRow, statusRow);
+    modelDock.append(modelRow, reasoningView.warning);
+    documentRef.body.append(panel, modelDock);
+
+    function attachToProductHosts() {
+      const { sidebarHost, composerHost } = findUiMounts(documentRef);
+      if (sidebarHost) {
+        if (panel.parentElement !== sidebarHost) sidebarHost.append(panel);
+        panel.dataset.codexMountState = "mounted";
+      } else {
+        panel.dataset.codexMountState = "pending";
+      }
+      if (composerHost) {
+        if (modelDock.parentElement !== composerHost) {
+          if (typeof composerHost.prepend === "function") composerHost.prepend(modelDock);
+          else composerHost.insertBefore?.(modelDock, composerHost.firstChild || null);
+        }
+        modelDock.dataset.codexMountState = "mounted";
+      } else {
+        modelDock.dataset.codexMountState = "pending";
+      }
+    }
+    attachToProductHosts();
+    const MountObserver = windowRef.MutationObserver;
+    const mountObserver = typeof MountObserver === "function"
+      ? new MountObserver(() => attachToProductHosts())
+      : null;
+    mountObserver?.observe(documentRef.body, { childList: true, subtree: true });
 
     let lastSnapshot = null;
     let lastEffort = null;
@@ -497,9 +568,9 @@
       const enteredUltra = isUltraEffect(effort) && !isUltraEffect(lastEffort);
       updateReasoningView(reasoningView, model.efforts, Number(reasoning.value), { enteredUltra });
       reasoningLabel.textContent = EFFORT_LABELS[effort];
-      panel.classList.toggle("is-max", effort === "max");
-      panel.classList.toggle("is-ultra", isUltraEffect(effort));
-      panel.classList.toggle("is-ultra-code", effort === "ultra-code");
+      modelDock.classList.toggle("is-max", effort === "max");
+      modelDock.classList.toggle("is-ultra", isUltraEffect(effort));
+      modelDock.classList.toggle("is-ultra-code", effort === "ultra-code");
       if (warningTimer != null) {
         (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
@@ -559,7 +630,17 @@
       modelSelect.disabled = true;
       reasoning.disabled = true;
     });
-    return Object.freeze({ controller, panel });
+    return Object.freeze({
+      controller,
+      modelDock,
+      panel,
+      dispose() {
+        mountObserver?.disconnect();
+        controller.dispose();
+        panel.remove?.();
+        modelDock.remove?.();
+      },
+    });
   }
 
   if (typeof window === "object" && typeof document === "object") {
@@ -571,6 +652,7 @@
     MODEL_CATALOG,
     createReasoningView,
     createBotUiController,
+    findUiMounts,
     mount,
     runtimePresentation,
     updateReasoningView,

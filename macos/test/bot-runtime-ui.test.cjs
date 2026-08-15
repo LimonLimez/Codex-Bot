@@ -310,3 +310,43 @@ test("provider connection uses only the fixed CLIProxyAPI provider facade", asyn
   await assert.rejects(() => controller.connectProvider("xai"), /provider/i);
   assert.deepEqual(calls, ["claude"]);
 });
+
+test("UI mount discovery selects explicit or semantic sidebar and composer hosts", () => {
+  const { findUiMounts } = require(uiPath);
+  const explicitSidebar = { id: "sidebar" };
+  const explicitComposer = { id: "composer" };
+  const explicitDocument = {
+    querySelector(selector) {
+      if (selector === "[data-codex-bot-sidebar-host]") return explicitSidebar;
+      if (selector === "[data-codex-bot-composer-host]") return explicitComposer;
+      return null;
+    },
+    querySelectorAll() { return []; },
+  };
+  assert.deepEqual(findUiMounts(explicitDocument), {
+    sidebarHost: explicitSidebar,
+    composerHost: explicitComposer,
+  });
+
+  const semanticSidebar = { id: "semantic-sidebar" };
+  const composerForm = { id: "semantic-composer" };
+  const prompt = {
+    placeholder: "Ask anything, or drop a file.",
+    getAttribute(name) { return name === "placeholder" ? this.placeholder : null; },
+    closest(selector) { return selector.includes("form") ? composerForm : null; },
+    parentElement: null,
+  };
+  const semanticDocument = {
+    querySelector(selector) {
+      if (selector === "nav[aria-label]") return semanticSidebar;
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector.includes("textarea") ? [prompt] : [];
+    },
+  };
+  assert.deepEqual(findUiMounts(semanticDocument), {
+    sidebarHost: semanticSidebar,
+    composerHost: composerForm,
+  });
+});

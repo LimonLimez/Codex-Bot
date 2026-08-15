@@ -16,6 +16,31 @@ function tempRoot(t) {
   return root;
 }
 
+test("desktop runtime loads only an exact sealed sidecar receipt", (t) => {
+  const { loadSidecarReceipt } = require(runtimePath);
+  const root = tempRoot(t);
+  const sidecarRoot = path.join(root, "codex", "cliproxy");
+  fs.mkdirSync(sidecarRoot, { recursive: true });
+  fs.writeFileSync(path.join(sidecarRoot, "receipt.json"), JSON.stringify({
+    bytes: 58169264,
+    sha256: "d".repeat(64),
+  }));
+  assert.deepEqual(loadSidecarReceipt(root), {
+    bytes: 58169264,
+    sha256: "d".repeat(64),
+  });
+  assert.equal(Object.isFrozen(loadSidecarReceipt(root)), true);
+  fs.writeFileSync(path.join(sidecarRoot, "receipt.json"), JSON.stringify({
+    bytes: 58169264,
+    sha256: "d".repeat(64),
+    endpoint: "private",
+  }));
+  assert.throws(() => loadSidecarReceipt(root), /receipt/i);
+  fs.rmSync(path.join(sidecarRoot, "receipt.json"));
+  fs.symlinkSync(path.join(root, "outside.json"), path.join(sidecarRoot, "receipt.json"));
+  assert.throws(() => loadSidecarReceipt(root), /receipt/i);
+});
+
 test("desktop runtime registers the exact frozen bot/model boundary and keeps create zero-argument", async (t) => {
   const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
   const handlers = new Map();

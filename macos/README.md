@@ -14,10 +14,11 @@ the Grok interface.
 The Codex Bot DMG does not contain Grok Bot, its `app.asar`, an
 extracted frontend, or any other proprietary vendor binary or asset. The
 repository keeps the same boundary.
-The installer uses an already installed, user-owned exact Grok Bot 0.20.0 copy or,
-after explicit authorization, downloads the version-pinned official macOS DMG
-directly from the vendor. It verifies the complete input before creating a
-separate Codex Bot application. The original Grok Bot app is never modified.
+The installer uses an already installed or mounted, user-owned exact Grok Bot
+0.20.0 application selected by the user. It verifies the complete input before
+creating a separate Codex Bot application. The original Grok Bot app is never
+modified, and the installer does not download vendor software on the user's
+behalf.
 
 ## Runtime boundary
 

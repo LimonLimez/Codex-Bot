@@ -61,6 +61,30 @@ function loadConfiguredProvider() {
   }
 }
 
+function loadSidecarReceipt(resourcesPath) {
+  try {
+    if (typeof resourcesPath !== "string" || !path.isAbsolute(resourcesPath)) throw new Error("path");
+    const receiptPath = path.join(resourcesPath, "codex", "cliproxy", "receipt.json");
+    const stat = fs.lstatSync(receiptPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 80 || stat.size > 512) throw new Error("file");
+    const parsed = JSON.parse(fs.readFileSync(receiptPath, "utf8"));
+    if (
+      parsed == null ||
+      typeof parsed !== "object" ||
+      Array.isArray(parsed) ||
+      Object.getPrototypeOf(parsed) !== Object.prototype ||
+      Object.keys(parsed).sort().join(",") !== "bytes,sha256" ||
+      !Number.isSafeInteger(parsed.bytes) ||
+      parsed.bytes < 1 ||
+      typeof parsed.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(parsed.sha256)
+    ) throw new Error("shape");
+    return Object.freeze({ bytes: parsed.bytes, sha256: parsed.sha256 });
+  } catch {
+    throw new Error("CLIProxyAPI receipt is unavailable.");
+  }
+}
+
 function productionDependencies(electron) {
   const stateRoot = path.join(electron.app.getPath("userData"), "codex-bot");
   const botStore = new BotStore({ filePath: path.join(stateRoot, "bots.v1.json") });
@@ -68,11 +92,12 @@ function productionDependencies(electron) {
   const modelSelectionsPath = path.join(stateRoot, "model-selections.v1.json");
   const conversationBindingsPath = path.join(stateRoot, "conversation-bindings.v1.json");
   const selectionStore = new ModelSelectionStore({ filePath: modelSelectionsPath });
+  const sidecarReceipt = loadSidecarReceipt(process.resourcesPath);
   const sidecarManager = new CLIProxyManager({
     binaryPath: path.join(process.resourcesPath, "codex", "cliproxy", "cli-proxy-api"),
     stateRoot: path.join(stateRoot, "cliproxy"),
-    expectedBinaryBytes: 58509266,
-    expectedBinarySha256: "1d7a12c5a1974b492dd2f21e3ecfb39db66d3465a67fd7039a844ce2c40e55df",
+    expectedBinaryBytes: sidecarReceipt.bytes,
+    expectedBinarySha256: sidecarReceipt.sha256,
   });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
@@ -94,6 +119,7 @@ function installDesktopRuntime(electron, injected = {}) {
     throw new Error("Codex desktop runtime requires Electron.");
   }
   if (electron.app[INSTALLED]) return electron.app[INSTALLED];
+  try { electron.app.setName?.("Codex Bot"); } catch {}
   const dependencies = injected.controller && injected.selectionStore
     ? injected
     : productionDependencies(electron);
@@ -214,4 +240,5 @@ module.exports = {
   RUNTIME_EVENT_CHANNEL,
   installDesktopRuntime,
   loadConfiguredProvider,
+  loadSidecarReceipt,
 };
