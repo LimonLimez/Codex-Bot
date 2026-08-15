@@ -723,17 +723,13 @@ test("subscription events are deeply detached and frozen before delivery", () =>
   assert.deepEqual(seen[0].payload, { frames: [{ sequence: 1, pixels: [1, 2, 3] }] });
 });
 
-test("rejects proxied cyclic deep wide and oversized provider data before publication", async (t) => {
+test("rejects proxied deep wide and oversized provider data before publication", async (t) => {
   const cases = [];
   cases.push(["proxy", new Proxy({
     runtimeId: "runtime-bot-1",
     type: "computer/frame",
     sequence: 1,
   }, {})]);
-
-  const cycle = { runtimeId: "runtime-bot-1", type: "computer/frame", sequence: 1 };
-  cycle.payload = cycle;
-  cases.push(["cycle", cycle]);
 
   const deep = { runtimeId: "runtime-bot-1", type: "computer/frame", sequence: 1, payload: {} };
   let cursor = deep.payload;

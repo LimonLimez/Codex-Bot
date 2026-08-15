@@ -208,6 +208,10 @@ function deepFreeze(value, seen = new Set()) {
 }
 
 function cloneProviderData(value, seen, budget, depth = 0) {
+  if (value && typeof value === "object") {
+    if (types.isProxy(value)) throw new TypeError("Provider data cannot contain proxies.");
+    if (seen.has(value)) return seen.get(value);
+  }
   budget.nodes += 1;
   if (budget.nodes > MAX_PROVIDER_DATA_NODES || depth > MAX_PROVIDER_DATA_DEPTH) {
     throw new TypeError("Provider data exceeds bounded complexity.");
@@ -225,8 +229,6 @@ function cloneProviderData(value, seen, budget, depth = 0) {
     return value;
   }
   if (typeof value !== "object") throw new TypeError("Provider data must contain values only.");
-  if (types.isProxy(value)) throw new TypeError("Provider data cannot contain proxies.");
-  if (seen.has(value)) throw new TypeError("Provider data cannot contain cycles or aliases.");
 
   const array = Array.isArray(value);
   const prototype = Object.getPrototypeOf(value);
