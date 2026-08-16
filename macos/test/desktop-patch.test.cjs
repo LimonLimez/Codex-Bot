@@ -21,6 +21,7 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /exposeInMainWorld\("codexBots"/);
   assert.match(preload, /exposeInMainWorld\("codexRuntime"/);
   assert.match(preload, /exposeInMainWorld\("codexAccount"/);
+  assert.match(preload, /exposeInMainWorld\("openbotComputer"/);
   assert.match(preload, /codex-bot:changed/);
   assert.match(preload, /codex-runtime:event/);
   assert.match(preload, /onEvent:callback/);
@@ -34,6 +35,12 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /codex-account:changed/);
   assert.match(preload, /codex-catalog:changed/);
   assert.match(preload, /create:\(\)=>__codexInvoke\("create"\)/);
+  for (const method of [
+    "selectMode", "read", "decidePermission", "listPermissions",
+    "revokePermission", "onChanged", "onPermissionRequested",
+  ]) {
+    assert.match(preload, new RegExp(`${method}:`));
+  }
   assert.throws(() => patchMainSource(main), /already|anchor/i);
   assert.throws(() => patchPreloadSource(preload), /already|anchor/i);
 });
@@ -50,8 +57,12 @@ test("desktop packaging includes every direct inference runtime module in the au
     "desktop/codex-runtime-integrity.cjs",
     "desktop/inference-bridge-server.cjs",
     "desktop/inference-provider-router.cjs",
+    "local/local-computer-boundary.cjs",
+    "local/local-computer-runtime.cjs",
     "local/local-desktop-manager.cjs",
+    "local/local-helper-child.cjs",
     "local/local-helper-protocol.cjs",
+    "local/local-helper-transport.cjs",
     "local/local-permission-broker.cjs",
     "local/local-permission-store.cjs",
   ];

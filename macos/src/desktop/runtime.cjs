@@ -15,6 +15,7 @@ const { InferenceBridgeServer } = require("./inference-bridge-server.cjs");
 const { InferenceProviderRouter } = require("./inference-provider-router.cjs");
 const { BOT_ID, ModelSelectionStore } = require("./model-selection-store.cjs");
 const { prepareOpenBotUserData } = require("./openbot-user-data.cjs");
+const { createLocalComputerRuntime } = require("../local/local-computer-runtime.cjs");
 
 const IPC_CHANNELS = Object.freeze({
   accountRead: "codex-account:read",
@@ -34,11 +35,18 @@ const IPC_CHANNELS = Object.freeze({
   selectBot: "codex-bot:select-bot",
   readModel: "codex-bot:read-model",
   selectModel: "codex-bot:select-model",
+  computerSelectMode: "openbot-computer:select-mode",
+  computerRead: "openbot-computer:read",
+  permissionDecide: "openbot-computer:permission-decide",
+  permissionsList: "openbot-computer:permissions-list",
+  permissionRevoke: "openbot-computer:permission-revoke",
 });
 const CHANGE_CHANNEL = "codex-bot:changed";
 const RUNTIME_EVENT_CHANNEL = "codex-runtime:event";
 const ACCOUNT_CHANGE_CHANNEL = "codex-account:changed";
 const CATALOG_CHANGE_CHANNEL = "codex-catalog:changed";
+const COMPUTER_CHANGE_CHANNEL = "openbot-computer:changed";
+const COMPUTER_PERMISSION_CHANNEL = "openbot-computer:permission-requested";
 const INSTALLED = Symbol.for("codex.bot.macos.desktop-runtime");
 const OPTIONAL_MODEL_EFFORTS = Object.freeze({
   "claude-fable-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
@@ -50,6 +58,131 @@ function sanitizedFailure() {
   const error = new Error("Codex bot operation failed.");
   error.code = "CODEX_BOT_OPERATION_FAILED";
   return error;
+}
+
+function sanitizedComputerFailure() {
+  const error = new Error("OpenBot Computer operation failed.");
+  error.code = "OPENBOT_COMPUTER_OPERATION_FAILED";
+  return error;
+}
+
+function exactPlainInput(value, fields, required = fields) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw sanitizedComputerFailure();
+  let descriptors;
+  let prototype;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    prototype = Object.getPrototypeOf(value);
+  } catch { throw sanitizedComputerFailure(); }
+  if ((prototype !== Object.prototype && prototype !== null)
+    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+      || !fields.includes(key) || !("value" in descriptors[key]))
+    || required.some((field) => !descriptors[field])) throw sanitizedComputerFailure();
+  return Object.fromEntries(fields
+    .filter((field) => descriptors[field])
+    .map((field) => [field, descriptors[field].value]));
+}
+
+function computerBotId(value) {
+  if (typeof value !== "string" || !BOT_ID.test(value)) throw sanitizedComputerFailure();
+  return value.toLowerCase();
+}
+
+function computerModeRequest(value) {
+  const request = exactPlainInput(value, ["botId", "mode"]);
+  if (!new Set(["local", "cursor", "not-now"]).has(request.mode)) throw sanitizedComputerFailure();
+  return Object.freeze({ botId: computerBotId(request.botId), mode: request.mode });
+}
+
+function computerDecisionRequest(value) {
+  const request = exactPlainInput(value, [
+    "requestId", "botId", "targetId", "targetGeneration", "decision",
+  ]);
+  if (typeof request.requestId !== "string"
+    || !/^permission-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.requestId)
+    || typeof request.targetId !== "string"
+    || !/^local-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.targetId)
+    || !Number.isSafeInteger(request.targetGeneration) || request.targetGeneration < 0
+    || !new Set(["deny", "once", "always"]).has(request.decision)) throw sanitizedComputerFailure();
+  return Object.freeze({
+    requestId: request.requestId.toLowerCase(),
+    botId: computerBotId(request.botId),
+    targetId: request.targetId.toLowerCase(),
+    targetGeneration: request.targetGeneration,
+    decision: request.decision,
+  });
+}
+
+function computerRevokeRequest(value) {
+  const request = exactPlainInput(value, ["botId", "grantId"]);
+  if (typeof request.grantId !== "string"
+    || !/^grant-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(request.grantId)) {
+    throw sanitizedComputerFailure();
+  }
+  return Object.freeze({
+    botId: computerBotId(request.botId),
+    grantId: request.grantId.toLowerCase(),
+  });
+}
+
+function computerPublic(value) {
+  if (value === undefined) return null;
+  const state = { nodes: 0, seen: new Set() };
+  return deepFreezeComputer(cloneComputerValue(value, state, 0));
+}
+
+function cloneComputerValue(value, state, depth) {
+  state.nodes += 1;
+  if (state.nodes > 4096 || depth > 16) throw sanitizedComputerFailure();
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw sanitizedComputerFailure();
+    return value;
+  }
+  if (typeof value === "string") {
+    if (Buffer.byteLength(value, "utf8") > 128 * 1024 || value.includes("\0")
+      || /(?:\/Users\/|Authorization\s*:|\bBearer\s+|(?:password|access[_-]?token|cookie)\s*[:=])/i.test(value)) {
+      throw sanitizedComputerFailure();
+    }
+    return value;
+  }
+  if (typeof value !== "object" || state.seen.has(value)) throw sanitizedComputerFailure();
+  const array = Array.isArray(value);
+  let prototype;
+  let descriptors;
+  let keys;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    keys = Reflect.ownKeys(descriptors);
+  } catch { throw sanitizedComputerFailure(); }
+  if ((array && prototype !== Array.prototype)
+    || (!array && prototype !== Object.prototype && prototype !== null)
+    || keys.some((key) => typeof key !== "string" || !("value" in descriptors[key])
+      || /(?:auth|bookmark|credential|endpoint|password|secret|token|url)/i.test(key))) {
+    throw sanitizedComputerFailure();
+  }
+  if (array) {
+    const elements = keys.filter((key) => key !== "length");
+    if (elements.length !== value.length || elements.some((key, index) => key !== String(index))) {
+      throw sanitizedComputerFailure();
+    }
+  }
+  state.seen.add(value);
+  const copy = array ? [] : {};
+  for (const key of keys) {
+    if (array && key === "length") continue;
+    copy[key] = cloneComputerValue(descriptors[key].value, state, depth + 1);
+  }
+  state.seen.delete(value);
+  return copy;
+}
+
+function deepFreezeComputer(value, seen = new Set()) {
+  if (!value || typeof value !== "object" || seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value)) deepFreezeComputer(nested, seen);
+  return Object.freeze(value);
 }
 
 function selectionRequest(value) {
@@ -334,6 +467,11 @@ function productionDependencies(electron) {
     readCatalog: () => accountController.catalogState(),
     stateRoot,
   });
+  const computerBoundary = createLocalComputerRuntime({
+    electron,
+    stateRoot,
+    store: botStore,
+  });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
   process.env.CODEX_BOT_MODEL_SELECTIONS = modelSelectionsPath;
@@ -345,6 +483,7 @@ function productionDependencies(electron) {
   return {
     accountController,
     codexManager,
+    computerBoundary,
     controller,
     inferenceBridge,
     selectionStore,
@@ -382,6 +521,14 @@ function installDesktopRuntime(electron, injected = {}) {
     stop() {},
   });
   const inferenceBridge = dependencies.inferenceBridge || null;
+  const computerBoundary = dependencies.computerBoundary || Object.freeze({
+    async selectMode() { throw sanitizedComputerFailure(); },
+    async read() { throw sanitizedComputerFailure(); },
+    async decidePermission() { throw sanitizedComputerFailure(); },
+    async listPermissions() { throw sanitizedComputerFailure(); },
+    async revokePermission() { throw sanitizedComputerFailure(); },
+    dispose() {},
+  });
   const registered = [];
   let disposed = false;
   void accountController.start().catch(() => {});
@@ -426,13 +573,24 @@ function installDesktopRuntime(electron, injected = {}) {
     }
   }
 
-  function handle(channel, operation) {
-    electron.ipcMain.handle(channel, async (_event, ...args) => {
-      if (disposed) throw sanitizedFailure();
+  function currentWindowSender(event) {
+    if (typeof electron.BrowserWindow.fromWebContents !== "function") return true;
+    try {
+      const window = electron.BrowserWindow.fromWebContents(event?.sender);
+      return Boolean(window && !window.isDestroyed?.() && window.webContents === event.sender
+        && !window.webContents.isDestroyed?.());
+    } catch { return false; }
+  }
+
+  function handle(channel, operation, { requireCurrentWindow = false, computer = false } = {}) {
+    electron.ipcMain.handle(channel, async (event, ...args) => {
+      if (disposed) throw computer ? sanitizedComputerFailure() : sanitizedFailure();
       try {
-        return await operation(...args);
+        if (requireCurrentWindow && !currentWindowSender(event)) throw sanitizedComputerFailure();
+        const result = await operation(...args);
+        return computer ? computerPublic(result) : result;
       } catch {
-        throw sanitizedFailure();
+        throw computer ? sanitizedComputerFailure() : sanitizedFailure();
       }
     });
     registered.push(channel);
@@ -511,6 +669,21 @@ function installDesktopRuntime(electron, injected = {}) {
       accountController.catalogState(),
     ));
   });
+  handle(IPC_CHANNELS.computerSelectMode, (value) => (
+    computerBoundary.selectMode(computerModeRequest(value))
+  ), { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.computerRead, (botId) => (
+    computerBoundary.read(computerBotId(botId))
+  ), { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.permissionDecide, (value) => (
+    computerBoundary.decidePermission(computerDecisionRequest(value))
+  ), { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.permissionsList, (botId) => (
+    computerBoundary.listPermissions(computerBotId(botId))
+  ), { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.permissionRevoke, (value) => (
+    computerBoundary.revokePermission(computerRevokeRequest(value))
+  ), { requireCurrentWindow: true, computer: true });
 
   const onBotChanged = (event) => broadcast(event);
   const onRuntimeChanged = (event) => {
@@ -520,11 +693,19 @@ function installDesktopRuntime(electron, injected = {}) {
   const onRuntimeEvent = (event) => broadcastRuntimeEvent(event);
   const onAccountChanged = (event) => broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
   const onCatalogChanged = (event) => broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
+  const onComputerChanged = (event) => {
+    try { broadcastChannel(COMPUTER_CHANGE_CHANNEL, computerPublic(event)); } catch {}
+  };
+  const onComputerPermission = (event) => {
+    try { broadcastChannel(COMPUTER_PERMISSION_CHANNEL, computerPublic(event)); } catch {}
+  };
   controller.on?.("bot-changed", onBotChanged);
   controller.on?.("runtime-changed", onRuntimeChanged);
   controller.on?.("runtime-event", onRuntimeEvent);
   accountController.on?.("account-changed", onAccountChanged);
   accountController.on?.("catalog-changed", onCatalogChanged);
+  computerBoundary.on?.("changed", onComputerChanged);
+  computerBoundary.on?.("permission-requested", onComputerPermission);
 
   const api = Object.freeze({
     dispose() {
@@ -536,6 +717,9 @@ function installDesktopRuntime(electron, injected = {}) {
       controller.off?.("runtime-event", onRuntimeEvent);
       accountController.off?.("account-changed", onAccountChanged);
       accountController.off?.("catalog-changed", onCatalogChanged);
+      computerBoundary.off?.("changed", onComputerChanged);
+      computerBoundary.off?.("permission-requested", onComputerPermission);
+      computerBoundary.dispose?.();
       accountController.dispose();
       inferenceBridge?.dispose?.();
       codexManager.stop();
@@ -557,6 +741,8 @@ module.exports = {
   ACCOUNT_CHANGE_CHANNEL,
   CATALOG_CHANGE_CHANNEL,
   CHANGE_CHANNEL,
+  COMPUTER_CHANGE_CHANNEL,
+  COMPUTER_PERMISSION_CHANNEL,
   IPC_CHANNELS,
   RUNTIME_EVENT_CHANNEL,
   createDirectCodexManager,

@@ -313,10 +313,11 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   });
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
     "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy",
-    "catalogList", "connectProvider", "create", "list", "read", "readModel", "rename", "retryRuntime",
-    "selectBot", "selectModel", "updateProfile",
+    "catalogList", "computerRead", "computerSelectMode", "connectProvider", "create", "list",
+    "permissionDecide", "permissionRevoke", "permissionsList", "read", "readModel", "rename",
+    "retryRuntime", "selectBot", "selectModel", "updateProfile",
   ]);
-  assert.equal(handlers.size, 17);
+  assert.equal(handlers.size, 22);
   assert.equal(Object.isFrozen(installed), true);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
@@ -383,6 +384,125 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   assert.deepEqual(calls.slice(-4), [
     ["inference-bridge-dispose"], ["direct-stop"], ["sidecar-stop"], ["dispose"],
   ]);
+});
+
+test("desktop exposes exact local computer methods and rejects hostile IPC before private effects", async () => {
+  const {
+    COMPUTER_CHANGE_CHANNEL,
+    COMPUTER_PERMISSION_CHANNEL,
+    installDesktopRuntime,
+    IPC_CHANNELS,
+  } = require(runtimePath);
+  const handlers = new Map();
+  const listeners = new Map();
+  const sends = [];
+  const calls = [];
+  const window = {
+    isDestroyed: () => false,
+    webContents: {
+      isDestroyed: () => false,
+      send: (...args) => sends.push(args),
+    },
+  };
+  const sender = window.webContents;
+  const computer = Object.freeze({
+    mode: "local",
+    generation: 1,
+    localProfileId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    nativeAgentId: null,
+    state: "ready",
+    lastConfirmedAt: "2026-08-15T12:34:56.000Z",
+    lastErrorCode: null,
+  });
+  const grant = Object.freeze({
+    grantId: "grant-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    botId: BOT_A,
+    capability: "filesystem.read",
+    resourceId: "folder-a",
+    resourceLabel: "Folder A",
+    scope: "always",
+    createdAt: "2026-08-15T12:34:56.000Z",
+  });
+  const computerBoundary = {
+    on(event, listener) { listeners.set(event, listener); },
+    off(event, listener) { if (listeners.get(event) === listener) listeners.delete(event); },
+    async selectMode(value) { calls.push(["select-mode", value]); return computer; },
+    async read(botId) { calls.push(["computer-read", botId]); return computer; },
+    async decidePermission(value) { calls.push(["permission-decide", value]); return computer; },
+    async listPermissions(botId) { calls.push(["permissions-list", botId]); return [grant]; },
+    async revokePermission(value) { calls.push(["permission-revoke", value]); return []; },
+    dispose() { calls.push(["computer-dispose"]); },
+  };
+  const controller = { on() {}, off() {}, dispose() {} };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(value) { return value === sender ? window : null; },
+      getAllWindows: () => [window],
+    },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore: {},
+    computerBoundary,
+    codexManager: { async start() {}, stop() {} },
+  });
+  const event = { sender };
+  const selected = await handlers.get(IPC_CHANNELS.computerSelectMode)(event, { botId: BOT_A, mode: "local" });
+  assert.deepEqual(selected, computer);
+  assert.equal(Object.isFrozen(selected), true);
+  const computerReadHandler = handlers.get(IPC_CHANNELS.computerRead);
+  assert.deepEqual(await computerReadHandler(event, BOT_A), computer);
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.permissionsList)(event, BOT_A), [grant]);
+  await handlers.get(IPC_CHANNELS.permissionDecide)(event, {
+    requestId: "permission-11111111-1111-4111-8111-111111111111",
+    botId: BOT_A,
+    targetId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    targetGeneration: 1,
+    decision: "once",
+  });
+  await handlers.get(IPC_CHANNELS.permissionRevoke)(event, { botId: BOT_A, grantId: grant.grantId });
+  assert.equal(calls.length, 5);
+
+  await assert.rejects(
+    handlers.get(IPC_CHANNELS.computerSelectMode)(event, new Proxy({}, {
+      ownKeys() { throw new Error("private /Users/person token"); },
+    })),
+    (error) => {
+      assert.equal(error.code, "OPENBOT_COMPUTER_OPERATION_FAILED");
+      assert.doesNotMatch(String(error), /Users|private|token/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    handlers.get(IPC_CHANNELS.computerRead)({ sender: {} }, BOT_A),
+    { code: "OPENBOT_COMPUTER_OPERATION_FAILED" },
+  );
+  assert.equal(calls.length, 5);
+
+  listeners.get("changed")({ botId: BOT_A, computer });
+  listeners.get("permission-requested")({
+    requestId: "permission-11111111-1111-4111-8111-111111111111",
+    botId: BOT_A,
+    targetId: computer.localProfileId,
+    targetGeneration: 1,
+    capability: "filesystem.read",
+    resourceLabel: "Folder A",
+    reason: "Read an approved file",
+  });
+  assert.deepEqual(sends.map(([channel]) => channel), [COMPUTER_CHANGE_CHANNEL, COMPUTER_PERMISSION_CHANNEL]);
+  assert.doesNotMatch(JSON.stringify(sends), /bookmark|Users|authToken|endpoint/);
+  installed.dispose();
+  assert.equal(handlers.has(IPC_CHANNELS.computerRead), false);
+  assert.equal(listeners.size, 0);
+  assert.deepEqual(calls.at(-1), ["computer-dispose"]);
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
 });
 
 test("desktop account boundary opens browser login only in main and publishes frozen sanitized account and catalog generations", async () => {
