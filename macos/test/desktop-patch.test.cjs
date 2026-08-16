@@ -50,6 +50,7 @@ test("desktop packaging includes every direct inference runtime module in the au
     "desktop/codex-runtime-integrity.cjs",
     "desktop/inference-bridge-server.cjs",
     "desktop/inference-provider-router.cjs",
+    "local/local-permission-broker.cjs",
     "local/local-permission-store.cjs",
   ];
   for (const relative of required) {
