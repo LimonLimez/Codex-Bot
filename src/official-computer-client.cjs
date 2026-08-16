@@ -283,6 +283,7 @@ module.exports = {
       INPUT_REQUEST_TIMEOUT_MS,
     ),
   pendingApprovalForSeat: (seatKey) => request("approval.get", { seatKey }),
+  pendingApprovals: () => request("approval.list"),
   decidePendingApproval: (seatKey, decision, binding) =>
     request("approval.decide", { seatKey, decision, binding }),
   acquireUserControl: (seatKey, controlId) =>

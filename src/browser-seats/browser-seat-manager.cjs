@@ -1300,6 +1300,12 @@ function pendingApprovalForSeat(key) {
   return actionApprovals.getPendingStatus(String(key || ""));
 }
 
+function pendingApprovals() {
+  return [...activeSeats.keys()]
+    .map((seatKey) => pendingApprovalForSeat(seatKey))
+    .filter(Boolean);
+}
+
 function decidePendingApproval(key, decision, binding) {
   const seatKey = String(key || "");
   if (seatKey !== String(binding?.seatId || ""))
@@ -1419,6 +1425,7 @@ module.exports = {
   approvalOriginForPage,
   approvalContextForActions,
   pendingApprovalForSeat,
+  pendingApprovals,
   decidePendingApproval,
   acquireUserControl,
   heartbeatUserControl,

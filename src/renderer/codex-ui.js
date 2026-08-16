@@ -2528,26 +2528,26 @@ function approvalActionLabel(action) {
   return `${kind}${target}${destination}${typed}`;
 }
 
-function removeOfficialApprovalCardForForm(form) {
+function removeOfficialApprovalCardForForm(form, seatId = null) {
   const anchor = form?.parentElement;
   const host = anchor?.parentElement;
   if (!host) return;
   for (const card of host.querySelectorAll(
     ":scope > [data-codex-chat-approval]",
   )) {
-    if (card.dataset.codexApprovalAgentId === form.dataset.codexAgentId)
-      card.remove();
+    if (!seatId || card.dataset.codexApprovalAgentId === seatId) card.remove();
   }
 }
 
 function renderOfficialApprovalCard(form, pending) {
-  const agentId = String(form?.dataset?.codexAgentId || "");
+  const agentId = String(pending?.seatId || "");
   const anchor = form?.parentElement;
   const host = anchor?.parentElement;
-  if (!agentId || !host || pending?.seatId !== agentId || !pending?.frame) {
-    removeOfficialApprovalCardForForm(form);
+  if (!agentId || !host) {
+    removeOfficialApprovalCardForForm(form, agentId || null);
     return;
   }
+  const requiresExactFrame = Boolean(pending?.frame);
   let card = [
     ...host.querySelectorAll(":scope > [data-codex-chat-approval]"),
   ].find((item) => item.dataset.codexApprovalAgentId === agentId);
@@ -2561,54 +2561,76 @@ function renderOfficialApprovalCard(form, pending) {
     host.insertBefore(card, anchor);
   }
   card.dataset.codexApprovalKey = approvalKey;
-  card.dataset.framePresented = "false";
+  card.dataset.codexApprovalProvider = requiresExactFrame
+    ? "official"
+    : "private";
+  card.dataset.framePresented = requiresExactFrame ? "false" : "true";
   const titleId = `codex-approval-${crypto.randomUUID()}`;
   card.setAttribute("aria-labelledby", titleId);
   const actions = (pending.presentation?.actions || [])
     .slice(0, 4)
     .map((action) => `<li>${escapeHtml(approvalActionLabel(action))}</li>`)
     .join("");
-  const expectedSource = `data:image/png;base64,${pending.frame.screenshotBase64}`;
+  const expectedSource = requiresExactFrame
+    ? `data:image/png;base64,${pending.frame.screenshotBase64}`
+    : "";
+  const providerLabel = requiresExactFrame
+    ? "Vendor computer"
+    : "Private browser";
+  const providerBadge = requiresExactFrame
+    ? '<span class="codex-route-badge is-vendor">Shared vendor screen</span>'
+    : '<span class="codex-route-badge">This employee\'s browser</span>';
+  const fallbackSummary = requiresExactFrame
+    ? "An employee wants to interact with the shared vendor computer."
+    : "An employee wants to use their private browser.";
+  const frameHtml = requiresExactFrame
+    ? `<figure>
+         <img src="${escapeHtml(expectedSource)}" alt="Exact shared vendor screen this action will use" data-codex-chat-approval-frame />
+         <figcaption>Allow once unlocks only this exact action on this displayed screen. If the screen or session changes, Open Bot asks again.</figcaption>
+       </figure>`
+    : "";
+  const initialStatus = requiresExactFrame
+    ? "Loading the exact approval screen..."
+    : "Browser access is on. Review this one action, then choose Allow once or Deny.";
   card.innerHTML = `
     <div class="codex-chat-approval-heading">
-      <div><span>Vendor computer</span><strong id="${titleId}">Computer action needs your permission</strong></div>
-      <span class="codex-route-badge is-vendor">Shared vendor screen</span>
+      <div><span>${providerLabel}</span><strong id="${titleId}">Computer action needs your permission</strong></div>
+      ${providerBadge}
     </div>
-    <p>${escapeHtml(pending.summary || "An employee wants to interact with the shared vendor computer.")}</p>
+    <p>${escapeHtml(pending.summary || fallbackSummary)}</p>
     ${actions ? `<ul>${actions}</ul>` : ""}
-    <figure>
-      <img src="${escapeHtml(expectedSource)}" alt="Exact shared vendor screen this action will use" data-codex-chat-approval-frame />
-      <figcaption>Allow once unlocks only this exact action on this displayed screen. If the screen or session changes, Open Bot asks again.</figcaption>
-    </figure>
+    ${frameHtml}
     <div class="codex-chat-approval-actions">
-      <button type="button" data-codex-chat-allow disabled>Allow once</button>
+      <button type="button" data-codex-chat-allow ${requiresExactFrame ? "disabled" : ""}>Allow once</button>
       <button type="button" data-codex-chat-deny>Deny</button>
-      <span data-codex-chat-approval-status role="status" aria-live="polite">Loading the exact approval screen...</span>
+      <span data-codex-chat-approval-status role="status" aria-live="polite">${initialStatus}</span>
     </div>`;
   const image = card.querySelector("[data-codex-chat-approval-frame]");
   const allow = card.querySelector("[data-codex-chat-allow]");
   const deny = card.querySelector("[data-codex-chat-deny]");
   const status = card.querySelector("[data-codex-chat-approval-status]");
-  image.addEventListener("load", () => {
-    if (
-      card.dataset.codexApprovalKey !== approvalKey ||
-      image.getAttribute("src") !== expectedSource
-    )
-      return;
-    card.dataset.framePresented = "true";
-    allow.disabled = false;
-    status.textContent = "Exact screen displayed. Choose Allow once or Deny.";
-  });
-  image.addEventListener("error", () => {
-    if (card.dataset.codexApprovalKey !== approvalKey) return;
-    allow.disabled = true;
-    status.textContent =
-      "The exact approval screen could not be displayed. Deny or wait for a fresh request.";
-  });
-  image.src = expectedSource;
+  if (image) {
+    image.addEventListener("load", () => {
+      if (
+        card.dataset.codexApprovalKey !== approvalKey ||
+        image.getAttribute("src") !== expectedSource
+      )
+        return;
+      card.dataset.framePresented = "true";
+      allow.disabled = false;
+      status.textContent = "Exact screen displayed. Choose Allow once or Deny.";
+    });
+    image.addEventListener("error", () => {
+      if (card.dataset.codexApprovalKey !== approvalKey) return;
+      allow.disabled = true;
+      status.textContent =
+        "The exact approval screen could not be displayed. Deny or wait for a fresh request.";
+    });
+    image.src = expectedSource;
+  }
   const decide = async (decision) => {
     if (card.dataset.codexApprovalKey !== approvalKey) return;
-    const presented = decision === "allow-once";
+    const presented = decision === "allow-once" && requiresExactFrame;
     if (presented && card.dataset.framePresented !== "true") return;
     allow.disabled = true;
     deny.disabled = true;
@@ -2623,7 +2645,8 @@ function renderOfficialApprovalCard(form, pending) {
       card.remove();
     } catch (error) {
       if (card.dataset.codexApprovalKey === approvalKey) {
-        allow.disabled = card.dataset.framePresented !== "true";
+        allow.disabled =
+          requiresExactFrame && card.dataset.framePresented !== "true";
         deny.disabled = false;
         status.textContent =
           error?.message ||
@@ -2637,56 +2660,73 @@ function renderOfficialApprovalCard(form, pending) {
 }
 
 async function refreshOfficialApprovalForForm(form) {
-  const agentId = String(form?.dataset?.codexAgentId || "");
+  const mode = officialComputerState(lastStatus).mode;
   if (
-    !agentId ||
-    officialComputerState(lastStatus).mode !== "official" ||
+    !["private", "official"].includes(mode) ||
     officialApprovalLoads.has(form)
   )
     return;
   officialApprovalLoads.add(form);
   try {
-    const response = await request(
-      `/api/approval?seatKey=${encodeURIComponent(agentId)}`,
-    );
+    const response = await request("/api/approvals");
     if (
       form.isConnected === false ||
-      form.dataset.codexAgentId !== agentId ||
-      officialComputerState(lastStatus).mode !== "official"
+      officialComputerState(lastStatus).mode !== mode
     )
       return;
-    if (response?.pending) renderOfficialApprovalCard(form, response.pending);
-    else removeOfficialApprovalCardForForm(form);
+    const pending = Array.isArray(response?.pending) ? response.pending : [];
+    const seatIds = new Set();
+    for (const approval of pending) {
+      const seatId = String(approval?.seatId || "");
+      if (!seatId) continue;
+      seatIds.add(seatId);
+      renderOfficialApprovalCard(form, approval);
+    }
+    const anchor = form?.parentElement;
+    const host = anchor?.parentElement;
+    if (host) {
+      for (const card of host.querySelectorAll(
+        ":scope > [data-codex-chat-approval]",
+      )) {
+        if (!seatIds.has(card.dataset.codexApprovalAgentId)) card.remove();
+      }
+    }
   } catch (error) {
     const anchor = form?.parentElement;
     const host = anchor?.parentElement;
-    const card = host
-      ? [...host.querySelectorAll(":scope > [data-codex-chat-approval]")].find(
-          (item) => item.dataset.codexApprovalAgentId === agentId,
-        )
-      : null;
-    const allow = card?.querySelector("[data-codex-chat-allow]");
-    const status = card?.querySelector("[data-codex-chat-approval-status]");
-    if (allow) allow.disabled = true;
-    if (status)
-      status.textContent =
-        error?.message || "Could not refresh this approval safely.";
+    for (const card of host?.querySelectorAll(
+      ":scope > [data-codex-chat-approval]",
+    ) || []) {
+      const allow = card.querySelector("[data-codex-chat-allow]");
+      const status = card.querySelector("[data-codex-chat-approval-status]");
+      if (allow) allow.disabled = true;
+      if (status)
+        status.textContent =
+          error?.message || "Could not refresh this approval safely.";
+    }
   } finally {
     officialApprovalLoads.delete(form);
   }
 }
 
 function refreshOfficialApprovalCards() {
-  const forms = [...document.querySelectorAll("form[data-codex-agent-id]")];
+  const forms = [
+    ...document.querySelectorAll("form[data-codex-agent-id]"),
+  ].filter(
+    (form) =>
+      form.isConnected !== false &&
+      (typeof form.getClientRects !== "function" ||
+        form.getClientRects().length > 0),
+  );
   for (const card of document.querySelectorAll("[data-codex-chat-approval]")) {
     const stillOwned = forms.some(
-      (form) =>
-        form.dataset.codexAgentId === card.dataset.codexApprovalAgentId &&
-        form.parentElement?.parentElement === card.parentElement,
+      (form) => form.parentElement?.parentElement === card.parentElement,
     );
     if (!stillOwned) card.remove();
   }
-  if (officialComputerState(lastStatus).mode !== "official") {
+  if (
+    !["private", "official"].includes(officialComputerState(lastStatus).mode)
+  ) {
     for (const form of forms) removeOfficialApprovalCardForForm(form);
     return;
   }
@@ -2694,7 +2734,9 @@ function refreshOfficialApprovalCards() {
 }
 
 function syncOfficialApprovalPolling() {
-  if (officialComputerState(lastStatus).mode !== "official") {
+  if (
+    !["private", "official"].includes(officialComputerState(lastStatus).mode)
+  ) {
     clearInterval(officialApprovalPollTimer);
     officialApprovalPollTimer = null;
     refreshOfficialApprovalCards();

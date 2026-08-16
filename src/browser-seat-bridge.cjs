@@ -1002,6 +1002,19 @@ function startViewServer({
         });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/approvals") {
+        requireNoQuery(url);
+        const pending = await withProviderRead(async (provider) => {
+          const values = await provider.pendingApprovals();
+          if (!Array.isArray(values)) return [];
+          return values
+            .slice(0, 16)
+            .map((value) => normalizePendingApproval(value, provider))
+            .filter(Boolean);
+        });
+        sendJson(response, 200, { pending });
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/approval") {
         requireNoQuery(url);
         const body = await readJson(request);

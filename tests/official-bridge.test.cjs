@@ -112,6 +112,7 @@ test.before(async () => {
     closeSeatForKey: privateManager.closeSeatForKey,
     captureSeat: privateManager.captureSeat,
     executeSeatActions: privateManager.executeSeatActions,
+    pendingApprovals: privateManager.pendingApprovals,
   };
   official.status = async () => safeStatus("private");
   server = bridge.startViewServer({
@@ -464,6 +465,39 @@ test("approval routes expose only the exact safe frame and echo its displayed bi
     binding,
   });
   assert.deepEqual(decision.value, { ok: true });
+
+  official.pendingApprovals = async () => [
+    {
+      requestId: "approval-request-list-1",
+      seatId: "group-member-a",
+      origin: "https://official-cloud-computer.invalid",
+      actionDigest: "action-digest-list-1",
+      riskClass: "confirmation",
+      summary: "Navigate to another page",
+      presentation: { actions: [{ kind: "navigate" }] },
+      expiresAt: Date.now() + 30_000,
+      frame: {
+        generation: 7,
+        sequence: 5,
+        sha256,
+        screenshotBase64: PNG_BASE64,
+        networkToken: SECRET_SENTINEL,
+      },
+      networkToken: SECRET_SENTINEL,
+    },
+  ];
+  const approvalList = await request("/api/approvals");
+  assert.equal(approvalList.status, 200);
+  assert.equal(approvalList.text.includes(SECRET_SENTINEL), false);
+  assert.equal(approvalList.value.pending.length, 1);
+  assert.equal(approvalList.value.pending[0].seatId, "group-member-a");
+  assert.deepEqual(approvalList.value.pending[0].frame, {
+    generation: 7,
+    sequence: 5,
+    sha256,
+    screenshotBase64: PNG_BASE64,
+    mimeType: "image/png",
+  });
 
   official.decidePendingApproval = async () => ({
     accepted: true,

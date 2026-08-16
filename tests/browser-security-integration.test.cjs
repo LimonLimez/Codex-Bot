@@ -295,37 +295,33 @@ test("an approved action stays on the exact page that passed final validation", 
 
 test("approval UI exposes safe status and authenticated allow or deny decisions", () => {
   const bridge = read("src/browser-seat-bridge.cjs");
-  const renderer = read("src/renderer/live-seat-component.jsfrag");
+  const liveSeat = read("src/renderer/live-seat-component.jsfrag");
+  const renderer = read("src/renderer/codex-ui.js");
   assert.match(bridge, /\/api\/approval/);
+  assert.match(bridge, /\/api\/approvals/);
   assert.match(bridge, /provider\.pendingApprovalForSeat/);
+  assert.match(bridge, /provider\.pendingApprovals/);
   assert.match(bridge, /provider\.decidePendingApproval/);
-  assert.match(renderer, /Browser action approval/);
+  assert.match(renderer, /Computer action needs your permission/);
+  assert.match(renderer, /Private browser/);
+  assert.match(renderer, /Vendor computer/);
   assert.match(renderer, /Allow once/);
-  assert.match(renderer, /Allow this site briefly/);
   assert.match(renderer, /Deny/);
-  assert.match(renderer, /Action:/);
-  assert.match(renderer, /Destination:/);
-  assert.match(renderer, /Target:/);
-  assert.match(renderer, /Form:/);
-  assert.match(renderer, /Content:/);
-  const framePoll = renderer.slice(
-    renderer.indexOf("const g = T.useCallback"),
-    renderer.indexOf("const j = T.useCallback"),
-  );
-  const approvalPoll = renderer.slice(
-    renderer.indexOf("const j = T.useCallback"),
-    renderer.indexOf(
+  assert.match(renderer, /approvalActionLabel/);
+  assert.match(renderer, /officialApprovalBinding/);
+  assert.match(renderer, /request\("\/api\/approvals"\)/);
+  assert.match(renderer, /request\("\/api\/approval"/);
+  const approvalPoll = liveSeat.slice(
+    liveSeat.indexOf("const j = T.useCallback"),
+    liveSeat.indexOf(
       "T.useEffect",
-      renderer.indexOf("const j = T.useCallback"),
+      liveSeat.indexOf("const j = T.useCallback"),
     ),
   );
-  assert.doesNotMatch(framePoll, /\/api\/approval/);
-  assert.match(approvalPoll, /\/api\/approval/);
-  assert.match(renderer, /setInterval\(\(\) => a && j\(\), 350\)/);
-  assert.match(renderer, /action: "acquire"/);
-  assert.match(renderer, /action: "heartbeat"/);
-  assert.match(renderer, /action: "release"/);
-  assert.match(renderer, /data-gb-overlay/);
+  assert.doesNotMatch(approvalPoll, /\/api\/approval/);
+  assert.match(liveSeat, /action: "acquire"/);
+  assert.match(liveSeat, /action: "heartbeat"/);
+  assert.match(liveSeat, /action: "release"/);
 });
 
 test("installer explicitly packages both browser security modules", () => {
