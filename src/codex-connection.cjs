@@ -39,6 +39,10 @@ const REASONING_EFFORTS = Object.freeze([
   "xhigh",
   "max",
 ]);
+const LOCAL_PROVIDER_ID = "local";
+const LOCAL_REASONING_EFFORTS = Object.freeze(["none"]);
+const LOCAL_MODEL_LIMIT = 200;
+const LOCAL_MODELS_RESPONSE_LIMIT = 1024 * 1024;
 const CLIPROXY_PROVIDERS = Object.freeze([
   Object.freeze({
     id: "codex",
@@ -206,8 +210,22 @@ const CLIPROXY_PROVIDERS = Object.freeze([
     ]),
   }),
 ]);
+const LOCAL_PROVIDER = Object.freeze({
+  id: LOCAL_PROVIDER_ID,
+  label: "Local models",
+  description: "Connect Ollama, LM Studio, or vLLM running on this PC.",
+  loginKind: "local",
+  loginFlag: null,
+  authType: null,
+  authFilePattern: /^$/,
+  defaultModel: "local-model",
+  reasoningEfforts: LOCAL_REASONING_EFFORTS,
+  fastModeSupported: false,
+  models: Object.freeze([]),
+});
+const PROVIDERS = Object.freeze([...CLIPROXY_PROVIDERS, LOCAL_PROVIDER]);
 const PROVIDERS_BY_ID = new Map(
-  CLIPROXY_PROVIDERS.map((provider) => [provider.id, provider]),
+  PROVIDERS.map((provider) => [provider.id, provider]),
 );
 const DEFAULT_PROVIDER_ID = "codex";
 const DEFAULT_PROXY_URL = "http://127.0.0.1:8317/v1";
@@ -333,7 +351,7 @@ function normalizeProviderId(value) {
   const provider = providerFor(value);
   if (!provider) {
     throw new SettingsValidationError(
-      `provider must be one of: ${CLIPROXY_PROVIDERS.map((item) => item.id).join(", ")}.`,
+      `provider must be one of: ${PROVIDERS.map((item) => item.id).join(", ")}.`,
     );
   }
   return provider.id;
@@ -344,20 +362,67 @@ function activeProviderId(config = {}) {
   return providerFor(config.provider)?.id || DEFAULT_PROVIDER_ID;
 }
 
-function modelIdsFor(providerId) {
-  return new Set(
-    (providerFor(providerId) || providerFor(DEFAULT_PROVIDER_ID)).models.map(
-      (model) => model.id,
-    ),
-  );
+function localServerConfig(config = state().config || {}) {
+  const candidate = config.localServer;
+  if (!plainObject(candidate) || !Array.isArray(candidate.models)) return null;
+  let baseUrl;
+  try {
+    baseUrl = normalizeLocalBaseUrl(candidate.baseUrl);
+  } catch {
+    return null;
+  }
+  const models = candidate.models
+    .filter(
+      (model) =>
+        plainObject(model) &&
+        typeof model.id === "string" &&
+        model.id.length > 0 &&
+        model.id.length <= 200 &&
+        model.id.trim() === model.id &&
+        !/[\u0000-\u001f\u007f]/.test(model.id),
+    )
+    .slice(0, LOCAL_MODEL_LIMIT)
+    .map((model) => ({
+      id: model.id,
+      label:
+        typeof model.label === "string" && model.label.trim()
+          ? model.label.trim().slice(0, 200)
+          : model.id,
+      description: "Available from the configured local model server.",
+    }));
+  if (!models.length) return null;
+  return {
+    baseUrl,
+    protectedApiKey:
+      typeof candidate.protectedApiKey === "string"
+        ? candidate.protectedApiKey
+        : null,
+    models,
+  };
 }
 
-function bootstrapModel(providerId = DEFAULT_PROVIDER_ID) {
+function modelsFor(providerId, config = state().config || {}) {
+  if (providerId === LOCAL_PROVIDER_ID)
+    return localServerConfig(config)?.models || [];
+  return (providerFor(providerId) || providerFor(DEFAULT_PROVIDER_ID)).models;
+}
+
+function modelIdsFor(providerId, config = state().config || {}) {
+  return new Set(modelsFor(providerId, config).map((model) => model.id));
+}
+
+function bootstrapModel(
+  providerId = DEFAULT_PROVIDER_ID,
+  config = state().config || {},
+) {
   const provider = providerFor(providerId) || providerFor(DEFAULT_PROVIDER_ID);
   const candidate = String(process.env.GROK_BOT_CLIPROXY_MODEL || "");
-  return modelIdsFor(provider.id).has(candidate)
-    ? candidate
-    : provider.defaultModel;
+  const modelIds = modelIdsFor(provider.id, config);
+  if (provider.id === LOCAL_PROVIDER_ID)
+    return modelIds.has(candidate)
+      ? candidate
+      : modelIds.values().next().value || provider.defaultModel;
+  return modelIds.has(candidate) ? candidate : provider.defaultModel;
 }
 
 function bootstrapReasoning(providerId = DEFAULT_PROVIDER_ID) {
@@ -378,8 +443,12 @@ function bootstrapFastMode() {
   return DEFAULT_FAST_MODE;
 }
 
-function validateModel(value, providerId = DEFAULT_PROVIDER_ID) {
-  const modelIds = modelIdsFor(providerId);
+function validateModel(
+  value,
+  providerId = DEFAULT_PROVIDER_ID,
+  config = state().config || {},
+) {
+  const modelIds = modelIdsFor(providerId, config);
   if (typeof value !== "string" || !modelIds.has(value)) {
     throw new SettingsValidationError(
       `model must be one of: ${[...modelIds].join(", ")}.`,
@@ -458,11 +527,11 @@ function storedDefaults(config = {}, providerId = activeProviderId(config)) {
   const storedFastMode = hasOwn(nested, "fastMode")
     ? nested.fastMode
     : config.fastMode;
-  const modelIds = modelIdsFor(provider.id);
+  const modelIds = modelIdsFor(provider.id, config);
   return {
     model: modelIds.has(storedModel)
       ? storedModel
-      : bootstrapModel(provider.id),
+      : bootstrapModel(provider.id, config),
     reasoningEffort: provider.reasoningEfforts.includes(storedReasoning)
       ? storedReasoning
       : bootstrapReasoning(provider.id),
@@ -498,7 +567,7 @@ function storedAgentOverride(
   const candidate = agentPreferences[agentId];
   if (!plainObject(candidate)) return null;
   const override = {};
-  if (modelIdsFor(provider.id).has(candidate.model))
+  if (modelIdsFor(provider.id, config).has(candidate.model))
     override.model = candidate.model;
   if (provider.reasoningEfforts.includes(candidate.reasoningEffort))
     override.reasoningEffort = candidate.reasoningEffort;
@@ -516,7 +585,7 @@ function preferencePatch(
   const provider = providerFor(providerId) || providerFor(DEFAULT_PROVIDER_ID);
   const patch = {};
   if (hasOwn(value, "model"))
-    patch.model = validateModel(value.model, provider.id);
+    patch.model = validateModel(value.model, provider.id, state().config || {});
   if (hasOwn(value, "reasoningEffort"))
     patch.reasoningEffort = validateReasoningEffort(
       value.reasoningEffort,
@@ -609,6 +678,18 @@ function newestProviderAuth(providerId) {
 
 function account(providerId = activeProviderId(state().config || {})) {
   const provider = providerFor(providerId) || providerFor(DEFAULT_PROVIDER_ID);
+  if (provider.id === LOCAL_PROVIDER_ID) {
+    const local = localServerConfig();
+    return {
+      signedIn: Boolean(local),
+      provider: provider.id,
+      providerLabel: provider.label,
+      name: local ? "Local model server" : null,
+      email: null,
+      plan: null,
+      avatarUrl: null,
+    };
+  }
   const item = newestProviderAuth(provider.id);
   if (!item)
     return {
@@ -659,9 +740,14 @@ function account(providerId = activeProviderId(state().config || {})) {
 }
 
 function providerConnections() {
-  return CLIPROXY_PROVIDERS.map((provider) => {
+  return PROVIDERS.map((provider) => {
     const providerAccount = account(provider.id);
-    const credential = newestProviderAuth(provider.id);
+    const local =
+      provider.id === LOCAL_PROVIDER_ID ? localServerConfig() : null;
+    const credential =
+      provider.id === LOCAL_PROVIDER_ID
+        ? null
+        : newestProviderAuth(provider.id);
     return {
       id: provider.id,
       label: provider.label,
@@ -672,6 +758,9 @@ function providerConnections() {
       credentialRevision: credential
         ? Math.max(0, Math.floor(credential.modifiedMs))
         : null,
+      ...(provider.id === LOCAL_PROVIDER_ID
+        ? { baseUrl: local?.baseUrl || null }
+        : {}),
     };
   });
 }
@@ -714,7 +803,12 @@ function unprotectSecret(value) {
 
 function state() {
   if (!globalThis[STATE_KEY])
-    globalThis[STATE_KEY] = { configMtime: -1, config: null, apiKey: null };
+    globalThis[STATE_KEY] = {
+      configMtime: -1,
+      config: null,
+      apiKey: null,
+      localApiKey: null,
+    };
   const shared = globalThis[STATE_KEY];
   let modified = -1;
   try {
@@ -725,6 +819,7 @@ function state() {
     shared.config = plainObject(loaded) ? loaded : {};
     shared.configMtime = modified;
     shared.apiKey = null;
+    shared.localApiKey = null;
   }
   return shared;
 }
@@ -929,6 +1024,25 @@ function getConnection(agentId = null) {
   }
   const providerId = activeProviderId(config);
   const provider = providerFor(providerId);
+  if (provider.id === LOCAL_PROVIDER_ID) {
+    const local = localServerConfig(config);
+    if (!local)
+      throw new SettingsValidationError(
+        "Connect and discover a local model server before using local models.",
+      );
+    if (local.protectedApiKey && !shared.localApiKey)
+      shared.localApiKey = unprotectSecret(local.protectedApiKey);
+    return {
+      mode: "local",
+      route: "local-openai-compatible",
+      provider: provider.id,
+      providerLabel: provider.label,
+      baseUrl: local.baseUrl,
+      apiKey: shared.localApiKey || null,
+      reasoningSupported: false,
+      ...preferences,
+    };
+  }
   return {
     mode: "cliproxy-oauth",
     route: `cliproxyapi-${provider.id}-oauth`,
@@ -941,7 +1055,12 @@ function getConnection(agentId = null) {
 }
 
 function setMode(mode) {
-  if (mode !== "api-key" && mode !== "codex-oauth" && mode !== "cliproxy-oauth")
+  if (
+    mode !== "api-key" &&
+    mode !== "codex-oauth" &&
+    mode !== "cliproxy-oauth" &&
+    mode !== "local"
+  )
     throw new SettingsValidationError("Unsupported connection mode.");
   const previous = safeJson(CONFIG_PATH, {});
   const config = plainObject(previous) ? previous : {};
@@ -976,7 +1095,7 @@ function setProvider(value) {
   );
   const nextConfig = {
     ...config,
-    mode: "cliproxy-oauth",
+    mode: providerId === LOCAL_PROVIDER_ID ? "local" : "cliproxy-oauth",
     provider: providerId,
     providerPreferences,
     providerAgentPreferences,
@@ -995,12 +1114,194 @@ function setProvider(value) {
 function useProvider(value) {
   const providerId = normalizeProviderId(value);
   const provider = providerFor(providerId);
-  if (!account(providerId).signedIn)
+  if (providerId === LOCAL_PROVIDER_ID && !localServerConfig())
+    throw new SettingsValidationError(
+      "Connect and discover a local model server before selecting it.",
+    );
+  if (providerId !== LOCAL_PROVIDER_ID && !account(providerId).signedIn)
     throw new SettingsValidationError(
       `${provider.label} is not connected. Finish its official sign-in before selecting it.`,
     );
   cancelProviderLogin(providerId);
   return setProvider(providerId);
+}
+
+function normalizeLocalBaseUrl(value) {
+  let candidate;
+  try {
+    candidate = new URL(String(value || "").trim());
+  } catch {
+    throw new SettingsValidationError(
+      "Enter a valid local URL such as http://127.0.0.1:11434/v1.",
+    );
+  }
+  const pathname = candidate.pathname.replace(/\/+$/, "");
+  if (
+    candidate.protocol !== "http:" ||
+    candidate.hostname !== "127.0.0.1" ||
+    !candidate.port ||
+    candidate.username ||
+    candidate.password ||
+    candidate.search ||
+    candidate.hash ||
+    (pathname && pathname !== "/" && pathname !== "/v1")
+  ) {
+    throw new SettingsValidationError(
+      "Local model servers must use a literal http://127.0.0.1:<port> URL with an optional /v1 path.",
+    );
+  }
+  const port = Number(candidate.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new SettingsValidationError(
+      "The local model server port is invalid.",
+    );
+  for (const reserved of [
+    process.env.GROK_BOT_CLIPROXY_URL,
+    process.env.GROK_BOT_GATEWAY_URL,
+    process.env.SAND_HOST_GATEWAY_URL,
+  ]) {
+    try {
+      const reservedUrl = new URL(String(reserved || ""));
+      if (
+        reservedUrl.hostname === "127.0.0.1" &&
+        Number(reservedUrl.port) === port
+      )
+        throw new SettingsValidationError(
+          "Choose the local model server port, not an Open Bot internal service port.",
+        );
+    } catch (error) {
+      if (error instanceof SettingsValidationError) throw error;
+    }
+  }
+  return `http://127.0.0.1:${port}/v1`;
+}
+
+async function readBoundedText(response, limit) {
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > limit)
+      throw new SettingsValidationError(
+        "The local model catalog is too large.",
+      );
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) {
+        await reader.cancel().catch(() => {});
+        throw new SettingsValidationError(
+          "The local model catalog is too large.",
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  return Buffer.concat(chunks, size).toString("utf8");
+}
+
+function normalizeDiscoveredModels(value) {
+  if (!plainObject(value) || !Array.isArray(value.data))
+    throw new SettingsValidationError(
+      "The local server did not return an OpenAI-compatible model catalog.",
+    );
+  const seen = new Set();
+  const models = [];
+  for (const item of value.data) {
+    const id = plainObject(item) ? item.id : null;
+    if (
+      typeof id !== "string" ||
+      id.length < 1 ||
+      id.length > 200 ||
+      id.trim() !== id ||
+      /[\u0000-\u001f\u007f]/.test(id) ||
+      seen.has(id)
+    )
+      continue;
+    seen.add(id);
+    models.push({ id, label: id });
+    if (models.length >= LOCAL_MODEL_LIMIT) break;
+  }
+  if (!models.length)
+    throw new SettingsValidationError(
+      "The local server returned no usable model IDs.",
+    );
+  return models;
+}
+
+async function configureLocalProvider({ baseUrl, apiKey = "" } = {}) {
+  const normalizedBaseUrl = normalizeLocalBaseUrl(baseUrl);
+  const normalizedApiKey = String(apiKey || "").trim();
+  if (normalizedApiKey.length > 4096 || /[\r\n\0]/.test(normalizedApiKey))
+    throw new SettingsValidationError("The optional local API key is invalid.");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  let response;
+  try {
+    const headers = { Accept: "application/json" };
+    if (normalizedApiKey) headers.Authorization = `Bearer ${normalizedApiKey}`;
+    response = await fetch(`${normalizedBaseUrl}/models`, {
+      headers,
+      redirect: "error",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError")
+      throw new SettingsValidationError("The local model server timed out.");
+    throw new SettingsValidationError(
+      "Open Bot could not reach that local model server.",
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!response.ok)
+    throw new SettingsValidationError(
+      `The local model server rejected model discovery (${response.status}).`,
+    );
+  let parsed;
+  try {
+    parsed = JSON.parse(
+      await readBoundedText(response, LOCAL_MODELS_RESPONSE_LIMIT),
+    );
+  } catch (error) {
+    if (error instanceof SettingsValidationError) throw error;
+    throw new SettingsValidationError(
+      "The local model server returned invalid JSON.",
+    );
+  }
+  const models = normalizeDiscoveredModels(parsed);
+  const previous = safeJson(CONFIG_PATH, {});
+  const config = plainObject(previous) ? previous : {};
+  const localServer = {
+    baseUrl: normalizedBaseUrl,
+    models,
+    ...(normalizedApiKey
+      ? { protectedApiKey: protectSecret(normalizedApiKey) }
+      : {}),
+  };
+  const nextConfig = {
+    ...config,
+    mode: "local",
+    provider: LOCAL_PROVIDER_ID,
+    localServer,
+  };
+  writePreferences(
+    nextConfig,
+    {
+      model: models[0].id,
+      reasoningEffort: "none",
+      fastMode: false,
+    },
+    LOCAL_PROVIDER_ID,
+  );
+  return publicStatus();
 }
 
 function setApiKey(apiKey) {
@@ -1592,7 +1893,7 @@ function publicStatus(agentId = null) {
     },
     preferences: {
       catalog: {
-        models: provider.models.map((model) => ({ ...model })),
+        models: modelsFor(provider.id).map((model) => ({ ...model })),
         reasoningEfforts: [...provider.reasoningEfforts],
         fastMode: {
           supported: provider.fastModeSupported,
@@ -1618,6 +1919,7 @@ module.exports = {
   beginCodexOAuth,
   beginProviderLogin,
   cancelProviderLogin,
+  configureLocalProvider,
   clearAgentPreferences,
   getConnection,
   getPreferences,
@@ -1632,6 +1934,7 @@ module.exports = {
   usage,
   verifyApiKey,
   normalizeCodexDeviceUrl,
+  normalizeLocalBaseUrl,
   normalizeProviderLoginUrl,
   providerLoginOutput,
   providerLoginStatus,

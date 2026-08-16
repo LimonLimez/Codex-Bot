@@ -405,7 +405,7 @@ test("authenticated Codex settings HTTP API updates defaults and per-agent inher
   assert.equal(payload.status.preferences.catalog.fastMode.supported, false);
   assert.deepEqual(
     payload.status.providers.map((provider) => provider.id),
-    ["codex", "claude", "antigravity", "kimi", "xai", "vertex"],
+    ["codex", "claude", "antigravity", "kimi", "xai", "vertex", "local"],
   );
 
   response = await request("/api/codex/settings", {

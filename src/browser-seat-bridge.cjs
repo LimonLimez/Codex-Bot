@@ -741,6 +741,15 @@ function startViewServer({
           });
           return;
         }
+        if (action === "local-connect") {
+          requireExactBodyKeys(body, ["action", "baseUrl", "apiKey"]);
+          const status = await connectionManager.configureLocalProvider({
+            baseUrl: body.baseUrl,
+            apiKey: body.apiKey,
+          });
+          sendJson(response, 200, { ok: true, status });
+          return;
+        }
         if (action === "vertex-import") {
           requireExactBodyKeys(body, ["action", "provider", "serviceAccount"]);
           if (body.provider !== "vertex")

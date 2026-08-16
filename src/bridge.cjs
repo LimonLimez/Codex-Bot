@@ -1022,6 +1022,7 @@ function resolveFastRequest(connection) {
 function providerHttpFailureMessage(connection, status, detail) {
   const provider = connection?.provider;
   const text = String(detail || "");
+  if (provider === "local") return `Local model server ${status}: ${text}`;
   if (
     provider === "kimi" &&
     status === 402 &&
@@ -1219,15 +1220,17 @@ class CLIProxyExecutor {
         };
         if (fastRequest.serviceTier)
           payload.service_tier = fastRequest.serviceTier;
-        if (reasoningEffort) payload.reasoning_effort = reasoningEffort;
+        if (reasoningEffort && connection.reasoningSupported !== false)
+          payload.reasoning_effort = reasoningEffort;
         if (openAITools.length) payload.tools = openAITools;
+        const headers = {
+          "Content-Type": "application/json",
+          "X-Codex-Bot-Bridge": "1",
+        };
+        if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
         const httpResponse = await fetch(`${baseUrl}/chat/completions`, {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
-            "X-Codex-Bot-Bridge": "1",
-          },
+          headers,
           body: JSON.stringify(payload),
           signal: ctx?.signal,
         });
