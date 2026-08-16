@@ -40,6 +40,7 @@ const ALLOWED_MUTATIONS = Object.freeze([
   "dist/codex/desktop/model-selection-store.cjs",
   "dist/codex/desktop/openbot-user-data.cjs",
   "dist/codex/desktop/runtime.cjs",
+  "dist/codex/local/local-permission-store.cjs",
   ...WS_FILES.map((relative) => `dist/codex/node_modules/ws/${relative}`),
   "dist/electron-main/main.cjs",
   "dist/electron-preload/preload.cjs",

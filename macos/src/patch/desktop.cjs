@@ -28,6 +28,7 @@ const DESKTOP_FILES = Object.freeze([
   "bots/remote-app-server-client.cjs",
   "bots/runtime-controller.cjs",
   "bots/runtime-provider.cjs",
+  "local/local-permission-store.cjs",
 ]);
 const WS_FILES = Object.freeze([
   "LICENSE",
