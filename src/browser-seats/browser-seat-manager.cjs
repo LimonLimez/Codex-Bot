@@ -1198,12 +1198,12 @@ async function classifyPage(page) {
     return {
       state: "challenge",
       title,
-      bodyPreview: bodyPreview.slice(0, 500),
+      bodyPreview: bodyPreview.slice(0, 2000),
     };
   }
   if (bodyPreview.trim().length === 0)
     return { state: "empty", title, bodyPreview: "" };
-  return { state: "loaded", title, bodyPreview: bodyPreview.slice(0, 500) };
+  return { state: "loaded", title, bodyPreview: bodyPreview.slice(0, 2000) };
 }
 
 async function executeSeatActions(key, actions, options = {}) {
