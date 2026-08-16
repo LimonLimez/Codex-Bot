@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -22,6 +23,10 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /exposeInMainWorld\("codexRuntime"/);
   assert.match(preload, /exposeInMainWorld\("codexAccount"/);
   assert.match(preload, /exposeInMainWorld\("openbotComputer"/);
+  assert.match(preload, /exposeInMainWorld\("openbotLocalDesktop"/);
+  assert.match(preload, /select:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:select",value\)/);
+  assert.match(preload, /clear:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:clear",value\)/);
+  assert.match(preload, /openbot-local-frame:frame/);
   assert.match(preload, /codex-bot:changed/);
   assert.match(preload, /codex-runtime:event/);
   assert.match(preload, /onEvent:callback/);
@@ -35,6 +40,7 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /codex-account:changed/);
   assert.match(preload, /codex-catalog:changed/);
   assert.match(preload, /create:\(\)=>__codexInvoke\("create"\)/);
+  assert.match(preload, /advanceSetup:value=>__codexInvoke\("advance-setup",value\)/);
   for (const method of [
     "selectMode", "read", "decidePermission", "listPermissions",
     "listPermissionRequests", "revokePermission", "onChanged", "onPermissionRequested",
@@ -57,6 +63,8 @@ test("desktop packaging includes every direct inference runtime module in the au
     "desktop/codex-runtime-integrity.cjs",
     "desktop/inference-bridge-server.cjs",
     "desktop/inference-provider-router.cjs",
+    "desktop/local-desktop-frame-ipc.cjs",
+    "computer/computer-target-router.cjs",
     "local/local-computer-boundary.cjs",
     "local/local-computer-runtime.cjs",
     "local/local-desktop-manager.cjs",
@@ -73,5 +81,25 @@ test("desktop packaging includes every direct inference runtime module in the au
       true,
       `${relative} must be included in the exact mutation audit`,
     );
+  }
+});
+
+test("desktop packaging closes every relative require reachable from its exact source list", () => {
+  const { DESKTOP_FILES } = require(patchPath);
+  const sourceRoot = path.join(__dirname, "..", "src");
+  const packaged = new Set(DESKTOP_FILES);
+  const relativeRequire = /require\(\s*["'](?<request>\.\.?\/[^"']+)["']\s*\)/g;
+
+  for (const relative of DESKTOP_FILES) {
+    const source = fs.readFileSync(path.join(sourceRoot, ...relative.split("/")), "utf8");
+    for (const match of source.matchAll(relativeRequire)) {
+      let dependency = path.posix.normalize(path.posix.join(path.posix.dirname(relative), match.groups.request));
+      if (path.posix.extname(dependency) === "") dependency += ".cjs";
+      assert.equal(
+        packaged.has(dependency),
+        true,
+        `${relative} requires ${dependency}, which must be present in the packaged closure`,
+      );
+    }
   }
 });

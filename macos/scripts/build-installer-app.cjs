@@ -5,7 +5,9 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { writeInstallerManifest } = require("./audit-release.cjs");
+const { auditTree, writeInstallerManifest } = require("./audit-release.cjs");
+const { DESKTOP_FILES } = require("../src/patch/desktop.cjs");
+const { ASSETS: RENDERER_ASSETS } = require("../src/patch/renderer.cjs");
 
 const VERSION = "0.2.0-macos.1";
 const SIDECAR_BYTES = 58558850;
@@ -28,6 +30,24 @@ const NODE_PACKAGES = Object.freeze([
   "prettier",
   "ws",
 ]);
+const PATCHER_SCRIPT_FILES = Object.freeze([
+  "audit-grok-contract.cjs",
+  "patch-app.cjs",
+  "verify-vendor-app.cjs",
+]);
+const PATCHER_ASSET_FILES = Object.freeze([
+  "grok-bot-0.20.0-contract.json",
+  "grok-bot-0.20.0-darwin-arm64.manifest.json",
+]);
+const PATCHER_SOURCE_FILES = Object.freeze([...new Set([
+  "patch/anchors.cjs",
+  "patch/desktop.cjs",
+  "patch/diff-audit.cjs",
+  "patch/host-inference.cjs",
+  "patch/renderer.cjs",
+  ...DESKTOP_FILES,
+  ...RENDERER_ASSETS.map((file) => `renderer/${file}`),
+])].sort());
 
 function sha256File(file) {
   const hash = crypto.createHash("sha256");
@@ -70,6 +90,94 @@ function copyTree(source, target) {
     else if (entry.isFile()) copyFile(from, to);
     else throw new Error(`Installer payload contains an unsupported entry: ${entry.name}`);
   }
+}
+
+function stagePatcherPayload({ macRoot, patcherRoot }) {
+  const sourceRoot = path.resolve(macRoot);
+  const targetRoot = path.resolve(patcherRoot);
+  const sourceStat = fs.lstatSync(sourceRoot);
+  if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) {
+    throw new Error("Patcher source root must be a real directory");
+  }
+  if (fs.existsSync(targetRoot)) throw new Error("Patcher payload target already exists");
+  fs.mkdirSync(targetRoot, { recursive: true, mode: 0o755 });
+  try {
+    for (const file of PATCHER_SCRIPT_FILES) {
+      copyFile(path.join(sourceRoot, "scripts", file), path.join(targetRoot, "scripts", file));
+    }
+    for (const file of PATCHER_SOURCE_FILES) {
+      copyFile(
+        path.join(sourceRoot, "src", ...file.split("/")),
+        path.join(targetRoot, "src", ...file.split("/")),
+      );
+    }
+    for (const file of PATCHER_ASSET_FILES) {
+      copyFile(path.join(sourceRoot, "assets", file), path.join(targetRoot, "assets", file));
+    }
+  } catch (error) {
+    fs.rmSync(targetRoot, { recursive: true, force: true });
+    throw error;
+  }
+  return Object.freeze({
+    assets: PATCHER_ASSET_FILES.length,
+    scripts: PATCHER_SCRIPT_FILES.length,
+    sources: PATCHER_SOURCE_FILES.length,
+  });
+}
+
+function gitOutput(repoRoot, args) {
+  const result = childProcess.spawnSync("/usr/bin/git", args, {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error("Release checkout could not be verified");
+  }
+  return String(result.stdout).trim();
+}
+
+function currentCommit(repoRoot) {
+  const commit = gitOutput(repoRoot, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("Release checkout commit is invalid");
+  return commit;
+}
+
+function captureReleaseCheckout({ repoRoot, release }) {
+  if (!release) return null;
+  const resolved = path.resolve(repoRoot);
+  const stat = fs.lstatSync(resolved);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error("Release checkout must be a real repository directory");
+  }
+  const commit = currentCommit(resolved);
+  const mainCommit = gitOutput(resolved, [
+    "rev-parse", "--verify", "refs/remotes/origin/main^{commit}",
+  ]);
+  if (commit !== mainCommit) {
+    throw new Error("Release checkout must be the exact origin/main commit");
+  }
+  if (gitOutput(resolved, ["status", "--porcelain=v1", "--untracked-files=all"]) !== "") {
+    throw new Error("Release checkout worktree must be clean");
+  }
+  return Object.freeze({ commit });
+}
+
+function verifyReleaseCheckout({ repoRoot, release, captured }) {
+  if (!release) return null;
+  if (captured == null || Object.keys(captured).join(",") !== "commit"
+    || typeof captured.commit !== "string" || !/^[a-f0-9]{40}$/.test(captured.commit)) {
+    throw new Error("Release checkout capture is invalid");
+  }
+  if (currentCommit(path.resolve(repoRoot)) !== captured.commit) {
+    throw new Error("Release checkout changed from the captured exact commit");
+  }
+  const current = captureReleaseCheckout({ repoRoot, release: true });
+  if (current.commit !== captured.commit) {
+    throw new Error("Release checkout changed from the captured exact commit");
+  }
+  return captured;
 }
 
 function run(executable, args, options = {}) {
@@ -170,6 +278,7 @@ function signingArguments(identity, target, development) {
 function buildInstaller(options) {
   const macRoot = path.resolve(__dirname, "..");
   const repoRoot = path.resolve(macRoot, "..");
+  const releaseCheckout = captureReleaseCheckout({ repoRoot, release: Boolean(options.release) });
   const output = path.resolve(options.output || path.join(macRoot, "dist", VERSION));
   if (fs.existsSync(output)) throw new Error("Installer output already exists");
   const sidecar = realFile(options.sidecar, "CLIProxyAPI executable").file;
@@ -258,24 +367,7 @@ function buildInstaller(options) {
     }
 
     const patcherRoot = path.join(resources, "Patcher");
-    for (const script of [
-      "patch-app.cjs",
-      "verify-vendor-app.cjs",
-      "audit-grok-contract.cjs",
-      "verify-codex-runtime.cjs",
-    ]) {
-      copyFile(path.join(macRoot, "scripts", script), path.join(patcherRoot, "scripts", script));
-    }
-    copyTree(path.join(macRoot, "src"), path.join(patcherRoot, "src"));
-    for (const asset of [
-      "grok-bot-0.20.0-contract.json",
-      "grok-bot-0.20.0-darwin-arm64.manifest.json",
-      "cliproxyapi-7.2.132-darwin-aarch64.json",
-      "cliproxyapi-model-catalog-2026-08-14.json",
-      "openai-codex-0.147.0-darwin-arm64.json",
-    ]) {
-      copyFile(path.join(macRoot, "assets", asset), path.join(patcherRoot, "assets", asset));
-    }
+    stagePatcherPayload({ macRoot, patcherRoot });
     for (const packageName of NODE_PACKAGES) {
       copyTree(
         path.join(macRoot, "node_modules", ...packageName.split("/")),
@@ -307,6 +399,7 @@ function buildInstaller(options) {
     );
 
     run("/usr/bin/xattr", ["-cr", app]);
+    run("/usr/bin/codesign", signingArguments(signingIdentity, installedExecutable, !options.release));
     run("/usr/bin/codesign", signingArguments(signingIdentity, profilePublisher, !options.release));
     run("/usr/bin/codesign", signingArguments(signingIdentity, installedSidecar, !options.release));
     fs.writeFileSync(
@@ -330,8 +423,15 @@ function buildInstaller(options) {
     run("/usr/bin/xattr", ["-cr", app]);
     run("/usr/bin/codesign", signingArguments(signingIdentity, app, !options.release));
     run("/usr/bin/codesign", ["--verify", "--deep", "--strict", app]);
+    auditTree(temporary, { expectedAppName: appName });
+    verifyReleaseCheckout({ repoRoot, release: Boolean(options.release), captured: releaseCheckout });
     fs.renameSync(temporary, output);
-    return Object.freeze({ app: path.join(output, appName), development: !options.release, version: VERSION });
+    return Object.freeze({
+      app: path.join(output, appName),
+      development: !options.release,
+      version: VERSION,
+      ...(releaseCheckout == null ? {} : { commit: releaseCheckout.commit }),
+    });
   } catch (error) {
     if (fs.existsSync(temporary)) fs.rmSync(temporary, { recursive: true, force: true });
     throw error;
@@ -356,11 +456,17 @@ module.exports = {
   CODEX_RUNTIME_LICENSE_SHA256,
   CODEX_RUNTIME_SHA256,
   NODE_PACKAGES,
+  PATCHER_ASSET_FILES,
+  PATCHER_SCRIPT_FILES,
+  PATCHER_SOURCE_FILES,
   SIDECAR_BYTES,
   SIDECAR_LICENSE_BYTES,
   SIDECAR_LICENSE_SHA256,
   SIDECAR_SHA256,
   VERSION,
   buildInstaller,
+  captureReleaseCheckout,
   parseArgs,
+  stagePatcherPayload,
+  verifyReleaseCheckout,
 };

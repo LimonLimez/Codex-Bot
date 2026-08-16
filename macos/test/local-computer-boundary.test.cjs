@@ -194,13 +194,46 @@ test("permission prompts and decisions expose metadata only and disposal is exac
   assert.deepEqual(await boundary.revokePermission({ botId: BOT_A, grantId: GRANT_A }), permissions);
   assert.deepEqual(broker.revoke.mock.calls[0].arguments, [{ botId: BOT_A, grantId: GRANT_A }]);
 
-  boundary.dispose();
-  boundary.dispose();
+  const disposal = boundary.dispose();
+  assert.equal(boundary.dispose(), disposal);
+  await disposal;
   assert.equal(manager.dispose.mock.callCount(), 1);
   assert.equal(broker.dispose.mock.callCount(), 1);
   broker.emit("request", prompt);
   assert.equal(prompts.length, 1);
   await assert.rejects(boundary.read(BOT_A), /disposed/i);
+});
+
+test("boundary disposal waits for Local Desktop cancellation before closing its broker", async () => {
+  let releaseManager;
+  const managerDone = new Promise((resolve) => { releaseManager = resolve; });
+  const order = [];
+  const { boundary, broker, manager } = fixture({
+    manager: {
+      dispose: mock.fn(async () => {
+        order.push("manager-start");
+        await managerDone;
+        order.push("manager-done");
+      }),
+    },
+    broker: { dispose: mock.fn(() => order.push("broker")) },
+  });
+
+  let settled = false;
+  const first = boundary.dispose();
+  const second = boundary.dispose();
+  Promise.resolve(first).then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(first, second);
+  assert.deepEqual(order, ["manager-start"]);
+  assert.equal(manager.dispose.mock.callCount(), 1);
+  assert.equal(broker.dispose.mock.callCount(), 0);
+
+  releaseManager();
+  await first;
+  assert.deepEqual(order, ["manager-start", "manager-done", "broker"]);
+  assert.equal(broker.dispose.mock.callCount(), 1);
 });
 
 test("permission request publication is bounded to the broker's per-bot capacity", async () => {

@@ -162,6 +162,120 @@ test("broker applies one current per-bot Allow Once decision exactly once", asyn
   assert.equal(tcc.ensure.mock.callCount(), 1);
 });
 
+test("shell consent exposes the exact command and full-host scope but never permits Always", async () => {
+  const { broker, store } = fixture();
+  const effect = mock.fn(async () => "done");
+  const shell = request(BOT_A, 4, {
+    capability: "shell.execute",
+    resourceId: "full-host-shell",
+    resourceLabel: "Full host shell",
+    reason: "Full host shell as your macOS user, not confined to this workspace",
+    command: "printf 'exact command' && /usr/bin/true",
+  });
+  const { pending, prompt } = await promptFor(broker, () => broker.request(shell, effect));
+  assert.deepEqual(prompt, {
+    requestId: `permission-${REQUEST_A}`,
+    botId: BOT_A,
+    targetId: TARGET_A,
+    targetGeneration: 4,
+    capability: "shell.execute",
+    resourceLabel: "Full host shell",
+    reason: "Full host shell as your macOS user, not confined to this workspace",
+    command: "printf 'exact command' && /usr/bin/true",
+    allowsAlways: false,
+  });
+  assert.equal(store.authorize.mock.callCount(), 0);
+  assert.equal(effect.mock.callCount(), 0);
+  await assert.rejects(
+    broker.decide({ ...identity(prompt), decision: "always" }),
+    /unavailable|one command/i,
+  );
+  assert.equal(effect.mock.callCount(), 0);
+  assert.deepEqual(await broker.listPending(BOT_A), [prompt]);
+  assert.equal(await broker.decide({ ...identity(prompt), decision: "once" }), "done");
+  assert.equal(await pending, "done");
+  assert.equal(effect.mock.callCount(), 1);
+  assert.equal(store.remember.mock.callCount(), 0);
+  broker.dispose();
+});
+
+test("task cancellation removes only the exact pending shell consent before any effect", async () => {
+  let nextId = 0;
+  const { broker } = fixture({
+    randomUUID() {
+      nextId += 1;
+      return `00000000-0000-4000-8000-${String(nextId).padStart(12, "0")}`;
+    },
+  });
+  const shell = request(BOT_A, 4, {
+    capability: "shell.execute",
+    resourceId: "full-host-shell",
+    resourceLabel: "Full host shell",
+    reason: "Full host shell as your macOS user, not confined to this workspace",
+    command: "printf exact",
+  });
+  const firstEffect = mock.fn(async () => "must-not-run");
+  const secondEffect = mock.fn(async () => "second");
+  const first = await promptFor(broker, () => broker.request(shell, firstEffect, { taskId: "standalone-first" }));
+  const firstOutcome = first.pending.catch((error) => error);
+  const second = await promptFor(broker, () => broker.request(shell, secondEffect, { taskId: "standalone-second" }));
+  const secondOutcome = second.pending.catch((error) => error);
+
+  broker.cancelTask({ botId: BOT_A, taskId: "standalone-first" });
+  assert.equal((await firstOutcome).code, "OPENBOT_PERMISSION_CANCELLED");
+  assert.deepEqual(await broker.listPending(BOT_A), [second.prompt]);
+  assert.equal(firstEffect.mock.callCount(), 0);
+  await assert.rejects(
+    broker.decide({ ...identity(first.prompt), decision: "once" }),
+    /unavailable/i,
+  );
+
+  assert.equal(await broker.decide({ ...identity(second.prompt), decision: "once" }), "second");
+  assert.equal(await secondOutcome, "second");
+  assert.equal(secondEffect.mock.callCount(), 1);
+  broker.dispose();
+});
+
+test("task cancellation during current-target lookup suppresses a late prompt and permits reuse", async (t) => {
+  const lookup = deferred();
+  let reads = 0;
+  const { broker } = fixture({
+    async readCurrentComputer() {
+      reads += 1;
+      if (reads === 1) await lookup.promise;
+      return computer();
+    },
+  });
+  t.after(() => broker.dispose());
+  const prompts = [];
+  broker.on("request", (prompt) => prompts.push(prompt));
+  const shell = request(BOT_A, 4, {
+    capability: "shell.execute",
+    resourceId: "full-host-shell",
+    resourceLabel: "Full host shell",
+    reason: "Full host shell as your macOS user, not confined to this workspace",
+    command: "printf exact",
+  });
+  const effect = mock.fn(async () => "done");
+  const first = broker.request(shell, effect, { taskId: "standalone-reusable" }).catch((error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+  broker.cancelTask({ botId: BOT_A, taskId: "standalone-reusable" });
+  lookup.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await first).code, "OPENBOT_PERMISSION_CANCELLED");
+  assert.deepEqual(prompts, []);
+  assert.equal(effect.mock.callCount(), 0);
+
+  const reused = await promptFor(broker, () => broker.request(
+    shell,
+    effect,
+    { taskId: "standalone-reusable" },
+  ));
+  assert.equal(await broker.decide({ ...identity(reused.prompt), decision: "once" }), "done");
+  assert.equal(await reused.pending, "done");
+  assert.equal(effect.mock.callCount(), 1);
+});
+
 test("broker replays frozen bot-scoped pending requests until they settle", async () => {
   const { broker } = fixture();
   const effect = mock.fn(async () => "done");

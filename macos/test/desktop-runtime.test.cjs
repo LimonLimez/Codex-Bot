@@ -158,6 +158,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   }
   class RouterFixture {
     constructor(options) { this.options = options; constructed.push(["router", options]); }
+    stream() {}
   }
   class BridgeFixture {
     constructor(options) { this.options = options; constructed.push(["bridge", options]); }
@@ -179,6 +180,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
     codexManager: direct,
     selectionStore,
     sidecarManager: lazy,
+    computerTargetRouter: { async resolve() {} },
     stateRoot,
     capability: "b".repeat(64),
     DirectTransportClass: DirectTransportFixture,
@@ -191,6 +193,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   assert.equal(constructed[0][1].manager, direct);
   assert.equal(constructed[0][1].workspacePath, path.join(stateRoot, "direct-codex", "empty-workspace"));
   assert.equal(constructed[2][1].capability, "b".repeat(64));
+  assert.equal(typeof constructed[2][1].computerTargetRouter.resolve, "function");
   assert.deepEqual(await constructed[1][1].readSelection(BOT_A), {
     botId: BOT_A,
     generation: 4,
@@ -214,6 +217,19 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   assert.deepEqual(constructed.map(([name]) => name), ["direct", "router", "bridge", "optional"]);
 });
 
+test("production direct Codex snapshots the host environment into a plain launch DTO", (t) => {
+  const { createDirectCodexManager } = require(runtimePath);
+  const { CodexAppServerManager } = require(path.join(__dirname, "..", "src", "desktop", "codex-app-server-manager.cjs"));
+  const root = tempRoot(t);
+  const manager = createDirectCodexManager({
+    resourcesPath: path.join(root, "OpenBot.app", "Contents", "Resources"),
+    stateRoot: path.join(root, "state"),
+    homeDirectory: path.join(root, "home"),
+  });
+  assert.equal(manager instanceof CodexAppServerManager, true);
+  manager.stop();
+});
+
 test("desktop runtime registers the exact frozen bot/model boundary and keeps create zero-argument", async (t) => {
   const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
   const handlers = new Map();
@@ -223,6 +239,7 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   const bot = Object.freeze({
     botId: BOT_A,
     name: "New Bot",
+    setupStage: "profile-model",
     runtime: Object.freeze({ state: "ready" }),
   });
   const controller = {
@@ -232,6 +249,10 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     async readBot(botId) { calls.push(["read", botId]); return bot; },
     async renameBot(botId, name) { calls.push(["rename", botId, name]); return { ...bot, name }; },
     async updateProfile(botId, profile) { calls.push(["profile", botId, profile]); return bot; },
+    async advanceSetup(botId, transition) {
+      calls.push(["advance-setup", botId, transition]);
+      return Object.freeze({ ...bot, setupStage: transition.nextStage });
+    },
     async retryRuntime(botId) { calls.push(["retry", botId]); return bot; },
     async runtimeSession(botId) {
       calls.push(["session", botId]);
@@ -245,19 +266,23 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     },
     dispose() { calls.push(["dispose"]); },
   };
+  let storedSelection = null;
   const selectionStore = {
     async selectBot(botId) { calls.push(["activate-model-bot", botId]); return botId; },
     async ensure(botId, fallback) {
       const selection = { botId, ...fallback, generation: 0 };
       calls.push(["ensure-model", selection]);
-      return selection;
+      storedSelection ??= selection;
+      return storedSelection;
     },
     async writeNext(selection) {
-      const next = { ...selection, generation: 1 };
+      const previous = calls.filter(([name]) => name === "select-model").length;
+      const next = { ...selection, generation: previous + 1 };
       calls.push(["select-model", next]);
-      return next;
+      storedSelection = next;
+      return storedSelection;
     },
-    async read(botId) { calls.push(["read-model", botId]); return null; },
+    async read(botId) { calls.push(["read-model", botId]); return storedSelection; },
   };
   const sidecarManager = {
     async connectProvider(provider) { calls.push(["connect-provider", provider]); return undefined; },
@@ -273,6 +298,9 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     async start() { calls.push(["direct-start"]); },
     stop() { calls.push(["direct-stop"]); },
   };
+  let setupCatalog = readyCatalog();
+  const setupAccount = accountWithCatalog(setupCatalog, () => codexManager.start());
+  setupAccount.catalogState = () => setupCatalog;
   const inferenceBridge = {
     async start() {
       calls.push(["inference-bridge-start"]);
@@ -306,18 +334,18 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   const installed = installDesktopRuntime(electron, {
     controller,
     selectionStore,
-    accountController: accountWithCatalog(readyCatalog(), () => codexManager.start()),
+    accountController: setupAccount,
     sidecarManager,
     codexManager,
     inferenceBridge,
   });
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
-    "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy",
+    "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy", "advanceSetup",
     "catalogList", "computerRead", "computerSelectMode", "connectProvider", "create", "list",
     "permissionDecide", "permissionRequestsList", "permissionRevoke", "permissionsList", "read", "readModel", "rename",
     "retryRuntime", "selectBot", "selectModel", "updateProfile",
   ]);
-  assert.equal(handlers.size, 23);
+  assert.equal(handlers.size, 24);
   assert.equal(Object.isFrozen(installed), true);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
@@ -342,6 +370,19 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     },
   ]);
   assert.deepEqual(calls.find(([name]) => name === "activate-model-bot"), ["activate-model-bot", BOT_A]);
+  const profileTransition = {
+    botId: BOT_A,
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  };
+  await assert.rejects(handlers.get(IPC_CHANNELS.advanceSetup)({}, profileTransition), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  assert.equal(calls.filter(([name]) => name === "advance-setup").length, 0);
+  await handlers.get(IPC_CHANNELS.rename)({}, BOT_A, "Research Bot");
+  await handlers.get(IPC_CHANNELS.updateProfile)({}, BOT_A, {
+    appearance: { description: "Find exact primary sources." },
+  });
   const selected = await handlers.get(IPC_CHANNELS.selectModel)({}, {
     botId: BOT_A,
     model: "gpt-5.6-sol",
@@ -357,6 +398,32 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     generation: 1,
   });
   assert.doesNotMatch(JSON.stringify(selected), /endpoint|authToken|opaque-private|runtime-a/);
+  setupCatalog = readyCatalog(8);
+  await assert.rejects(handlers.get(IPC_CHANNELS.advanceSetup)({}, profileTransition), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  assert.equal(calls.filter(([name]) => name === "advance-setup").length, 0);
+  const refreshed = await handlers.get(IPC_CHANNELS.selectModel)({}, {
+    botId: BOT_A,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+  });
+  assert.equal(refreshed.catalogGeneration, 8);
+  assert.equal(refreshed.generation, 2);
+  assert.equal((await handlers.get(IPC_CHANNELS.advanceSetup)({}, profileTransition)).setupStage, "computer");
+  assert.deepEqual(calls.find(([name]) => name === "advance-setup"), [
+    "advance-setup",
+    BOT_A,
+    { expectedStage: "profile-model", nextStage: "computer" },
+  ]);
+  const hostileTransition = new Proxy({}, {
+    getPrototypeOf() { throw new Error("/Users/private token=secret"); },
+  });
+  await assert.rejects(handlers.get(IPC_CHANNELS.advanceSetup)({}, hostileTransition), (error) => (
+    error?.code === "CODEX_BOT_OPERATION_FAILED"
+      && !/Users|token|secret/i.test(error?.message)
+  ));
+  assert.equal(calls.filter(([name]) => name === "advance-setup").length, 1);
   assert.equal(await handlers.get(IPC_CHANNELS.connectProvider)({}, "claude"), undefined);
   assert.deepEqual(calls.find(([name]) => name === "connect-provider"), ["connect-provider", "claude"]);
   await assert.rejects(handlers.get(IPC_CHANNELS.connectProvider)({}, "codex"), {
@@ -375,7 +442,7 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(sends.at(-1), ["codex-bot:changed", bot]);
-  installed.dispose();
+  await installed.dispose();
   assert.equal(process.env.CODEX_BOT_CLIPROXY_URL, undefined);
   assert.equal(process.env.CODEX_BOT_CLIPROXY_TOKEN, undefined);
   assert.equal(process.env.CODEX_BOT_INFERENCE_ENDPOINT, undefined);
@@ -384,6 +451,246 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   assert.deepEqual(calls.slice(-4), [
     ["inference-bridge-dispose"], ["direct-stop"], ["sidecar-stop"], ["dispose"],
   ]);
+});
+
+test("setup completion consumes a fresh authoritative Computer selection for the same bot", async () => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  const calls = [];
+  const computer = Object.freeze({
+    mode: "local",
+    generation: 4,
+    localProfileId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    nativeAgentId: null,
+    state: "ready",
+    lastConfirmedAt: "2026-08-15T12:34:56.000Z",
+    lastErrorCode: null,
+  });
+  let record = Object.freeze({
+    botId: BOT_A,
+    name: "Research Bot",
+    setupStage: "computer",
+    runtime: Object.freeze({ state: "ready" }),
+    computer,
+  });
+  const controller = {
+    on() {},
+    off() {},
+    async readBot(botId) { assert.equal(botId, BOT_A); return record; },
+    async advanceSetup(botId, transition) {
+      calls.push(["advance", botId, transition]);
+      record = Object.freeze({ ...record, setupStage: transition.nextStage });
+      return record;
+    },
+    dispose() {},
+  };
+  const computerBoundary = {
+    async selectMode(value) {
+      calls.push(["select-mode", value]);
+      return Object.freeze({ botId: value.botId, computer });
+    },
+    dispose() {},
+  };
+  const window = {
+    isDestroyed: () => false,
+    webContents: { isDestroyed: () => false, send() {} },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(sender) { return sender === window.webContents ? window : null; },
+      getAllWindows() { return [window]; },
+    },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore: {},
+    computerBoundary,
+    codexManager: { async start() {}, stop() {} },
+  });
+  const transition = { botId: BOT_A, expectedStage: "computer", nextStage: "complete" };
+  await assert.rejects(handlers.get(IPC_CHANNELS.advanceSetup)({}, transition), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  assert.deepEqual(calls, []);
+  await assert.rejects(
+    handlers.get(IPC_CHANNELS.computerSelectMode)(
+      { sender: window.webContents },
+      { botId: BOT_A, mode: "not-now" },
+    ),
+    { code: "OPENBOT_COMPUTER_OPERATION_FAILED" },
+  );
+  await assert.rejects(handlers.get(IPC_CHANNELS.advanceSetup)({}, transition), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  assert.deepEqual(calls, [["select-mode", { botId: BOT_A, mode: "not-now" }]]);
+  await handlers.get(IPC_CHANNELS.computerSelectMode)(
+    { sender: window.webContents },
+    { botId: BOT_A, mode: "local" },
+  );
+  assert.equal((await handlers.get(IPC_CHANNELS.advanceSetup)({}, transition)).setupStage, "complete");
+  assert.deepEqual(calls, [
+    ["select-mode", { botId: BOT_A, mode: "not-now" }],
+    ["select-mode", { botId: BOT_A, mode: "local" }],
+    ["advance", BOT_A, { expectedStage: "computer", nextStage: "complete" }],
+  ]);
+  await assert.rejects(handlers.get(IPC_CHANNELS.advanceSetup)({}, transition), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  assert.equal(calls.length, 3, "the same Computer receipt cannot complete setup twice");
+  await installed.dispose();
+});
+
+test("profile setup cannot commit after its authoritative catalog receipt changes in flight", async () => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  let catalog = readyCatalog(7);
+  let selected = null;
+  let record = Object.freeze({
+    botId: BOT_A,
+    name: "New Bot",
+    setupStage: "profile-model",
+    runtime: Object.freeze({ state: "ready" }),
+    computer: Object.freeze({
+      mode: "not-now", generation: 0, localProfileId: null, nativeAgentId: null,
+      state: "unconfigured", lastConfirmedAt: null, lastErrorCode: null,
+    }),
+  });
+  let releaseAdvance;
+  let enteredAdvance;
+  const entered = new Promise((resolve) => { enteredAdvance = resolve; });
+  const gate = new Promise((resolve) => { releaseAdvance = resolve; });
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async readBot() { return record; },
+    async renameBot(_botId, name) { record = Object.freeze({ ...record, name }); return record; },
+    async updateProfile() { return record; },
+    async advanceSetup(_botId, transition, fence) {
+      enteredAdvance();
+      await gate;
+      if (typeof fence === "function") fence(record);
+      record = Object.freeze({ ...record, setupStage: transition.nextStage });
+      return record;
+    },
+  };
+  const selectionStore = {
+    async writeNext(value) {
+      selected = Object.freeze({ ...value, generation: (selected?.generation ?? 0) + 1 });
+      return selected;
+    },
+    async read() { return selected; },
+  };
+  const accountController = { ...accountWithCatalog(), catalogState() { return catalog; } };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller, selectionStore, accountController,
+    codexManager: { async start() {}, stop() {} },
+  });
+  await handlers.get(IPC_CHANNELS.rename)({}, BOT_A, "Research Bot");
+  await handlers.get(IPC_CHANNELS.updateProfile)({}, BOT_A, {
+    appearance: { description: "Review primary sources." },
+  });
+  await handlers.get(IPC_CHANNELS.selectModel)({}, {
+    botId: BOT_A,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+  });
+  const pending = handlers.get(IPC_CHANNELS.advanceSetup)({}, {
+    botId: BOT_A,
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  });
+  await Promise.race([
+    entered,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("selection barrier was not entered")), 100)),
+  ]);
+  catalog = readyCatalog(8);
+  releaseAdvance();
+  await assert.rejects(pending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(record.setupStage, "profile-model");
+  assert.equal(selected.catalogGeneration, 7);
+  assert.equal(catalog.generation, 8);
+  await installed.dispose();
+});
+
+test("Computer setup cannot commit after its authoritative target changes in flight", async () => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  const computer = Object.freeze({
+    mode: "local", generation: 4,
+    localProfileId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    nativeAgentId: null, state: "ready",
+    lastConfirmedAt: "2026-08-15T12:34:56.000Z", lastErrorCode: null,
+  });
+  let record = Object.freeze({
+    botId: BOT_A, name: "Research Bot", setupStage: "computer",
+    runtime: Object.freeze({ state: "ready" }), computer,
+  });
+  let releaseAdvance;
+  let enteredAdvance;
+  const entered = new Promise((resolve) => { enteredAdvance = resolve; });
+  const gate = new Promise((resolve) => { releaseAdvance = resolve; });
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async readBot() { return record; },
+    async advanceSetup(_botId, transition, fence) {
+      enteredAdvance();
+      await gate;
+      if (typeof fence === "function") fence(record);
+      record = Object.freeze({ ...record, setupStage: transition.nextStage });
+      return record;
+    },
+  };
+  const computerBoundary = {
+    async selectMode(value) { return Object.freeze({ botId: value.botId, computer }); },
+    dispose() {},
+  };
+  const window = {
+    isDestroyed: () => false,
+    webContents: { isDestroyed: () => false, send() {} },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(sender) { return sender === window.webContents ? window : null; },
+      getAllWindows() { return [window]; },
+    },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller, selectionStore: {}, computerBoundary,
+    codexManager: { async start() {}, stop() {} },
+  });
+  await handlers.get(IPC_CHANNELS.computerSelectMode)(
+    { sender: window.webContents },
+    { botId: BOT_A, mode: "local" },
+  );
+  const pending = handlers.get(IPC_CHANNELS.advanceSetup)({}, {
+    botId: BOT_A,
+    expectedStage: "computer",
+    nextStage: "complete",
+  });
+  await entered;
+  record = Object.freeze({ ...record, computer: Object.freeze({ ...computer, generation: 5 }) });
+  releaseAdvance();
+  await assert.rejects(pending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(record.setupStage, "computer");
+  assert.equal(record.computer.generation, 5);
+  await installed.dispose();
 });
 
 test("desktop exposes exact local computer methods and rejects hostile IPC before private effects", async () => {
@@ -497,6 +804,20 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
     botId: BOT_A,
     requests: [prompt],
   });
+  const shellPrompt = Object.freeze({
+    ...prompt,
+    capability: "shell.execute",
+    resourceLabel: "Full host shell",
+    reason: "Full host shell as your macOS user, not confined to this workspace",
+    command: "printf 'exact command'\n/usr/bin/true",
+    allowsAlways: false,
+  });
+  resultOverrides.requests = { botId: BOT_A, requests: [shellPrompt] };
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.permissionRequestsList)(event, BOT_A), {
+    botId: BOT_A,
+    requests: [shellPrompt],
+  });
+  delete resultOverrides.requests;
   const permissionDecideHandler = handlers.get(IPC_CHANNELS.permissionDecide);
   const decision = {
     requestId: "permission-11111111-1111-4111-8111-111111111111",
@@ -514,7 +835,7 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
     botId: BOT_A,
     permissions: [],
   });
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 7);
 
   await assert.rejects(
     handlers.get(IPC_CHANNELS.computerSelectMode)(event, new Proxy({}, {
@@ -530,13 +851,13 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
     handlers.get(IPC_CHANNELS.computerRead)({ sender: {} }, BOT_A),
     { code: "OPENBOT_COMPUTER_OPERATION_FAILED" },
   );
-  assert.equal(calls.length, 6);
+  assert.equal(calls.length, 7);
   resultOverrides.read = { botId: BOT_A, computer, unexpected: true };
   await assert.rejects(computerReadHandler(event, BOT_A), {
     code: "OPENBOT_COMPUTER_OPERATION_FAILED",
   });
   delete resultOverrides.read;
-  assert.equal(calls.length, 7);
+  assert.equal(calls.length, 8);
 
   let accessorReads = 0;
   resultOverrides.read = Object.defineProperty({ botId: BOT_A }, "computer", {
@@ -661,7 +982,7 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
   assert.equal(sends.length, 2);
   assert.equal(accessorReads, 0);
   assert.doesNotMatch(JSON.stringify(sends), /bookmark|Users|authToken|endpoint/);
-  installed.dispose();
+  await installed.dispose();
   assert.equal(handlers.has(IPC_CHANNELS.computerRead), false);
   assert.equal(listeners.size, 0);
   assert.deepEqual(calls.at(-1), ["computer-dispose"]);
@@ -779,7 +1100,7 @@ test("desktop account boundary opens browser login only in main and publishes fr
     [CATALOG_CHANGE_CHANNEL, catalog],
   ]);
   assert.doesNotMatch(JSON.stringify(sends), /private|authUrl|loginId|accessToken|email|endpoint/);
-  installed.dispose();
+  await installed.dispose();
   assert.equal(listeners.size, 0);
   assert.equal(handlers.size, 0);
   assert.deepEqual(calls.slice(-1), [["account-dispose"]]);
@@ -824,7 +1145,7 @@ test("selecting a bot retains its local model generation across remote runtime c
   const selected = await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A);
   assert.equal(selected, retained);
   assert.equal(runtimeReads, 0);
-  installed.dispose();
+  await installed.dispose();
 });
 
 test("selecting a stored bot durably owns the next unbound inference conversation", async (t) => {
@@ -873,7 +1194,7 @@ test("selecting a stored bot durably owns the next unbound inference conversatio
   assert.equal(config.botId, BOT_B.slice(4));
   assert.equal(config.generation, 9);
   assert.equal(config.model, "gpt-5.6-terra");
-  installed.dispose();
+  await installed.dispose();
 });
 
 test("official Codex selection remains usable when the bot's remote Work runtime is unavailable", async () => {
@@ -942,7 +1263,165 @@ test("official Codex selection remains usable when the bot's remote Work runtime
     serviceTier: null,
     catalogGeneration: 7,
   }]);
-  installed.dispose();
+  await installed.dispose();
+});
+
+test("desktop model selection publishes only inside the controller same-bot mutation barrier", async () => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  let markEntered;
+  let releaseBarrier;
+  const entered = new Promise((resolve) => { markEntered = resolve; });
+  const barrier = new Promise((resolve) => { releaseBarrier = resolve; });
+  const calls = [];
+  const bot = Object.freeze({ botId: BOT_A, name: "New Bot", runtime: Object.freeze({ state: "ready" }) });
+  class Conversations {
+    on() {}
+    off() {}
+    list() { return []; }
+    create() { throw new Error("unused"); }
+    read() { throw new Error("unused"); }
+    send() { throw new Error("unused"); }
+    cancel() { throw new Error("unused"); }
+    async withModelSelectionMutation(botId, operation) {
+      calls.push(["barrier-enter", botId]);
+      markEntered();
+      await barrier;
+      const value = await operation();
+      calls.push(["barrier-exit", botId]);
+      return value;
+    }
+    async dispose() {}
+  }
+  const conversations = new Conversations();
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async readBot() { return bot; },
+  };
+  const selectionStore = {
+    async writeNext(value) {
+      calls.push(["write-next", value.botId]);
+      return Object.freeze({ ...value, generation: 4 });
+    },
+  };
+  const electron = {
+    app: { on() {}, off() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore,
+    standaloneConversations: conversations,
+    accountController: accountWithCatalog(),
+  });
+  const selecting = handlers.get(IPC_CHANNELS.selectModel)({}, {
+    botId: BOT_A,
+    model: "gpt-5.6-luna",
+    reasoningEffort: "max",
+  });
+  await entered;
+  assert.deepEqual(calls, [["barrier-enter", BOT_A]]);
+  releaseBarrier();
+  const selected = await selecting;
+  assert.equal(selected.generation, 4);
+  assert.deepEqual(calls.map(([name]) => name), ["barrier-enter", "write-next", "barrier-exit"]);
+  await installed.dispose();
+});
+
+test("desktop model selection establishes the real same-bot send fence before a held bot read", async () => {
+  const { StandaloneConversationController } = require("../src/desktop/standalone-conversation-controller.cjs");
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  let enterRead;
+  let releaseRead;
+  const readEntered = new Promise((resolve) => { enterRead = resolve; });
+  const readGate = new Promise((resolve) => { releaseRead = resolve; });
+  const initial = Object.freeze({
+    botId: BOT_A,
+    generation: 3,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  });
+  let streams = 0;
+  const generated = [
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  ];
+  const conversations = new StandaloneConversationController({
+    router: {
+      async stream() {
+        streams += 1;
+        return { fullStream: (async function* () { await new Promise(() => {}); })() };
+      },
+    },
+    async readSelection() { return initial; },
+    makeId() { return generated.shift(); },
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const conversation = conversations.create({ botId: BOT_A });
+  const bot = Object.freeze({
+    botId: BOT_A,
+    name: "OpenBot",
+    setupStage: "complete",
+    runtime: Object.freeze({ state: "ready" }),
+  });
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async readBot() {
+      enterRead();
+      await readGate;
+      return bot;
+    },
+  };
+  const selectionStore = {
+    async writeNext(value) { return Object.freeze({ ...value, generation: 4 }); },
+  };
+  const electron = {
+    app: { on() {}, off() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore,
+    standaloneConversations: conversations,
+    accountController: accountWithCatalog(),
+  });
+  const selecting = handlers.get(IPC_CHANNELS.selectModel)({}, {
+    botId: BOT_A,
+    model: "gpt-5.6-luna",
+    reasoningEffort: "max",
+  });
+  await readEntered;
+  const sendResult = await Promise.allSettled([conversations.send({
+    botId: BOT_A,
+    conversationId: conversation.conversationId,
+    text: "must use the old model only if no selection is pending",
+  })]);
+  if (sendResult[0].status === "fulfilled") {
+    await conversations.cancel({
+      botId: BOT_A,
+      conversationId: conversation.conversationId,
+      invocationId: sendResult[0].value.invocationId,
+    });
+  }
+  assert.equal(sendResult[0].status, "rejected");
+  assert.equal(sendResult[0].reason?.code, "OPENBOT_CONVERSATION_STALE");
+  assert.equal(streams, 0);
+
+  releaseRead();
+  assert.equal((await selecting).generation, 4);
+  await installed.dispose();
 });
 
 test("desktop runtime forwards only the controller's sanitized scoped runtime events", async () => {
@@ -971,8 +1450,141 @@ test("desktop runtime forwards only the controller's sanitized scoped runtime ev
   listeners.get("runtime-event")(scoped);
   assert.deepEqual(sends, [[RUNTIME_EVENT_CHANNEL, scoped]]);
   assert.doesNotMatch(JSON.stringify(sends), /endpoint|authToken|Bearer|providerDiagnostic/);
-  installed.dispose();
+  await installed.dispose();
   assert.equal(listeners.has("runtime-event"), false);
+});
+
+test("runtime bot account and computer broadcasts never enter Local Desktop browser windows", async () => {
+  const {
+    ACCOUNT_CHANGE_CHANNEL,
+    CATALOG_CHANGE_CHANNEL,
+    CHANGE_CHANNEL,
+    COMPUTER_CHANGE_CHANNEL,
+    COMPUTER_PERMISSION_CHANNEL,
+    installDesktopRuntime,
+    RUNTIME_EVENT_CHANNEL,
+  } = require(runtimePath);
+  const handlers = new Map();
+  const controllerListeners = new Map();
+  const accountListeners = new Map();
+  const computerListeners = new Map();
+  const normalSends = [];
+  const hiddenSends = [];
+  const normalWindow = {
+    isDestroyed: () => false,
+    webContents: {
+      isDestroyed: () => false,
+      send: (...args) => normalSends.push(args),
+    },
+  };
+  const hiddenLocalWindow = {
+    isDestroyed: () => false,
+    webContents: {
+      isDestroyed: () => false,
+      send(...args) {
+        hiddenSends.push(args);
+        throw new Error("cross-bot DTO reached hidden Local Desktop");
+      },
+    },
+  };
+  normalWindow.webContents.mainFrame = { isDestroyed: () => false };
+  hiddenLocalWindow.webContents.mainFrame = { isDestroyed: () => false };
+  const controller = {
+    on(event, listener) { controllerListeners.set(event, listener); },
+    off(event, listener) { if (controllerListeners.get(event) === listener) controllerListeners.delete(event); },
+    dispose() {},
+  };
+  const accountController = {
+    ...accountWithCatalog(),
+    on(event, listener) { accountListeners.set(event, listener); },
+    off(event, listener) { if (accountListeners.get(event) === listener) accountListeners.delete(event); },
+  };
+  const computerBoundary = {
+    on(event, listener) { computerListeners.set(event, listener); },
+    off(event, listener) { if (computerListeners.get(event) === listener) computerListeners.delete(event); },
+    async read(botId) {
+      return {
+        botId,
+        computer: {
+          mode: "local",
+          generation: 1,
+          localProfileId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          nativeAgentId: null,
+          state: "ready",
+          lastConfirmedAt: "2026-08-16T12:00:00.000Z",
+          lastErrorCode: null,
+        },
+      };
+    },
+    dispose() {},
+  };
+  const localDesktopManager = {
+    ownsWindow(window) { return window === hiddenLocalWindow; },
+    async open() {},
+    async captureDisplayFrame() { throw new Error("unused"); },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(webContents) {
+        return [normalWindow, hiddenLocalWindow].find((window) => window.webContents === webContents) ?? null;
+      },
+      getAllWindows: () => [normalWindow, hiddenLocalWindow],
+    },
+  };
+  const installed = installDesktopRuntime(electron, {
+    accountController,
+    codexManager: { async start() {}, stop() {} },
+    computerBoundary,
+    controller,
+    localDesktopManager,
+    selectionStore: {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const bot = Object.freeze({ botId: BOT_B, name: "Other Bot", runtime: Object.freeze({ state: "ready" }) });
+  const runtimeEvent = Object.freeze({ botId: BOT_B, generation: 2, event: Object.freeze({ type: "completed" }) });
+  const account = Object.freeze({ generation: 2, status: "signed-out" });
+  const catalog = readyCatalog(8);
+  const computer = Object.freeze({
+    mode: "local",
+    generation: 2,
+    localProfileId: "local-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    nativeAgentId: null,
+    state: "ready",
+    lastConfirmedAt: "2026-08-16T12:00:00.000Z",
+    lastErrorCode: null,
+  });
+  const permission = Object.freeze({
+    requestId: "permission-22222222-2222-4222-8222-222222222222",
+    botId: BOT_B,
+    targetId: computer.localProfileId,
+    targetGeneration: 2,
+    capability: "application.open",
+    resourceLabel: "Approved App",
+    reason: "Open an approved app",
+  });
+  controllerListeners.get("bot-changed")({ botId: BOT_B, bot });
+  controllerListeners.get("runtime-event")(runtimeEvent);
+  accountListeners.get("account-changed")(account);
+  accountListeners.get("catalog-changed")(catalog);
+  computerListeners.get("changed")({ botId: BOT_B, computer });
+  computerListeners.get("permission-requested")(permission);
+
+  assert.deepEqual(hiddenSends, []);
+  assert.deepEqual(normalSends.map(([channel]) => channel), [
+    CHANGE_CHANNEL,
+    RUNTIME_EVENT_CHANNEL,
+    ACCOUNT_CHANGE_CHANNEL,
+    CATALOG_CHANGE_CHANNEL,
+    COMPUTER_CHANGE_CHANNEL,
+    COMPUTER_PERMISSION_CHANNEL,
+  ]);
+  await installed.dispose();
 });
 
 test("model selection registry is atomic, private, exact, and contains no runtime secrets", async (t) => {

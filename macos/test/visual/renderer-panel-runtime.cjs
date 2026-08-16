@@ -20,11 +20,12 @@ async function main() {
   const catalog = argument("catalog", "full");
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 640 || height < 480
     || !new Set(["terra-light", "sol-light", "medium", "high", "xhigh", "max", "ultra", "ultra-code"]).has(effort)
-    || !new Set(["closed", "entry", "steady", "later", "advanced", "hold", "drag", "wheel", "arrows", "focus", "hover", "disabled", "reduced", "fast-entry", "fast-steady", "fast-exit", "computer-setup", "computer-change", "permission", "grants"]).has(phase)
+    || !new Set(["closed", "entry", "steady", "later", "advanced", "hold", "drag", "wheel", "arrows", "focus", "hover", "disabled", "reduced", "fast-entry", "fast-steady", "fast-exit", "new-bot-setup", "computer-setup", "computer-change", "permission", "grants"]).has(phase)
     || !new Set(["standard", "priority"]).has(tier)
     || !new Set(["dark", "light"]).has(theme)
     || !new Set(["wide", "narrow"]).has(layout)
-    || !new Set(["full", "minimal", "long"]).has(catalog)) {
+    || !new Set(["full", "minimal", "long"]).has(catalog)
+    || (phase === "entry" && !new Set(["ultra", "ultra-code"]).has(effort))) {
     throw new Error("Visual capture arguments are invalid.");
   }
   if (phase === "reduced") app.commandLine.appendSwitch("force-prefers-reduced-motion", "reduce");
@@ -58,14 +59,59 @@ async function main() {
             : effort[0].toUpperCase() + effort.slice(1);
   const sliderRect = await window.webContents.executeJavaScript(`(async () => {
     const phase = ${JSON.stringify(phase)};
-    if (phase === "computer-setup") {
+    if (phase === "new-bot-setup" || phase === "computer-setup") {
       document.querySelector(".codex-bot-new")?.click();
+      await new Promise((resolve, reject) => {
+        let remainingFrames = 120;
+        const waitForSetup = () => {
+          const setup = document.querySelector(".codex-new-bot-setup");
+          if (setup && !setup.hidden) return resolve();
+          if (remainingFrames-- <= 0) return reject(new Error("New Bot profile setup did not open."));
+          requestAnimationFrame(waitForSetup);
+        };
+        waitForSetup();
+      });
+      const profile = document.querySelector(".codex-new-bot-setup");
+      const profileTitle = document.querySelector(".codex-new-bot-setup-title");
+      const name = document.querySelector(".codex-new-bot-name");
+      const description = document.querySelector(".codex-new-bot-description");
+      const photo = document.querySelector(".codex-new-bot-photo");
+      const shape = document.querySelector(".codex-new-bot-shape");
+      const color = document.querySelector(".codex-new-bot-color");
+      const provider = document.querySelector(".codex-new-bot-provider");
+      const model = document.querySelector(".codex-new-bot-model");
+      const power = document.querySelector(".codex-new-bot-power");
+      const speed = document.querySelector(".codex-new-bot-speed");
+      const profileProceed = document.querySelector(".codex-new-bot-continue");
+      const computerBeforeProfile = document.querySelector(".codex-computer-setup");
+      if (!profile || profile.hidden || !profile.open || profileTitle?.textContent !== "Set up New Bot"
+        || name?.value !== "New Bot" || name.placeholder !== "Name your Bot"
+        || description?.placeholder !== "What should this Bot help with?"
+        || photo?.accept !== "image/png" || shape?.options.length !== 18 || color?.options.length !== 11
+        || !provider?.value || !model?.value || !power?.value || !speed?.value
+        || profileProceed?.disabled || (computerBeforeProfile && !computerBeforeProfile.hidden)) {
+        throw new Error("New Bot profile setup did not originate from production state.");
+      }
+      const profileRect = profile.getBoundingClientRect();
+      if (profileRect.top < 12 || profileRect.right > innerWidth - 12
+        || profileRect.bottom > innerHeight - 12 || profileRect.left < 12) {
+        throw new Error("New Bot profile setup is clipped by the viewport.");
+      }
+      if (phase === "new-bot-setup") {
+        return {
+          x: Math.round(profileRect.left + profileRect.width / 2),
+          y: Math.round(profileRect.top + profileRect.height / 2),
+        };
+      }
+      name.value = "Research Bot";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      profileProceed.click();
       await new Promise((resolve, reject) => {
         let remainingFrames = 120;
         const waitForSetup = () => {
           const setup = document.querySelector(".codex-computer-setup");
           if (setup && !setup.hidden) return resolve();
-          if (remainingFrames-- <= 0) return reject(new Error("Computer setup did not open."));
+          if (remainingFrames-- <= 0) return reject(new Error("Computer setup did not open after profile confirmation."));
           requestAnimationFrame(waitForSetup);
         };
         waitForSetup();
@@ -73,7 +119,7 @@ async function main() {
       const setup = document.querySelector(".codex-computer-setup");
       const choices = [...document.querySelectorAll(".codex-computer-choice-input")];
       const proceed = document.querySelector(".codex-computer-continue");
-      if (!setup || setup.hidden || choices.length !== 3 || choices.some((choice) => choice.checked)
+      if (!profile.hidden || !setup || setup.hidden || choices.length !== 3 || choices.some((choice) => choice.checked)
         || !proceed?.disabled) throw new Error("Computer setup did not originate from production state.");
       const rect = setup.getBoundingClientRect();
       if (rect.top < 12 || rect.right > innerWidth - 12 || rect.bottom > innerHeight - 12 || rect.left < 12) {
@@ -182,6 +228,30 @@ async function main() {
     if (label.textContent !== ${JSON.stringify(expectedLabel)}) {
       throw new Error("Power control did not render the requested state.");
     }
+    if (phase === "entry") {
+      const waitForPowerState = (predicate, message) => new Promise((resolve, reject) => {
+        let remainingFrames = 120;
+        const inspect = () => {
+          if (predicate()) return resolve();
+          if (remainingFrames-- <= 0) return reject(new Error(message));
+          requestAnimationFrame(inspect);
+        };
+        inspect();
+      });
+      slider.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Home" }));
+      await waitForPowerState(
+        () => label.textContent !== ${JSON.stringify(expectedLabel)}
+          && !document.querySelector(".codex-power-control")?.classList.contains("is-ultra"),
+        "Ultra entry evidence did not leave its persisted steady state.",
+      );
+      slider.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "End" }));
+      await waitForPowerState(
+        () => label.textContent === ${JSON.stringify(expectedLabel)}
+          && document.querySelector(".codex-power-control")?.classList.contains("is-ultra-entering")
+          && document.querySelector(".codex-power-warning")?.hidden === false,
+        "Ultra entry evidence did not originate from a user transition.",
+      );
+    }
     if (phase === "advanced") document.querySelector(".codex-power-advanced-toggle")?.click();
     if (phase === "hold") slider.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
     if (phase === "drag") {
@@ -208,7 +278,7 @@ async function main() {
     window.webContents.sendInputEvent({ type: "mouseMove", x: sliderRect.x, y: sliderRect.y, movementX: 0, movementY: 0 });
   }
   const delay = phase === "entry" || phase === "fast-entry" ? 280
-    : phase === "computer-setup" || phase === "computer-change" || phase === "permission" || phase === "grants" ? 240
+    : phase === "new-bot-setup" || phase === "computer-setup" || phase === "computer-change" || phase === "permission" || phase === "grants" ? 240
     : phase === "hold" ? 560
       : phase === "later" ? 3300
       : phase === "fast-steady" || tier === "priority" ? 720

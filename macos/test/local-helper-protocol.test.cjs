@@ -39,12 +39,17 @@ function current(generation = 4) {
 
 class FakeTransport {
   messages = [];
+  cancellations = [];
   disposed = false;
   #messageListeners = new Set();
   #exitListeners = new Set();
 
   send = mock.fn(async (message) => {
     this.messages.push(message);
+  });
+
+  cancel = mock.fn(async (requestId) => {
+    this.cancellations.push(requestId);
   });
 
   onMessage(listener) {
@@ -95,9 +100,13 @@ test("helper requests are exact bounded current and correlated", async () => {
   assert.deepEqual(transport.messages, [request()]);
   assert.equal(Object.isFrozen(transport.messages[0]), true);
 
-  transport.reply({ requestId: REQUEST_A, ok: true, value: { cwd: "workspace" } });
+  transport.reply({
+    requestId: REQUEST_A,
+    ok: true,
+    value: { exitCode: 0, stdout: "workspace", stderr: "" },
+  });
   const value = await pending;
-  assert.deepEqual(value, { cwd: "workspace" });
+  assert.deepEqual(value, { exitCode: 0, stdout: "workspace", stderr: "" });
   assert.equal(Object.isFrozen(value), true);
   protocol.dispose();
 });
@@ -161,9 +170,133 @@ test("unknown replies helper exit timeout and disposal settle pending work once"
   const fourthFixture = fixture({ transport: fourthTransport });
   const disposed = fourthFixture.protocol.run(request()).catch((error) => error);
   await new Promise((resolve) => setImmediate(resolve));
-  fourthFixture.protocol.dispose();
-  assert.match((await disposed).message, /disposed/i);
+  const fourthDisposal = fourthFixture.protocol.dispose();
+  await new Promise((resolve) => setImmediate(resolve));
+  fourthTransport.reply({ requestId: REQUEST_A, ok: false, errorCode: "OPENBOT_LOCAL_CANCELLED" });
+  await fourthDisposal;
+  assert.equal((await disposed).code, "OPENBOT_LOCAL_CANCELLED");
   assert.equal(fourthTransport.disposed, true);
+});
+
+test("task cancellation sends exact request cancellation and leaves sibling work usable", async () => {
+  const { protocol, transport } = fixture();
+  const taskA = protocol.run(request());
+  const taskAOutcome = taskA.catch((error) => error);
+  const taskBRequest = request({
+    requestId: "request-22222222-2222-4222-8222-222222222222",
+    taskId: "task-b",
+  });
+  const taskB = protocol.run(taskBRequest);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const cancellation = protocol.cancelTask("task-a");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(transport.cancellations, [REQUEST_A]);
+  transport.reply({ requestId: REQUEST_A, ok: false, errorCode: "OPENBOT_LOCAL_CANCELLED" });
+  await cancellation;
+  assert.equal((await taskAOutcome).code, "OPENBOT_LOCAL_CANCELLED");
+  transport.reply({
+    requestId: taskBRequest.requestId,
+    ok: true,
+    value: { exitCode: 0, stdout: "", stderr: "" },
+  });
+  assert.deepEqual(await taskB, { exitCode: 0, stdout: "", stderr: "" });
+  assert.equal(transport.disposed, false);
+  protocol.dispose();
+});
+
+test("task cancellation waits for the correlated child reply and permits a later task reuse", async () => {
+  const { protocol, transport } = fixture();
+  const first = protocol.run(request());
+  const firstOutcome = first.catch((error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  let cancellationSettled = false;
+  const cancellation = protocol.cancelTask("task-a").then(() => {
+    cancellationSettled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cancellationSettled, false, "cancellation must wait for the child process-group acknowledgement");
+  assert.deepEqual(transport.cancellations, [REQUEST_A]);
+
+  transport.reply({ requestId: REQUEST_A, ok: false, errorCode: "OPENBOT_LOCAL_CANCELLED" });
+  await cancellation;
+  assert.equal((await firstOutcome).code, "OPENBOT_LOCAL_CANCELLED");
+
+  const nextRequest = request({
+    requestId: "request-22222222-2222-4222-8222-222222222222",
+  });
+  const next = protocol.run(nextRequest);
+  await new Promise((resolve) => setImmediate(resolve));
+  transport.reply({
+    requestId: nextRequest.requestId,
+    ok: true,
+    value: { exitCode: 0, stdout: "next", stderr: "" },
+  });
+  assert.deepEqual(await next, { exitCode: 0, stdout: "next", stderr: "" });
+  protocol.dispose();
+});
+
+test("correlated shell replies preserve bounded hostile output for the metadata reducer only", async () => {
+  const { protocol, transport } = fixture();
+  const rawOutput = "/Users/person/project sk-proj-private -----BEGIN OPENSSH PRIVATE KEY-----";
+  const pending = protocol.run(request());
+  await new Promise((resolve) => setImmediate(resolve));
+  transport.reply({
+    requestId: REQUEST_A,
+    ok: true,
+    value: { exitCode: 0, stdout: rawOutput, stderr: "parser token tests passed" },
+  });
+  assert.deepEqual(await pending, {
+    exitCode: 0,
+    stdout: rawOutput,
+    stderr: "parser token tests passed",
+  });
+
+  const generic = protocol.run(request({
+    requestId: "request-22222222-2222-4222-8222-222222222222",
+    capability: "filesystem.read",
+    operation: "filesystem.read",
+    arguments: { relativePath: "notes.txt" },
+  }));
+  const genericOutcome = generic.catch((error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+  transport.reply({
+    requestId: "request-22222222-2222-4222-8222-222222222222",
+    ok: true,
+    value: { content: "/Users/person/private" },
+  });
+  assert.equal((await genericOutcome).code, "OPENBOT_LOCAL_HELPER_PROTOCOL_FAILED");
+});
+
+test("protocol disposal waits for every active child cancellation acknowledgement", async () => {
+  const { protocol, transport } = fixture();
+  const secondRequest = request({
+    requestId: "request-22222222-2222-4222-8222-222222222222",
+    taskId: "task-b",
+  });
+  const first = protocol.run(request()).catch((error) => error);
+  const second = protocol.run(secondRequest).catch((error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  let disposalSettled = false;
+  const disposal = Promise.resolve(protocol.dispose()).then(() => {
+    disposalSettled = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposalSettled, false);
+  assert.equal(transport.disposed, false);
+  assert.deepEqual(transport.cancellations, [REQUEST_A, secondRequest.requestId]);
+
+  transport.reply({ requestId: secondRequest.requestId, ok: false, errorCode: "OPENBOT_LOCAL_CANCELLED" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposalSettled, false);
+  assert.equal(transport.disposed, false);
+  transport.reply({ requestId: REQUEST_A, ok: false, errorCode: "OPENBOT_LOCAL_CANCELLED" });
+  await disposal;
+  assert.equal((await first).code, "OPENBOT_LOCAL_CANCELLED");
+  assert.equal((await second).code, "OPENBOT_LOCAL_CANCELLED");
+  assert.equal(transport.disposed, true);
 });
 
 test("hostile request and reply objects never execute accessors or expose diagnostics", async () => {

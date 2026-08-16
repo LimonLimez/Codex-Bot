@@ -107,6 +107,49 @@ test("runtime config is exact, frozen, generation scoped, and keeps connection s
   }, TypeError);
 });
 
+test("runtime config rejects caller-supplied Computer metadata and keeps routing main-owned", (t) => {
+  const { createRuntimeConfig, loadRuntimeConfig } = require(runtimePath);
+  const computer = {
+    mode: "local",
+    targetId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    targetGeneration: 4,
+    workspaceId: "workspace-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  };
+  assert.throws(() => createRuntimeConfig({
+    botId: BOT_ID,
+    generation: 3,
+    endpoint: "http://127.0.0.1:43123/v1",
+    credential: TOKEN,
+    model: "gpt-5.6-sol",
+    reasoningEffort: "max",
+    computer,
+  }), { code: "CODEX_BRIDGE_CONFIG_INVALID" });
+  const registry = temporaryRegistry(t);
+  fs.writeFileSync(registry, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId: `bot-${BOT_ID}`,
+    selections: {
+      [`bot-${BOT_ID}`]: {
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        serviceTier: null,
+        generation: 12,
+        updatedAt: null,
+      },
+    },
+  })}\n`, { mode: 0o600 });
+  const config = loadRuntimeConfig({
+    CODEX_BOT_MODEL_SELECTIONS: registry,
+    CODEX_BOT_CONVERSATION_BINDINGS: path.join(path.dirname(registry), "bindings.json"),
+    CODEX_BOT_INFERENCE_ENDPOINT: "tcp://127.0.0.1:43210",
+    CODEX_BOT_INFERENCE_CAPABILITY: "a".repeat(64),
+  }, { conversationId: "conversation-main-owned", computer });
+
+  assert.equal(typeof config.computer, "undefined");
+  assert.doesNotMatch(fs.readFileSync(registry, "utf8"), /workspace-|local-|computer/i);
+});
+
 test("runtime config has no permissive endpoint, token, identity, or model fallback", () => {
   const { createRuntimeConfig, loadRuntimeConfig } = require(runtimePath);
   const valid = {

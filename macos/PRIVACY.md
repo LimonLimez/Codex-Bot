@@ -23,12 +23,22 @@ optional provider opens CLIProxyAPI's provider-specific authorization flow.
 Those providers process the prompts and model requests sent to them under their
 own terms and privacy policies.
 
-Each Work bot is assigned its own explicitly configured remote runtime. Prompts,
-requested tool actions, computer frames, keyboard or pointer input, and data
-entered into websites may be processed by that remote-runtime provider and by
-the websites used inside the runtime. If the remote provider is unavailable,
-OpenBot fails closed; it does not silently use this Mac, a shared computer, or
-an xAI inference fallback.
+Computer access is selected explicitly for each bot. If Free Local Desktop is
+selected, OpenBot creates a dedicated Electron Chromium desktop, private
+per-bot browser partition, and bot-scoped task workspaces on this Mac. It does
+not open a normal Chrome or Safari profile. Browser cookies and site state may
+be retained in that private OpenBot partition until the bot's local data is
+removed. The requesting bot must use OpenBot's permission flow for brokered
+file, shell, and other local actions; those actions can affect files or apps the
+user permits. Free Local Desktop is local ownership isolation, not a cloud VM
+or a security boundary for untrusted code.
+
+If a remote runtime is selected, prompts, requested tool actions, computer
+frames, keyboard or pointer input, and data entered into websites may be
+processed by that remote-runtime provider and by the websites used inside the
+runtime. If that provider is unavailable, OpenBot fails closed. It never
+silently switches the bot to Free Local Desktop, a shared computer, or an xAI
+inference fallback.
 
 OpenBot does not add project telemetry. Runtime errors and public events are
 sanitized to remove authorization values, endpoints, provider diagnostics, and
@@ -40,6 +50,15 @@ The installer reads a user-owned, exact Grok Bot 0.20.0 application and creates
 a separate OpenBot application. It does not modify the source Grok Bot app.
 On first launch, a legacy Codex Bot profile is copied atomically into OpenBot;
 the legacy application and profile are retained for compatibility and rollback.
-The OpenBot DMG contains no Grok Bot application, user profile, conversation,
-cookie, browser history, development log, screenshot, credential, or personal
-absolute path. A mounted-image audit enforces that release boundary.
+The OpenBot DMG contains no Grok Bot application, user profile, local permission
+grant or bookmark, Free Local Desktop workspace or browser partition,
+standalone conversation, cookie, browser history, development log, screenshot,
+captured frame, credential, or personal absolute path. A mounted-image audit
+enforces that release boundary.
+
+The unmodified, integrity-pinned Codex and CLIProxyAPI executables can contain
+public upstream CI source paths recorded by their compilers. The audit permits
+only the enumerated `/Users/runner` Cargo, Rust toolchain, Go module cache, and
+official project-workspace roots inside those two exact installer members. It
+still rejects every other absolute home path, every such path in any other
+member, and all detected credential material.

@@ -1,0 +1,302 @@
+.openbot-standalone-shell {
+  --openbot-shell-bg: #0b0d12;
+  --openbot-shell-panel: #11141b;
+  --openbot-shell-line: rgba(255, 255, 255, 0.09);
+  --openbot-shell-text: #f5f7fb;
+  --openbot-shell-muted: #9299a8;
+  --openbot-shell-blue: #2383ff;
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(236px, 280px) minmax(0, 1fr);
+  min-width: 720px;
+  min-height: 520px;
+  color: var(--openbot-shell-text);
+  background:
+    radial-gradient(circle at 78% 12%, rgba(35, 131, 255, 0.08), transparent 28%),
+    var(--openbot-shell-bg);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.openbot-standalone-sidebar {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  padding: 48px 14px 16px;
+  overflow: auto;
+  border-right: 1px solid var(--openbot-shell-line);
+  background: color-mix(in srgb, var(--openbot-shell-panel) 94%, transparent);
+}
+
+.openbot-standalone-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 7px;
+  font-size: 15px;
+}
+
+.openbot-standalone-brand-mark,
+.openbot-standalone-orb {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(117, 178, 255, 0.55);
+  border-radius: 9px;
+  color: white;
+  background: linear-gradient(145deg, #2383ff, #7047eb);
+  box-shadow: 0 8px 22px rgba(35, 131, 255, 0.22);
+  font-weight: 750;
+}
+
+.openbot-standalone-lane {
+  margin: 0 7px 6px;
+  color: var(--openbot-shell-muted);
+  font-size: 11px;
+}
+
+.openbot-standalone-workspace {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: 58px minmax(170px, 38vh) minmax(0, 1fr) auto auto;
+}
+
+.openbot-standalone-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--openbot-shell-line);
+  -webkit-app-region: drag;
+}
+
+.openbot-standalone-header > div {
+  display: grid;
+  gap: 1px;
+}
+
+.openbot-standalone-header span {
+  color: var(--openbot-shell-muted);
+  font-size: 11px;
+}
+
+.openbot-standalone-status {
+  padding: 5px 9px;
+  border: 1px solid rgba(35, 131, 255, 0.24);
+  border-radius: 999px;
+  color: #9ac7ff !important;
+  background: rgba(35, 131, 255, 0.08);
+}
+
+.openbot-standalone-transcript {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 18px;
+  padding: 28px clamp(24px, 8vw, 96px);
+  overflow: auto;
+}
+
+.openbot-standalone-welcome {
+  display: grid;
+  max-width: 560px;
+  justify-items: start;
+  gap: 9px;
+  margin: auto;
+}
+
+.openbot-standalone-welcome h1,
+.openbot-standalone-welcome p {
+  margin: 0;
+}
+
+.openbot-standalone-welcome h1 {
+  font-size: clamp(24px, 4vw, 34px);
+  letter-spacing: -0.035em;
+}
+
+.openbot-standalone-welcome p {
+  max-width: 520px;
+  color: var(--openbot-shell-muted);
+  font-size: 14px;
+}
+
+.openbot-standalone-message {
+  display: grid;
+  max-width: min(720px, 88%);
+  gap: 5px;
+}
+
+.openbot-standalone-message p {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--openbot-shell-line);
+  border-radius: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--openbot-shell-panel);
+}
+
+.openbot-standalone-message.is-user {
+  align-self: flex-end;
+}
+
+.openbot-standalone-message.is-user strong {
+  text-align: right;
+}
+
+.openbot-standalone-message.is-user p {
+  border-color: rgba(35, 131, 255, 0.28);
+  background: rgba(35, 131, 255, 0.12);
+}
+
+.openbot-standalone-queue {
+  display: grid;
+  gap: 7px;
+  max-height: 180px;
+  margin: 0 clamp(24px, 8vw, 96px) 10px;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--openbot-shell-line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--openbot-shell-panel) 88%, transparent);
+}
+
+.openbot-standalone-queue[hidden] {
+  display: none;
+}
+
+.openbot-standalone-queue-title {
+  color: var(--openbot-shell-muted);
+  font-size: 11px;
+}
+
+.openbot-standalone-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.openbot-standalone-queue-editor {
+  flex: 1;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--openbot-shell-line);
+  border-radius: 9px;
+  padding: 7px 9px;
+  color: var(--openbot-shell-text);
+  background: transparent;
+  font: inherit;
+}
+
+.openbot-standalone-queue-remove {
+  border: 0;
+  color: var(--openbot-shell-muted);
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.openbot-standalone-composer {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  margin: 0 clamp(24px, 8vw, 96px) 24px;
+  padding: 12px 12px 12px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 18px;
+  background: rgba(20, 23, 31, 0.96);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+}
+
+.openbot-standalone-input {
+  flex: 1;
+  min-width: 0;
+  max-height: 160px;
+  padding: 4px 0;
+  resize: none;
+  border: 0;
+  outline: 0;
+  color: var(--openbot-shell-text);
+  background: transparent;
+  font: inherit;
+}
+
+.openbot-standalone-send {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 10px;
+  color: white;
+  background: var(--openbot-shell-blue);
+  font-size: 17px;
+  cursor: pointer;
+}
+
+.openbot-standalone-stop {
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 111, 126, 0.42);
+  border-radius: 10px;
+  color: #ffb1ba;
+  background: rgba(255, 74, 94, 0.1);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.openbot-standalone-stop[hidden] {
+  display: none;
+}
+
+.openbot-standalone-send:disabled,
+.openbot-standalone-stop:disabled {
+  opacity: 0.55;
+}
+
+@media (prefers-color-scheme: light) {
+  .openbot-standalone-shell {
+    --openbot-shell-bg: #f4f6fa;
+    --openbot-shell-panel: #ffffff;
+    --openbot-shell-line: rgba(15, 23, 42, 0.1);
+    --openbot-shell-text: #161b26;
+    --openbot-shell-muted: #687082;
+  }
+
+  .openbot-standalone-composer {
+    background: rgba(255, 255, 255, 0.96);
+  }
+}
+
+@media (max-width: 880px) {
+  .openbot-standalone-shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .openbot-standalone-transcript {
+    padding-inline: 24px;
+  }
+
+  .openbot-standalone-composer {
+    margin-inline: 24px;
+  }
+
+  .openbot-standalone-queue {
+    margin-inline: 24px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .openbot-standalone-shell *,
+  .openbot-standalone-shell *::before,
+  .openbot-standalone-shell *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

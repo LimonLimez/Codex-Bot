@@ -7,6 +7,10 @@ const os = require("node:os");
 const path = require("node:path");
 
 const { auditDmg, auditTree } = require("./audit-release.cjs");
+const {
+  captureReleaseCheckout,
+  verifyReleaseCheckout,
+} = require("./build-installer-app.cjs");
 
 function run(executable, args) {
   const result = childProcess.spawnSync(executable, args, {
@@ -15,6 +19,34 @@ function run(executable, args) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   if (result.error || result.status !== 0) throw new Error(`DMG packaging command failed: ${path.basename(executable)}`);
+}
+
+function verifyInstallerSignature(installerApp) {
+  const result = childProcess.spawnSync("/usr/bin/codesign", [
+    "--verify", "--deep", "--strict", path.resolve(installerApp),
+  ], {
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error("Installer code signature verification failed");
+  }
+  return true;
+}
+
+function preflightInstallerApp({ installerApp, expectedAppName }) {
+  const resolved = path.resolve(installerApp);
+  if (path.basename(resolved) !== expectedAppName) {
+    throw new Error("Installer preflight app name mismatch");
+  }
+  const audit = auditTree(path.dirname(resolved), { expectedAppName });
+  verifyInstallerSignature(resolved);
+  return Object.freeze({
+    fileCount: audit.fileCount,
+    signatureVerified: true,
+    totalBytes: audit.totalBytes,
+  });
 }
 
 function sha256File(file) {
@@ -69,6 +101,9 @@ function parseArgs(argv) {
 }
 
 function packageDmg(options) {
+  const macRoot = path.resolve(__dirname, "..");
+  const repoRoot = path.resolve(macRoot, "..");
+  const releaseCheckout = captureReleaseCheckout({ repoRoot, release: Boolean(options.release) });
   const installerApp = path.resolve(options["installer-app"]);
   const output = path.resolve(options.output);
   assertExactReleaseNames(installerApp, output, Boolean(options.release));
@@ -79,7 +114,7 @@ function packageDmg(options) {
   if (fs.existsSync(output)) throw new Error("DMG output already exists");
   const development = !options.release;
   const expectedAppName = path.basename(installerApp);
-  auditTree(path.dirname(installerApp), { expectedAppName });
+  preflightInstallerApp({ installerApp, expectedAppName });
 
   fs.mkdirSync(path.dirname(output), { recursive: true, mode: 0o755 });
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-dmg-build-"));
@@ -88,7 +123,10 @@ function packageDmg(options) {
   fs.mkdirSync(stage, { mode: 0o700 });
   try {
     fs.cpSync(installerApp, path.join(stage, expectedAppName), { recursive: true, errorOnExist: true, force: false });
-    auditTree(stage, { expectedAppName });
+    preflightInstallerApp({
+      installerApp: path.join(stage, expectedAppName),
+      expectedAppName,
+    });
     run("/usr/bin/hdiutil", [
       "create", "-quiet", "-fs", "HFS+", "-format", "UDZO",
       "-imagekey", "zlib-level=9", "-volname",
@@ -102,6 +140,7 @@ function packageDmg(options) {
       run("/usr/bin/codesign", ["--verify", "--strict", temporaryDmg]);
     }
     auditDmg(temporaryDmg, { expectedAppName });
+    verifyReleaseCheckout({ repoRoot, release: Boolean(options.release), captured: releaseCheckout });
     fs.renameSync(temporaryDmg, output);
     return Object.freeze({
       development,
@@ -125,4 +164,10 @@ if (require.main === module) {
   }
 }
 
-module.exports = { packageDmg, parseArgs, sha256File };
+module.exports = {
+  packageDmg,
+  parseArgs,
+  preflightInstallerApp,
+  sha256File,
+  verifyInstallerSignature,
+};

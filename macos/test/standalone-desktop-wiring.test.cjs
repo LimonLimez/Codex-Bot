@@ -1,0 +1,612 @@
+"use strict";
+
+const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const test = require("node:test");
+
+const macRoot = path.resolve(__dirname, "..");
+const runtimePath = path.join(macRoot, "src", "desktop", "runtime.cjs");
+const desktopPatchPath = path.join(macRoot, "src", "patch", "desktop.cjs");
+const rendererPatchPath = path.join(macRoot, "src", "patch", "renderer.cjs");
+const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
+
+const STOCK_PRELOAD = 'const stock="kept";s.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>{});\n';
+const STOCK_INDEX = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grok Bot</title>
+  </head>
+  <body><div id="root"></div></body>
+</html>
+`;
+
+function tempRoot(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-standalone-wiring-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  return root;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function manualCleanupClock() {
+  let timer = null;
+  return Object.freeze({
+    options: Object.freeze({
+      setCleanupTimeout(callback, milliseconds) {
+        assert.equal(timer, null);
+        timer = { callback, cleared: false, milliseconds };
+        return timer;
+      },
+      clearCleanupTimeout(value) {
+        assert.equal(value, timer);
+        value.cleared = true;
+      },
+    }),
+    delay() { return timer?.milliseconds ?? null; },
+    pending() { return Boolean(timer && !timer.cleared); },
+    fire() {
+      assert.equal(this.pending(), true);
+      timer.cleared = true;
+      timer.callback();
+    },
+  });
+}
+
+test("patching stages the standalone assets and loads host selection before bot controls", (t) => {
+  const { ASSETS, patchRenderer, patchRendererIndexSource } = require(rendererPatchPath);
+  const { DESKTOP_FILES, patchPreloadSource } = require(desktopPatchPath);
+  assert.equal(DESKTOP_FILES.includes("desktop/standalone-conversation-controller.cjs"), true);
+  assert.equal(DESKTOP_FILES.includes("desktop/standalone-conversation-ipc.cjs"), true);
+  assert.equal(DESKTOP_FILES.includes("desktop/standalone-conversation-store.cjs"), true);
+  assert.equal(DESKTOP_FILES.includes("desktop/local-desktop-frame-ipc.cjs"), true);
+  const preload = patchPreloadSource(STOCK_PRELOAD);
+  assert.match(preload, /exposeInMainWorld\("openbotConversations"/);
+  assert.match(preload, /exposeInMainWorld\("openbotLocalDesktop"/);
+  assert.match(preload, /openbot-local-frame:select/);
+  assert.match(preload, /openbot-local-frame:clear/);
+  assert.match(preload, /openbot-local-frame:frame/);
+  for (const method of ["list", "create", "read", "send", "cancel", "onChanged", "onEvent"]) {
+    assert.match(preload, new RegExp(`${method}:`));
+  }
+  const index = patchRendererIndexSource(STOCK_INDEX);
+  const desktopView = index.indexOf("./codex/openbot-local-desktop-view.js");
+  const standalone = index.indexOf("./codex/openbot-standalone-shell.js");
+  const controls = index.indexOf("./codex/bot-runtime-ui.js");
+  assert.ok(desktopView >= 0 && standalone > desktopView && controls > standalone);
+  assert.match(index, /\.\/codex\/openbot-local-desktop-view\.css/);
+  assert.match(index, /\.\/codex\/openbot-standalone-shell\.css/);
+  assert.deepEqual(ASSETS, [
+    "bot-runtime-ui.js",
+    "codex-ui.css",
+    "model-controls.js",
+    "openbot-local-desktop-view.css",
+    "openbot-local-desktop-view.js",
+    "openbot-standalone-shell.css",
+    "openbot-standalone-shell.js",
+    "reasoning-control.js",
+  ]);
+
+  const root = tempRoot(t);
+  fs.mkdirSync(path.join(root, "dist", "renderer"), { recursive: true });
+  fs.writeFileSync(path.join(root, "dist", "renderer", "index.html"), STOCK_INDEX);
+  patchRenderer(root);
+  const staged = path.join(root, "dist", "renderer", "codex");
+  assert.deepEqual(fs.readdirSync(staged).sort(), ASSETS);
+  for (const asset of [
+    "openbot-local-desktop-view.css", "openbot-local-desktop-view.js",
+    "openbot-standalone-shell.css", "openbot-standalone-shell.js",
+  ]) {
+    assert.deepEqual(
+      fs.readFileSync(path.join(staged, asset)),
+      fs.readFileSync(path.join(macRoot, "src", "renderer", asset)),
+    );
+  }
+});
+
+test("the inference factory gives standalone and preserved host one router", () => {
+  const { createInferenceBridgeRuntime } = require(runtimePath);
+  const constructed = [];
+  class DirectTransportFixture {
+    constructor(options) { this.options = options; constructed.push(["direct", this]); }
+  }
+  class RouterFixture {
+    constructor(options) { this.options = options; constructed.push(["router", this]); }
+    stream() {}
+  }
+  class StandaloneFixture {
+    constructor(options) { this.options = options; constructed.push(["standalone", this]); }
+  }
+  class StoreFixture {
+    constructor(options) { this.options = options; constructed.push(["store", this]); }
+  }
+  class BridgeFixture {
+    constructor(options) { this.options = options; constructed.push(["bridge", this]); }
+  }
+  const toolBridge = Object.freeze({ open() {} });
+  const computerTargetRouter = Object.freeze({ async resolve() {} });
+  const stateRoot = "/tmp/openbot-standalone-shared-router";
+  const bridge = createInferenceBridgeRuntime({
+    codexManager: {},
+    selectionStore: { async read() { return null; } },
+    sidecarManager: { async start() {} },
+    stateRoot,
+    toolBridge,
+    computerTargetRouter,
+    capability: "a".repeat(64),
+    DirectTransportClass: DirectTransportFixture,
+    RouterClass: RouterFixture,
+    StandaloneControllerClass: StandaloneFixture,
+    StandaloneStoreClass: StoreFixture,
+    BridgeClass: BridgeFixture,
+    OptionalTransportClass: class OptionalTransportFixture {},
+  });
+  assert.deepEqual(constructed.map(([name]) => name), ["direct", "router", "store", "standalone", "bridge"]);
+  assert.equal(bridge.conversations, constructed[3][1]);
+  assert.equal(constructed[3][1].options.router, constructed[1][1]);
+  assert.equal(constructed[4][1].options.router, constructed[1][1]);
+  assert.equal(constructed[4][1].options.computerTargetRouter, computerTargetRouter);
+  assert.equal(constructed[3][1].options.readSelection, constructed[1][1].options.readSelection);
+  assert.equal(constructed[3][1].options.store, constructed[2][1]);
+  assert.equal(constructed[3][1].options.toolBridge, toolBridge);
+  assert.equal(constructed[2][1].options.filePath, path.join(stateRoot, "standalone-conversations.v1.json"));
+});
+
+test("top-level computer composition shares one manager and one target router with standalone tools", () => {
+  const { createStandaloneComputerComposition } = require(runtimePath);
+  const store = { read() {}, updateComputer() {} };
+  const manager = { open() {}, run() {}, navigate() {}, capture() {} };
+  const boundary = { dispose() {} };
+  const made = [];
+  class TargetRouterFixture {
+    constructor(options) { this.options = options; made.push(["target", this]); }
+    resolve() {}
+    run() {}
+    disposeTask() {}
+    dispose() {}
+  }
+  const composition = createStandaloneComputerComposition({
+    electron: {},
+    stateRoot: "/tmp/openbot-computer-composition",
+    store,
+    createComponents(options) {
+      made.push(["components", options]);
+      return { boundary, manager };
+    },
+    TargetRouterClass: TargetRouterFixture,
+    createToolBridge(options) { made.push(["tools", options]); return { open() {} }; },
+  });
+  assert.deepEqual(Object.keys(composition).sort(), ["boundary", "localManager", "targetRouter", "toolBridge"]);
+  assert.equal(Object.isFrozen(composition), true);
+  assert.equal(composition.boundary, boundary);
+  assert.equal(composition.localManager, manager);
+  assert.equal(composition.targetRouter.options.store, store);
+  assert.equal(composition.targetRouter.options.localManager, manager);
+  assert.equal(made[2][1].computerTargetRouter, composition.targetRouter);
+});
+
+test("desktop runtime installs standalone handlers only for current OpenBot windows", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const { STANDALONE_IPC_CHANNELS } = require("../src/desktop/standalone-conversation-ipc.cjs");
+  const { LOCAL_DESKTOP_FRAME_CHANNELS } = require("../src/desktop/local-desktop-frame-ipc.cjs");
+  const handlers = new Map();
+  const sender = { isDestroyed: () => false, send() {} };
+  const window = { isDestroyed: () => false, webContents: sender };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(value) { return value === sender ? window : null; },
+      getAllWindows() { return [window]; },
+    },
+  };
+  class Conversations extends EventEmitter {
+    list() { return []; }
+    create() { throw new Error("unused"); }
+    read() { throw new Error("unused"); }
+    send() { throw new Error("unused"); }
+    cancel() { throw new Error("unused"); }
+    dispose() { this.disposed = true; }
+  }
+  const standaloneConversations = new Conversations();
+  let targetDisposed = 0;
+  const installed = installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() {} },
+    selectionStore: {},
+    standaloneConversations,
+    localDesktopManager: {
+      ownsWindow() { return false; }, async open() {}, async captureDisplayFrame() { throw new Error("unused"); },
+    },
+    computerTargetRouter: { dispose() { targetDisposed += 1; } },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+  for (const channel of Object.values(STANDALONE_IPC_CHANNELS)) assert.equal(handlers.has(channel), true);
+  for (const channel of Object.values(LOCAL_DESKTOP_FRAME_CHANNELS)) assert.equal(handlers.has(channel), true);
+  assert.deepEqual(await handlers.get(STANDALONE_IPC_CHANNELS.list)({ sender }, BOT_A), []);
+  await assert.rejects(handlers.get(STANDALONE_IPC_CHANNELS.list)({ sender: {} }, BOT_A), {
+    code: "OPENBOT_CONVERSATION_OPERATION_FAILED",
+  });
+  await installed.dispose();
+  for (const channel of Object.values(STANDALONE_IPC_CHANNELS)) assert.equal(handlers.has(channel), false);
+  for (const channel of Object.values(LOCAL_DESKTOP_FRAME_CHANNELS)) assert.equal(handlers.has(channel), false);
+  assert.equal(standaloneConversations.disposed, true);
+  assert.equal(targetDisposed, 1);
+});
+
+test("desktop runtime teardown waits for standalone and Local Desktop cancellation before closing routers", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const handlers = new Map();
+  const order = [];
+  const conversationsGate = deferred();
+  const boundaryGate = deferred();
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  const conversations = new EventEmitter();
+  Object.assign(conversations, {
+    list() { return []; }, create() {}, read() {}, send() {}, cancel() {},
+    async dispose() {
+      order.push("conversations-start");
+      await conversationsGate.promise;
+      order.push("conversations-done");
+    },
+  });
+  const boundary = new EventEmitter();
+  Object.assign(boundary, {
+    async dispose() {
+      order.push("boundary-start");
+      await boundaryGate.promise;
+      order.push("boundary-done");
+    },
+  });
+  const installed = installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() { order.push("controller"); } },
+    selectionStore: {},
+    standaloneConversations: conversations,
+    computerBoundary: boundary,
+    computerTargetRouter: { dispose() { order.push("target-router"); } },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() { order.push("account"); },
+    },
+    codexManager: { async start() {}, stop() { order.push("codex"); } },
+    sidecarManager: { stop() { order.push("sidecar"); } },
+  });
+
+  let settled = false;
+  const first = installed.dispose();
+  const second = installed.dispose();
+  first.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(first, second);
+  assert.equal(settled, false);
+  assert.equal(handlers.size, 0);
+  assert.deepEqual(order, ["conversations-start"]);
+
+  conversationsGate.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["conversations-start", "conversations-done", "boundary-start"]);
+  assert.equal(settled, false);
+  boundaryGate.resolve();
+  await first;
+  assert.deepEqual(order, [
+    "conversations-start", "conversations-done", "boundary-start", "boundary-done",
+    "target-router", "account", "codex", "sidecar", "controller",
+  ]);
+});
+
+test("top-level runtime disposal releases an adopted Computer source while merged subagent open stays hung", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const { StandaloneConversationController } = require("../src/desktop/standalone-conversation-controller.cjs");
+  const cleanupClock = manualCleanupClock();
+  const runnerOpenEntered = deferred();
+  const runnerOpenGate = deferred();
+  const toolDisposalGate = deferred();
+  const runnerDisposalEntered = deferred();
+  let toolDisposals = 0;
+  let runnerDisposals = 0;
+  let streams = 0;
+  const identifiers = [
+    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  ];
+  const conversations = new StandaloneConversationController({
+    router: {
+      async stream() {
+        streams += 1;
+        throw new Error("cancelled partial open must not stream");
+      },
+    },
+    toolBridge: {
+      async open(identity) {
+        return Object.freeze({
+          ...identity,
+          definitions: Object.freeze([]),
+          async dispatch() { throw new Error("cancelled partial open must not dispatch"); },
+          async dispose() {
+            toolDisposals += 1;
+            await toolDisposalGate.promise;
+          },
+        });
+      },
+    },
+    subagentRunner: {
+      async open(identity) {
+        runnerOpenEntered.resolve();
+        await runnerOpenGate.promise;
+        return Object.freeze({
+          botId: identity.botId,
+          conversationId: identity.conversationId,
+          taskId: identity.taskId,
+          definitions: Object.freeze([]),
+          async dispatch() { throw new Error("late source must not dispatch"); },
+          async dispose() {
+            runnerDisposals += 1;
+            runnerDisposalEntered.resolve();
+          },
+        });
+      },
+      async dispose() {},
+    },
+    async readSelection() {
+      return Object.freeze({
+        botId: BOT_A,
+        generation: 7,
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "ultra",
+        serviceTier: null,
+      });
+    },
+    makeId() {
+      const value = identifiers.shift();
+      if (!value) throw new Error("test exhausted deterministic IDs");
+      return value;
+    },
+    now: () => "2026-08-16T12:00:00.000Z",
+    ...cleanupClock.options,
+  });
+  const created = conversations.create({ botId: BOT_A });
+  const sending = conversations.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Dispose partial merged open",
+  });
+  const rejectedSending = assert.rejects(sending, { code: "OPENBOT_CONVERSATION_CANCELLED" });
+  await runnerOpenEntered.promise;
+
+  const electron = {
+    app: { on() {}, off() {} },
+    ipcMain: { handle() {}, removeHandler() {} },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() {} },
+    selectionStore: {},
+    standaloneConversations: conversations,
+    computerBoundary: { on() {}, off() {}, dispose() {} },
+    computerTargetRouter: { dispose() {} },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+  let runtimeSettled = false;
+  const runtimeDisposal = installed.dispose().then(() => { runtimeSettled = true; });
+  for (let attempt = 0; attempt < 20 && !cleanupClock.pending(); attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(toolDisposals, 1);
+  assert.equal(cleanupClock.delay(), 250);
+  assert.equal(cleanupClock.pending(), true);
+  cleanupClock.fire();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtimeSettled, false);
+  toolDisposalGate.resolve();
+  await runtimeDisposal;
+  await rejectedSending;
+  assert.equal(toolDisposals, 1);
+  assert.equal(runnerDisposals, 0);
+  assert.equal(streams, 0);
+
+  runnerOpenGate.resolve();
+  await runnerDisposalEntered.promise;
+  assert.equal(toolDisposals, 1);
+  assert.equal(runnerDisposals, 1);
+  assert.equal(streams, 0);
+});
+
+test("every repeated before-quit is prevented until one disposal acknowledgement and one final quit", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const gate = deferred();
+  const beforeQuitListeners = new Set();
+  let prevented = 0;
+  let quits = 0;
+  const electron = {
+    app: {
+      on(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.add(listener); },
+      off(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.delete(listener); },
+      quit() {
+        quits += 1;
+        for (const listener of [...beforeQuitListeners]) listener({ preventDefault() { prevented += 1; } });
+      },
+    },
+    ipcMain: { handle() {}, removeHandler() {} },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() {} },
+    selectionStore: {},
+    computerBoundary: { on() {}, off() {}, async dispose() { await gate.promise; } },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+  assert.equal(beforeQuitListeners.size, 1);
+  const requestQuit = () => {
+    for (const listener of [...beforeQuitListeners]) listener({ preventDefault() { prevented += 1; } });
+  };
+  requestQuit();
+  requestQuit();
+  requestQuit();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prevented, 3);
+  assert.equal(quits, 0);
+  gate.resolve();
+  for (let attempt = 0; attempt < 20 && quits === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(quits, 1);
+  assert.equal(prevented, 3);
+  assert.equal(beforeQuitListeners.size, 0);
+});
+
+test("reentrant before-quit during synchronous handler removal shares one cleanup and one final quit", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const beforeQuitListeners = new Set();
+  let prevented = 0;
+  let quits = 0;
+  let controllerDisposals = 0;
+  let boundaryDisposals = 0;
+  let reentered = false;
+  const requestQuit = () => {
+    for (const listener of [...beforeQuitListeners]) {
+      listener({ preventDefault() { prevented += 1; } });
+    }
+  };
+  const electron = {
+    app: {
+      on(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.add(listener); },
+      off(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.delete(listener); },
+      quit() { quits += 1; requestQuit(); },
+    },
+    ipcMain: {
+      handle() {},
+      removeHandler() {
+        if (reentered) return;
+        reentered = true;
+        requestQuit();
+      },
+    },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  installDesktopRuntime(electron, {
+    controller: {
+      on() {}, off() {},
+      dispose() { controllerDisposals += 1; },
+    },
+    selectionStore: {},
+    computerBoundary: {
+      on() {}, off() {},
+      dispose() { boundaryDisposals += 1; },
+    },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+
+  requestQuit();
+  for (let attempt = 0; attempt < 20 && quits === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(prevented, 2);
+  assert.equal(controllerDisposals, 1);
+  assert.equal(boundaryDisposals, 1);
+  assert.equal(quits, 1);
+  assert.equal(beforeQuitListeners.size, 0);
+});
+
+test("a synchronous teardown exception cannot orphan repeated before-quit cleanup", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const boundaryGate = deferred();
+  const beforeQuitListeners = new Set();
+  const listenerErrors = [];
+  let prevented = 0;
+  let quits = 0;
+  let removeAttempts = 0;
+  let controllerDisposals = 0;
+  let boundaryDisposals = 0;
+  const requestQuit = () => {
+    for (const listener of [...beforeQuitListeners]) {
+      try {
+        listener({ preventDefault() { prevented += 1; } });
+      } catch (error) {
+        listenerErrors.push(error);
+      }
+    }
+  };
+  const electron = {
+    app: {
+      on(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.add(listener); },
+      off(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.delete(listener); },
+      quit() { quits += 1; requestQuit(); },
+    },
+    ipcMain: {
+      handle() {},
+      removeHandler() {
+        removeAttempts += 1;
+        if (removeAttempts === 1) throw new Error("one-shot remove failure");
+      },
+    },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  installDesktopRuntime(electron, {
+    controller: {
+      on() {}, off() {},
+      dispose() { controllerDisposals += 1; },
+    },
+    selectionStore: {},
+    computerBoundary: {
+      on() {}, off() {},
+      async dispose() {
+        boundaryDisposals += 1;
+        await boundaryGate.promise;
+      },
+    },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+
+  requestQuit();
+  requestQuit();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prevented, 2);
+  assert.deepEqual(listenerErrors, []);
+  assert.equal(boundaryDisposals, 1);
+  assert.equal(controllerDisposals, 0);
+  assert.equal(quits, 0);
+
+  boundaryGate.resolve();
+  for (let attempt = 0; attempt < 20 && quits === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(controllerDisposals, 1);
+  assert.equal(boundaryDisposals, 1);
+  assert.equal(quits, 1);
+  assert.equal(prevented, 2);
+  assert.equal(beforeQuitListeners.size, 0);
+});

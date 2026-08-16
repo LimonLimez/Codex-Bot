@@ -92,6 +92,17 @@ function createLocalHelperTransport(options) {
         throw transportError("Local helper is unavailable.", "OPENBOT_LOCAL_HELPER_UNAVAILABLE");
       }
     },
+    async cancel(requestId) {
+      if (closed) throw transportError("Local helper is closed.", "OPENBOT_LOCAL_HELPER_UNAVAILABLE");
+      if (typeof requestId !== "string" || !REQUEST_ID_PATTERN.test(requestId)) {
+        throw transportError("Local helper cancellation is invalid.", "OPENBOT_LOCAL_HELPER_CANCEL_FAILED");
+      }
+      const normalized = requestId.toLowerCase();
+      try { child.postMessage({ type: "cancel", requestId: normalized }); } catch {
+        emitExit();
+        throw transportError("Local helper is unavailable.", "OPENBOT_LOCAL_HELPER_UNAVAILABLE");
+      }
+    },
     async authorizeResource(requestId, bookmark) {
       if (closed) throw transportError("Local helper is closed.", "OPENBOT_LOCAL_HELPER_UNAVAILABLE");
       const bytes = Buffer.isBuffer(bookmark)

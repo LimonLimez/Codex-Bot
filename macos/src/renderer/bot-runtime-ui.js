@@ -80,6 +80,26 @@
   });
   const COMPUTER_MODES = new Set(COMPUTER_CHOICES.map((entry) => entry.value));
   const COMPUTER_STATES = new Set(["unconfigured", "starting", "ready", "reconnecting", "unavailable"]);
+  const BOT_SHAPES = Object.freeze([
+    "blob", "pebble", "bean", "egg", "squircle", "tablet", "capsule", "cylinder",
+    "hex", "gem", "crystal", "wedge", "shield", "dome", "arch", "cloud", "teardrop", "leaf",
+  ]);
+  const BOT_COLORS = Object.freeze([
+    "black", "brown", "red", "orange", "yellow", "green", "cyan", "blue", "violet", "magenta", "gray",
+  ]);
+  const BOT_SHAPE_IDS = new Set(BOT_SHAPES);
+  const BOT_COLOR_IDS = new Set(BOT_COLORS);
+  const SETUP_STAGES = new Set(["profile-model", "computer", "complete"]);
+  const SETUP_STAGE_ORDER = Object.freeze({ "profile-model": 0, computer: 1, complete: 2 });
+  const DEFAULT_SETUP_APPEARANCE = Object.freeze({
+    shape: "blob",
+    color: "red",
+    image: null,
+    description: "",
+  });
+  const MAX_AVATAR_DATA_LENGTH = 2_000_000;
+  const MAX_LOCAL_PNG_BYTES = Math.floor((MAX_AVATAR_DATA_LENGTH - "data:image/png;base64,".length) * 3 / 4);
+  const MAX_DESCRIPTION_LENGTH = 1000;
   const PERMISSION_DECISIONS = new Set(["deny", "once", "always"]);
   const TARGET_ID = /^local-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const PERMISSION_ID = /^permission-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -101,6 +121,9 @@
     "requestId", "botId", "targetId", "targetGeneration", "capability",
     "resourceLabel", "reason",
   ]);
+  const SHELL_PROMPT_FIELDS = Object.freeze([
+    ...PROMPT_FIELDS, "command", "allowsAlways",
+  ]);
   const GRANT_FIELDS = Object.freeze([
     "grantId", "botId", "capability", "resourceId", "resourceLabel", "scope", "createdAt",
   ]);
@@ -110,6 +133,54 @@
 
   function isUltraEffect(effort) {
     return effort === "ultra" || effort === "ultra-code";
+  }
+
+  function normalizeLocalPngAvatar(value) {
+    if (value === null) return null;
+    if (typeof value !== "string" || value.length > MAX_AVATAR_DATA_LENGTH
+      || !/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+      throw new Error("Bot photo must be a PNG smaller than 2 MB.");
+    }
+    const encoded = value.slice(value.indexOf(",") + 1);
+    if (encoded.length % 4 !== 0) throw new Error("Bot photo must be a valid PNG.");
+    return value;
+  }
+
+  function readLocalPngFile(file, FileReaderCtor) {
+    if (!file || file.type !== "image/png" || !Number.isSafeInteger(file.size)
+      || file.size < 1 || file.size > MAX_LOCAL_PNG_BYTES || typeof FileReaderCtor !== "function") {
+      return Promise.reject(new Error("Choose a PNG smaller than 2 MB."));
+    }
+    return new Promise((resolve, reject) => {
+      let reader;
+      try { reader = new FileReaderCtor(); }
+      catch { reject(new Error("Could not read that PNG.")); return; }
+      reader.onerror = () => reject(new Error("Could not read that PNG."));
+      reader.onload = () => {
+        try { resolve(normalizeLocalPngAvatar(reader.result)); }
+        catch { reject(new Error("Choose a valid PNG smaller than 2 MB.")); }
+      };
+      try { reader.readAsDataURL(file); }
+      catch { reject(new Error("Could not read that PNG.")); }
+    });
+  }
+
+  function closedProfileSetup() {
+    return Object.freeze({
+      open: false,
+      pending: false,
+      dismissible: false,
+      name: "",
+      description: "",
+      image: null,
+      shape: "blob",
+      color: "red",
+      provider: null,
+      model: null,
+      reasoningEffort: null,
+      serviceTier: null,
+      error: null,
+    });
   }
 
   function runtimePresentation(state) {
@@ -259,15 +330,29 @@
   }
 
   function normalizePermissionPrompt(value) {
-    const prompt = exactDataObject(value, PROMPT_FIELDS, "Permission request is unavailable.");
+    let prompt;
+    try {
+      prompt = exactDataObject(value, PROMPT_FIELDS, "Permission request is unavailable.");
+    } catch {
+      prompt = exactDataObject(value, SHELL_PROMPT_FIELDS, "Permission request is unavailable.");
+    }
+    const shell = prompt.capability === "shell.execute";
     if (typeof prompt.requestId !== "string" || !PERMISSION_ID.test(prompt.requestId)
       || typeof prompt.botId !== "string" || !BOT_ID.test(prompt.botId)
       || typeof prompt.targetId !== "string" || !TARGET_ID.test(prompt.targetId)
       || !Number.isSafeInteger(prompt.targetGeneration) || prompt.targetGeneration < 0
       || !PERMISSION_CAPABILITIES.has(prompt.capability)
       || !validResourceLabel(prompt.resourceLabel)
-      || !validPublicText(prompt.reason, 512)) throw new Error("Permission request is unavailable.");
-    return Object.freeze(prompt);
+      || !validPublicText(prompt.reason, 512)
+      || (shell && (typeof prompt.command !== "string" || prompt.command.length === 0
+        || prompt.command.includes("\0") || utf8Length(prompt.command) > 8192
+        || prompt.allowsAlways !== false))
+      || (!shell && Object.hasOwn(prompt, "command"))) {
+      throw new Error("Permission request is unavailable.");
+    }
+    return Object.freeze(shell
+      ? { ...prompt, allowsAlways: false }
+      : prompt);
   }
 
   function normalizePermissionRequests(value, botId) {
@@ -308,25 +393,74 @@
   }
 
   function normalizeBot(value) {
-    if (
-      value == null ||
-      typeof value !== "object" ||
-      typeof value.botId !== "string" ||
-      !BOT_ID.test(value.botId) ||
-      typeof value.name !== "string" ||
-      value.name.trim().length === 0 ||
-      value.name.length > 160 ||
-      value.runtime == null ||
-      typeof value.runtime !== "object" ||
-      typeof value.runtime.state !== "string"
-    ) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error("Bot state is unavailable.");
     }
+    let descriptors;
+    let prototype;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(value);
+      prototype = Object.getPrototypeOf(value);
+    } catch { throw new Error("Bot state is unavailable."); }
+    if ((prototype !== Object.prototype && prototype !== null)
+      || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+        || !("value" in descriptors[key]))) throw new Error("Bot state is unavailable.");
+    const read = (field) => descriptors[field]?.value;
+    const botId = read("botId");
+    const name = read("name");
+    const setupStage = read("setupStage");
+    const runtimeValue = read("runtime");
+    if (typeof botId !== "string" || !BOT_ID.test(botId)
+      || typeof name !== "string" || name.trim().length === 0 || name.length > 160
+      || !SETUP_STAGES.has(setupStage)
+      || !runtimeValue || typeof runtimeValue !== "object" || Array.isArray(runtimeValue)) {
+      throw new Error("Bot state is unavailable.");
+    }
+    let runtimeDescriptors;
+    let runtimePrototype;
+    try {
+      runtimeDescriptors = Object.getOwnPropertyDescriptors(runtimeValue);
+      runtimePrototype = Object.getPrototypeOf(runtimeValue);
+    } catch { throw new Error("Bot state is unavailable."); }
+    if ((runtimePrototype !== Object.prototype && runtimePrototype !== null)
+      || Reflect.ownKeys(runtimeDescriptors).some((key) => typeof key !== "string"
+        || !("value" in runtimeDescriptors[key]))
+      || typeof runtimeDescriptors.state?.value !== "string") {
+      throw new Error("Bot state is unavailable.");
+    }
+    let appearance;
+    const appearanceValue = read("appearance");
+    if (setupStage === "profile-model" && appearanceValue !== undefined) {
+      if (!appearanceValue || typeof appearanceValue !== "object" || Array.isArray(appearanceValue)) {
+        throw new Error("Bot state is unavailable.");
+      }
+      let appearanceDescriptors;
+      let appearancePrototype;
+      try {
+        appearanceDescriptors = Object.getOwnPropertyDescriptors(appearanceValue);
+        appearancePrototype = Object.getPrototypeOf(appearanceValue);
+      } catch { throw new Error("Bot state is unavailable."); }
+      if ((appearancePrototype !== Object.prototype && appearancePrototype !== null)
+        || Reflect.ownKeys(appearanceDescriptors).some((key) => typeof key !== "string"
+          || !("value" in appearanceDescriptors[key]))) throw new Error("Bot state is unavailable.");
+      const shape = appearanceDescriptors.shape?.value;
+      const color = appearanceDescriptors.color?.value;
+      const image = appearanceDescriptors.image?.value;
+      const description = appearanceDescriptors.description?.value;
+      if (!BOT_SHAPE_IDS.has(shape) || !BOT_COLOR_IDS.has(color)
+        || typeof description !== "string" || description.length > MAX_DESCRIPTION_LENGTH
+        || description.includes("\0")) throw new Error("Bot state is unavailable.");
+      try { normalizeLocalPngAvatar(image); }
+      catch { throw new Error("Bot state is unavailable."); }
+      appearance = Object.freeze({ shape, color, image, description });
+    }
     return Object.freeze({
-      botId: value.botId,
-      name: value.name,
-      runtime: Object.freeze({ state: value.runtime.state }),
-      computer: normalizeComputer(value.computer ?? DEFAULT_COMPUTER),
+      botId,
+      name,
+      setupStage,
+      ...(appearance ? { appearance } : {}),
+      runtime: Object.freeze({ state: runtimeDescriptors.state.value }),
+      computer: normalizeComputer(read("computer") ?? DEFAULT_COMPUTER),
     });
   }
 
@@ -488,10 +622,14 @@
     let selectionPending = false;
     let creationPending = false;
     let creationBotId = null;
+    let creationError = null;
     let modelSelection = null;
     let modelCatalog = OPTIONAL_MODEL_CATALOG;
     let catalogGeneration = -1;
     let catalogStatus = "loading";
+    let profileSetup = closedProfileSetup();
+    let profileSetupBotId = null;
+    let profileSetupCatalogGeneration = -1;
     let computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
     let computerSetupBotId = null;
     let mandatorySetupBotId = null;
@@ -509,6 +647,95 @@
 
     function activeBot() {
       return activeBotId == null ? null : bots.get(activeBotId) ?? null;
+    }
+
+    function setupModelDescriptor(model = null, provider = null) {
+      if (typeof model === "string") {
+        const exact = modelCatalog.find((entry) => entry.model === model
+          && (provider === null || entry.provider === provider));
+        if (exact) return exact;
+      }
+      if (typeof provider === "string") {
+        const providerDefault = modelCatalog.find((entry) => entry.provider === provider && entry.isDefault)
+          ?? modelCatalog.find((entry) => entry.provider === provider);
+        if (providerDefault) return providerDefault;
+      }
+      return modelCatalog.find((entry) => entry.isDefault) ?? modelCatalog[0] ?? null;
+    }
+
+    function setupSelectionFor(descriptor, preferred = null) {
+      if (!descriptor) return Object.freeze({
+        provider: null,
+        model: null,
+        reasoningEffort: null,
+        serviceTier: null,
+      });
+      const preferredMatches = preferred?.provider === descriptor.provider
+        && preferred.model === descriptor.model
+        && preferred.catalogGeneration === descriptor.catalogGeneration;
+      const reasoningEffort = preferredMatches && descriptor.efforts.includes(preferred.reasoningEffort)
+        ? preferred.reasoningEffort
+        : descriptor.efforts.includes(descriptor.defaultReasoningEffort)
+          ? descriptor.defaultReasoningEffort
+          : descriptor.efforts[0];
+      const preferredTier = preferredMatches ? preferred.serviceTier : descriptor.defaultServiceTier;
+      const serviceTier = preferredTier === null
+        || descriptor.serviceTiers.some((entry) => entry.id === preferredTier)
+        ? preferredTier
+        : descriptor.defaultServiceTier;
+      return Object.freeze({
+        provider: descriptor.provider,
+        model: descriptor.model,
+        reasoningEffort,
+        serviceTier,
+      });
+    }
+
+    function openNewBotProfileSetup(botId) {
+      const bot = bots.get(botId);
+      if (!bot || botId !== activeBotId || mandatorySetupBotId !== botId
+        || bot.setupStage !== "profile-model") {
+        throw new Error("New Bot setup is unavailable.");
+      }
+      const descriptor = setupModelDescriptor(modelSelection?.model, modelSelection?.provider);
+      const selection = setupSelectionFor(descriptor, modelSelection);
+      const appearance = bot.appearance ?? DEFAULT_SETUP_APPEARANCE;
+      profileSetupBotId = botId;
+      profileSetupCatalogGeneration = catalogGeneration;
+      profileSetup = Object.freeze({
+        open: true,
+        pending: false,
+        dismissible: false,
+        name: bot.name,
+        description: appearance.description,
+        image: appearance.image,
+        shape: appearance.shape,
+        color: appearance.color,
+        ...selection,
+        error: null,
+      });
+      computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
+      computerSetupBotId = null;
+      return profileSetup;
+    }
+
+    function openMandatoryComputerSetup(botId) {
+      const bot = bots.get(botId);
+      if (!bot || botId !== activeBotId || mandatorySetupBotId !== botId
+        || bot.setupStage !== "computer") {
+        throw new Error("Computer setup is unavailable.");
+      }
+      profileSetup = closedProfileSetup();
+      profileSetupBotId = null;
+      profileSetupCatalogGeneration = -1;
+      computerSetupBotId = botId;
+      computerSetup = Object.freeze({
+        open: true,
+        pending: false,
+        selectedMode: null,
+        dismissible: false,
+      });
+      return computerSetup;
     }
 
     function promptMatchesComputer(prompt, record) {
@@ -697,7 +924,10 @@
         selectionEpoch,
         selectionPending,
         creationPending,
-        mandatorySetupPending: mandatorySetupBotId !== null,
+        creationError,
+        mandatorySetupPending: mandatorySetupBotId !== null
+          || Boolean(computerFacade && [...bots.values()].some((record) => record.setupStage !== "complete")),
+        profileSetup,
         computer: Object.freeze({
           ...(selected?.computer ?? DEFAULT_COMPUTER),
           ...computerPresentation(selected?.computer ?? DEFAULT_COMPUTER),
@@ -724,11 +954,34 @@
       } catch {}
     }
 
+    function synchronizeActiveSetupStage(record) {
+      if (!computerFacade || !record || record.botId !== activeBotId || selectionPending) return;
+      if (record.setupStage === "complete") {
+        if (mandatorySetupBotId !== record.botId || profileSetup.pending || computerSetup.pending) return;
+        mandatorySetupBotId = null;
+        profileSetup = closedProfileSetup();
+        profileSetupBotId = null;
+        profileSetupCatalogGeneration = -1;
+        computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
+        computerSetupBotId = null;
+        return;
+      }
+      mandatorySetupBotId = record.botId;
+      if (record.setupStage === "profile-model") {
+        if (!profileSetup.open && !computerSetup.pending) openNewBotProfileSetup(record.botId);
+        return;
+      }
+      if (!profileSetup.pending && !computerSetup.open) openMandatoryComputerSetup(record.botId);
+    }
+
     function applyBot(value) {
       if (disposed) throw new Error("Bot controls are unavailable.");
       let record = normalizeBot(value);
       const existing = bots.get(record.botId);
       const previousTarget = computerPermissionTarget(existing?.computer);
+      if (existing && SETUP_STAGE_ORDER[record.setupStage] < SETUP_STAGE_ORDER[existing.setupStage]) {
+        record = Object.freeze({ ...record, setupStage: existing.setupStage });
+      }
       if (existing && existing.computer.generation > record.computer.generation) {
         record = Object.freeze({ ...record, computer: existing.computer });
       }
@@ -744,6 +997,7 @@
         }
       }
       prunePermissionRequests(record.botId);
+      synchronizeActiveSetupStage(record);
       if (activeBotId == null) requestBotSelection(record.botId);
       else publish();
       return record;
@@ -824,23 +1078,30 @@
       if (disposed || typeof botId !== "string" || !bots.has(botId)) {
         throw new Error("Bot selection is unavailable.");
       }
+      const targetBot = bots.get(botId);
+      const targetSetupPending = Boolean(computerFacade && targetBot.setupStage !== "complete");
       if (selectionFlight?.botId === botId
         && (creationPending || mandatorySetupBotId === botId)) {
         return selectionFlight.promise;
       }
       if ((creationPending && creationBotId !== botId)
         || (mandatorySetupBotId !== null && mandatorySetupBotId !== botId)
+        || (profileSetup.open && (profileSetupBotId !== botId || force))
         || (computerSetup.open && !computerSetup.dismissible
           && (computerSetupBotId !== botId || force))) {
         throw new Error("Bot selection is unavailable while setup is pending.");
       }
-      const mandatoryRecovery = mandatorySetupBotId === botId && !computerSetup.open;
+      const expectedSetupOpen = targetBot.setupStage === "profile-model"
+        ? profileSetup.open
+        : computerSetup.open;
+      const mandatoryRecovery = targetSetupPending && activeBotId === botId && !expectedSetupOpen;
       if (activeBotId === botId && !force && !mandatoryRecovery) {
         return selectionFlight?.botId === botId
           ? selectionFlight.promise
           : Promise.resolve(snapshot());
       }
       const previousBotId = activeBotId;
+      const previousMandatorySetupBotId = mandatorySetupBotId;
       const previousModelSelection = modelSelection;
       const previousPermissions = permissions;
       const previousPermissionTarget = previousBotId === null ? null : currentPermissionTarget(previousBotId);
@@ -852,9 +1113,13 @@
         onSelectionChanged(null);
       } catch {}
       activeBotId = botId;
+      mandatorySetupBotId = targetSetupPending ? botId : null;
       modelSelection = null;
       selectionPending = true;
       permissions = Object.freeze([]);
+      profileSetup = closedProfileSetup();
+      profileSetupBotId = null;
+      profileSetupCatalogGeneration = -1;
       computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
       computerSetupBotId = null;
       refreshPermissionRequest();
@@ -913,13 +1178,10 @@
           }
           selectionPending = false;
           if (computerFacade && mandatorySetupBotId === botId) {
-            computerSetupBotId = botId;
-            computerSetup = Object.freeze({
-              open: true,
-              pending: false,
-              selectedMode: null,
-              dismissible: false,
-            });
+            const current = bots.get(botId);
+            if (current?.setupStage === "profile-model") openNewBotProfileSetup(botId);
+            else if (current?.setupStage === "computer") openMandatoryComputerSetup(botId);
+            else mandatorySetupBotId = null;
           }
           try { onSelectionChanged(botId); } catch {}
           publish();
@@ -927,6 +1189,7 @@
         } catch (error) {
           if (!disposed && epoch === selectionEpoch && activeBotId === botId) {
             activeBotId = previousBotId;
+            mandatorySetupBotId = previousMandatorySetupBotId;
             modelSelection = previousModelSelection;
             const repairTarget = previousBotId === null ? null : currentPermissionTarget(previousBotId);
             const permissionCommittedSinceSelection = previousBotId !== null
@@ -1020,7 +1283,10 @@
       }
       refreshPermissionRequest();
       if (bots.size > 0) {
-        try { await selectBot(bots.keys().next().value); }
+        const pending = computerFacade
+          ? [...bots.values()].find((record) => record.setupStage !== "complete")
+          : null;
+        try { await selectBot(pending?.botId ?? bots.keys().next().value); }
         catch (error) {
           if (disposed) throw error;
           publish();
@@ -1061,28 +1327,214 @@
 
     async function createBot() {
       if (disposed || creationPending || mandatorySetupBotId !== null || computerSetup.open
+        || (computerFacade && [...bots.values()].some((record) => record.setupStage !== "complete"))
         || typeof facade.create !== "function") {
         throw new Error("Bot creation is unavailable.");
       }
       creationPending = true;
       creationBotId = null;
+      creationError = null;
       publish();
       try {
         const created = await facade.create();
         if (disposed) throw new Error("Bot creation is unavailable.");
         const record = normalizeBot(created);
+        if (record.name !== "New Bot"
+          || (computerFacade && record.setupStage !== "profile-model")) {
+          throw new Error("Bot creation is unavailable.");
+        }
         bots.set(record.botId, record);
         creationBotId = record.botId;
-        if (computerFacade) mandatorySetupBotId = record.botId;
         await selectBot(record.botId);
         creationPending = false;
         creationBotId = null;
+        creationError = null;
         publish();
         return record;
       } catch (error) {
         creationPending = false;
         creationBotId = null;
-        if (!disposed) publish();
+        if (!disposed) {
+          creationError = "Could not finish creating New Bot. Try again.";
+          publish();
+        }
+        throw error;
+      }
+    }
+
+    function updateNewBotSetup(patch) {
+      const allowed = new Set([
+        "name", "description", "image", "shape", "color",
+        "provider", "model", "reasoningEffort", "serviceTier",
+      ]);
+      if (disposed || !profileSetup.open || profileSetup.pending
+        || profileSetupBotId !== activeBotId || mandatorySetupBotId !== activeBotId
+        || !patch || typeof patch !== "object" || Array.isArray(patch)
+        || Object.keys(patch).some((key) => !allowed.has(key))) {
+        throw new Error("New Bot setup is unavailable.");
+      }
+      const next = { ...profileSetup, error: null };
+      if (Object.hasOwn(patch, "name")) {
+        if (typeof patch.name !== "string" || patch.name.length > 160 || patch.name.includes("\0")) {
+          throw new Error("Bot name is unavailable.");
+        }
+        next.name = patch.name;
+      }
+      if (Object.hasOwn(patch, "description")) {
+        if (typeof patch.description !== "string" || patch.description.length > MAX_DESCRIPTION_LENGTH
+          || patch.description.includes("\0")) {
+          throw new Error("Bot description is unavailable.");
+        }
+        next.description = patch.description;
+      }
+      if (Object.hasOwn(patch, "image")) next.image = normalizeLocalPngAvatar(patch.image);
+      if (Object.hasOwn(patch, "shape")) {
+        if (!BOT_SHAPE_IDS.has(patch.shape)) throw new Error("Bot shape is unavailable.");
+        next.shape = patch.shape;
+      }
+      if (Object.hasOwn(patch, "color")) {
+        if (!BOT_COLOR_IDS.has(patch.color)) throw new Error("Bot color is unavailable.");
+        next.color = patch.color;
+      }
+      let descriptor = setupModelDescriptor(next.model, next.provider);
+      if (Object.hasOwn(patch, "provider")) {
+        if (typeof patch.provider !== "string") throw new Error("Model provider is unavailable.");
+        descriptor = setupModelDescriptor(null, patch.provider);
+        if (!descriptor) throw new Error("Model provider is unavailable.");
+        Object.assign(next, setupSelectionFor(descriptor));
+      }
+      if (Object.hasOwn(patch, "model")) {
+        descriptor = setupModelDescriptor(patch.model, next.provider);
+        if (!descriptor || descriptor.model !== patch.model || descriptor.provider !== next.provider) {
+          throw new Error("Model selection is unavailable.");
+        }
+        Object.assign(next, setupSelectionFor(descriptor));
+      }
+      descriptor = setupModelDescriptor(next.model, next.provider);
+      if (!descriptor || descriptor.model !== next.model || descriptor.provider !== next.provider) {
+        throw new Error("Model selection is unavailable.");
+      }
+      if (Object.hasOwn(patch, "reasoningEffort")) {
+        if (!descriptor.efforts.includes(patch.reasoningEffort)) {
+          throw new Error("Power selection is unavailable.");
+        }
+        next.reasoningEffort = patch.reasoningEffort;
+      }
+      if (Object.hasOwn(patch, "serviceTier")) {
+        if (!(patch.serviceTier === null
+          || descriptor.serviceTiers.some((entry) => entry.id === patch.serviceTier))) {
+          throw new Error("Speed selection is unavailable.");
+        }
+        next.serviceTier = patch.serviceTier;
+      }
+      profileSetup = Object.freeze(next);
+      profileSetupCatalogGeneration = catalogGeneration;
+      publish();
+      return snapshot();
+    }
+
+    function setupTransactionIsCurrent(botId, epoch, catalogMarker, descriptor, expectedStage = "profile-model") {
+      const currentDescriptor = setupModelDescriptor(descriptor.model, descriptor.provider);
+      return !disposed && activeBotId === botId && mandatorySetupBotId === botId
+        && profileSetupBotId === botId && profileSetup.open
+        && (expectedStage === null || bots.get(botId)?.setupStage === expectedStage)
+        && selectionEpoch === epoch && catalogGeneration === catalogMarker
+        && currentDescriptor?.model === descriptor.model
+        && currentDescriptor.provider === descriptor.provider
+        && currentDescriptor.catalogGeneration === descriptor.catalogGeneration;
+    }
+
+    async function confirmNewBotSetup() {
+      const bot = activeBot();
+      const draft = profileSetup;
+      const name = draft.name.trim();
+      const description = draft.description.trim();
+      const descriptor = setupModelDescriptor(draft.model, draft.provider);
+      if (disposed || !bot || !draft.open || draft.pending || profileSetupBotId !== bot.botId
+        || mandatorySetupBotId !== bot.botId || bot.setupStage !== "profile-model"
+        || name.length < 1 || name.length > 160
+        || !descriptor || descriptor.model !== draft.model || descriptor.provider !== draft.provider
+        || !descriptor.efforts.includes(draft.reasoningEffort)
+        || !(draft.serviceTier === null
+          || descriptor.serviceTiers.some((entry) => entry.id === draft.serviceTier))
+        || typeof facade.rename !== "function" || typeof facade.updateProfile !== "function"
+        || typeof facade.advanceSetup !== "function"
+        || !runtimeFacade || typeof runtimeFacade.selectModel !== "function") {
+        throw new Error("New Bot setup is unavailable.");
+      }
+      const botId = bot.botId;
+      const epoch = selectionEpoch;
+      const catalogMarker = profileSetupCatalogGeneration;
+      profileSetup = Object.freeze({ ...draft, pending: true, error: null });
+      publish();
+      try {
+        const renamedValue = await facade.rename(botId, name);
+        if (!setupTransactionIsCurrent(botId, epoch, catalogMarker, descriptor)) {
+          throw new Error("New Bot setup changed.");
+        }
+        const renamed = normalizeBot(renamedValue);
+        if (renamed.botId !== botId || renamed.setupStage !== "profile-model") {
+          throw new Error("New Bot setup changed.");
+        }
+        applyBot(renamedValue);
+
+        const profileValue = await facade.updateProfile(botId, {
+          appearance: {
+            shape: draft.shape,
+            color: draft.color,
+            image: draft.image,
+            description,
+          },
+        });
+        if (!setupTransactionIsCurrent(botId, epoch, catalogMarker, descriptor)) {
+          throw new Error("New Bot setup changed.");
+        }
+        const profiled = normalizeBot(profileValue);
+        if (profiled.botId !== botId || profiled.setupStage !== "profile-model") {
+          throw new Error("New Bot setup changed.");
+        }
+        applyBot(profileValue);
+
+        const modelValue = await selectModel(draft.model, draft.reasoningEffort, draft.serviceTier);
+        if (!modelValue || typeof modelValue !== "object"
+          || !setupTransactionIsCurrent(botId, epoch, catalogMarker, descriptor)
+          || !modelSelection || modelSelection.provider !== draft.provider
+          || modelSelection.model !== draft.model
+          || modelSelection.reasoningEffort !== draft.reasoningEffort
+          || modelSelection.serviceTier !== draft.serviceTier
+          || modelSelection.catalogGeneration !== descriptor.catalogGeneration) {
+          throw new Error("New Bot setup changed.");
+        }
+        const stageValue = await facade.advanceSetup({
+          botId,
+          expectedStage: "profile-model",
+          nextStage: "computer",
+        });
+        const stageRecord = normalizeBot(stageValue);
+        if (!setupTransactionIsCurrent(botId, epoch, catalogMarker, descriptor, null)
+          || stageRecord.botId !== botId || stageRecord.setupStage !== "computer"
+          || !["profile-model", "computer"].includes(bots.get(botId)?.setupStage)) {
+          throw new Error("New Bot setup changed.");
+        }
+        applyBot(stageValue);
+        if (disposed || selectionEpoch !== epoch || activeBotId !== botId
+          || bots.get(botId)?.setupStage !== "computer") {
+          throw new Error("New Bot setup changed.");
+        }
+        openMandatoryComputerSetup(botId);
+        publish();
+        return snapshot();
+      } catch (error) {
+        if (!disposed && activeBotId === botId && mandatorySetupBotId === botId
+          && profileSetupBotId === botId && profileSetup.open) {
+          profileSetup = Object.freeze({
+            ...profileSetup,
+            pending: false,
+            error: "Could not finish setting up New Bot. Your choices are still here. Try again.",
+          });
+          synchronizeActiveSetupStage(bots.get(botId));
+          publish();
+        }
         throw error;
       }
     }
@@ -1121,8 +1573,10 @@
     async function confirmComputerMode() {
       const bot = activeBot();
       const mode = computerSetup.selectedMode;
+      const mandatory = mandatorySetupBotId === bot?.botId;
       if (disposed || !bot || !computerSetup.open || computerSetup.pending || computerSetupBotId !== bot.botId
         || !COMPUTER_MODES.has(mode)
+        || (mandatory && (bot.setupStage !== "computer" || typeof facade.advanceSetup !== "function"))
         || !computerFacade || typeof computerFacade.selectMode !== "function") {
         throw new Error("Computer setup is unavailable.");
       }
@@ -1159,6 +1613,24 @@
         if (commitPermissionRead(bot.botId, permissionReadEpoch)) {
           permissions = permissionTarget === null ? Object.freeze([]) : nextPermissions;
         }
+        if (mandatory) {
+          const stageValue = await facade.advanceSetup({
+            botId: bot.botId,
+            expectedStage: "computer",
+            nextStage: "complete",
+          });
+          const stageRecord = normalizeBot(stageValue);
+          if (disposed || epoch !== selectionEpoch || activeBotId !== bot.botId
+            || stageRecord.botId !== bot.botId || stageRecord.setupStage !== "complete"
+            || !["computer", "complete"].includes(bots.get(bot.botId)?.setupStage)
+            || !sameComputerIdentity(bots.get(bot.botId)?.computer, normalizedResult.computer)) {
+            throw new Error("Computer setup changed.");
+          }
+          applyBot(stageValue);
+          if (bots.get(bot.botId)?.setupStage !== "complete") {
+            throw new Error("Computer setup changed.");
+          }
+        }
         computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
         computerSetupBotId = null;
         if (mandatorySetupBotId === bot.botId) mandatorySetupBotId = null;
@@ -1167,6 +1639,7 @@
       } catch (error) {
         if (!disposed && epoch === selectionEpoch && activeBotId === bot.botId) {
           computerSetup = Object.freeze({ ...computerSetup, pending: false });
+          synchronizeActiveSetupStage(bots.get(bot.botId));
           publish();
         }
         throw error;
@@ -1178,6 +1651,7 @@
       const bot = activeBot();
       if (disposed || !prompt || !bot || prompt.botId !== bot.botId
         || permissionDecisionRequestId !== null
+        || (decision === "always" && prompt.allowsAlways === false)
         || !PERMISSION_DECISIONS.has(decision) || !computerFacade
         || typeof computerFacade.decidePermission !== "function") {
         throw new Error("Computer permission is unavailable or changed.");
@@ -1357,6 +1831,9 @@
       creationPending = false;
       creationBotId = null;
       mandatorySetupBotId = null;
+      profileSetup = closedProfileSetup();
+      profileSetupBotId = null;
+      profileSetupCatalogGeneration = -1;
       permissionRequest = null;
       permissionQueue.clear();
       permissionRefreshes.clear();
@@ -1375,6 +1852,7 @@
       applyBot,
       chooseComputerMode,
       confirmComputerMode,
+      confirmNewBotSetup,
       connectProvider,
       createBot,
       decideComputerPermission,
@@ -1388,6 +1866,7 @@
       selectBot,
       selectModel,
       snapshot,
+      updateNewBotSetup,
     });
   }
 
@@ -1569,6 +2048,10 @@
     const newButton = element(documentRef, "button", "codex-bot-new", "New Bot");
     newButton.type = "button";
     header.append(botSelect, newButton);
+    const creationAlert = element(documentRef, "p", "codex-bot-create-error");
+    creationAlert.setAttribute("role", "alert");
+    creationAlert.setAttribute("aria-live", "assertive");
+    creationAlert.hidden = true;
     const renameRow = element(documentRef, "div", "codex-bot-rename-row");
     const rename = element(documentRef, "input", "codex-bot-rename");
     rename.maxLength = 160;
@@ -1602,6 +2085,108 @@
     computerGrantsTitle.id = "codex-computer-grants-title";
     const computerGrantsList = element(documentRef, "div", "codex-computer-grants-list");
     computerGrants.append(computerGrantsTitle, computerGrantsList);
+    const newBotSetup = element(documentRef, "dialog", "codex-new-bot-setup");
+    newBotSetup.setAttribute("role", "dialog");
+    newBotSetup.setAttribute("aria-modal", "true");
+    newBotSetup.setAttribute("aria-labelledby", "codex-new-bot-setup-title");
+    newBotSetup.setAttribute("aria-describedby", "codex-new-bot-setup-copy");
+    newBotSetup.hidden = true;
+    const newBotSetupTitle = element(documentRef, "h2", "codex-new-bot-setup-title", "Set up New Bot");
+    newBotSetupTitle.id = "codex-new-bot-setup-title";
+    const newBotSetupCopy = element(
+      documentRef,
+      "p",
+      "codex-new-bot-setup-copy",
+      "Choose this bot’s profile and model before its Computer.",
+    );
+    newBotSetupCopy.id = "codex-new-bot-setup-copy";
+    const newBotSetupFields = element(documentRef, "div", "codex-new-bot-fields");
+    const labeledSetupField = (labelText, control, { optional = false } = {}) => {
+      const label = element(documentRef, "label", "codex-new-bot-field");
+      const heading = element(documentRef, "span", "codex-new-bot-field-label", labelText);
+      if (optional) heading.append(element(documentRef, "span", "codex-new-bot-optional", "(Optional)"));
+      label.append(heading, control);
+      return label;
+    };
+    const newBotPhoto = element(documentRef, "input", "codex-new-bot-photo");
+    newBotPhoto.type = "file";
+    newBotPhoto.accept = "image/png";
+    newBotPhoto.setAttribute("aria-label", "Add a Bot photo");
+    newBotPhoto.hidden = true;
+    const newBotPhotoPick = element(documentRef, "button", "codex-new-bot-photo-pick", "Add a Bot photo");
+    newBotPhotoPick.type = "button";
+    const newBotPhotoPreview = element(documentRef, "img", "codex-new-bot-photo-preview");
+    newBotPhotoPreview.alt = "";
+    newBotPhotoPreview.hidden = true;
+    const newBotPhotoRemove = element(documentRef, "button", "codex-new-bot-photo-remove", "Remove Bot photo");
+    newBotPhotoRemove.type = "button";
+    newBotPhotoRemove.hidden = true;
+    const newBotPhotoRow = element(documentRef, "div", "codex-new-bot-photo-row");
+    newBotPhotoRow.append(newBotPhoto, newBotPhotoPick, newBotPhotoPreview, newBotPhotoRemove);
+    const newBotPhotoField = element(documentRef, "div", "codex-new-bot-field");
+    const newBotPhotoLabel = element(documentRef, "span", "codex-new-bot-field-label", "Bot photo");
+    newBotPhotoLabel.append(element(documentRef, "span", "codex-new-bot-optional", "(Optional)"));
+    newBotPhotoField.append(newBotPhotoLabel, newBotPhotoRow);
+    const newBotName = element(documentRef, "input", "codex-new-bot-name");
+    newBotName.type = "text";
+    newBotName.required = true;
+    newBotName.maxLength = 160;
+    newBotName.placeholder = "Name your Bot";
+    newBotName.setAttribute("aria-label", "Name");
+    newBotName.setAttribute("aria-required", "true");
+    const newBotDescription = element(documentRef, "textarea", "codex-new-bot-description");
+    newBotDescription.maxLength = MAX_DESCRIPTION_LENGTH;
+    newBotDescription.rows = 3;
+    newBotDescription.placeholder = "What should this Bot help with?";
+    newBotDescription.setAttribute("aria-label", "Description");
+    const newBotShape = element(documentRef, "select", "codex-new-bot-shape");
+    newBotShape.setAttribute("aria-label", "Character shape");
+    for (const value of BOT_SHAPES) {
+      const option = element(documentRef, "option", "", `${value[0].toUpperCase()}${value.slice(1)}`);
+      option.value = value;
+      newBotShape.append(option);
+    }
+    const newBotColor = element(documentRef, "select", "codex-new-bot-color");
+    newBotColor.setAttribute("aria-label", "Character color");
+    for (const value of BOT_COLORS) {
+      const option = element(documentRef, "option", "", `${value[0].toUpperCase()}${value.slice(1)}`);
+      option.value = value;
+      newBotColor.append(option);
+    }
+    const newBotProvider = element(documentRef, "select", "codex-new-bot-provider");
+    newBotProvider.setAttribute("aria-label", "Inference provider");
+    const newBotModel = element(documentRef, "select", "codex-new-bot-model");
+    newBotModel.setAttribute("aria-label", "Model");
+    const newBotPower = element(documentRef, "select", "codex-new-bot-power");
+    newBotPower.setAttribute("aria-label", "Power");
+    const newBotSpeed = element(documentRef, "select", "codex-new-bot-speed");
+    newBotSpeed.setAttribute("aria-label", "Speed");
+    newBotSetupFields.append(
+      newBotPhotoField,
+      labeledSetupField("Name", newBotName),
+      labeledSetupField("Description", newBotDescription, { optional: true }),
+      labeledSetupField("Character shape", newBotShape),
+      labeledSetupField("Character color", newBotColor),
+      labeledSetupField("Provider", newBotProvider),
+      labeledSetupField("Model", newBotModel),
+      labeledSetupField("Power", newBotPower),
+      labeledSetupField("Speed", newBotSpeed),
+    );
+    const newBotSetupError = element(documentRef, "p", "codex-new-bot-error");
+    newBotSetupError.setAttribute("role", "alert");
+    newBotSetupError.setAttribute("aria-live", "assertive");
+    newBotSetupError.hidden = true;
+    const newBotSetupActions = element(documentRef, "div", "codex-new-bot-actions");
+    const newBotContinue = element(documentRef, "button", "codex-new-bot-continue", "Continue");
+    newBotContinue.type = "button";
+    newBotSetupActions.append(newBotContinue);
+    newBotSetup.append(
+      newBotSetupTitle,
+      newBotSetupCopy,
+      newBotSetupFields,
+      newBotSetupError,
+      newBotSetupActions,
+    );
     const computerSetup = element(documentRef, "dialog", "codex-computer-setup");
     computerSetup.setAttribute("role", "dialog");
     computerSetup.setAttribute("aria-modal", "true");
@@ -1658,7 +2243,10 @@
     permissionSheet.setAttribute("role", "dialog");
     permissionSheet.setAttribute("aria-modal", "true");
     permissionSheet.setAttribute("aria-labelledby", "codex-permission-title");
-    permissionSheet.setAttribute("aria-describedby", "codex-permission-reason codex-permission-capability");
+    permissionSheet.setAttribute(
+      "aria-describedby",
+      "codex-permission-reason codex-permission-capability codex-permission-command",
+    );
     permissionSheet.hidden = true;
     const permissionTitle = element(documentRef, "h2", "codex-permission-title", "Computer permission");
     permissionTitle.id = "codex-permission-title";
@@ -1666,13 +2254,22 @@
     permissionReason.id = "codex-permission-reason";
     const permissionCapability = element(documentRef, "p", "codex-permission-capability");
     permissionCapability.id = "codex-permission-capability";
+    const permissionCommand = element(documentRef, "pre", "codex-permission-command");
+    permissionCommand.id = "codex-permission-command";
+    permissionCommand.hidden = true;
     const permissionActions = element(documentRef, "div", "codex-permission-actions");
     const permissionDeny = element(documentRef, "button", "codex-permission-deny", "Deny");
     const permissionOnce = element(documentRef, "button", "codex-permission-once", "Allow Once");
     const permissionAlways = element(documentRef, "button", "codex-permission-always", "Always Allow for This Bot");
     for (const button of [permissionDeny, permissionOnce, permissionAlways]) button.type = "button";
     permissionActions.append(permissionDeny, permissionOnce, permissionAlways);
-    permissionSheet.append(permissionTitle, permissionReason, permissionCapability, permissionActions);
+    permissionSheet.append(
+      permissionTitle,
+      permissionReason,
+      permissionCapability,
+      permissionCommand,
+      permissionActions,
+    );
     const modelDock = element(documentRef, "section", "codex-model-dock");
     modelDock.id = "codex-model-dock";
     modelDock.dataset.codexMountState = "pending";
@@ -1740,11 +2337,13 @@
     panelStack.append(powerShell, advanced);
     panel.append(
       header,
+      creationAlert,
       renameRow,
       providerRow,
       statusRow,
       computerRow,
       computerGrants,
+      newBotSetup,
       computerSetup,
       permissionSheet,
     );
@@ -1779,13 +2378,15 @@
     mountObserver?.observe(documentRef.body, { childList: true, subtree: true });
 
     let lastSnapshot = null;
-    let lastEffect = null;
     let warningTimer = null;
     let warningScope = null;
     let currentPowerScope = "unselected";
     let holdTimer = null;
     let activeFastTier = null;
     let compactProjectionPending = false;
+    let advancedUltraEntryIntent = null;
+    let newBotSetupReturnFocus = null;
+    let newBotPhotoError = null;
     let setupReturnFocus = null;
     let permissionReturnFocus = null;
     const powerState = new POWER_CONTROL.PowerControlState([], null, { ownerKey: "unselected" });
@@ -1841,7 +2442,6 @@
         }, 2000);
         warningTimer = timer;
       }
-      lastEffect = snapshot.effect;
     }
 
     function populateAdvanced(next, preferredModel) {
@@ -1881,6 +2481,70 @@
       advancedSpeed.value = serviceTier ?? "__standard__";
     }
 
+    function populateNewBotSetup(next) {
+      const draft = next.profileSetup;
+      const providers = [];
+      for (const entry of next.modelCatalog) {
+        if (!providers.includes(entry.provider)) providers.push(entry.provider);
+      }
+      newBotProvider.replaceChildren(...providers.map((provider) => {
+        const label = provider === "openai-codex"
+          ? "OpenAI Codex"
+          : provider === "cliproxy-anthropic"
+            ? "CLIProxyAPI"
+            : provider;
+        const option = element(documentRef, "option", "", label);
+        option.value = provider;
+        return option;
+      }));
+      newBotProvider.value = draft.provider ?? "";
+      const models = next.modelCatalog.filter((entry) => entry.provider === draft.provider);
+      newBotModel.replaceChildren(...models.map((entry) => {
+        const option = element(documentRef, "option", "", entry.label);
+        option.value = entry.model;
+        return option;
+      }));
+      newBotModel.value = draft.model ?? "";
+      const descriptor = models.find((entry) => entry.model === draft.model) ?? null;
+      newBotPower.replaceChildren(...(descriptor?.efforts ?? []).map((effort) => {
+        const option = element(documentRef, "option", "", EFFORT_LABELS[effort] ?? effort);
+        option.value = effort;
+        return option;
+      }));
+      newBotPower.value = draft.reasoningEffort ?? "";
+      const standard = element(documentRef, "option", "", "Standard");
+      standard.value = "__standard__";
+      newBotSpeed.replaceChildren(standard, ...(descriptor?.serviceTiers ?? []).map((tier) => {
+        const option = element(documentRef, "option", "", tier.name);
+        option.value = tier.id;
+        option.title = tier.description;
+        return option;
+      }));
+      newBotSpeed.value = draft.serviceTier ?? "__standard__";
+      newBotName.value = draft.name;
+      newBotDescription.value = draft.description;
+      newBotShape.value = draft.shape;
+      newBotColor.value = draft.color;
+      newBotPhotoPreview.src = draft.image ?? "";
+      newBotPhotoPreview.hidden = draft.image === null;
+      newBotPhotoPick.textContent = draft.image === null ? "Add a Bot photo" : "Change Bot photo";
+      newBotPhotoRemove.hidden = draft.image === null;
+      const error = draft.error ?? newBotPhotoError;
+      newBotSetupError.textContent = error ?? "";
+      newBotSetupError.hidden = error == null;
+      const valid = draft.name.trim().length > 0 && descriptor
+        && descriptor.provider === draft.provider && descriptor.model === draft.model
+        && descriptor.efforts.includes(draft.reasoningEffort)
+        && (draft.serviceTier === null
+          || descriptor.serviceTiers.some((entry) => entry.id === draft.serviceTier));
+      newBotContinue.disabled = draft.pending || !valid;
+      newBotContinue.textContent = draft.pending ? "Setting up…" : "Continue";
+      for (const control of [
+        newBotPhoto, newBotPhotoPick, newBotPhotoRemove, newBotName, newBotDescription, newBotShape,
+        newBotColor, newBotProvider, newBotModel, newBotPower, newBotSpeed,
+      ]) control.disabled = draft.pending;
+    }
+
     function render(next) {
       if (mountDisposed) return;
       const previousSnapshot = lastSnapshot;
@@ -1893,10 +2557,17 @@
         option.selected = record.botId === next.activeBotId;
         botSelect.append(option);
       }
-      botSelect.disabled = next.creationPending
+      botSelect.disabled = next.creationPending || next.profileSetup.open
         || (next.computerSetup.open && !next.computerSetup.dismissible);
-      newButton.disabled = next.creationPending || next.mandatorySetupPending || next.computerSetup.open;
+      newButton.disabled = next.creationPending || next.mandatorySetupPending
+        || next.profileSetup.open || next.computerSetup.open;
+      creationAlert.textContent = next.creationError ?? "";
+      creationAlert.hidden = next.creationError == null;
       rename.value = selected?.name ?? "";
+      rename.disabled = selected == null || next.selectionPending || next.profileSetup.open;
+      renameButton.disabled = rename.disabled;
+      providerSelect.disabled = selected == null || next.selectionPending || next.profileSetup.open;
+      connectProvider.disabled = providerSelect.disabled;
       status.textContent = next.runtime.label;
       status.dataset.tone = next.runtime.tone;
       retry.hidden = !next.runtime.retryVisible;
@@ -1932,9 +2603,24 @@
         row.append(copy, revoke);
         return row;
       }));
+      const profileOpening = next.profileSetup.open && !previousSnapshot?.profileSetup?.open;
+      const profileClosing = !next.profileSetup.open && previousSnapshot?.profileSetup?.open;
+      if (profileOpening) newBotSetupReturnFocus = documentRef.activeElement ?? newButton;
+      populateNewBotSetup(next);
+      setDialogOpen(newBotSetup, next.profileSetup.open);
+      newBotSetup.setAttribute("aria-busy", String(next.profileSetup.pending));
+      if (profileOpening) newBotName.focus?.();
       const setupOpening = next.computerSetup.open && !previousSnapshot?.computerSetup?.open;
       const setupClosing = !next.computerSetup.open && previousSnapshot?.computerSetup?.open;
-      if (setupOpening) setupReturnFocus = documentRef.activeElement ?? newButton;
+      if (setupOpening) {
+        setupReturnFocus = profileClosing
+          ? (newBotSetupReturnFocus ?? newButton)
+          : (documentRef.activeElement ?? newButton);
+        if (profileClosing) newBotSetupReturnFocus = null;
+      } else if (profileClosing) {
+        newBotSetupReturnFocus?.focus?.();
+        newBotSetupReturnFocus = null;
+      }
       setDialogOpen(computerSetup, next.computerSetup.open);
       computerSetup.setAttribute("aria-busy", String(next.computerSetup.pending));
       for (const [mode, input] of computerChoiceInputs) {
@@ -1964,13 +2650,21 @@
         button.disabled = next.permissionDecisionPending;
       }
       if (prompt) {
+        const shell = prompt.capability === "shell.execute";
         permissionTitle.textContent = `Allow ${selected?.name ?? "this bot"} to use ${prompt.resourceLabel}?`;
         permissionReason.textContent = prompt.reason;
         permissionCapability.textContent = prompt.capability.replaceAll(".", " ");
+        permissionCommand.textContent = shell ? prompt.command : "";
+        permissionCommand.hidden = !shell;
+        permissionAlways.hidden = shell;
+        permissionAlways.disabled = shell || next.permissionDecisionPending;
       } else {
         permissionTitle.textContent = "Computer permission";
         permissionReason.textContent = "";
         permissionCapability.textContent = "";
+        permissionCommand.textContent = "";
+        permissionCommand.hidden = true;
+        permissionAlways.hidden = false;
       }
       if ((permissionOpening || permissionDecisionSettled) && !next.permissionDecisionPending) {
         permissionDeny.focus?.();
@@ -1986,7 +2680,8 @@
         setupReturnFocus?.focus?.();
         setupReturnFocus = null;
       }
-      const enabled = selected != null && !next.selectionPending && next.modelCatalog.length > 0;
+      const enabled = selected != null && !next.selectionPending
+        && !next.profileSetup.open && next.modelCatalog.length > 0;
       const selectedTuple = next.modelSelection ? {
         provider: next.modelSelection.provider,
         model: next.modelSelection.model,
@@ -1996,8 +2691,16 @@
       } : null;
       const stops = MODEL_CONTROLS.buildPowerStops(next.modelCatalog, selectedTuple);
       const selectedIndex = selectedTuple ? MODEL_CONTROLS.closestPowerStop(stops, selectedTuple) : 0;
+      const compactSelectedStop = selectedTuple ? stops.find((stop) => (
+        stop.provider === selectedTuple.provider
+        && stop.model === selectedTuple.model
+        && stop.effort === selectedTuple.effort
+        && stop.serviceTier === selectedTuple.serviceTier
+        && stop.catalogGeneration === selectedTuple.catalogGeneration
+      )) : null;
       const ownerKey = `${next.activeBotId ?? "none"}:${next.modelSelection?.generation ?? "pending"}:${stops[0]?.catalogGeneration ?? 0}`;
       currentPowerScope = `${next.activeBotId ?? "none"}:${next.selectionEpoch}`;
+      if (advancedUltraEntryIntent?.botId !== next.activeBotId) advancedUltraEntryIntent = null;
       let power = powerState.setStops(stops, selectedIndex, { ownerKey });
       power = powerState.setDisabled(!enabled);
       compactProjectionPending = Boolean(selectedTuple && power.selection
@@ -2006,7 +2709,13 @@
           || power.selection.effort !== selectedTuple.effort
           || power.selection.serviceTier !== selectedTuple.serviceTier
           || power.selection.catalogGeneration !== selectedTuple.catalogGeneration));
-      const enteredUltra = power.effect === "ultra" && lastEffect !== "ultra";
+      const enteredUltra = Boolean(advancedUltraEntryIntent && selectedTuple
+        && advancedUltraEntryIntent.botId === next.activeBotId
+        && advancedUltraEntryIntent.model === selectedTuple.model
+        && advancedUltraEntryIntent.effort === selectedTuple.effort
+        && advancedUltraEntryIntent.serviceTier === selectedTuple.serviceTier
+        && advancedUltraEntryIntent.catalogGeneration === selectedTuple.catalogGeneration);
+      if (enteredUltra) advancedUltraEntryIntent = null;
       if (power.stops.length) paintPower(power, { enteredUltra });
       const visibleSelection = next.selectionPending
         ? null
@@ -2016,7 +2725,8 @@
         effort: next.modelSelection.reasoningEffort,
         serviceTier: next.modelSelection.serviceTier,
         catalogGeneration: next.modelSelection.catalogGeneration,
-        label: EFFORT_LABELS[next.modelSelection.reasoningEffort]
+        label: compactSelectedStop?.label
+          ?? EFFORT_LABELS[next.modelSelection.reasoningEffort]
           ?? next.modelSelection.reasoningEffort,
         effect: isUltraEffect(next.modelSelection.reasoningEffort)
           ? "ultra"
@@ -2068,6 +2778,44 @@
       onRuntimeEvent(event) {
         windowRef.dispatchEvent?.(new windowRef.CustomEvent("codex-bot-runtime-event", { detail: event }));
       },
+    });
+    const updateSetup = (patch) => {
+      newBotPhotoError = null;
+      try { controller.updateNewBotSetup(patch); }
+      catch { render(controller.snapshot()); }
+    };
+    newBotName.addEventListener("input", () => updateSetup({ name: newBotName.value }));
+    newBotDescription.addEventListener("input", () => updateSetup({ description: newBotDescription.value }));
+    newBotShape.addEventListener("change", () => updateSetup({ shape: newBotShape.value }));
+    newBotColor.addEventListener("change", () => updateSetup({ color: newBotColor.value }));
+    newBotProvider.addEventListener("change", () => updateSetup({ provider: newBotProvider.value }));
+    newBotModel.addEventListener("change", () => updateSetup({ model: newBotModel.value }));
+    newBotPower.addEventListener("change", () => updateSetup({ reasoningEffort: newBotPower.value }));
+    newBotSpeed.addEventListener("change", () => updateSetup({
+      serviceTier: newBotSpeed.value === "__standard__" ? null : newBotSpeed.value,
+    }));
+    newBotPhotoPick.addEventListener("click", () => newBotPhoto.click?.());
+    newBotPhoto.addEventListener("change", () => {
+      const file = newBotPhoto.files?.[0] ?? null;
+      newBotPhotoError = null;
+      void readLocalPngFile(file, windowRef.FileReader).then((image) => {
+        if (!mountDisposed) updateSetup({ image });
+      }).catch(() => {
+        if (mountDisposed) return;
+        newBotPhotoError = "Choose a valid PNG smaller than 2 MB.";
+        render(controller.snapshot());
+      });
+    });
+    newBotPhotoRemove.addEventListener("click", () => updateSetup({ image: null }));
+    const submitNewBotSetup = () => {
+      void controller.confirmNewBotSetup().catch(() => render(controller.snapshot()));
+    };
+    newBotContinue.addEventListener("click", submitNewBotSetup);
+    newBotSetup.addEventListener("cancel", (event) => event.preventDefault?.());
+    newBotSetup.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || (!event.metaKey && !event.ctrlKey) || newBotContinue.disabled) return;
+      event.preventDefault?.();
+      submitNewBotSetup();
     });
     botSelect.addEventListener("change", () => {
       try {
@@ -2230,8 +2978,17 @@
         serviceTier: advancedSpeed.value === "__standard__" ? null : advancedSpeed.value,
       });
       if (!selection) return;
+      const previousEffort = lastSnapshot.modelSelection?.reasoningEffort
+        ?? powerState.snapshot().selection?.effort;
+      const intent = !isUltraEffect(previousEffort) && isUltraEffect(selection.effort)
+        ? Object.freeze({ botId: lastSnapshot.activeBotId, ...selection })
+        : null;
+      advancedUltraEntryIntent = intent;
       void controller.selectModel(selection.model, selection.effort, selection.serviceTier)
-        .catch(() => render(controller.snapshot()));
+        .catch(() => render(controller.snapshot()))
+        .finally(() => {
+          if (advancedUltraEntryIntent === intent) advancedUltraEntryIntent = null;
+        });
     };
     advancedModel.addEventListener("change", () => {
       if (!lastSnapshot) return;
@@ -2280,6 +3037,8 @@
     createBotUiController,
     findUiMounts,
     mount,
+    normalizeLocalPngAvatar,
+    readLocalPngFile,
     runtimePresentation,
     updateReasoningView,
   });

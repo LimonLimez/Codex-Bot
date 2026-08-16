@@ -8,6 +8,7 @@ const EFFORT = /^[a-z][a-z0-9_-]{0,31}$/;
 const SERVICE_TIER = /^[a-z][a-z0-9_-]{0,31}$/;
 const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const INVOCATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const WORKSPACE_ID = /^workspace-[a-f0-9]{64}$/;
 const PROVIDERS = new Set(["openai-codex", "cliproxy-anthropic"]);
 const OPTIONAL_MODELS = new Set(["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]);
 const REQUEST_KEYS = new Set([
@@ -18,6 +19,7 @@ const REQUEST_KEYS = new Set([
   "toolChoice",
   "invocationId",
   "signal",
+  "workspaceId",
 ]);
 const SELECTION_KEYS = new Set([
   "botId",
@@ -165,7 +167,9 @@ class InferenceProviderRouter {
       !Array.isArray(request.messages) ||
       !Array.isArray(request.tools) ||
       typeof request.invocationId !== "string" ||
-      !INVOCATION_ID.test(request.invocationId)
+      !INVOCATION_ID.test(request.invocationId) ||
+      !(request.workspaceId === undefined || (typeof request.workspaceId === "string"
+        && WORKSPACE_ID.test(request.workspaceId)))
     ) {
       throw inferenceError("CODEX_INFERENCE_INVALID", "Codex inference request is invalid.");
     }
@@ -183,7 +187,7 @@ class InferenceProviderRouter {
     await this.#assertCurrent(selected);
     let result;
     try {
-      result = selectedTransport.stream(Object.freeze({
+      const transportRequest = {
         selection: upstreamSelection,
         conversationId: request.conversationId,
         messages: request.messages,
@@ -192,7 +196,11 @@ class InferenceProviderRouter {
         invocationId: request.invocationId,
         signal: request.signal,
         assertCurrent: () => this.#assertCurrent(selected),
-      }));
+      };
+      if (selected.provider === "openai-codex" && request.workspaceId !== undefined) {
+        transportRequest.workspaceId = request.workspaceId;
+      }
+      result = selectedTransport.stream(Object.freeze(transportRequest));
     } catch (error) {
       if (error instanceof InferenceProviderError) throw error;
       throw inferenceError("CODEX_INFERENCE_UNAVAILABLE", "Codex inference is unavailable.");

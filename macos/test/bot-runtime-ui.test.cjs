@@ -20,17 +20,19 @@ function deferred() {
   return { promise, reject, resolve };
 }
 
-function bot(botId, name, state) {
+function bot(botId, name, state, setupStage = "complete") {
   return Object.freeze({
     botId,
     name,
+    setupStage,
     runtime: Object.freeze({ state }),
   });
 }
 
-function botWithComputer(botId, name, runtimeState, overrides = {}) {
+function botWithComputer(botId, name, runtimeState, overrides = {}, setupStage = "complete", appearance = undefined) {
   return Object.freeze({
-    ...bot(botId, name, runtimeState),
+    ...bot(botId, name, runtimeState, setupStage),
+    ...(appearance === undefined ? {} : { appearance: Object.freeze({ ...appearance }) }),
     computer: Object.freeze({
       mode: "not-now",
       generation: 0,
@@ -42,6 +44,10 @@ function botWithComputer(botId, name, runtimeState, overrides = {}) {
       ...overrides,
     }),
   });
+}
+
+function pendingBotWithComputer(botId, name = "New Bot", runtimeState = "provisioning", appearance = undefined) {
+  return botWithComputer(botId, name, runtimeState, {}, "profile-model", appearance);
 }
 
 class FakeClassList {
@@ -138,6 +144,36 @@ test("the reviewed optional-provider manifest preserves model-specific Ultra Cod
   );
   assert.equal(Object.isFrozen(MODEL_CATALOG), true);
   assert.equal(Object.isFrozen(MODEL_CATALOG[0].efforts), true);
+});
+
+test("local Bot photos accept only bounded PNG data URLs", async () => {
+  const { normalizeLocalPngAvatar, readLocalPngFile } = require(uiPath);
+  const valid = "data:image/png;base64,aGVsbG8=";
+  assert.equal(normalizeLocalPngAvatar(valid), valid);
+  assert.throws(() => normalizeLocalPngAvatar("data:image/jpeg;base64,aGVsbG8="), /PNG/i);
+  assert.throws(
+    () => normalizeLocalPngAvatar(`data:image/png;base64,${"A".repeat(1_999_980)}`),
+    /smaller than 2 MB/i,
+  );
+
+  class FakeReader {
+    readAsDataURL() {
+      this.result = valid;
+      this.onload();
+    }
+  }
+  assert.equal(
+    await readLocalPngFile({ type: "image/png", size: 5 }, FakeReader),
+    valid,
+  );
+  await assert.rejects(
+    readLocalPngFile({ type: "image/jpeg", size: 5 }, FakeReader),
+    /PNG/i,
+  );
+  await assert.rejects(
+    readLocalPngFile({ type: "image/png", size: 1_500_000 }, FakeReader),
+    /smaller than 2 MB/i,
+  );
 });
 
 test("Power control preserves the approved compact topology exact ticks labels and effects", () => {
@@ -250,12 +286,627 @@ test("bot controller uses literal zero-argument New Bot and explicit rename/retr
   assert.deepEqual(calls.at(-1), ["unsubscribe"]);
 });
 
+test("New Bot commits profile and authoritative model before opening Computer", async () => {
+  const { createBotUiController } = require(uiPath);
+  const created = pendingBotWithComputer(BOT_B);
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+      isDefault: true,
+    })]),
+  });
+  const selectedModel = Object.freeze({
+    botId: BOT_B,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const calls = [];
+  const controller = createBotUiController({
+    facade: {
+      async list() { return []; },
+      async create() { calls.push(["create", arguments.length]); return created; },
+      async rename(botId, name) {
+        calls.push(["rename", botId, name]);
+        return pendingBotWithComputer(botId, name);
+      },
+      async updateProfile(botId, profile) {
+        calls.push(["updateProfile", botId, profile]);
+        return pendingBotWithComputer(botId, "Research Bot");
+      },
+      async advanceSetup(value) {
+        calls.push(["advanceSetup", value]);
+        return botWithComputer(value.botId, "Research Bot", "provisioning", {}, "computer");
+      },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return selectedModel; },
+      async readModel() { return selectedModel; },
+      async selectModel(selection) {
+        calls.push(["selectModel", selection]);
+        return Object.freeze({ ...selectedModel, ...selection, generation: 2 });
+      },
+    },
+    accountFacade: {
+      async catalog() { return catalog; },
+      onCatalogChanged() { return () => {}; },
+    },
+    computerFacade: {
+      async read(botId) { return { botId, computer: created.computer }; },
+      async listPermissions(botId) { return { botId, permissions: [] }; },
+      async listPermissionRequests(botId) { return { botId, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+  });
+
+  await controller.initialize();
+  await controller.createBot();
+  assert.deepEqual(calls[0], ["create", 0]);
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().profileSetup.dismissible, false);
+  assert.equal(controller.snapshot().profileSetup.name, "New Bot");
+  assert.equal(controller.snapshot().profileSetup.model, "gpt-5.6-sol");
+  assert.equal(controller.snapshot().computerSetup.open, false);
+
+  controller.updateNewBotSetup({
+    name: "  Research Bot  ",
+    description: "Find exact primary sources.",
+    image: "data:image/png;base64,aGVsbG8=",
+    shape: "gem",
+    color: "blue",
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+  });
+  await controller.confirmNewBotSetup();
+
+  assert.deepEqual(calls.slice(1), [
+    ["rename", BOT_B, "Research Bot"],
+    ["updateProfile", BOT_B, {
+      appearance: {
+        shape: "gem",
+        color: "blue",
+        image: "data:image/png;base64,aGVsbG8=",
+        description: "Find exact primary sources.",
+      },
+    }],
+    ["selectModel", {
+      botId: BOT_B,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "ultra",
+      serviceTier: null,
+    }],
+    ["advanceSetup", {
+      botId: BOT_B,
+      expectedStage: "profile-model",
+      nextStage: "computer",
+    }],
+  ]);
+  assert.equal(controller.snapshot().profileSetup.open, false);
+  assert.deepEqual(controller.snapshot().computerSetup, {
+    open: true,
+    pending: false,
+    selectedMode: null,
+    dismissible: false,
+  });
+  controller.dispose();
+});
+
+test("New Bot requires a fresh authoritative model confirmation before Computer", async () => {
+  const { createBotUiController } = require(uiPath);
+  const created = pendingBotWithComputer(BOT_B);
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+      isDefault: true,
+    })]),
+  });
+  const selected = Object.freeze({
+    botId: BOT_B,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  let modelCalls = 0;
+  const controller = createBotUiController({
+    facade: {
+      async list() { return []; },
+      async create() { return created; },
+      async rename(botId, name) { return pendingBotWithComputer(botId, name); },
+      async updateProfile(botId) { return pendingBotWithComputer(botId, "Research Bot"); },
+      async advanceSetup(value) {
+        return botWithComputer(value.botId, "Research Bot", "provisioning", {}, value.nextStage);
+      },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return selected; },
+      async readModel() { return selected; },
+      async selectModel(value) {
+        modelCalls += 1;
+        if (modelCalls === 1) return undefined;
+        return Object.freeze({ ...selected, ...value, generation: 2 });
+      },
+    },
+    accountFacade: {
+      async catalog() { return catalog; },
+      onCatalogChanged() { return () => {}; },
+    },
+    computerFacade: {
+      async read(botId) { return { botId, computer: created.computer }; },
+      async listPermissions(botId) { return { botId, permissions: [] }; },
+      async listPermissionRequests(botId) { return { botId, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+  });
+
+  await controller.initialize();
+  await controller.createBot();
+  controller.updateNewBotSetup({ name: "Research Bot" });
+  await assert.rejects(controller.confirmNewBotSetup(), /setup changed/i);
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().computerSetup.open, false);
+  assert.match(controller.snapshot().profileSetup.error, /try again/i);
+
+  await controller.confirmNewBotSetup();
+  assert.equal(modelCalls, 2);
+  assert.equal(controller.snapshot().profileSetup.open, false);
+  assert.equal(controller.snapshot().computerSetup.open, true);
+  controller.dispose();
+});
+
+test("restart resumes the persisted setup stage without creating or inferring from New Bot", async () => {
+  const { createBotUiController } = require(uiPath);
+  const appearance = {
+    shape: "gem",
+    color: "blue",
+    image: "data:image/png;base64,aGVsbG8=",
+    description: "Persisted after a partial setup.",
+  };
+  const profileBot = pendingBotWithComputer(BOT_B, "Research Bot", "provisioning", appearance);
+  const selected = Object.freeze({
+    botId: BOT_B,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 2,
+  });
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "ultra"]),
+      isDefault: true,
+    })]),
+  });
+  let createCalls = 0;
+  const facadeFor = (record, records = [record]) => ({
+    async list() { return records; },
+    async create() { createCalls += 1; return record; },
+    onChanged() { return () => {}; },
+  });
+  const runtimeFacade = {
+    async selectBot() { return selected; },
+    async readModel() { return selected; },
+  };
+  const accountFacade = { async catalog() { return catalog; } };
+  const computerFacade = {
+    async read(botId) { return { botId, computer: profileBot.computer }; },
+    async listPermissions(botId) { return { botId, permissions: [] }; },
+    async listPermissionRequests(botId) { return { botId, requests: [] }; },
+    onChanged() { return () => {}; },
+    onPermissionRequested() { return () => {}; },
+  };
+
+  const profileController = createBotUiController({
+    facade: facadeFor(profileBot, [botWithComputer(BOT_A, "Existing", "ready"), profileBot]),
+    runtimeFacade,
+    accountFacade,
+    computerFacade,
+  });
+  await profileController.initialize();
+  assert.equal(createCalls, 0);
+  assert.equal(profileController.snapshot().activeBotId, BOT_B);
+  assert.equal(profileController.snapshot().profileSetup.open, true);
+  assert.equal(profileController.snapshot().profileSetup.dismissible, false);
+  assert.equal(profileController.snapshot().profileSetup.name, "Research Bot");
+  assert.equal(profileController.snapshot().profileSetup.description, appearance.description);
+  assert.equal(profileController.snapshot().profileSetup.shape, "gem");
+  assert.equal(profileController.snapshot().profileSetup.color, "blue");
+  assert.equal(profileController.snapshot().profileSetup.image, appearance.image);
+  assert.equal(profileController.snapshot().computerSetup.open, false);
+  profileController.dispose();
+
+  const computerBot = botWithComputer(BOT_B, "Research Bot", "provisioning", {}, "computer", appearance);
+  const computerController = createBotUiController({
+    facade: facadeFor(computerBot), runtimeFacade, accountFacade, computerFacade,
+  });
+  await computerController.initialize();
+  assert.equal(createCalls, 0);
+  assert.equal(computerController.snapshot().profileSetup.open, false);
+  assert.deepEqual(computerController.snapshot().computerSetup, {
+    open: true,
+    pending: false,
+    selectedMode: null,
+    dismissible: false,
+  });
+  computerController.dispose();
+
+  const existingNamedNewBot = botWithComputer(BOT_A, "New Bot", "ready", {}, "complete");
+  const existingSelection = Object.freeze({ ...selected, botId: BOT_A });
+  const existingController = createBotUiController({
+    facade: facadeFor(existingNamedNewBot),
+    runtimeFacade: {
+      async selectBot() { return existingSelection; },
+      async readModel() { return existingSelection; },
+    },
+    accountFacade,
+    computerFacade: {
+      ...computerFacade,
+      async read(botId) { return { botId, computer: existingNamedNewBot.computer }; },
+    },
+  });
+  await existingController.initialize();
+  assert.equal(existingController.snapshot().profileSetup.open, false);
+  assert.equal(existingController.snapshot().computerSetup.open, false);
+  existingController.dispose();
+});
+
+test("failed profile setup preserves the same bot and sanitized draft for retry", async () => {
+  const { createBotUiController } = require(uiPath);
+  const created = pendingBotWithComputer(BOT_B);
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "ultra"]),
+      isDefault: true,
+    })]),
+  });
+  const selected = Object.freeze({
+    botId: BOT_B,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  let createCalls = 0;
+  let profileCalls = 0;
+  const controller = createBotUiController({
+    facade: {
+      async list() { return []; },
+      async create() { createCalls += 1; return created; },
+      async rename(botId, name) { return pendingBotWithComputer(botId, name); },
+      async updateProfile(botId) {
+        profileCalls += 1;
+        if (profileCalls === 1) {
+          throw new Error("ENOSPC /Users/private endpoint=https://provider token=secret");
+        }
+        return pendingBotWithComputer(botId, "Research Bot");
+      },
+      async advanceSetup(value) {
+        return botWithComputer(value.botId, "Research Bot", "provisioning", {}, value.nextStage);
+      },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return selected; },
+      async readModel() { return selected; },
+      async selectModel(value) { return Object.freeze({ ...selected, ...value, generation: 2 }); },
+    },
+    accountFacade: {
+      async catalog() { return catalog; },
+      onCatalogChanged() { return () => {}; },
+    },
+    computerFacade: {
+      async read(botId) { return { botId, computer: created.computer }; },
+      async listPermissions(botId) { return { botId, permissions: [] }; },
+      async listPermissionRequests(botId) { return { botId, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+  });
+
+  await controller.initialize();
+  await controller.createBot();
+  controller.updateNewBotSetup({
+    name: "Research Bot",
+    description: "Keep this exact draft.",
+    image: "data:image/png;base64,aGVsbG8=",
+    shape: "gem",
+    color: "blue",
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+  });
+  await assert.rejects(controller.confirmNewBotSetup(), /ENOSPC/);
+  const failed = controller.snapshot();
+  assert.equal(failed.profileSetup.open, true);
+  assert.equal(failed.profileSetup.pending, false);
+  assert.equal(failed.profileSetup.name, "Research Bot");
+  assert.equal(failed.profileSetup.description, "Keep this exact draft.");
+  assert.equal(failed.profileSetup.image, "data:image/png;base64,aGVsbG8=");
+  assert.match(failed.profileSetup.error, /try again/i);
+  assert.doesNotMatch(failed.profileSetup.error, /ENOSPC|Users\/private|provider|token|secret/i);
+  assert.equal(failed.computerSetup.open, false);
+  assert.equal(createCalls, 1);
+
+  await controller.confirmNewBotSetup();
+  assert.equal(createCalls, 1);
+  assert.equal(profileCalls, 2);
+  assert.equal(controller.snapshot().profileSetup.open, false);
+  assert.equal(controller.snapshot().computerSetup.open, true);
+  controller.dispose();
+});
+
+test("catalog changes fence stale setup completion and permit explicit re-confirmation", async () => {
+  const { createBotUiController } = require(uiPath);
+  const created = pendingBotWithComputer(BOT_B);
+  const renameRelease = deferred();
+  let catalogListener;
+  let catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-old",
+      displayName: "GPT Old",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+      isDefault: true,
+    })]),
+  });
+  const oldSelection = Object.freeze({
+    botId: BOT_B,
+    provider: "openai-codex",
+    model: "gpt-old",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const calls = [];
+  let holdRename = true;
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [botWithComputer(BOT_A, "Existing", "ready")]; },
+      async create() { return created; },
+      async rename(botId, name) {
+        calls.push(["rename", botId, name]);
+        if (holdRename) await renameRelease.promise;
+        return pendingBotWithComputer(botId, name);
+      },
+      async updateProfile(botId) {
+        calls.push(["updateProfile", botId]);
+        return pendingBotWithComputer(botId, "Research Bot");
+      },
+      async advanceSetup(value) {
+        calls.push(["advanceSetup", value]);
+        return botWithComputer(value.botId, "Research Bot", "provisioning", {}, value.nextStage);
+      },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot(botId) { return botId === BOT_B ? oldSelection : null; },
+      async readModel(botId) { return botId === BOT_B ? oldSelection : null; },
+      async selectModel(value) {
+        calls.push(["selectModel", value]);
+        return Object.freeze({
+          ...value,
+          provider: "openai-codex",
+          catalogGeneration: 13,
+          generation: 2,
+        });
+      },
+    },
+    accountFacade: {
+      async catalog() { return catalog; },
+      onCatalogChanged(listener) { catalogListener = listener; return () => {}; },
+    },
+    computerFacade: {
+      async read(botId) { return { botId, computer: created.computer }; },
+      async listPermissions(botId) { return { botId, permissions: [] }; },
+      async listPermissionRequests(botId) { return { botId, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+  });
+
+  await controller.initialize();
+  await controller.createBot();
+  controller.updateNewBotSetup({ name: "Research Bot" });
+  const stale = controller.confirmNewBotSetup();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(() => controller.selectBot(BOT_A), /setup is pending/i);
+  catalog = Object.freeze({
+    generation: 13,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-new",
+      displayName: "GPT New",
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: Object.freeze(["medium", "high"]),
+      isDefault: true,
+    })]),
+  });
+  catalogListener(catalog);
+  renameRelease.resolve();
+  await assert.rejects(stale, /setup changed/i);
+  assert.equal(calls.some(([name]) => name === "updateProfile"), false);
+  assert.equal(calls.some(([name]) => name === "selectModel"), false);
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().profileSetup.name, "Research Bot");
+  assert.equal(controller.snapshot().computerSetup.open, false);
+
+  holdRename = false;
+  controller.updateNewBotSetup({
+    provider: "openai-codex",
+    model: "gpt-new",
+    reasoningEffort: "high",
+    serviceTier: null,
+  });
+  await controller.confirmNewBotSetup();
+  assert.equal(controller.snapshot().profileSetup.open, false);
+  assert.equal(controller.snapshot().computerSetup.open, true);
+  assert.equal(calls.filter(([name]) => name === "selectModel").length, 1);
+  controller.dispose();
+});
+
+test("disposing during profile setup fences every late completion", async () => {
+  const { createBotUiController } = require(uiPath);
+  const created = pendingBotWithComputer(BOT_B);
+  const profileRelease = deferred();
+  const selected = Object.freeze({
+    botId: BOT_B,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation: 1,
+  });
+  let profileStarted = false;
+  let modelCalls = 0;
+  let publications = 0;
+  const controller = createBotUiController({
+    facade: {
+      async list() { return []; },
+      async create() { return created; },
+      async rename(botId, name) { return pendingBotWithComputer(botId, name); },
+      async updateProfile(botId) {
+        profileStarted = true;
+        await profileRelease.promise;
+        return pendingBotWithComputer(botId, "Research Bot");
+      },
+      async advanceSetup() { throw new Error("unexpected setup advance"); },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return selected; },
+      async readModel() { return selected; },
+      async selectModel() { modelCalls += 1; return selected; },
+    },
+    computerFacade: {
+      async read(botId) { return { botId, computer: created.computer }; },
+      async listPermissions(botId) { return { botId, permissions: [] }; },
+      async listPermissionRequests(botId) { return { botId, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+    onStateChanged() { publications += 1; },
+  });
+
+  await controller.initialize();
+  await controller.createBot();
+  controller.updateNewBotSetup({ name: "Research Bot" });
+  const finishing = controller.confirmNewBotSetup();
+  while (!profileStarted) await new Promise((resolve) => setImmediate(resolve));
+  controller.dispose();
+  const publicationsAfterDispose = publications;
+  profileRelease.resolve();
+  await assert.rejects(finishing, /setup changed/i);
+  assert.equal(modelCalls, 0);
+  assert.equal(publications, publicationsAfterDispose);
+  assert.equal(controller.snapshot().activeBotId, null);
+  assert.equal(controller.snapshot().profileSetup.open, false);
+  assert.equal(controller.snapshot().computerSetup.open, false);
+});
+
+test("disposing during the durable setup-stage advance fences its late completion", async () => {
+  const { createBotUiController } = require(uiPath);
+  const created = pendingBotWithComputer(BOT_B);
+  const advanceRelease = deferred();
+  const selected = Object.freeze({
+    botId: BOT_B,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation: 1,
+  });
+  let advanceStarted = false;
+  let publications = 0;
+  const controller = createBotUiController({
+    facade: {
+      async list() { return []; },
+      async create() { return created; },
+      async rename(botId, name) { return pendingBotWithComputer(botId, name); },
+      async updateProfile(botId) { return pendingBotWithComputer(botId, "Research Bot"); },
+      async advanceSetup(value) {
+        advanceStarted = true;
+        await advanceRelease.promise;
+        return botWithComputer(value.botId, "Research Bot", "provisioning", {}, "computer");
+      },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return selected; },
+      async readModel() { return selected; },
+      async selectModel() { return selected; },
+    },
+    computerFacade: {
+      async read(botId) { return { botId, computer: created.computer }; },
+      async listPermissions(botId) { return { botId, permissions: [] }; },
+      async listPermissionRequests(botId) { return { botId, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+    onStateChanged() { publications += 1; },
+  });
+
+  await controller.initialize();
+  await controller.createBot();
+  controller.updateNewBotSetup({ name: "Research Bot" });
+  const finishing = controller.confirmNewBotSetup();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(advanceStarted, true);
+  controller.dispose();
+  const publicationsAfterDispose = publications;
+  advanceRelease.resolve();
+  await assert.rejects(finishing, /setup changed/i);
+  assert.equal(publications, publicationsAfterDispose);
+  assert.equal(controller.snapshot().activeBotId, null);
+  assert.equal(controller.snapshot().computerSetup.open, false);
+});
+
 test("New Bot setup asks for an explicit Computer mode with no default", async () => {
   const { createBotUiController } = require(uiPath);
   const selectedModes = [];
+  const setupTransitions = [];
   let changed;
   let permissionRequested;
-  const created = botWithComputer(BOT_B, "New Bot", "provisioning");
+  const created = pendingBotWithComputer(BOT_B);
   const computerFacade = {
     async read(botId) { return { botId, computer: created.computer }; },
     async selectMode(value) {
@@ -282,13 +933,43 @@ test("New Bot setup asks for an explicit Computer mode with no default", async (
     facade: {
       async list() { return []; },
       async create() { return created; },
+      async rename(botId, name) { return pendingBotWithComputer(botId, name); },
+      async updateProfile(botId) { return pendingBotWithComputer(botId); },
+      async advanceSetup(value) {
+        setupTransitions.push(value);
+        return botWithComputer(
+          value.botId,
+          "New Bot",
+          "provisioning",
+          {},
+          value.nextStage,
+        );
+      },
       onChanged() { return () => {}; },
     },
-    runtimeFacade: { async selectBot() { return null; } },
+    runtimeFacade: {
+      async selectBot() { return null; },
+      async selectModel(value) {
+        return Object.freeze({
+          ...value,
+          provider: "cliproxy-anthropic",
+          catalogGeneration: 1,
+          generation: 1,
+        });
+      },
+    },
     computerFacade,
   });
   await controller.initialize();
   await controller.createBot();
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().computerSetup.open, false);
+  await controller.confirmNewBotSetup();
+  assert.deepEqual(setupTransitions, [{
+    botId: BOT_B,
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  }]);
   assert.deepEqual(controller.snapshot().computerSetup, {
     open: true,
     pending: false,
@@ -308,6 +989,11 @@ test("New Bot setup asks for an explicit Computer mode with no default", async (
   assert.equal(controller.snapshot().computerSetup.selectedMode, "local");
   await controller.confirmComputerMode();
   assert.deepEqual(selectedModes, [{ botId: BOT_B, mode: "local" }]);
+  assert.deepEqual(setupTransitions.at(-1), {
+    botId: BOT_B,
+    expectedStage: "computer",
+    nextStage: "complete",
+  });
   assert.equal(controller.snapshot().computerSetup.open, false);
   assert.equal(controller.snapshot().computer.mode, "local");
   assert.equal(controller.snapshot().computer.label, "Runs on this Mac");
@@ -325,11 +1011,11 @@ test("New Bot setup asks for an explicit Computer mode with no default", async (
   assert.equal(permissionRequested, null);
 });
 
-test("New Bot creation is single-flight until its mandatory Computer choice is established", async () => {
+test("New Bot creation is single-flight until its mandatory setup is established", async () => {
   const { createBotUiController } = require(uiPath);
   const heldCreate = deferred();
   let createCalls = 0;
-  const created = botWithComputer(BOT_B, "New Bot", "provisioning");
+  const created = pendingBotWithComputer(BOT_B);
   const controller = createBotUiController({
     facade: {
       async list() { return [botWithComputer(BOT_A, "A", "ready")]; },
@@ -367,20 +1053,16 @@ test("New Bot creation is single-flight until its mandatory Computer choice is e
   assert.equal(secondResult.status, "rejected");
   assert.equal(controller.snapshot().activeBotId, BOT_B);
   assert.equal(controller.snapshot().bots.filter(({ botId }) => botId === BOT_B).length, 1);
-  assert.deepEqual(controller.snapshot().computerSetup, {
-    open: true,
-    pending: false,
-    selectedMode: null,
-    dismissible: false,
-  });
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().computerSetup.open, false);
   await assert.rejects(controller.createBot(), /pending|unavailable/i);
   assert.equal(createCalls, 1);
   controller.dispose();
 });
 
-test("a persisted New Bot keeps its mandatory Computer setup after selection recovery", async () => {
+test("a persisted New Bot keeps its mandatory profile setup after selection recovery", async () => {
   const { createBotUiController } = require(uiPath);
-  const created = botWithComputer(BOT_B, "New Bot", "provisioning");
+  const created = pendingBotWithComputer(BOT_B);
   let createCalls = 0;
   let failCreatedSelection = true;
   const controller = createBotUiController({
@@ -420,21 +1102,17 @@ test("a persisted New Bot keeps its mandatory Computer setup after selection rec
   failCreatedSelection = false;
   await controller.selectBot(BOT_B);
   assert.equal(controller.snapshot().activeBotId, BOT_B);
-  assert.deepEqual(controller.snapshot().computerSetup, {
-    open: true,
-    pending: false,
-    selectedMode: null,
-    dismissible: false,
-  });
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().computerSetup.open, false);
   assert.throws(() => controller.selectBot(BOT_B, true), /setup is pending/i);
-  assert.equal(controller.snapshot().computerSetup.open, true);
+  assert.equal(controller.snapshot().profileSetup.open, true);
   assert.equal(controller.snapshot().mandatorySetupPending, true);
   controller.dispose();
 });
 
 test("a forced catalog refresh coalesces with the created bot's mandatory selection", async () => {
   const { createBotUiController } = require(uiPath);
-  const created = botWithComputer(BOT_B, "New Bot", "provisioning");
+  const created = pendingBotWithComputer(BOT_B);
   const selectionStarted = deferred();
   const selectionRelease = deferred();
   let createdSelectionCalls = 0;
@@ -489,7 +1167,8 @@ test("a forced catalog refresh coalesces with the created bot's mandatory select
   assert.equal(createdResult.status, "fulfilled");
   assert.equal(refreshedResult.status, "fulfilled");
   assert.equal(controller.snapshot().activeBotId, BOT_B);
-  assert.equal(controller.snapshot().computerSetup.open, true);
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().computerSetup.open, false);
   assert.equal(controller.snapshot().mandatorySetupPending, true);
   assert.doesNotThrow(() => catalogListener(Object.freeze({
     generation: 1,
@@ -501,7 +1180,8 @@ test("a forced catalog refresh coalesces with the created bot's mandatory select
       supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
     })]),
   })));
-  assert.equal(controller.snapshot().computerSetup.open, true);
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().computerSetup.open, false);
   controller.dispose();
 });
 
@@ -2669,6 +3349,7 @@ test("mounted optional model controls stay reachable while the official catalog 
 function createMountedUiHarness({
   catalog,
   initialSelection,
+  fileReader = null,
   windowTimers = { clearTimeout, setTimeout },
   botsFacade = null,
   computerFacade = null,
@@ -2755,6 +3436,7 @@ function createMountedUiHarness({
     setTimeout: windowTimers.setTimeout,
     clearTimeout: windowTimers.clearTimeout,
   };
+  if (fileReader) windowRef.FileReader = fileReader;
   if (computerFacade) windowRef.openbotComputer = computerFacade;
   const mounted = mount({ windowRef, documentRef });
   const find = (node, className) => {
@@ -2817,7 +3499,67 @@ test("mounted async provider completion never mutates detached controls after di
   assert.equal(connect.disabled, true, "a detached control must not be mutated by late completion");
 });
 
-test("mounted New Bot setup has no default and permission decisions stay explicit", async (context) => {
+test("mounted New Bot creation exposes a sanitized failure and a retry succeeds once", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const initialSelection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const created = bot(BOT_B, "New Bot", "ready");
+  let createCalls = 0;
+  const botsFacade = {
+    async list() { return [bot(BOT_A, "A", "ready")]; },
+    async create() {
+      createCalls += 1;
+      if (createCalls === 1) throw new Error("ENOSPC /Users/private endpoint=https://provider token=secret");
+      return created;
+    },
+    onChanged() { return () => {}; },
+  };
+  const runtimeFacade = {
+    async selectBot(botId) { return Object.freeze({ ...initialSelection, botId, generation: createCalls + 1 }); },
+    async readModel(botId) { return Object.freeze({ ...initialSelection, botId, generation: createCalls + 1 }); },
+    async selectModel(value) { return Object.freeze({ ...value, provider: "openai-codex", generation: 4 }); },
+  };
+  const harness = createMountedUiHarness({ catalog, initialSelection, botsFacade, runtimeFacade });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const newButton = harness.findPanel("codex-bot-new");
+  const creationAlert = harness.findPanel("codex-bot-create-error");
+  newButton.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createCalls, 1);
+  assert.equal(newButton.disabled, false);
+  assert.equal(creationAlert.hidden, false);
+  assert.equal(creationAlert.attributes.role, "alert");
+  assert.match(creationAlert.textContent, /could not create|try again/i);
+  assert.doesNotMatch(creationAlert.textContent, /ENOSPC|Users\/private|provider|token|secret/i);
+
+  newButton.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createCalls, 2);
+  assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
+  assert.equal(harness.mounted.controller.snapshot().bots.filter(({ botId }) => botId === BOT_B).length, 1);
+  assert.equal(creationAlert.hidden, true);
+  assert.equal(creationAlert.textContent, "");
+});
+
+test("mounted New Bot requires profile and model confirmation before unselected Computer", async (context) => {
   const catalog = Object.freeze({
     generation: 12,
     status: "ready",
@@ -2837,11 +3579,18 @@ test("mounted New Bot setup has no default and permission decisions stay explici
     catalogGeneration: 12,
     generation: 1,
   });
-  const created = botWithComputer(BOT_B, "New Bot", "provisioning");
+  const created = pendingBotWithComputer(BOT_B);
   const selections = new Map([[BOT_A, initialSelection], [BOT_B, Object.freeze({ ...initialSelection, botId: BOT_B })]]);
   let permissionListener;
   const modes = [];
   const decisions = [];
+  const setupCalls = [];
+  class SetupPhotoReader {
+    readAsDataURL() {
+      this.result = "data:image/png;base64,aGVsbG8=";
+      this.onload();
+    }
+  }
   const computerFacade = {
     async read(botId) { return { botId, computer: created.computer }; },
     async listPermissions(botId) { return { botId, permissions: [] }; },
@@ -2867,15 +3616,38 @@ test("mounted New Bot setup has no default and permission decisions stay explici
   const botsFacade = {
     async list() { return [botWithComputer(BOT_A, "A", "ready")]; },
     async create() { return created; },
+    async rename(botId, name) {
+      setupCalls.push(["rename", botId, name]);
+      return pendingBotWithComputer(botId, name);
+    },
+    async updateProfile(botId, profile) {
+      setupCalls.push(["updateProfile", botId, profile]);
+      return pendingBotWithComputer(botId, "Research Bot");
+    },
+    async advanceSetup(value) {
+      setupCalls.push(["advanceSetup", value]);
+      return botWithComputer(value.botId, "Research Bot", "provisioning", {}, value.nextStage);
+    },
     onChanged() { return () => {}; },
   };
   const runtimeFacade = {
     async selectBot(botId) { return selections.get(botId); },
     async readModel(botId) { return selections.get(botId); },
-    async selectModel(value) { return selections.get(value.botId); },
+    async selectModel(value) {
+      setupCalls.push(["selectModel", value]);
+      const selected = Object.freeze({
+        ...value,
+        provider: "openai-codex",
+        catalogGeneration: 12,
+        generation: 2,
+      });
+      selections.set(value.botId, selected);
+      return selected;
+    },
   };
   const harness = createMountedUiHarness({
     catalog,
+    fileReader: SetupPhotoReader,
     initialSelection,
     botsFacade,
     computerFacade,
@@ -2886,6 +3658,88 @@ test("mounted New Bot setup has no default and permission decisions stay explici
   const newButton = harness.findPanel("codex-bot-new");
   newButton.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
+  const profileSetup = harness.findPanel("codex-new-bot-setup");
+  const profileTitle = harness.findPanel("codex-new-bot-setup-title");
+  const name = harness.findPanel("codex-new-bot-name");
+  const description = harness.findPanel("codex-new-bot-description");
+  const photo = harness.findPanel("codex-new-bot-photo");
+  const shape = harness.findPanel("codex-new-bot-shape");
+  const color = harness.findPanel("codex-new-bot-color");
+  const provider = harness.findPanel("codex-new-bot-provider");
+  const model = harness.findPanel("codex-new-bot-model");
+  const power = harness.findPanel("codex-new-bot-power");
+  const profileContinue = harness.findPanel("codex-new-bot-continue");
+  assert.equal(profileSetup.hidden, false);
+  assert.equal(profileSetup.open, true);
+  assert.equal(profileSetup.tagName, "DIALOG");
+  assert.equal(profileSetup.attributes.role, "dialog");
+  assert.equal(profileSetup.attributes["aria-modal"], "true");
+  assert.equal(profileTitle.textContent, "Set up New Bot");
+  assert.equal(name.value, "New Bot");
+  assert.equal(name.placeholder, "Name your Bot");
+  assert.equal(name.required, true);
+  assert.equal(name.attributes["aria-required"], "true");
+  assert.equal(description.placeholder, "What should this Bot help with?");
+  assert.equal(photo.type, "file");
+  assert.equal(photo.accept, "image/png");
+  assert.deepEqual(shape.children.map((option) => option.value).slice(0, 3), ["blob", "pebble", "bean"]);
+  assert.deepEqual(color.children.map((option) => option.value).slice(0, 3), ["black", "brown", "red"]);
+  assert.equal(provider.value, "openai-codex");
+  assert.equal(model.value, "gpt-5.6-sol");
+  assert.equal(power.value, "medium");
+  assert.equal(profileContinue.disabled, false);
+  assert.equal(harness.mounted.controller.snapshot().computerSetup.open, false);
+  assert.equal(harness.documentRef.activeElement, name);
+
+  const botSelect = harness.findPanel("codex-bot-select");
+  botSelect.value = BOT_A;
+  assert.doesNotThrow(() => botSelect.listeners.get("change")());
+  assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
+  assert.equal(harness.mounted.controller.snapshot().profileSetup.open, true);
+  name.value = " ";
+  name.listeners.get("input")();
+  assert.equal(profileContinue.disabled, true, "a non-empty Bot name is required");
+  name.value = "Research Bot";
+  name.listeners.get("input")();
+  description.value = "Find exact primary sources.";
+  description.listeners.get("input")();
+  shape.value = "gem";
+  shape.listeners.get("change")();
+  color.value = "blue";
+  color.listeners.get("change")();
+  power.value = "ultra";
+  power.listeners.get("change")();
+  photo.files = [{ type: "image/png", size: 5 }];
+  photo.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  profileContinue.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(setupCalls, [
+    ["rename", BOT_B, "Research Bot"],
+    ["updateProfile", BOT_B, {
+      appearance: {
+        shape: "gem",
+        color: "blue",
+        image: "data:image/png;base64,aGVsbG8=",
+        description: "Find exact primary sources.",
+      },
+    }],
+    ["selectModel", {
+      botId: BOT_B,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "ultra",
+      serviceTier: null,
+    }],
+    ["advanceSetup", {
+      botId: BOT_B,
+      expectedStage: "profile-model",
+      nextStage: "computer",
+    }],
+  ]);
+  assert.equal(profileSetup.hidden, true);
+  assert.equal(profileSetup.open, false);
+
   const setup = harness.findPanel("codex-computer-setup");
   const choices = harness.findPanel("codex-computer-choices");
   const continueButton = harness.findPanel("codex-computer-continue");
@@ -2908,11 +3762,6 @@ test("mounted New Bot setup has no default and permission decisions stay explici
   assert.equal(cancelButton.hidden, true, "initial setup must remain an explicit choice");
   const localInput = choices.children[0].children[0];
   assert.equal(harness.documentRef.activeElement === localInput, true, "setup must focus its first choice");
-  const botSelect = harness.findPanel("codex-bot-select");
-  botSelect.value = BOT_A;
-  assert.doesNotThrow(() => botSelect.listeners.get("change")());
-  assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
-  assert.equal(harness.mounted.controller.snapshot().computerSetup.open, true);
   localInput.checked = true;
   localInput.listeners.get("change")();
   assert.equal(continueButton.disabled, false);
@@ -2942,7 +3791,7 @@ test("mounted New Bot setup has no default and permission decisions stay explici
     true,
     "permission sheet must focus Deny",
   );
-  assert.equal(harness.findPanel("codex-permission-title").textContent, "Allow New Bot to use Google Chrome?");
+  assert.equal(harness.findPanel("codex-permission-title").textContent, "Allow Research Bot to use Google Chrome?");
   harness.findPanel("codex-permission-once").listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(decisions.map(({ decision }) => decision), ["once"]);
@@ -3056,6 +3905,88 @@ test("mounted permission actions disable atomically and Escape cannot decide twi
   assert.equal(sheet.hidden, true);
   assert.equal(harness.mounted.controller.snapshot().permissionDecisionPending, false);
   assert.equal(harness.documentRef.activeElement === newButton, true, "the prompt queue must restore original focus");
+});
+
+test("mounted shell consent shows the exact full-host command and offers no Always action", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const local = {
+    mode: "local",
+    generation: 3,
+    localProfileId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    nativeAgentId: null,
+    state: "ready",
+    lastConfirmedAt: "2026-08-15T12:34:56.000Z",
+    lastErrorCode: null,
+  };
+  const command = "printf 'exact command'\n/usr/bin/true";
+  const prompt = Object.freeze({
+    requestId: "permission-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    botId: BOT_A,
+    targetId: local.localProfileId,
+    targetGeneration: local.generation,
+    capability: "shell.execute",
+    resourceLabel: "Full host shell",
+    reason: "Full host shell as your macOS user, not confined to this workspace",
+    command,
+    allowsAlways: false,
+  });
+  const decisions = [];
+  let pending = [];
+  let permissionListener;
+  const computerFacade = {
+    async read() { return { botId: BOT_A, computer: local }; },
+    async listPermissions() { return { botId: BOT_A, permissions: [] }; },
+    async listPermissionRequests() { return { botId: BOT_A, requests: pending }; },
+    async decidePermission(value) {
+      decisions.push(value);
+      pending = [];
+      return { botId: BOT_A, permissions: [] };
+    },
+    onChanged() { return () => {}; },
+    onPermissionRequested(listener) { permissionListener = listener; return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    botsFacade: {
+      async list() { return [botWithComputer(BOT_A, "A", "ready", local)]; },
+      onChanged() { return () => {}; },
+    },
+    computerFacade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  pending = [prompt];
+  permissionListener(prompt);
+  assert.equal(harness.findPanel("codex-permission-title").textContent, "Allow A to use Full host shell?");
+  assert.equal(harness.findPanel("codex-permission-reason").textContent, prompt.reason);
+  assert.equal(harness.findPanel("codex-permission-command").textContent, command);
+  const always = harness.findPanel("codex-permission-always");
+  assert.equal(always.hidden, true);
+  assert.equal(always.disabled, true);
+  await assert.rejects(harness.mounted.controller.decideComputerPermission("always"), /unavailable|changed/i);
+  assert.equal(decisions.length, 0);
+  harness.findPanel("codex-permission-once").listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(decisions.map(({ decision }) => decision), ["once"]);
 });
 
 test("mounted Computer grants stay bot-scoped and expose revoke plus Change Computer", async (context) => {
@@ -3301,6 +4232,44 @@ test("mounted Power keeps an authoritative noncompact tuple visible until a proj
   harness.mounted.dispose();
 });
 
+test("closed Power trigger uses compact labels while Advanced keeps raw effort labels", async () => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+    })]),
+  });
+  const initialSelection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 4,
+  });
+  const harness = createMountedUiHarness({ catalog, initialSelection });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const triggerEffort = harness.find("codex-model-trigger-effort");
+  const advancedToggle = harness.find("codex-power-advanced-toggle");
+  const advancedEffort = harness.find("codex-power-effort-select");
+  assert.equal(triggerEffort.textContent, "Standard");
+  advancedToggle.listeners.get("click")();
+  assert.equal(advancedEffort.children.find((option) => option.value === "medium").textContent, "Medium");
+  assert.equal(advancedEffort.children.find((option) => option.value === "high").textContent, "High");
+
+  advancedEffort.value = "high";
+  advancedEffort.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(triggerEffort.textContent, "Extended");
+  harness.mounted.dispose();
+});
+
 test("mounted Fast state distinguishes priority from other authoritative service tiers", async () => {
   const catalog = Object.freeze({
     generation: 7,
@@ -3388,5 +4357,127 @@ test("mounted Ultra entry survives an immediate authoritative reply for its full
   pending[0].callback();
   assert.equal(warning.hidden, true);
   assert.equal(harness.mounted.modelDock.classList.contains("is-warning"), false);
+  harness.mounted.dispose();
+});
+
+test("persisted Ultra mounts steady but an explicit Advanced transition enters once", async () => {
+  const timers = new Map();
+  let timerId = 0;
+  const windowTimers = {
+    setTimeout(callback, delay) {
+      const id = ++timerId;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const catalog = Object.freeze({
+    generation: 9,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const initialSelection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+    catalogGeneration: 9,
+    generation: 3,
+  });
+  const harness = createMountedUiHarness({ catalog, initialSelection, windowTimers });
+  await new Promise((resolve) => setImmediate(resolve));
+  const warning = harness.find("codex-power-warning");
+  const effort = harness.find("codex-power-effort-select");
+  assert.equal(warning.hidden, true);
+  assert.equal(harness.find("codex-power-control").classList.contains("is-ultra-entering"), false);
+  assert.equal(timers.size, 0);
+
+  effort.value = "max";
+  effort.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(warning.hidden, true);
+  assert.equal(timers.size, 0);
+  effort.value = "ultra";
+  effort.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(warning.hidden, false);
+  assert.equal(harness.mounted.modelDock.classList.contains("is-warning"), true);
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0].delay, 2000);
+  harness.mounted.dispose();
+});
+
+test("switching to a bot with persisted Ultra Code starts steady", async () => {
+  const timers = new Map();
+  let timerId = 0;
+  const windowTimers = {
+    setTimeout(callback, delay) {
+      const id = ++timerId;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const catalog = Object.freeze({
+    generation: 9,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
+    })]),
+  });
+  const selections = new Map([
+    [BOT_A, Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 9,
+      generation: 3,
+    })],
+    [BOT_B, Object.freeze({
+      botId: BOT_B,
+      provider: "cliproxy-anthropic",
+      model: "claude-fable-5",
+      reasoningEffort: "ultra-code",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 7,
+    })],
+  ]);
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selections.get(BOT_A),
+    windowTimers,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot(botId) { return selections.get(botId); },
+      async readModel(botId) { return selections.get(botId); },
+      async selectModel() { throw new Error("not used"); },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const botSelect = harness.findPanel("codex-bot-select");
+  botSelect.value = BOT_B;
+  botSelect.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.find("codex-model-trigger-effort").textContent, "Ultra Code");
+  assert.equal(harness.find("codex-power-warning").hidden, true);
+  assert.equal(harness.find("codex-power-control").classList.contains("is-ultra-entering"), false);
+  assert.equal(timers.size, 0);
   harness.mounted.dispose();
 });

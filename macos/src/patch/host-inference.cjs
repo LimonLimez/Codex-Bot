@@ -11,15 +11,15 @@ const STOCK_READINESS =
 const CODEX_READINESS = "isReady:async()=>!0";
 const PRIMARY_SESSION_OPTIONS = "ye={modelId:t.subagentModelId,inferenceReason:";
 const CODEX_PRIMARY_SESSION_OPTIONS =
-  "ye={conversationId:t.getConversationId(),modelId:t.subagentModelId,inferenceReason:";
+  'ye={conversationId:t.getConversationId(),taskId:openBotTaskId(t),modelId:t.subagentModelId,inferenceReason:';
 const SUMMARY_SESSION_OPTIONS =
   't.inference.createSession(pn=>{t.emitUpdate({type:"request-id",requestId:pn})},{modelId:dXt,isSummarizationSession:!0';
 const CODEX_SUMMARY_SESSION_OPTIONS =
-  't.inference.createSession(pn=>{t.emitUpdate({type:"request-id",requestId:pn})},{conversationId:t.getConversationId(),modelId:dXt,isSummarizationSession:!0';
+  't.inference.createSession(pn=>{t.emitUpdate({type:"request-id",requestId:pn})},{conversationId:t.getConversationId(),taskId:openBotTaskId(t),modelId:dXt,isSummarizationSession:!0';
 const MAX_HOST_BYTES = 32 * 1024 * 1024;
 
 const CODEX_INFERENCE =
-  'function E4i(t){let bridgePath=process.env.CODEX_BOT_BRIDGE;if(typeof bridgePath!=="string"||bridgePath.trim()==="")throw new Error("OpenBot bridge is unavailable.");let bridge=require(bridgePath);if(bridge==null||typeof bridge.createPromptSession!=="function")throw new Error("OpenBot bridge is unavailable.");return{resolvePrivacyMode:()=>Promise.resolve(qt.NO_TRAINING),getGeminiVideoAttachedMediaUrlProvider:()=>void 0,createSession(o,s){return bridge.createPromptSession({...s,onRequestId:o,botId:void 0,modelId:void 0},ETn)},recordPostTurnLabeling(){}}}';
+  'function openBotTaskId(t){if(!t.isSubagentRunner)return"parent";let e=t.subagentTranscriptId;if(typeof e!=="string"||!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(e)||e.includes(".."))throw new Error("OpenBot subagent identity is unavailable.");return e}function E4i(t){let bridgePath=process.env.CODEX_BOT_BRIDGE;if(typeof bridgePath!=="string"||bridgePath.trim()==="")throw new Error("OpenBot bridge is unavailable.");let bridge=require(bridgePath);if(bridge==null||typeof bridge.createPromptSession!=="function")throw new Error("OpenBot bridge is unavailable.");return{resolvePrivacyMode:()=>Promise.resolve(qt.NO_TRAINING),getGeminiVideoAttachedMediaUrlProvider:()=>void 0,createSession(o,s){return bridge.createPromptSession({...s,onRequestId:o,botId:void 0,modelId:void 0},ETn)},recordPostTurnLabeling(){}}}';
 
 function uniqueIndex(source, anchor, label) {
   const first = source.indexOf(anchor);

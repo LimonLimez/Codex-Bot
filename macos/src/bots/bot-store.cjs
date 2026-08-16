@@ -5,8 +5,9 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const LEGACY_SCHEMA_VERSION = 1;
+const PREVIOUS_SCHEMA_VERSION = 2;
 const MAX_BOTS = 4096;
 const MAX_CONVERSATIONS = 2048;
 const MAX_NAME_LENGTH = 160;
@@ -22,6 +23,8 @@ const PROTOTYPE_SENSITIVE_MIGRATION_KEYS = new Set([
 ]);
 const APPEARANCE_FIELDS = new Set(["shape", "color", "image", "title", "description"]);
 const PROFILE_FIELDS = new Set(["appearance", "notifications"]);
+const SETUP_STAGES = new Set(["profile-model", "computer", "complete"]);
+const SETUP_TRANSITION_FIELDS = new Set(["expectedStage", "nextStage"]);
 const RUNTIME_FIELDS = new Set(["provider", "remoteRuntimeId", "state", "lastConfirmedAt", "lastErrorCode"]);
 const RUNTIME_TRANSACTION_FIELDS = new Set(["expectedLastErrorCode", "afterCommit"]);
 const COMPUTER_FIELDS = new Set([
@@ -46,8 +49,10 @@ const BOT_FIELDS = new Set([
   "conversations",
   "runtime",
   "computer",
+  "setupStage",
 ]);
-const LEGACY_BOT_FIELDS = new Set([...BOT_FIELDS].filter((field) => field !== "computer"));
+const PREVIOUS_BOT_FIELDS = new Set([...BOT_FIELDS].filter((field) => field !== "setupStage"));
+const LEGACY_BOT_FIELDS = new Set([...PREVIOUS_BOT_FIELDS].filter((field) => field !== "computer"));
 const STORE_FIELDS = new Set(["schemaVersion", "bots", "legacyImports"]);
 const LEGACY_FIELDS = new Set(["migrationKey", "name", "appearance", "notifications", "conversations"]);
 const LEGACY_IMPORT_FIELDS = new Set(["botId", "fingerprint"]);
@@ -440,6 +445,13 @@ function normalizeComputer(value) {
   return normalized;
 }
 
+function normalizeSetupStage(value) {
+  if (typeof value !== "string" || !SETUP_STAGES.has(value)) {
+    throw new Error("Bot setup stage is invalid.");
+  }
+  return value;
+}
+
 function normalizeBotRecord(value) {
   const record = assertPlainObject(value, "Bot");
   assertExactKeys(record, BOT_FIELDS, "Bot");
@@ -464,13 +476,15 @@ function normalizeBotRecord(value) {
     conversations: record.conversations.map(normalizeConversationRef),
     runtime: normalizeRuntime(record.runtime),
     computer: normalizeComputer(record.computer),
+    setupStage: normalizeSetupStage(record.setupStage),
   };
 }
 
-function migrateLegacyStore(value) {
+function migrateStore(value) {
   const store = assertPlainObject(value, "Store");
   assertExactKeys(store, STORE_FIELDS, "Store");
-  if (store.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+  if (store.schemaVersion !== LEGACY_SCHEMA_VERSION
+    && store.schemaVersion !== PREVIOUS_SCHEMA_VERSION) {
     throw new Error("Unsupported bot store schema version.");
   }
   if (!Array.isArray(store.bots) || store.bots.length > MAX_BOTS) {
@@ -480,14 +494,20 @@ function migrateLegacyStore(value) {
     schemaVersion: SCHEMA_VERSION,
     bots: store.bots.map((rawBot) => {
       const bot = assertPlainObject(rawBot, "Bot");
-      assertExactKeys(bot, LEGACY_BOT_FIELDS, "Bot");
-      if (bot.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+      const expectedFields = store.schemaVersion === LEGACY_SCHEMA_VERSION
+        ? LEGACY_BOT_FIELDS
+        : PREVIOUS_BOT_FIELDS;
+      assertExactKeys(bot, expectedFields, "Bot");
+      if (bot.schemaVersion !== store.schemaVersion) {
         throw new Error("Bot schema version is unsupported.");
       }
       return {
         ...bot,
         schemaVersion: SCHEMA_VERSION,
-        computer: { ...DEFAULT_COMPUTER },
+        ...(store.schemaVersion === LEGACY_SCHEMA_VERSION
+          ? { computer: { ...DEFAULT_COMPUTER } }
+          : {}),
+        setupStage: "complete",
       };
     }),
     legacyImports: store.legacyImports,
@@ -495,8 +515,9 @@ function migrateLegacyStore(value) {
 }
 
 function normalizeLoadedStore(value) {
-  if (value?.schemaVersion === LEGACY_SCHEMA_VERSION) {
-    return normalizeStore(migrateLegacyStore(value));
+  if (value?.schemaVersion === LEGACY_SCHEMA_VERSION
+    || value?.schemaVersion === PREVIOUS_SCHEMA_VERSION) {
+    return normalizeStore(migrateStore(value));
   }
   return normalizeStore(value);
 }
@@ -517,6 +538,7 @@ function normalizeStore(value) {
   const bots = store.bots.map(normalizeBotRecord);
   const botIds = new Set();
   const runtimeOwners = new Map();
+  const localProfileOwners = new Map();
   const conversationOwners = new Map();
   for (const bot of bots) {
     if (botIds.has(bot.botId)) throw new Error("Bot store contains duplicate bot IDs.");
@@ -524,6 +546,12 @@ function normalizeStore(value) {
     if (bot.runtime.remoteRuntimeId) {
       if (runtimeOwners.has(bot.runtime.remoteRuntimeId)) throw new Error("Bot store contains duplicate remote runtime IDs.");
       runtimeOwners.set(bot.runtime.remoteRuntimeId, bot.botId);
+    }
+    if (bot.computer.localProfileId) {
+      if (localProfileOwners.has(bot.computer.localProfileId)) {
+        throw new Error("Bot store contains duplicate local profile IDs.");
+      }
+      localProfileOwners.set(bot.computer.localProfileId, bot.botId);
     }
     for (const ref of bot.conversations) {
       const key = conversationKey(ref);
@@ -709,6 +737,22 @@ function normalizedComputerPatch(value) {
   return patch;
 }
 
+function normalizedSetupTransition(value) {
+  let transition;
+  try {
+    transition = assertPlainObject(cloneData(value), "Setup transition");
+  } catch {
+    throw new TypeError("Setup transition must contain plain data values only.");
+  }
+  assertExactKeys(transition, SETUP_TRANSITION_FIELDS, "Setup transition");
+  const expectedStage = normalizeSetupStage(transition.expectedStage);
+  const nextStage = normalizeSetupStage(transition.nextStage);
+  const valid = (expectedStage === "profile-model" && nextStage === "computer")
+    || (expectedStage === "computer" && nextStage === "complete");
+  if (!valid) throw new Error("Bot setup transition must be monotonic.");
+  return Object.freeze({ expectedStage, nextStage });
+}
+
 class BotStore {
   #filePath;
   #fs;
@@ -766,6 +810,7 @@ class BotStore {
         conversations: [],
         runtime: { ...DEFAULT_RUNTIME },
         computer: { ...DEFAULT_COMPUTER },
+        setupStage: "profile-model",
       };
       next.bots.push(record);
       return record.botId;
@@ -801,6 +846,7 @@ class BotStore {
         updatedAt: timestamp,
         runtime: { ...DEFAULT_RUNTIME },
         computer: { ...DEFAULT_COMPUTER },
+        setupStage: "complete",
       });
       next.legacyImports[legacy.migrationKey] = { botId, fingerprint };
       return { botId, unchanged: false };
@@ -833,6 +879,29 @@ class BotStore {
       const bot = this.#requiredBot(next, normalizedBotId);
       if (appearancePatch) bot.appearance = { ...bot.appearance, ...appearancePatch };
       if (hasOwn(patch, "notifications")) bot.notifications = patch.notifications;
+      bot.updatedAt = safeNow(this.#now);
+      return bot.botId;
+    });
+  }
+
+  async advanceSetup(botId, value, commitFence = undefined) {
+    const normalizedBotId = normalizeBotId(botId);
+    const transition = normalizedSetupTransition(value);
+    if (commitFence !== undefined && typeof commitFence !== "function") {
+      throw new TypeError("Setup commit fence must be a function.");
+    }
+    return this.#mutate((next) => {
+      const bot = this.#requiredBot(next, normalizedBotId);
+      if (bot.setupStage !== transition.expectedStage) {
+        throw new Error("Bot setup stage changed; transition is stale.");
+      }
+      if (commitFence) {
+        const result = commitFence(publicSnapshot(bot));
+        if (result && typeof result.then === "function") {
+          throw new TypeError("Setup commit fence must be synchronous.");
+        }
+      }
+      bot.setupStage = transition.nextStage;
       bot.updatedAt = safeNow(this.#now);
       return bot.botId;
     });

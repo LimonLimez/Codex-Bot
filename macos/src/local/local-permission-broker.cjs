@@ -17,6 +17,7 @@ const REQUEST_FIELDS = new Set([
   "resourceLabel",
   "reason",
 ]);
+const SHELL_REQUEST_FIELDS = new Set([...REQUEST_FIELDS, "command"]);
 const DECISION_FIELDS = new Set([
   "requestId",
   "botId",
@@ -25,6 +26,8 @@ const DECISION_FIELDS = new Set([
   "decision",
 ]);
 const REVOKE_FIELDS = new Set(["botId", "grantId"]);
+const TASK_CONTEXT_FIELDS = new Set(["taskId"]);
+const CANCEL_TASK_FIELDS = new Set(["botId", "taskId"]);
 const DECISIONS = new Set(["deny", "once", "always"]);
 const CAPABILITIES = new Set([
   "filesystem.read",
@@ -40,6 +43,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const REQUEST_ID_PATTERN = /^permission-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GRANT_ID_PATTERN = /^grant-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RESOURCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 class PermissionBrokerError extends Error {
   constructor(message, code) {
@@ -141,13 +145,22 @@ function normalizeDisplayText(value, label) {
 
 function normalizeRequest(value) {
   const request = assertPlainObject(cloneInput(value, "Permission request"), "Permission request");
-  assertExactKeys(request, REQUEST_FIELDS, "Permission request");
+  assertExactKeys(
+    request,
+    request.capability === "shell.execute" ? SHELL_REQUEST_FIELDS : REQUEST_FIELDS,
+    "Permission request",
+  );
   if (typeof request.capability !== "string" || !CAPABILITIES.has(request.capability)) {
     throw new Error("Permission capability is invalid.");
   }
   if (typeof request.resourceId !== "string" || !RESOURCE_ID_PATTERN.test(request.resourceId)
     || request.resourceId.includes("..")) {
     throw new Error("Permission resource ID is invalid.");
+  }
+  if (request.capability === "shell.execute"
+    && (typeof request.command !== "string" || request.command.length === 0
+      || request.command.includes("\0") || Buffer.byteLength(request.command, "utf8") > 8192)) {
+    throw new Error("Shell permission command is invalid.");
   }
   return {
     botId: normalizeBotId(request.botId),
@@ -157,6 +170,7 @@ function normalizeRequest(value) {
     resourceId: request.resourceId,
     resourceLabel: normalizeDisplayText(request.resourceLabel, "Permission resource label"),
     reason: normalizeDisplayText(request.reason, "Permission reason"),
+    ...(request.capability === "shell.execute" ? { command: request.command } : {}),
   };
 }
 
@@ -185,6 +199,25 @@ function normalizeRevoke(value) {
   return { botId: normalizeBotId(input.botId), grantId: input.grantId.toLowerCase() };
 }
 
+function normalizeTaskContext(value) {
+  if (value === undefined) return null;
+  const input = assertPlainObject(cloneInput(value, "Permission task context"), "Permission task context");
+  assertExactKeys(input, TASK_CONTEXT_FIELDS, "Permission task context");
+  if (typeof input.taskId !== "string" || !TASK_ID_PATTERN.test(input.taskId)) {
+    throw new Error("Permission task ID is invalid.");
+  }
+  return { taskId: input.taskId };
+}
+
+function normalizeCancelTask(value) {
+  const input = assertPlainObject(cloneInput(value, "Permission task cancellation"), "Permission task cancellation");
+  assertExactKeys(input, CANCEL_TASK_FIELDS, "Permission task cancellation");
+  if (typeof input.taskId !== "string" || !TASK_ID_PATTERN.test(input.taskId)) {
+    throw new Error("Permission task ID is invalid.");
+  }
+  return { botId: normalizeBotId(input.botId), taskId: input.taskId };
+}
+
 function storeRequest(request) {
   return {
     botId: request.botId,
@@ -211,6 +244,9 @@ function frozenPrompt(requestId, request) {
     capability: request.capability,
     resourceLabel: request.resourceLabel,
     reason: request.reason,
+    ...(request.capability === "shell.execute"
+      ? { command: request.command, allowsAlways: false }
+      : {}),
   });
 }
 
@@ -289,6 +325,7 @@ class LocalPermissionBroker extends EventEmitter {
   #tcc;
   #randomUUID;
   #pending = new Map();
+  #taskEpochs = new Map();
   #disposed = false;
 
   constructor({ store, readCurrentComputer, chooseResource, tcc, randomUUID = crypto.randomUUID } = {}) {
@@ -325,28 +362,42 @@ class LocalPermissionBroker extends EventEmitter {
     return true;
   }
 
-  async request(value, effect) {
+  async request(value, effect, rawContext) {
     if (this.#disposed) throw brokerError("Permission broker is disposed.", "OPENBOT_PERMISSION_DISPOSED");
     const request = normalizeRequest(value);
+    const context = normalizeTaskContext(rawContext);
     if (typeof effect !== "function") throw new TypeError("Permission effect must be a function.");
+    const task = this.#beginTask(request.botId, context);
+    try {
     try {
       await this.#assertCurrent(request);
-      const remembered = await this.#store.authorize(storeRequest(request));
-      await this.#assertCurrent(request);
-      if (remembered?.allowed === true) {
-        const bookmark = normalizeBookmark(remembered.privateBookmark);
-        await this.#ensureTcc(request);
+      this.#assertTaskActive(task);
+      if (request.capability === "shell.execute") {
         await this.#assertCurrent(request);
-        return await this.#runEffect(effect, bookmark);
-      }
-      if (remembered?.allowed !== false) {
-        throw brokerError("Stored permission result is unavailable.", "OPENBOT_PERMISSION_OPERATION_FAILED");
+        this.#assertTaskActive(task);
+      } else {
+        const remembered = await this.#store.authorize(storeRequest(request));
+        this.#assertTaskActive(task);
+        await this.#assertCurrent(request);
+        this.#assertTaskActive(task);
+        if (remembered?.allowed === true) {
+          const bookmark = normalizeBookmark(remembered.privateBookmark);
+          await this.#ensureTcc(request);
+          this.#assertTaskActive(task);
+          await this.#assertCurrent(request);
+          this.#assertTaskActive(task);
+          return await this.#runEffect(effect, bookmark);
+        }
+        if (remembered?.allowed !== false) {
+          throw brokerError("Stored permission result is unavailable.", "OPENBOT_PERMISSION_OPERATION_FAILED");
+        }
       }
     } catch (error) {
       throw safeFailure(error);
     }
 
     if (this.#disposed) throw brokerError("Permission broker is disposed.", "OPENBOT_PERMISSION_DISPOSED");
+    this.#assertTaskActive(task);
     let botPending = 0;
     for (const entry of this.#pending.values()) {
       if (entry.request.botId === request.botId) botPending += 1;
@@ -358,10 +409,13 @@ class LocalPermissionBroker extends EventEmitter {
       );
     }
     const requestId = `permission-${safeUUID(this.#randomUUID)}`;
-    return new Promise((resolve, reject) => {
-      this.#pending.set(requestId, { request, effect, resolve, reject });
+    return await new Promise((resolve, reject) => {
+      this.#pending.set(requestId, { request, task, effect, resolve, reject });
       this.emit("request", frozenPrompt(requestId, request));
     });
+    } finally {
+      this.#endTask(task);
+    }
   }
 
   async decide(value) {
@@ -370,6 +424,12 @@ class LocalPermissionBroker extends EventEmitter {
     const entry = this.#pending.get(decision.requestId);
     if (!entry || !sameDecision(entry, decision)) {
       throw brokerError("Permission request is unavailable.", "OPENBOT_PERMISSION_UNAVAILABLE");
+    }
+    if (entry.request.capability === "shell.execute" && decision.decision === "always") {
+      throw brokerError(
+        "Full host shell permission is available for one command only.",
+        "OPENBOT_PERMISSION_ALWAYS_UNAVAILABLE",
+      );
     }
     this.#pending.delete(decision.requestId);
 
@@ -381,13 +441,20 @@ class LocalPermissionBroker extends EventEmitter {
 
     let grant = null;
     try {
+      this.#assertTaskActive(entry.task);
       await this.#assertCurrent(entry.request);
+      this.#assertTaskActive(entry.task);
       const bookmark = normalizeBookmark(await this.#chooseResource(storeRequest(entry.request)));
+      this.#assertTaskActive(entry.task);
       await this.#assertCurrent(entry.request);
+      this.#assertTaskActive(entry.task);
       await this.#ensureTcc(entry.request);
+      this.#assertTaskActive(entry.task);
       await this.#assertCurrent(entry.request);
+      this.#assertTaskActive(entry.task);
       if (decision.decision === "always") {
         grant = await this.#store.remember(storeRequest(entry.request), bookmark);
+        this.#assertTaskActive(entry.task);
         try {
           await this.#assertCurrent(entry.request);
         } catch (error) {
@@ -419,7 +486,9 @@ class LocalPermissionBroker extends EventEmitter {
         normalizedBotId,
         await this.#readCurrentComputer(normalizedBotId),
       );
-      return sameTarget(target, confirmedTarget) ? grants : Object.freeze([]);
+      return sameTarget(target, confirmedTarget)
+        ? Object.freeze(grants.filter((grant) => grant?.capability !== "shell.execute"))
+        : Object.freeze([]);
     } catch (error) {
       throw safeFailure(error);
     }
@@ -448,9 +517,24 @@ class LocalPermissionBroker extends EventEmitter {
 
   cancelBot(botId) {
     const normalizedBotId = normalizeBotId(botId);
+    for (const state of this.#taskEpochs.values()) {
+      if (state.botId === normalizedBotId) state.epoch += 1;
+    }
     const failure = brokerError("Permission request was cancelled.", "OPENBOT_PERMISSION_CANCELLED");
     for (const [requestId, entry] of this.#pending) {
       if (entry.request.botId !== normalizedBotId) continue;
+      this.#pending.delete(requestId);
+      entry.reject(failure);
+    }
+  }
+
+  cancelTask(value) {
+    const input = normalizeCancelTask(value);
+    const state = this.#taskEpochs.get(`${input.botId}\0${input.taskId}`);
+    if (state) state.epoch += 1;
+    const failure = brokerError("Permission request was cancelled.", "OPENBOT_PERMISSION_CANCELLED");
+    for (const [requestId, entry] of this.#pending) {
+      if (entry.request.botId !== input.botId || entry.task?.taskId !== input.taskId) continue;
       this.#pending.delete(requestId);
       entry.reject(failure);
     }
@@ -462,7 +546,36 @@ class LocalPermissionBroker extends EventEmitter {
     const failure = brokerError("Permission broker is disposed.", "OPENBOT_PERMISSION_DISPOSED");
     for (const entry of this.#pending.values()) entry.reject(failure);
     this.#pending.clear();
+    this.#taskEpochs.clear();
     this.removeAllListeners();
+  }
+
+  #beginTask(botId, context) {
+    if (context === null) return null;
+    const key = `${botId}\0${context.taskId}`;
+    let state = this.#taskEpochs.get(key);
+    if (!state) {
+      state = { active: 0, botId, epoch: 0 };
+      this.#taskEpochs.set(key, state);
+    }
+    state.active += 1;
+    return Object.freeze({ epoch: state.epoch, key, taskId: context.taskId });
+  }
+
+  #assertTaskActive(task) {
+    if (task === null) return;
+    const state = this.#taskEpochs.get(task.key);
+    if (!state || state.epoch !== task.epoch) {
+      throw brokerError("Permission request was cancelled.", "OPENBOT_PERMISSION_CANCELLED");
+    }
+  }
+
+  #endTask(task) {
+    if (task === null) return;
+    const state = this.#taskEpochs.get(task.key);
+    if (!state) return;
+    state.active -= 1;
+    if (state.active === 0) this.#taskEpochs.delete(task.key);
   }
 
   async #assertCurrent(request) {

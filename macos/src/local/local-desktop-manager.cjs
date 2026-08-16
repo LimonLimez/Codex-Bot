@@ -8,6 +8,15 @@ const { EventEmitter } = require("node:events");
 const { LocalHelperProtocol } = require("./local-helper-protocol.cjs");
 
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
+const MAX_DISPLAY_FRAME_BYTES = 1_048_576;
+const MAX_DISPLAY_FRAME_WIDTH = 640;
+const MAX_DISPLAY_FRAME_HEIGHT = 400;
+const DISPLAY_FRAME_BOUNDS = Object.freeze([
+  Object.freeze({ width: 640, height: 400 }),
+  Object.freeze({ width: 512, height: 320 }),
+  Object.freeze({ width: 400, height: 250 }),
+  Object.freeze({ width: 320, height: 200 }),
+]);
 const MAX_URL_BYTES = 4096;
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TARGET_ID_PATTERN = /^local-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
@@ -27,6 +36,7 @@ const ACTION_FIELDS = new Set([
 ]);
 const IDENTITY_FIELDS = new Set(["botId", "targetId", "targetGeneration"]);
 const NAVIGATION_FIELDS = new Set([...IDENTITY_FIELDS, "url"]);
+const DISPOSE_TASK_FIELDS = new Set(["botId", "taskId"]);
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const EXTERNAL_RESOURCE_CAPABILITIES = new Set([
   "filesystem.read",
@@ -206,6 +216,15 @@ function normalizeNavigation(value) {
   return { ...identity, url: safeHttpsUrl(input.url) };
 }
 
+function normalizeDisposeTask(value) {
+  const input = assertPlainObject(cloneInput(value, "Local Desktop task"), "Local Desktop task");
+  assertExactKeys(input, DISPOSE_TASK_FIELDS, "Local Desktop task");
+  if (typeof input.taskId !== "string" || !SAFE_ID_PATTERN.test(input.taskId)) {
+    throw new Error("Local Desktop task ID is invalid.");
+  }
+  return { botId: normalizeBotId(input.botId), taskId: input.taskId };
+}
+
 function safeHttpsUrl(value) {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_URL_BYTES || value.includes("\0")) {
     throw desktopError("Local navigation URL is invalid.", "OPENBOT_LOCAL_NAVIGATION_INVALID");
@@ -277,6 +296,8 @@ class LocalDesktopManager extends EventEmitter {
   #entries = new Map();
   #profiles = new Map();
   #queues = new Map();
+  #windows = new WeakSet();
+  #disposePromise = null;
   #disposed = false;
 
   constructor({
@@ -295,6 +316,7 @@ class LocalDesktopManager extends EventEmitter {
       throw new TypeError("Local Desktop manager requires an absolute userData path.");
     }
     if (!permissionBroker || typeof permissionBroker.request !== "function"
+      || typeof permissionBroker.cancelTask !== "function"
       || typeof permissionBroker.cancelBot !== "function") {
       throw new TypeError("Local Desktop manager requires a permission broker.");
     }
@@ -322,6 +344,10 @@ class LocalDesktopManager extends EventEmitter {
     return true;
   }
 
+  ownsWindow(window) {
+    try { return Boolean(window && typeof window === "object" && this.#windows.has(window)); } catch { return false; }
+  }
+
   async open(value) {
     this.#assertActive();
     const computer = normalizeComputer(value);
@@ -329,7 +355,7 @@ class LocalDesktopManager extends EventEmitter {
       this.#assertActive();
       const existing = this.#entries.get(computer.botId);
       if (existing && this.#sameIdentity(existing, computer)) return publicSession(existing);
-      if (existing) this.#closeEntry(existing, true);
+      if (existing) await this.#closeEntry(existing, true);
 
       const profilePath = await this.#ensureProfile(computer.profileUuid);
       this.#assertActive();
@@ -349,6 +375,7 @@ class LocalDesktopManager extends EventEmitter {
           allowRunningInsecureContent: false,
         },
       });
+      this.#windows.add(window);
       let helperTransport;
       let protocol;
       try {
@@ -370,6 +397,8 @@ class LocalDesktopManager extends EventEmitter {
           window,
           helperTransport,
           protocol: null,
+          operations: new Map(),
+          closePromise: null,
         };
         protocol = new LocalHelperProtocol({
           transport: helperTransport,
@@ -390,13 +419,11 @@ class LocalDesktopManager extends EventEmitter {
         });
         window.once?.("closed", () => {
           if (this.#entries.get(computer.botId) !== entry) return;
-          this.#entries.delete(computer.botId);
-          protocol.dispose();
-          this.#permissionBroker.cancelBot(computer.botId);
+          void this.#closeEntry(entry, true);
         });
         return publicSession(entry);
       } catch (error) {
-        try { protocol?.dispose(); } catch {}
+        try { await protocol?.dispose(); } catch {}
         if (!protocol) {
           try { helperTransport?.dispose?.(); } catch {}
         }
@@ -417,6 +444,9 @@ class LocalDesktopManager extends EventEmitter {
       throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
     }
     this.#requiredEntry(input, entry);
+    try { safeHttpsUrl(entry.window.webContents.getURL()); } catch {
+      throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+    }
     return publicSession(entry);
   }
 
@@ -424,13 +454,7 @@ class LocalDesktopManager extends EventEmitter {
     this.#assertActive();
     const input = normalizeIdentity(value);
     const entry = this.#requiredEntry(input);
-    let image;
-    try {
-      image = await entry.window.webContents.capturePage();
-    } catch {
-      throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
-    }
-    this.#requiredEntry(input, entry);
+    const image = await this.#captureCurrentImage(input, entry);
     let size;
     let bytes;
     try {
@@ -457,56 +481,126 @@ class LocalDesktopManager extends EventEmitter {
     return frame;
   }
 
+  async captureDisplayFrame(value) {
+    this.#assertActive();
+    const input = normalizeIdentity(value);
+    const entry = this.#requiredEntry(input);
+    const image = await this.#captureCurrentImage(input, entry);
+    let sourceSize;
+    try { sourceSize = image.getSize(); } catch {
+      throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
+    }
+    if (!this.#validFrameSize(sourceSize, 8192, 8192) || typeof image.resize !== "function") {
+      throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
+    }
+    for (const bounds of DISPLAY_FRAME_BOUNDS) {
+      const scale = Math.min(1, bounds.width / sourceSize.width, bounds.height / sourceSize.height);
+      const width = Math.max(1, Math.floor(sourceSize.width * scale));
+      const height = Math.max(1, Math.floor(sourceSize.height * scale));
+      let rendered;
+      let size;
+      let bytes;
+      try {
+        rendered = width === sourceSize.width && height === sourceSize.height
+          ? image
+          : image.resize({ width, height, quality: "good" });
+        size = rendered.getSize();
+        bytes = rendered.toPNG();
+      } catch { continue; }
+      if (!this.#validFrameSize(size, MAX_DISPLAY_FRAME_WIDTH, MAX_DISPLAY_FRAME_HEIGHT)
+        || !Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_DISPLAY_FRAME_BYTES) continue;
+      return Object.freeze({
+        botId: entry.botId,
+        targetId: entry.targetId,
+        targetGeneration: entry.targetGeneration,
+        frameId: `frame-${crypto.createHash("sha256").update(bytes).digest("hex")}`,
+        width: size.width,
+        height: size.height,
+        mimeType: "image/png",
+        bytes: Uint8Array.from(bytes),
+      });
+    }
+    throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
+  }
+
   async run(value) {
     this.#assertActive();
     const input = normalizeAction(value);
     const entry = this.#requiredEntry(input);
     const requestId = `request-${safeUUID(this.#randomUUID)}`;
-    const result = await this.#permissionBroker.request({
-      botId: input.botId,
-      targetId: input.targetId,
-      targetGeneration: input.targetGeneration,
-      capability: input.capability,
-      resourceId: input.resourceId,
-      resourceLabel: input.resourceLabel,
-      reason: input.reason,
-    }, async (bookmark) => {
-      this.#requiredEntry(input, entry);
-      if (EXTERNAL_RESOURCE_CAPABILITIES.has(input.capability)) {
-        if (typeof entry.helperTransport.authorizeResource !== "function") {
-          throw desktopError("Local resource handoff is unavailable.", "OPENBOT_LOCAL_RESOURCE_UNAVAILABLE");
-        }
-        await entry.helperTransport.authorizeResource(requestId, Buffer.from(bookmark));
-        this.#requiredEntry(input, entry);
-      }
-      return entry.protocol.run({
-        requestId,
+    let finishOperation;
+    const operation = {
+      requestId,
+      taskId: input.taskId,
+      cancelled: false,
+      done: new Promise((resolve) => { finishOperation = resolve; }),
+      finish: () => finishOperation(),
+    };
+    entry.operations.set(requestId, operation);
+    try {
+      const result = await this.#permissionBroker.request({
         botId: input.botId,
         targetId: input.targetId,
         targetGeneration: input.targetGeneration,
-        taskId: input.taskId,
         capability: input.capability,
-        operation: input.operation,
-        arguments: input.arguments,
-      });
-    });
-    this.#requiredEntry(input, entry);
-    this.emit("result", Object.freeze({
-      requestId,
-      botId: entry.botId,
-      targetId: entry.targetId,
-      targetGeneration: entry.targetGeneration,
-      taskId: input.taskId,
-      ok: true,
-    }));
-    return result;
+        resourceId: input.resourceId,
+        resourceLabel: input.resourceLabel,
+        reason: input.reason,
+        ...(input.capability === "shell.execute" ? { command: input.arguments.command } : {}),
+      }, async (bookmark) => {
+        this.#assertOperationActive(entry, input, operation);
+        if (EXTERNAL_RESOURCE_CAPABILITIES.has(input.capability)) {
+          if (typeof entry.helperTransport.authorizeResource !== "function") {
+            throw desktopError("Local resource handoff is unavailable.", "OPENBOT_LOCAL_RESOURCE_UNAVAILABLE");
+          }
+          await entry.helperTransport.authorizeResource(requestId, Buffer.from(bookmark));
+          this.#assertOperationActive(entry, input, operation);
+        }
+        return entry.protocol.run({
+          requestId,
+          botId: input.botId,
+          targetId: input.targetId,
+          targetGeneration: input.targetGeneration,
+          taskId: input.taskId,
+          capability: input.capability,
+          operation: input.operation,
+          arguments: input.arguments,
+        });
+      }, { taskId: input.taskId });
+      this.#assertOperationActive(entry, input, operation);
+      this.emit("result", Object.freeze({
+        requestId,
+        botId: entry.botId,
+        targetId: entry.targetId,
+        targetGeneration: entry.targetGeneration,
+        taskId: input.taskId,
+        ok: true,
+      }));
+      return result;
+    } finally {
+      if (entry.operations.get(requestId) === operation) entry.operations.delete(requestId);
+      operation.finish();
+    }
+  }
+
+  async disposeTask(value) {
+    this.#assertActive();
+    const input = normalizeDisposeTask(value);
+    const entry = this.#entries.get(input.botId);
+    if (!entry) return;
+    const operations = [...entry.operations.values()]
+      .filter((operation) => operation.taskId === input.taskId);
+    for (const operation of operations) operation.cancelled = true;
+    this.#permissionBroker.cancelTask(input);
+    await entry.protocol.cancelTask(input.taskId);
+    await Promise.all(operations.map((operation) => operation.done));
   }
 
   async close(botId) {
     const normalizedBotId = normalizeBotId(botId);
     return this.#enqueue(normalizedBotId, async () => {
       const entry = this.#entries.get(normalizedBotId);
-      if (entry) this.#closeEntry(entry, true);
+      if (entry) await this.#closeEntry(entry, true);
       else this.#permissionBroker.cancelBot(normalizedBotId);
     });
   }
@@ -515,7 +609,7 @@ class LocalDesktopManager extends EventEmitter {
     const normalizedBotId = normalizeBotId(botId);
     return this.#enqueue(normalizedBotId, async () => {
       const entry = this.#entries.get(normalizedBotId);
-      if (entry) this.#closeEntry(entry, true);
+      if (entry) await this.#closeEntry(entry, true);
       else this.#permissionBroker.cancelBot(normalizedBotId);
       const profile = this.#profiles.get(normalizedBotId);
       if (!profile) return;
@@ -530,12 +624,17 @@ class LocalDesktopManager extends EventEmitter {
   }
 
   dispose() {
-    if (this.#disposed) return;
+    if (this.#disposePromise) return this.#disposePromise;
+    if (this.#disposed) return Promise.resolve();
     this.#disposed = true;
-    for (const entry of [...this.#entries.values()]) this.#closeEntry(entry, true);
-    this.#entries.clear();
-    this.#queues.clear();
-    this.removeAllListeners();
+    const entries = [...this.#entries.values()];
+    this.#disposePromise = (async () => {
+      await Promise.all(entries.map((entry) => this.#closeEntry(entry, true)));
+      this.#entries.clear();
+      this.#queues.clear();
+      this.removeAllListeners();
+    })();
+    return this.#disposePromise;
   }
 
   #sameIdentity(entry, identity) {
@@ -554,11 +653,24 @@ class LocalDesktopManager extends EventEmitter {
     return entry;
   }
 
+  #assertOperationActive(entry, identity, operation) {
+    this.#requiredEntry(identity, entry);
+    if (operation.cancelled || entry.operations.get(operation.requestId) !== operation) {
+      throw desktopError("Local Desktop task was cancelled.", "OPENBOT_LOCAL_TASK_CANCELLED");
+    }
+  }
+
   #closeEntry(entry, cancelPermissions) {
+    if (entry.closePromise) return entry.closePromise;
     if (this.#entries.get(entry.botId) === entry) this.#entries.delete(entry.botId);
-    try { entry.protocol.dispose(); } catch {}
-    try { if (!entry.window.isDestroyed?.()) entry.window.destroy(); } catch {}
+    for (const operation of entry.operations.values()) operation.cancelled = true;
     if (cancelPermissions) this.#permissionBroker.cancelBot(entry.botId);
+    entry.closePromise = (async () => {
+      try { await entry.protocol.dispose(); } catch {}
+      await Promise.all([...entry.operations.values()].map((operation) => operation.done));
+      try { if (!entry.window.isDestroyed?.()) entry.window.destroy(); } catch {}
+    })();
+    return entry.closePromise;
   }
 
   async #ensureProfile(uuid) {
@@ -591,13 +703,41 @@ class LocalDesktopManager extends EventEmitter {
 
   #secureWindow(window) {
     if (!window?.webContents || typeof window.webContents.setWindowOpenHandler !== "function"
-      || typeof window.webContents.loadURL !== "function" || typeof window.webContents.capturePage !== "function") {
+      || typeof window.webContents.loadURL !== "function" || typeof window.webContents.getURL !== "function"
+      || typeof window.webContents.capturePage !== "function") {
       throw desktopError("Local browser window is unavailable.", "OPENBOT_LOCAL_BROWSER_UNAVAILABLE");
     }
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     window.webContents.on?.("will-navigate", (event, url) => {
       try { safeHttpsUrl(url); } catch { event.preventDefault?.(); }
     });
+    window.webContents.on?.("will-redirect", (event, url) => {
+      try { safeHttpsUrl(url); } catch { event.preventDefault?.(); }
+    });
+  }
+
+  async #captureCurrentImage(identity, expected) {
+    this.#requiredEntry(identity, expected);
+    this.#assertCaptureUrl(expected);
+    let image;
+    try { image = await expected.window.webContents.capturePage(); } catch {
+      throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
+    }
+    this.#requiredEntry(identity, expected);
+    this.#assertCaptureUrl(expected);
+    return image;
+  }
+
+  #assertCaptureUrl(entry) {
+    try { safeHttpsUrl(entry.window.webContents.getURL()); } catch {
+      throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
+    }
+  }
+
+  #validFrameSize(size, maximumWidth, maximumHeight) {
+    return Boolean(size && Number.isSafeInteger(size.width) && Number.isSafeInteger(size.height)
+      && size.width >= 1 && size.height >= 1
+      && size.width <= maximumWidth && size.height <= maximumHeight);
   }
 
   #enqueue(botId, operation) {

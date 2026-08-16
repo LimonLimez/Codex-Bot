@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { types } = require("node:util");
 const {
@@ -15,6 +16,7 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
 const MAX_QUEUED_NOTIFICATIONS = 2_048;
 const MAX_QUEUED_NOTIFICATION_BYTES = 2_000_000;
+const WORKSPACE_ID = /^workspace-[a-f0-9]{64}$/;
 
 class CodexDirectInferenceError extends Error {
   constructor(code = "CODEX_INFERENCE_UNAVAILABLE", message = "Codex inference is unavailable.") {
@@ -76,6 +78,33 @@ function safeWorkspace(value) {
     && value.trim() === value;
 }
 
+function preparePrivateDirectory(directory) {
+  try {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    let stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("invalid");
+    if ((stat.mode & 0o077) !== 0) fs.chmodSync(directory, 0o700);
+    stat = fs.lstatSync(directory);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0) {
+      throw new Error("invalid");
+    }
+  } catch {
+    throw directError("CODEX_INFERENCE_UNAVAILABLE", "Codex inference is unavailable.");
+  }
+}
+
+function workspaceFor(base, workspaceId) {
+  if (workspaceId === undefined) return base;
+  const root = path.join(path.dirname(base), "task-workspaces");
+  const selected = path.join(root, workspaceId);
+  if (path.dirname(selected) !== root) {
+    throw directError("CODEX_INFERENCE_PAYLOAD_INVALID", "Codex inference payload is invalid.");
+  }
+  preparePrivateDirectory(root);
+  preparePrivateDirectory(selected);
+  return selected;
+}
+
 function transcriptInput(messages) {
   const input = [Object.freeze({
     type: "text",
@@ -115,7 +144,9 @@ function transcriptInput(messages) {
 function normalizeRequest(rawRequest) {
   const request = safeData(rawRequest);
   if (!request || !safeIdentifier(request.conversationId)
-    || !safeIdentifier(request.invocationId) || typeof request.assertCurrent !== "function") {
+    || !safeIdentifier(request.invocationId) || typeof request.assertCurrent !== "function"
+    || !(request.workspaceId === undefined || (typeof request.workspaceId === "string"
+      && WORKSPACE_ID.test(request.workspaceId)))) {
     throw directError("CODEX_INFERENCE_PAYLOAD_INVALID", "Codex inference payload is invalid.");
   }
   let selection;
@@ -171,6 +202,7 @@ function normalizeRequest(rawRequest) {
     selection,
     signal,
     toolNames: selectedToolNames,
+    workspaceId: request.workspaceId,
   });
 }
 
@@ -408,7 +440,7 @@ class CodexDirectInferenceTransport {
 
       const threadParams = {
         approvalPolicy: "never",
-        cwd: this.#workspacePath,
+        cwd: workspaceFor(this.#workspacePath, operation.request.workspaceId),
         developerInstructions: operation.request.developerInstructions,
         ephemeral: true,
         model: operation.request.selection.model,

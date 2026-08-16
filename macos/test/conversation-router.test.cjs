@@ -459,7 +459,7 @@ test("reserved runtime overrides reject before bot lookup and Chat never resolve
     chatStore: memoryChatStore(),
     makeId: () => "request-1",
   });
-  const forbidden = ["provider", "runtimeId", "generation", "endpoint", "authToken", "modulePath", "codexBinary", "localBinary"];
+  const forbidden = ["provider", "runtimeId", "generation", "endpoint", "authToken", "modulePath", "codexBinary", "localBinary", "taskId"];
 
   for (const key of forbidden) {
     await assert.rejects(router.create("work", { botId, model: "gpt-5.6", [key]: "forged" }), /invalid|override/i);

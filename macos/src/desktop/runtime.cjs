@@ -14,8 +14,22 @@ const { CLIProxyInferenceTransport } = require("./cliproxy-inference-transport.c
 const { InferenceBridgeServer } = require("./inference-bridge-server.cjs");
 const { InferenceProviderRouter } = require("./inference-provider-router.cjs");
 const { BOT_ID, ModelSelectionStore } = require("./model-selection-store.cjs");
-const { prepareOpenBotUserData } = require("./openbot-user-data.cjs");
-const { createLocalComputerRuntime } = require("../local/local-computer-runtime.cjs");
+const {
+  acceptanceAppDataIntent,
+  prepareOpenBotUserData,
+  selectOpenBotAppData,
+  verifySelectedOpenBotAppData,
+} = require("./openbot-user-data.cjs");
+const {
+  createStandaloneComputerToolBridge,
+  StandaloneConversationController,
+} = require("./standalone-conversation-controller.cjs");
+const { installStandaloneConversationIpc } = require("./standalone-conversation-ipc.cjs");
+const { installLocalDesktopFrameIpc } = require("./local-desktop-frame-ipc.cjs");
+const { StandaloneConversationStore } = require("./standalone-conversation-store.cjs");
+const { StandaloneSubagentRunner } = require("./standalone-subagent-runner.cjs");
+const { ComputerTargetRouter } = require("../computer/computer-target-router.cjs");
+const { createLocalComputerRuntimeComponents } = require("../local/local-computer-runtime.cjs");
 
 const IPC_CHANNELS = Object.freeze({
   accountRead: "codex-account:read",
@@ -31,6 +45,7 @@ const IPC_CHANNELS = Object.freeze({
   read: "codex-bot:read",
   rename: "codex-bot:rename",
   updateProfile: "codex-bot:update-profile",
+  advanceSetup: "codex-bot:advance-setup",
   retryRuntime: "codex-bot:retry-runtime",
   selectBot: "codex-bot:select-bot",
   readModel: "codex-bot:read-model",
@@ -95,6 +110,32 @@ function computerModeRequest(value) {
   return Object.freeze({ botId: computerBotId(request.botId), mode: request.mode });
 }
 
+function setupTransitionRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw sanitizedFailure();
+  let descriptors;
+  let prototype;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    prototype = Object.getPrototypeOf(value);
+  } catch { throw sanitizedFailure(); }
+  const fields = ["botId", "expectedStage", "nextStage"];
+  if ((prototype !== Object.prototype && prototype !== null)
+    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+      || !fields.includes(key) || !("value" in descriptors[key]))
+    || fields.some((field) => !descriptors[field])) throw sanitizedFailure();
+  const botId = descriptors.botId.value;
+  const expectedStage = descriptors.expectedStage.value;
+  const nextStage = descriptors.nextStage.value;
+  const monotonic = (expectedStage === "profile-model" && nextStage === "computer")
+    || (expectedStage === "computer" && nextStage === "complete");
+  if (typeof botId !== "string" || !BOT_ID.test(botId) || !monotonic) throw sanitizedFailure();
+  return Object.freeze({
+    botId: botId.toLowerCase(),
+    expectedStage,
+    nextStage,
+  });
+}
+
 function computerDecisionRequest(value) {
   const request = exactPlainInput(value, [
     "requestId", "botId", "targetId", "targetGeneration", "decision",
@@ -131,6 +172,9 @@ const COMPUTER_PUBLIC_FIELDS = Object.freeze([
 ]);
 const PROMPT_PUBLIC_FIELDS = Object.freeze([
   "requestId", "botId", "targetId", "targetGeneration", "capability", "resourceLabel", "reason",
+]);
+const SHELL_PROMPT_PUBLIC_FIELDS = Object.freeze([
+  ...PROMPT_PUBLIC_FIELDS, "command", "allowsAlways",
 ]);
 const GRANT_PUBLIC_FIELDS = Object.freeze([
   "grantId", "botId", "capability", "resourceId", "resourceLabel", "scope", "createdAt",
@@ -203,15 +247,22 @@ function computerEnvelopePublic(value, expectedBotId = null) {
 }
 
 function permissionPromptPublic(value, expectedBotId = null) {
-  const prompt = exactPlainInput(value, PROMPT_PUBLIC_FIELDS);
+  let prompt;
+  try { prompt = exactPlainInput(value, PROMPT_PUBLIC_FIELDS); }
+  catch { prompt = exactPlainInput(value, SHELL_PROMPT_PUBLIC_FIELDS); }
   const botId = computerBotId(prompt.botId);
+  const shell = prompt.capability === "shell.execute";
   if ((expectedBotId !== null && botId !== expectedBotId)
     || typeof prompt.requestId !== "string" || !PERMISSION_ID.test(prompt.requestId)
     || typeof prompt.targetId !== "string" || !TARGET_ID.test(prompt.targetId)
     || !Number.isSafeInteger(prompt.targetGeneration) || prompt.targetGeneration < 0
     || !COMPUTER_CAPABILITIES.has(prompt.capability)
     || !boundedPublicText(prompt.resourceLabel)
-    || !boundedPublicText(prompt.reason, 512)) {
+    || !boundedPublicText(prompt.reason, 512)
+    || (shell && (typeof prompt.command !== "string" || prompt.command.length === 0
+      || prompt.command.includes("\0") || Buffer.byteLength(prompt.command, "utf8") > 8192
+      || prompt.allowsAlways !== false))
+    || (!shell && Object.hasOwn(prompt, "command"))) {
     throw sanitizedComputerFailure();
   }
   return {
@@ -222,6 +273,7 @@ function permissionPromptPublic(value, expectedBotId = null) {
     capability: prompt.capability,
     resourceLabel: prompt.resourceLabel,
     reason: prompt.reason,
+    ...(shell ? { command: prompt.command, allowsAlways: false } : {}),
   };
 }
 
@@ -463,7 +515,7 @@ function createDirectCodexManager({
   resourcesPath,
   stateRoot,
   homeDirectory,
-  environment = process.env,
+  environment,
   ManagerClass = CodexAppServerManager,
 } = {}) {
   if (typeof resourcesPath !== "string" || !path.isAbsolute(resourcesPath)
@@ -476,7 +528,9 @@ function createDirectCodexManager({
     resourcesPath,
     stateRoot: path.join(stateRoot, "direct-codex"),
     homeDirectory,
-    environment,
+    environment: environment === undefined
+      ? Object.fromEntries(Object.entries(process.env))
+      : environment,
     clientVersion: "0.2.0-macos.1",
   });
 }
@@ -517,10 +571,15 @@ function createInferenceBridgeRuntime({
   sidecarManager,
   readCatalog = null,
   stateRoot,
+  toolBridge = null,
+  computerTargetRouter = null,
   capability = crypto.randomBytes(32).toString("hex"),
   DirectTransportClass = CodexDirectInferenceTransport,
   OptionalTransportClass = CLIProxyInferenceTransport,
   RouterClass = InferenceProviderRouter,
+  StandaloneControllerClass = StandaloneConversationController,
+  StandaloneStoreClass = StandaloneConversationStore,
+  StandaloneSubagentRunnerClass = StandaloneSubagentRunner,
   BridgeClass = InferenceBridgeServer,
 } = {}) {
   if (!codexManager || typeof codexManager !== "object"
@@ -529,28 +588,33 @@ function createInferenceBridgeRuntime({
     || !(readCatalog === null || typeof readCatalog === "function")
     || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
     || typeof capability !== "string" || !/^[a-f0-9]{64}$/.test(capability)
-    || [DirectTransportClass, OptionalTransportClass, RouterClass, BridgeClass]
+    || !(toolBridge === null || (toolBridge && typeof toolBridge.open === "function"))
+    || !computerTargetRouter || typeof computerTargetRouter !== "object"
+    || typeof computerTargetRouter.resolve !== "function"
+    || [DirectTransportClass, OptionalTransportClass, RouterClass, StandaloneControllerClass,
+      StandaloneStoreClass, StandaloneSubagentRunnerClass, BridgeClass]
       .some((value) => typeof value !== "function")) throw sanitizedFailure();
   const directTransport = new DirectTransportClass({
     manager: codexManager,
     workspacePath: path.join(stateRoot, "direct-codex", "empty-workspace"),
   });
+  const readSelection = async (botId) => {
+    const stored = await selectionStore.read(botId);
+    if (!stored || typeof stored !== "object") throw sanitizedFailure();
+    if (readCatalog !== null && !selectionMatchesCatalog(stored, readCatalog())) {
+      throw sanitizedFailure();
+    }
+    return Object.freeze({
+      botId: stored.botId,
+      generation: stored.generation,
+      provider: stored.provider,
+      model: stored.model,
+      reasoningEffort: stored.reasoningEffort,
+      serviceTier: stored.serviceTier,
+    });
+  };
   const router = new RouterClass({
-    async readSelection(botId) {
-      const stored = await selectionStore.read(botId);
-      if (!stored || typeof stored !== "object") throw sanitizedFailure();
-      if (readCatalog !== null && !selectionMatchesCatalog(stored, readCatalog())) {
-        throw sanitizedFailure();
-      }
-      return Object.freeze({
-        botId: stored.botId,
-        generation: stored.generation,
-        provider: stored.provider,
-        model: stored.model,
-        reasoningEffort: stored.reasoningEffort,
-        serviceTier: stored.serviceTier,
-      });
-    },
+    readSelection,
     directTransport,
     async createOptionalTransport(provider) {
       if (provider !== "cliproxy-anthropic") throw sanitizedFailure();
@@ -558,7 +622,34 @@ function createInferenceBridgeRuntime({
       return new OptionalTransportClass({ session });
     },
   });
-  return new BridgeClass({ router, capability });
+  const conversationStore = new StandaloneStoreClass({
+    filePath: path.join(stateRoot, "standalone-conversations.v1.json"),
+  });
+  const subagentOptions = { router, readSelection };
+  if (toolBridge !== null) subagentOptions.toolBridge = toolBridge;
+  const subagentRunner = new StandaloneSubagentRunnerClass(subagentOptions);
+  const conversationOptions = {
+    router,
+    readSelection,
+    store: conversationStore,
+    subagentRunner,
+  };
+  if (toolBridge !== null) conversationOptions.toolBridge = toolBridge;
+  const conversations = new StandaloneControllerClass(conversationOptions);
+  const bridge = new BridgeClass({ router, computerTargetRouter, capability });
+  try {
+    Object.defineProperty(bridge, "conversations", {
+      configurable: false,
+      enumerable: false,
+      value: conversations,
+      writable: false,
+    });
+  } catch {
+    conversations.dispose?.();
+    router.dispose?.();
+    throw sanitizedFailure();
+  }
+  return bridge;
 }
 
 function prepareProductionUserData(electron, publisherPath = path.join(
@@ -566,13 +657,70 @@ function prepareProductionUserData(electron, publisherPath = path.join(
   "codex",
   "native",
   "openbot-profile-publish",
-)) {
+), options = {}) {
+  const argv = options.argv ?? process.argv;
+  const acceptanceIntent = acceptanceAppDataIntent(argv);
+  const selected = selectOpenBotAppData({
+    argv,
+    appDataPath: acceptanceIntent ? undefined : electron.app.getPath("appData"),
+    fsApi: options.fsApi,
+    tempDirectory: options.tempDirectory,
+    currentUid: options.currentUid,
+  });
   const migration = prepareOpenBotUserData({
-    appDataPath: electron.app.getPath("appData"),
+    appDataPath: selected.appDataPath,
+    fsApi: options.fsApi,
     publisherPath,
   });
+  if (selected.acceptance) {
+    verifySelectedOpenBotAppData(selected, {
+      fsApi: options.fsApi,
+      currentUid: options.currentUid,
+    });
+  }
   electron.app.setPath("userData", migration.userDataPath);
   return migration;
+}
+
+function createStandaloneComputerComposition({
+  electron,
+  stateRoot,
+  store,
+  createComponents = createLocalComputerRuntimeComponents,
+  TargetRouterClass = ComputerTargetRouter,
+  createToolBridge = createStandaloneComputerToolBridge,
+} = {}) {
+  if (!electron || typeof electron !== "object"
+    || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
+    || !store || typeof store.read !== "function" || typeof store.updateComputer !== "function"
+    || typeof createComponents !== "function" || typeof TargetRouterClass !== "function"
+    || typeof createToolBridge !== "function") throw sanitizedFailure();
+  let components;
+  try { components = createComponents({ electron, stateRoot, store }); } catch { throw sanitizedFailure(); }
+  if (!components || typeof components !== "object" || !components.boundary || !components.manager) {
+    throw sanitizedFailure();
+  }
+  let targetRouter;
+  let toolBridge;
+  try {
+    targetRouter = new TargetRouterClass({ store, localManager: components.manager });
+    toolBridge = createToolBridge({ computerTargetRouter: targetRouter });
+  } catch {
+    try { targetRouter?.dispose?.(); } catch {}
+    try { components.boundary.dispose?.(); } catch {}
+    throw sanitizedFailure();
+  }
+  if (!toolBridge || typeof toolBridge.open !== "function") {
+    try { targetRouter.dispose?.(); } catch {}
+    try { components.boundary.dispose?.(); } catch {}
+    throw sanitizedFailure();
+  }
+  return Object.freeze({
+    boundary: components.boundary,
+    localManager: components.manager,
+    targetRouter,
+    toolBridge,
+  });
 }
 
 function productionDependencies(electron) {
@@ -593,17 +741,15 @@ function productionDependencies(electron) {
     resourcesPath: process.resourcesPath,
     stateRoot,
   });
+  const computer = createStandaloneComputerComposition({ electron, stateRoot, store: botStore });
   const inferenceBridge = createInferenceBridgeRuntime({
     codexManager,
     selectionStore,
     sidecarManager,
     readCatalog: () => accountController.catalogState(),
     stateRoot,
-  });
-  const computerBoundary = createLocalComputerRuntime({
-    electron,
-    stateRoot,
-    store: botStore,
+    toolBridge: computer.toolBridge,
+    computerTargetRouter: computer.targetRouter,
   });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
@@ -616,9 +762,12 @@ function productionDependencies(electron) {
   return {
     accountController,
     codexManager,
-    computerBoundary,
+    computerBoundary: computer.boundary,
+    computerTargetRouter: computer.targetRouter,
+    localDesktopManager: computer.localManager,
     controller,
     inferenceBridge,
+    standaloneConversations: inferenceBridge.conversations,
     selectionStore,
     sidecarManager,
     store: botStore,
@@ -654,6 +803,9 @@ function installDesktopRuntime(electron, injected = {}) {
     stop() {},
   });
   const inferenceBridge = dependencies.inferenceBridge || null;
+  const standaloneConversations = dependencies.standaloneConversations
+    || inferenceBridge?.conversations
+    || null;
   const computerBoundary = dependencies.computerBoundary || Object.freeze({
     async selectMode() { throw sanitizedComputerFailure(); },
     async read() { throw sanitizedComputerFailure(); },
@@ -663,8 +815,22 @@ function installDesktopRuntime(electron, injected = {}) {
     async revokePermission() { throw sanitizedComputerFailure(); },
     dispose() {},
   });
+  const computerTargetRouter = dependencies.computerTargetRouter || null;
+  const localDesktopManager = dependencies.localDesktopManager || null;
+  const profileSetupReceipts = new Map();
+  const computerSetupReceipts = new Map();
   const registered = [];
+  let disposePromise = null;
+  let disposeComplete = false;
+  let quitRequested = false;
+  let finalQuitIssued = false;
   let disposed = false;
+  const standaloneIpc = standaloneConversations
+    ? installStandaloneConversationIpc({ electron, controller: standaloneConversations })
+    : null;
+  const localFrameIpc = localDesktopManager
+    ? installLocalDesktopFrameIpc({ electron, manager: localDesktopManager, computerBoundary })
+    : null;
   void accountController.start().catch(() => {});
   if (inferenceBridge && typeof inferenceBridge.start === "function") {
     void Promise.resolve()
@@ -679,10 +845,16 @@ function installDesktopRuntime(electron, injected = {}) {
       });
   }
 
+  function isLocalDesktopWindow(window) {
+    if (!localDesktopManager || typeof localDesktopManager.ownsWindow !== "function") return false;
+    try { return Boolean(localDesktopManager.ownsWindow(window)); } catch { return true; }
+  }
+
   function broadcast(bot) {
     const record = bot?.bot && typeof bot.bot === "object" ? bot.bot : bot;
     if (!record || typeof record !== "object") return;
     for (const window of electron.BrowserWindow.getAllWindows()) {
+      if (isLocalDesktopWindow(window)) continue;
       try {
         if (!window.webContents.isDestroyed()) window.webContents.send(CHANGE_CHANNEL, record);
       } catch {}
@@ -692,6 +864,7 @@ function installDesktopRuntime(electron, injected = {}) {
   function broadcastRuntimeEvent(event) {
     if (!event || typeof event !== "object") return;
     for (const window of electron.BrowserWindow.getAllWindows()) {
+      if (isLocalDesktopWindow(window)) continue;
       try {
         if (!window.webContents.isDestroyed()) window.webContents.send(RUNTIME_EVENT_CHANNEL, event);
       } catch {}
@@ -701,6 +874,7 @@ function installDesktopRuntime(electron, injected = {}) {
   function broadcastChannel(channel, value) {
     if (!value || typeof value !== "object") return;
     for (const window of electron.BrowserWindow.getAllWindows()) {
+      if (isLocalDesktopWindow(window)) continue;
       try {
         if (!window.webContents.isDestroyed()) window.webContents.send(channel, value);
       } catch {}
@@ -754,6 +928,128 @@ function installDesktopRuntime(electron, injected = {}) {
     return selectionStore.ensure(botId, requested);
   }
 
+  function modelSelectionMatches(left, right) {
+    return Boolean(left && right
+      && left.botId === right.botId
+      && left.provider === right.provider
+      && left.model === right.model
+      && left.reasoningEffort === right.reasoningEffort
+      && left.serviceTier === right.serviceTier
+      && left.catalogGeneration === right.catalogGeneration
+      && left.generation === right.generation);
+  }
+
+  function computerIdentityMatches(left, right) {
+    return Boolean(left && right
+      && left.mode === right.mode
+      && left.generation === right.generation
+      && left.localProfileId === right.localProfileId
+      && left.nativeAgentId === right.nativeAgentId
+      && left.state === right.state
+      && left.lastConfirmedAt === right.lastConfirmedAt
+      && left.lastErrorCode === right.lastErrorCode);
+  }
+
+  function markRenamedForSetup(bot) {
+    if (bot?.setupStage !== "profile-model") {
+      if (typeof bot?.botId === "string") profileSetupReceipts.delete(bot.botId);
+      return;
+    }
+    profileSetupReceipts.set(bot.botId, {
+      renamed: true,
+      profiled: false,
+      model: null,
+      catalogGeneration: null,
+    });
+  }
+
+  function markProfiledForSetup(bot) {
+    if (bot?.setupStage !== "profile-model") {
+      if (typeof bot?.botId === "string") profileSetupReceipts.delete(bot.botId);
+      return;
+    }
+    const previous = profileSetupReceipts.get(bot.botId);
+    profileSetupReceipts.set(bot.botId, {
+      renamed: previous?.renamed === true,
+      profiled: previous?.renamed === true,
+      model: null,
+      catalogGeneration: null,
+    });
+  }
+
+  async function markModelForSetup(bot, selection, catalog, pendingReceipt) {
+    const previous = profileSetupReceipts.get(bot.botId);
+    const currentBot = typeof controller.readBot === "function"
+      ? await controller.readBot(bot.botId)
+      : null;
+    const currentCatalog = accountController.catalogState();
+    if (previous !== pendingReceipt
+      || bot.setupStage !== "profile-model" || currentBot?.setupStage !== "profile-model"
+      || previous?.renamed !== true || previous?.profiled !== true
+      || !Number.isSafeInteger(catalog?.generation) || catalog.generation < 0
+      || currentCatalog?.generation !== catalog.generation
+      || !selectionMatchesCatalog(selection, currentCatalog)) {
+      if (profileSetupReceipts.get(bot.botId) === pendingReceipt) {
+        profileSetupReceipts.delete(bot.botId);
+      }
+      return;
+    }
+    profileSetupReceipts.set(bot.botId, Object.freeze({
+      renamed: true,
+      profiled: true,
+      model: selection,
+      catalogGeneration: catalog.generation,
+    }));
+  }
+
+  async function profileSetupCommitFence(botId) {
+    const receipt = profileSetupReceipts.get(botId);
+    const bot = typeof controller.readBot === "function" ? await controller.readBot(botId) : null;
+    const catalog = accountController.catalogState();
+    const selected = typeof selectionStore.read === "function" ? await selectionStore.read(botId) : null;
+    if (bot?.setupStage !== "profile-model" || receipt?.renamed !== true || receipt?.profiled !== true
+      || !receipt.model || catalog?.generation !== receipt.catalogGeneration
+      || !selectionMatchesCatalog(receipt.model, catalog)
+      || !modelSelectionMatches(selected, receipt.model)) {
+      if (receipt && catalog?.generation !== receipt.catalogGeneration) {
+        profileSetupReceipts.set(botId, { ...receipt, model: null, catalogGeneration: null });
+      }
+      throw sanitizedFailure();
+    }
+    return (currentBot) => {
+      const currentReceipt = profileSetupReceipts.get(botId);
+      const currentCatalog = accountController.catalogState();
+      if (currentReceipt !== receipt || currentBot?.setupStage !== "profile-model"
+        || currentCatalog?.generation !== receipt.catalogGeneration
+        || !selectionMatchesCatalog(receipt.model, currentCatalog)) {
+        if (currentReceipt === receipt
+          && currentCatalog?.generation !== receipt.catalogGeneration) {
+          profileSetupReceipts.set(botId, Object.freeze({
+            ...receipt,
+            model: null,
+            catalogGeneration: null,
+          }));
+        }
+        throw sanitizedFailure();
+      }
+    };
+  }
+
+  async function computerSetupCommitFence(botId) {
+    const receipt = computerSetupReceipts.get(botId);
+    const bot = typeof controller.readBot === "function" ? await controller.readBot(botId) : null;
+    if (bot?.setupStage !== "computer" || !receipt
+      || !computerIdentityMatches(bot.computer, receipt.computer)) throw sanitizedFailure();
+    return (currentBot) => {
+      if (computerSetupReceipts.get(botId) !== receipt
+        || currentBot?.setupStage !== "computer"
+        || !computerIdentityMatches(currentBot.computer, receipt.computer)) {
+        if (computerSetupReceipts.get(botId) === receipt) computerSetupReceipts.delete(botId);
+        throw sanitizedFailure();
+      }
+    };
+  }
+
   handle(IPC_CHANNELS.list, () => controller.listBots());
   handle(IPC_CHANNELS.accountRead, () => accountController.accountState());
   handle(IPC_CHANNELS.catalogList, () => accountController.catalogState());
@@ -785,8 +1081,29 @@ function installDesktopRuntime(electron, injected = {}) {
     await sidecarManager.connectProvider(provider);
   });
   handle(IPC_CHANNELS.read, (botId) => controller.readBot(botId));
-  handle(IPC_CHANNELS.rename, (botId, name) => controller.renameBot(botId, name));
-  handle(IPC_CHANNELS.updateProfile, (botId, profile) => controller.updateProfile(botId, profile));
+  handle(IPC_CHANNELS.rename, async (botId, name) => {
+    const bot = await controller.renameBot(botId, name);
+    markRenamedForSetup(bot);
+    return bot;
+  });
+  handle(IPC_CHANNELS.updateProfile, async (botId, profile) => {
+    const bot = await controller.updateProfile(botId, profile);
+    markProfiledForSetup(bot);
+    return bot;
+  });
+  handle(IPC_CHANNELS.advanceSetup, async (value) => {
+    const request = setupTransitionRequest(value);
+    const commitFence = request.expectedStage === "profile-model"
+      ? await profileSetupCommitFence(request.botId)
+      : await computerSetupCommitFence(request.botId);
+    const bot = await controller.advanceSetup(request.botId, {
+      expectedStage: request.expectedStage,
+      nextStage: request.nextStage,
+    }, commitFence);
+    profileSetupReceipts.delete(request.botId);
+    computerSetupReceipts.delete(request.botId);
+    return bot;
+  });
   handle(IPC_CHANNELS.retryRuntime, (botId) => controller.retryRuntime(botId));
   handle(IPC_CHANNELS.selectBot, async (botId) => {
     const bot = await controller.readBot(botId);
@@ -798,16 +1115,48 @@ function installDesktopRuntime(electron, injected = {}) {
   handle(IPC_CHANNELS.readModel, (botId) => currentModelSelection(botId));
   handle(IPC_CHANNELS.selectModel, async (rawSelection) => {
     const requested = selectionRequest(rawSelection);
-    const bot = await controller.readBot(requested.botId);
-    if (!bot) throw sanitizedFailure();
-    return selectionStore.writeNext(resolveModelSelection(
-      requested,
-      accountController.catalogState(),
-    ));
+    const selectWithinBarrier = async () => {
+      const previousReceipt = profileSetupReceipts.get(requested.botId);
+      const pendingReceipt = Object.freeze({
+        renamed: previousReceipt?.renamed === true,
+        profiled: previousReceipt?.profiled === true,
+        model: null,
+        catalogGeneration: null,
+      });
+      profileSetupReceipts.set(requested.botId, pendingReceipt);
+      const bot = await controller.readBot(requested.botId);
+      if (!bot) throw sanitizedFailure();
+      const catalog = accountController.catalogState();
+      const selected = await selectionStore.writeNext(resolveModelSelection(requested, catalog));
+      await markModelForSetup(bot, selected, catalog, pendingReceipt);
+      return selected;
+    };
+    return typeof standaloneConversations?.withModelSelectionMutation === "function"
+      ? standaloneConversations.withModelSelectionMutation(requested.botId, selectWithinBarrier)
+      : selectWithinBarrier();
   });
   handle(IPC_CHANNELS.computerSelectMode, async (value) => {
     const request = computerModeRequest(value);
-    return computerEnvelopePublic(await computerBoundary.selectMode(request), request.botId);
+    const pendingReceipt = Object.freeze({ mode: request.mode, computer: null });
+    computerSetupReceipts.set(request.botId, pendingReceipt);
+    const selected = computerEnvelopePublic(await computerBoundary.selectMode(request), request.botId);
+    if (selected.computer.mode !== request.mode) {
+      if (computerSetupReceipts.get(request.botId) === pendingReceipt) {
+        computerSetupReceipts.delete(request.botId);
+      }
+      throw sanitizedComputerFailure();
+    }
+    if (typeof controller.readBot === "function") {
+      const bot = await controller.readBot(request.botId);
+      if (computerSetupReceipts.get(request.botId) !== pendingReceipt) return selected;
+      if (bot?.setupStage === "computer" && computerIdentityMatches(bot.computer, selected.computer)) {
+        computerSetupReceipts.set(request.botId, Object.freeze({
+          mode: request.mode,
+          computer: selected.computer,
+        }));
+      } else computerSetupReceipts.delete(request.botId);
+    }
+    return selected;
   }, { requireCurrentWindow: true, computer: true });
   handle(IPC_CHANNELS.computerRead, async (value) => {
     const botId = computerBotId(value);
@@ -854,31 +1203,76 @@ function installDesktopRuntime(electron, injected = {}) {
 
   const api = Object.freeze({
     dispose() {
-      if (disposed) return;
+      if (disposePromise) return disposePromise;
+      if (disposeComplete) return Promise.resolve();
+      let settleDispose;
+      disposePromise = new Promise((resolve) => { settleDispose = resolve; });
       disposed = true;
-      for (const channel of registered) electron.ipcMain.removeHandler(channel);
-      controller.off?.("bot-changed", onBotChanged);
-      controller.off?.("runtime-changed", onRuntimeChanged);
-      controller.off?.("runtime-event", onRuntimeEvent);
-      accountController.off?.("account-changed", onAccountChanged);
-      accountController.off?.("catalog-changed", onCatalogChanged);
-      computerBoundary.off?.("changed", onComputerChanged);
-      computerBoundary.off?.("permission-requested", onComputerPermission);
-      computerBoundary.dispose?.();
-      accountController.dispose();
-      inferenceBridge?.dispose?.();
-      codexManager.stop();
-      sidecarManager.stop();
-      delete process.env.CODEX_BOT_CLIPROXY_URL;
-      delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
-      delete process.env.CODEX_BOT_INFERENCE_ENDPOINT;
-      delete process.env.CODEX_BOT_INFERENCE_CAPABILITY;
-      controller.dispose();
-      try { delete electron.app[INSTALLED]; } catch {}
+      const settle = async (effect) => {
+        try { await effect(); } catch {}
+      };
+      const teardown = Promise.resolve().then(async () => {
+        try {
+          await settle(() => profileSetupReceipts.clear());
+          await settle(() => computerSetupReceipts.clear());
+          for (const channel of registered) {
+            await settle(() => electron.ipcMain.removeHandler(channel));
+          }
+          await settle(() => controller.off?.("bot-changed", onBotChanged));
+          await settle(() => controller.off?.("runtime-changed", onRuntimeChanged));
+          await settle(() => controller.off?.("runtime-event", onRuntimeEvent));
+          await settle(() => accountController.off?.("account-changed", onAccountChanged));
+          await settle(() => accountController.off?.("catalog-changed", onCatalogChanged));
+          await settle(() => computerBoundary.off?.("changed", onComputerChanged));
+          await settle(() => computerBoundary.off?.("permission-requested", onComputerPermission));
+          await settle(() => localFrameIpc?.dispose());
+          await settle(() => { delete process.env.CODEX_BOT_CLIPROXY_URL; });
+          await settle(() => { delete process.env.CODEX_BOT_CLIPROXY_TOKEN; });
+          await settle(() => { delete process.env.CODEX_BOT_INFERENCE_ENDPOINT; });
+          await settle(() => { delete process.env.CODEX_BOT_INFERENCE_CAPABILITY; });
+          let standaloneIpcTeardown;
+          let standaloneConversationTeardown;
+          try { standaloneIpcTeardown = standaloneIpc?.dispose?.(); } catch {}
+          try { standaloneConversationTeardown = standaloneConversations?.dispose?.(); } catch {}
+          await settle(() => standaloneIpcTeardown);
+          await settle(() => standaloneConversationTeardown);
+          await settle(() => computerBoundary.dispose?.());
+          await settle(() => computerTargetRouter?.dispose?.());
+          await settle(() => accountController.dispose());
+          await settle(() => inferenceBridge?.dispose?.());
+          await settle(() => codexManager.stop());
+          await settle(() => sidecarManager.stop());
+          await settle(() => controller.dispose());
+        } finally {
+          disposeComplete = true;
+          try { delete electron.app[INSTALLED]; } catch {}
+          if (!quitRequested) removeBeforeQuitListener();
+        }
+      });
+      void teardown.then(settleDispose, settleDispose);
+      return disposePromise;
     },
   });
   electron.app[INSTALLED] = api;
-  electron.app.once?.("before-quit", () => api.dispose());
+  const removeBeforeQuitListener = () => {
+    try {
+      if (typeof electron.app.off === "function") electron.app.off("before-quit", onBeforeQuit);
+      else electron.app.removeListener?.("before-quit", onBeforeQuit);
+    } catch {}
+  };
+  const issueFinalQuit = () => {
+    if (!quitRequested || !disposeComplete || finalQuitIssued) return;
+    finalQuitIssued = true;
+    removeBeforeQuitListener();
+    try { electron.app.quit?.(); } catch {}
+  };
+  const onBeforeQuit = (event) => {
+    if (disposeComplete || finalQuitIssued) return;
+    try { event?.preventDefault?.(); } catch {}
+    quitRequested = true;
+    void api.dispose().then(issueFinalQuit);
+  };
+  electron.app.on?.("before-quit", onBeforeQuit);
   return api;
 }
 
@@ -893,6 +1287,7 @@ module.exports = {
   createDirectCodexManager,
   createInferenceBridgeRuntime,
   createLazySidecarManager,
+  createStandaloneComputerComposition,
   installDesktopRuntime,
   loadConfiguredProvider,
   loadSidecarReceipt,

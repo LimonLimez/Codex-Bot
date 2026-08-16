@@ -39,7 +39,9 @@ test("stock renderer index receives one self-hosted Codex control layer", () => 
   const patched = patchRendererIndexSource(STOCK_INDEX);
   assert.match(patched, /<title>OpenBot<\/title>/);
   assert.equal((patched.match(/\.\/codex\/codex-ui\.css/g) ?? []).length, 1);
-  for (const file of ["model-controls.js", "reasoning-control.js", "bot-runtime-ui.js"]) {
+  for (const file of [
+    "model-controls.js", "reasoning-control.js", "openbot-local-desktop-view.js", "bot-runtime-ui.js",
+  ]) {
     assert.equal((patched.match(new RegExp(`\\.\\/codex\\/${file.replace(".", "\\.")}`, "g")) ?? []).length, 1);
   }
   assert.match(patched, /assets\/index-CphCyQnY\.js/);
@@ -63,6 +65,10 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
     "bot-runtime-ui.js",
     "codex-ui.css",
     "model-controls.js",
+    "openbot-local-desktop-view.css",
+    "openbot-local-desktop-view.js",
+    "openbot-standalone-shell.css",
+    "openbot-standalone-shell.js",
     "reasoning-control.js",
   ]);
   for (const file of fs.readdirSync(target)) {
@@ -93,16 +99,24 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(css, /\.codex-power-tick\s*\{[^}]*width:\s*4px[^}]*height:\s*4px/s);
   assert.match(css, /\.codex-power-control\.is-max[^}]*#2383ff/s);
   assert.match(css, /\.codex-power-control\.is-disabled\s*\{[^}]*opacity:\s*0\.5[0-9]/s);
-  assert.match(css, /\.codex-power-ultra-field[^}]*linear-gradient\([^)]*#2383ff[^)]*(?:#7c3aed|#8b5cf6)[^)]*#2383ff/s);
-  assert.match(css, /\.codex-power-control\.is-ultra-entering[^}]*\.codex-power-burst/s);
-  assert.match(css, /@keyframes\s+codex-power-ultra-flow/);
-  assert.match(css, /@keyframes\s+codex-power-ultra-particle-drift/);
+  assert.match(css, /\.codex-power-ultra-field\s*\{[^}]*overflow:\s*hidden[^}]*isolation:\s*isolate[^}]*linear-gradient\([^)]*#2383ff[^)]*(?:#7c3aed|#8b5cf6)/s);
+  assert.match(css, /\.codex-power-ultra-field::before\s*\{[^}]*radial-gradient[^}]*mix-blend-mode:\s*screen/s);
+  assert.match(css, /\.codex-power-ultra-field::after\s*\{[^}]*radial-gradient[^}]*repeating-linear-gradient[^}]*mix-blend-mode:\s*soft-light/s);
+  assert.match(css, /\.codex-power-control\.is-ultra\s+\.codex-power-particles,[^}]*\.codex-power-control\.is-ultra\s+\.codex-power-burst\s*\{[^}]*display:\s*none/s);
+  assert.match(css, /\.codex-power-control\.is-ultra-entering\s+\.codex-power-thumb::after\s*\{[^}]*radial-gradient[^}]*codex-power-ultra-thumb-flare/s);
+  assert.match(css, /@keyframes\s+codex-power-ultra-reveal/);
+  assert.match(css, /@keyframes\s+codex-power-ultra-field-a/);
+  assert.match(css, /@keyframes\s+codex-power-ultra-field-b/);
+  assert.match(css, /@keyframes\s+codex-power-ultra-thumb-flare/);
+  assert.match(css, /\.codex-power-compact-controls\s*\{[^}]*position:\s*relative[^}]*height:\s*40px/s);
+  assert.match(css, /\.codex-power-endpoints\s*\{[^}]*font-size:\s*14px[^}]*line-height:\s*20px/s);
   assert.match(
     css,
-    /\.codex-power-control\.is-ultra:not\(\.is-ultra-entering\)\s+\.codex-power-particle\s*\{[^}]*animation:\s*codex-power-ultra-particle-drift/s,
+    /\.codex-power-warning\s*\{[^}]*position:\s*absolute[^}]*inset:\s*0[^}]*font-size:\s*14px[^}]*line-height:\s*20px/s,
   );
-  assert.match(css, /\.codex-power-compact-controls\s*\{[^}]*position:\s*relative[^}]*height:\s*36px/s);
-  assert.match(css, /\.codex-power-warning\s*\{[^}]*position:\s*absolute[^}]*inset:\s*0/s);
+  assert.match(css, /\.codex-power-warning:not\(\[hidden\]\)\s*\{[^}]*background-clip:\s*text[^}]*animation:\s*codex-power-warning-shimmer\s+1\.1s\s+ease-out\s+both/s);
+  assert.doesNotMatch(css, /\.codex-power-warning(?:[^{}]|\{[^}]*\})*animation:[^;}]*infinite/s);
+  assert.match(css, /@keyframes\s+codex-power-warning-shimmer/);
   assert.match(css, /\.codex-model-dock\.is-warning[^}]*\.codex-power-(?:advanced|fast)-toggle/s);
   assert.match(css, /\.codex-power-advanced[^}]*grid-template-columns/s);
   assert.doesNotMatch(css, /\.codex-model-row[^}]*112px/s);
@@ -110,6 +124,10 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(
     css,
     /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-power-particles,[\s\S]*\.codex-power-burst\s*\{[^}]*display:\s*none\s*!important/s,
+  );
+  assert.match(
+    css,
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-power-warning:not\(\[hidden\]\)\s*\{[^}]*background:\s*none[^}]*-webkit-text-fill-color:\s*currentColor/s,
   );
   assert.match(css, /:root\[data-theme="light"\][\s\S]*--codex-surface:\s*#f[0-9a-f]{5}/i);
   assert.match(css, /@media\s*\(prefers-color-scheme:\s*light\)/);
@@ -160,11 +178,22 @@ test("visual disabled and later-Ultra evidence comes from production state inste
   assert.match(runtime, /phase === "disabled"[\s\S]*trigger\.disabled[\s\S]*popover[^\n]*hidden/s);
   assert.match(runtime, /disabled:\s*phase === "disabled"\s*\?\s*"true"\s*:\s*"false"/s);
   assert.match(runtime, /phase === "later"[\s\S]*3300/s);
+  assert.match(
+    runtime,
+    /phase === "entry"[\s\S]*KeyboardEvent\("keydown",\s*\{[^}]*key:\s*"Home"[^}]*\}\)[\s\S]*KeyboardEvent\("keydown",\s*\{[^}]*key:\s*"End"[^}]*\}\)[\s\S]*is-ultra-entering[\s\S]*codex-power-warning/s,
+  );
   assert.doesNotMatch(runtime, /slider\.disabled\s*=|classList\.add\("is-disabled"\)/);
   assert.match(fixture, /params\.get\("disabled"\) === "true"/);
   assert.match(fixture, /selectBot\(\)[\s\S]*new Promise\(\(\) => \{\}\)/s);
+  assert.match(runtime, /new-bot-setup/);
+  assert.match(runtime, /New Bot profile setup did not originate from production state/);
+  assert.match(runtime, /codex-new-bot-continue/);
   assert.match(runtime, /computer-setup/);
   assert.match(runtime, /computer-change/);
   assert.match(runtime, /Permission sheet did not originate from production state/);
+  assert.match(fixture, /async updateProfile/);
+  assert.match(fixture, /setupStage:\s*"complete"/);
+  assert.match(fixture, /async create\(\)[\s\S]*setupStage:\s*"profile-model"/s);
+  assert.match(fixture, /async advanceSetup\([^)]+\)[\s\S]*expectedStage[\s\S]*nextStage/s);
   assert.match(fixture, /window\.openbotComputer/);
 });

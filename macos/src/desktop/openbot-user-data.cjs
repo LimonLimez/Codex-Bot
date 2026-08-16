@@ -3,6 +3,7 @@
 const childProcess = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const { types } = require("node:util");
 
@@ -11,6 +12,8 @@ const PRODUCT_NAME = "OpenBot";
 const FAILURE_MESSAGE = "OpenBot could not migrate the existing profile safely.";
 const MAX_ENTRIES = 200_000;
 const MAX_DEPTH = 96;
+const ACCEPTANCE_APP_DATA_OPTION = "--openbot-acceptance-app-data";
+const ACCEPTANCE_APP_DATA_FLAG = `${ACCEPTANCE_APP_DATA_OPTION}=`;
 
 class OpenBotUserDataError extends Error {
   constructor() {
@@ -22,6 +25,93 @@ class OpenBotUserDataError extends Error {
 
 function fail() {
   throw new OpenBotUserDataError();
+}
+
+function denseArguments(value) {
+  if (!Array.isArray(value) || types.isProxy(value)) fail();
+  let descriptors;
+  try { descriptors = Object.getOwnPropertyDescriptors(value); } catch { fail(); }
+  const length = descriptors.length?.value;
+  if (!Number.isSafeInteger(length) || length < 0 || length > 4096
+    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+      || (key !== "length" && !/^(?:0|[1-9]\d*)$/.test(key)))) fail();
+  const output = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[index];
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "string"
+      || descriptor.value.length > 8192 || descriptor.value.includes("\0")) fail();
+    output.push(descriptor.value);
+  }
+  return output;
+}
+
+function acceptanceAppDataIntent(value = process.argv) {
+  const args = denseArguments(value);
+  for (const argument of args) {
+    if (argument.startsWith(ACCEPTANCE_APP_DATA_OPTION)) return true;
+  }
+  return false;
+}
+
+function directoryIdentity(fsApi, directory, currentUid) {
+  let stat;
+  let real;
+  try {
+    stat = fsApi.lstatSync(directory);
+    real = fsApi.realpathSync(directory);
+  } catch { fail(); }
+  if (!stat.isDirectory() || stat.isSymbolicLink() || real !== directory
+    || (stat.mode & 0o777) !== 0o700 || stat.uid !== currentUid) fail();
+  return Object.freeze({ dev: String(stat.dev), ino: String(stat.ino), mode: stat.mode, uid: stat.uid });
+}
+
+function selectOpenBotAppData({
+  argv = process.argv,
+  appDataPath,
+  fsApi = fs,
+  tempDirectory = os.tmpdir(),
+  currentUid = typeof process.getuid === "function" ? process.getuid() : -1,
+} = {}) {
+  try {
+    const args = denseArguments(argv);
+    if (!fsApi || typeof fsApi.lstatSync !== "function" || typeof fsApi.realpathSync !== "function"
+      || typeof tempDirectory !== "string" || !path.isAbsolute(tempDirectory)
+      || !Number.isSafeInteger(currentUid) || currentUid < 0) fail();
+    const flags = args.filter((argument) => argument.startsWith(ACCEPTANCE_APP_DATA_OPTION));
+    if (flags.length === 0) {
+      if (typeof appDataPath !== "string" || !path.isAbsolute(appDataPath)
+        || appDataPath.length > 4096 || appDataPath.includes("\0")) fail();
+      return Object.freeze({ acceptance: false, appDataPath, identity: null });
+    }
+    if (flags.length !== 1 || !flags[0].startsWith(ACCEPTANCE_APP_DATA_FLAG)) fail();
+    const selected = flags[0].slice(ACCEPTANCE_APP_DATA_FLAG.length);
+    if (!selected || !path.isAbsolute(selected) || selected.length > 4096
+      || selected.includes("\0") || path.normalize(selected) !== selected) fail();
+    let tempRoot;
+    try { tempRoot = fsApi.realpathSync(tempDirectory); } catch { fail(); }
+    const relative = path.relative(tempRoot, selected);
+    if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) fail();
+    const identity = directoryIdentity(fsApi, selected, currentUid);
+    return Object.freeze({ acceptance: true, appDataPath: selected, identity });
+  } catch (error) {
+    if (error instanceof OpenBotUserDataError) throw error;
+    fail();
+  }
+}
+
+function verifySelectedOpenBotAppData(selection, { fsApi = fs, currentUid } = {}) {
+  try {
+    if (!selection || typeof selection !== "object" || selection.acceptance !== true
+      || typeof selection.appDataPath !== "string" || !selection.identity) fail();
+    const expectedUid = currentUid === undefined ? selection.identity.uid : currentUid;
+    const current = directoryIdentity(fsApi, selection.appDataPath, expectedUid);
+    if (current.dev !== selection.identity.dev || current.ino !== selection.identity.ino
+      || current.mode !== selection.identity.mode || current.uid !== selection.identity.uid) fail();
+    return true;
+  } catch (error) {
+    if (error instanceof OpenBotUserDataError) throw error;
+    fail();
+  }
 }
 
 function validOptions(value) {
@@ -240,8 +330,13 @@ function prepareOpenBotUserData(rawOptions) {
 }
 
 module.exports = {
+  ACCEPTANCE_APP_DATA_OPTION,
+  ACCEPTANCE_APP_DATA_FLAG,
   LEGACY_NAME,
   OpenBotUserDataError,
   PRODUCT_NAME,
+  acceptanceAppDataIntent,
   prepareOpenBotUserData,
+  selectOpenBotAppData,
+  verifySelectedOpenBotAppData,
 };

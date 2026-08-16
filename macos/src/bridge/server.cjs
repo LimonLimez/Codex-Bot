@@ -4,6 +4,8 @@ const { CodexClient, BridgeDisposedError } = require("./codex-client.cjs");
 const { InferenceSocketClient } = require("./inference-socket-client.cjs");
 const { loadRuntimeConfig } = require("./runtime-config.cjs");
 
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
 class BridgeSessionError extends Error {
   constructor() {
     super("Codex bridge session is invalid.");
@@ -41,6 +43,19 @@ function sessionOptions(value) {
   return Object.fromEntries(
     Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]),
   );
+}
+
+function nativeSessionIdentity(options) {
+  if (typeof options.conversationId !== "string" || !SESSION_ID.test(options.conversationId)
+    || options.conversationId.includes("..")
+    || typeof options.taskId !== "string" || !SESSION_ID.test(options.taskId)
+    || options.taskId.includes("..")) {
+    throw new BridgeSessionError();
+  }
+  return Object.freeze({
+    conversationId: options.conversationId,
+    taskId: options.taskId,
+  });
 }
 
 function sameConfig(left, right) {
@@ -166,13 +181,18 @@ function createBridge({
                 return false;
               }
             };
-      const client = config.provider == null
-        ? new CodexClient({ config, fetchImpl, isCurrent: current })
-        : new SocketClientClass({
+      let client;
+      if (config.provider == null) {
+        client = new CodexClient({ config, fetchImpl, isCurrent: current });
+      } else {
+        const identity = nativeSessionIdentity(normalized);
+        client = new SocketClientClass({
           config,
-          conversationId: normalized.conversationId,
+          conversationId: identity.conversationId,
+          taskId: identity.taskId,
           isCurrent: current,
         });
+      }
       let session;
       session = new PromptSession(client, config, middleware, () => sessions.delete(session));
       sessions.add(session);

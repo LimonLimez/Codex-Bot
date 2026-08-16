@@ -2,7 +2,7 @@
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { execFile } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { normalizeRequest } = require("./local-helper-protocol.cjs");
 
 const MAX_FILE_BYTES = 128 * 1024;
@@ -10,6 +10,7 @@ const MAX_COMMAND_BYTES = 8192;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_PATH_BYTES = 1024;
 const BUNDLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{1,254}$/;
+const LOCAL_SHELL_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 class LocalHelperChildError extends Error {
   constructor(message, code) {
@@ -49,6 +50,40 @@ function safeWorkspace(value) {
   return path.resolve(value);
 }
 
+async function privateTaskDirectory(target) {
+  let created = false;
+  try {
+    await fs.mkdir(target, { mode: 0o700 });
+    created = true;
+  } catch (error) {
+    if (error?.code !== "EEXIST") {
+      throw childError("Local task workspace is unavailable.", "OPENBOT_LOCAL_WORKSPACE_INVALID");
+    }
+  }
+  if (created) {
+    try { await fs.chmod(target, 0o700); } catch {
+      throw childError("Local task workspace is unavailable.", "OPENBOT_LOCAL_WORKSPACE_INVALID");
+    }
+  }
+  let stat;
+  try { stat = await fs.lstat(target); } catch {
+    throw childError("Local task workspace is unavailable.", "OPENBOT_LOCAL_WORKSPACE_INVALID");
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o700) {
+    throw childError("Local task workspace is unavailable.", "OPENBOT_LOCAL_WORKSPACE_INVALID");
+  }
+  return target;
+}
+
+async function taskWorkspace(workspacePath, taskId) {
+  const tasksPath = await privateTaskDirectory(path.join(workspacePath, "tasks"));
+  return privateTaskDirectory(path.join(tasksPath, taskId));
+}
+
+function taskTempDirectory(workspacePath) {
+  return privateTaskDirectory(path.join(workspacePath, "tmp"));
+}
+
 function confinedPath(workspacePath, value) {
   if (typeof value !== "string" || value.length === 0 || value.includes("\0")
     || path.isAbsolute(value) || value.includes("\\") || Buffer.byteLength(value, "utf8") > MAX_PATH_BYTES) {
@@ -83,30 +118,138 @@ async function rejectSymlinks(workspacePath, target, includeTarget) {
   }
 }
 
-function runFile(file, args, options) {
+function cancellationError() {
+  return childError("Local operation was cancelled.", "OPENBOT_LOCAL_CANCELLED");
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancellationError();
+}
+
+function runFile(file, args, options, signal) {
   return new Promise((resolve, reject) => {
-    execFile(file, args, options, (error, stdout = "", stderr = "") => {
-      const outputBytes = Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8");
-      if (outputBytes > MAX_OUTPUT_BYTES || error?.killed || error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-        reject(childError("Local command output is unavailable.", "OPENBOT_LOCAL_OUTPUT_LIMIT"));
+    const outputLimit = Number.isSafeInteger(options.maxBuffer)
+      && options.maxBuffer > 0 && options.maxBuffer <= MAX_OUTPUT_BYTES
+      ? options.maxBuffer
+      : MAX_OUTPUT_BYTES;
+    const timeoutMs = Number.isSafeInteger(options.timeout) && options.timeout > 0
+      ? options.timeout
+      : 0;
+    let child;
+    let settled = false;
+    let termination = null;
+    let outputBytes = 0;
+    const stdout = [];
+    const stderr = [];
+    let timeoutTimer = null;
+    let killTimer = null;
+    let forceTimer = null;
+
+    const signalGroup = (name) => {
+      if (!child || !Number.isSafeInteger(child.pid) || child.pid < 1) return;
+      try { process.kill(-child.pid, name); }
+      catch {
+        try { child.kill(name); } catch {}
+      }
+    };
+    const cleanup = () => {
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      if (killTimer !== null) clearTimeout(killTimer);
+      if (forceTimer !== null) clearTimeout(forceTimer);
+      try { signal?.removeEventListener?.("abort", abort); } catch {}
+    };
+    const finish = (outcome, failed) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (failed) reject(outcome);
+      else resolve(outcome);
+    };
+    const terminationFailure = () => {
+      if (termination === "cancel") return cancellationError();
+      if (termination === "output") {
+        return childError("Local command output is unavailable.", "OPENBOT_LOCAL_OUTPUT_LIMIT");
+      }
+      return childError("Local command failed.", "OPENBOT_LOCAL_COMMAND_FAILED");
+    };
+    const terminate = (reason) => {
+      if (settled || termination !== null) return;
+      termination = reason;
+      signalGroup("SIGTERM");
+      killTimer = setTimeout(() => signalGroup("SIGKILL"), 50);
+      killTimer.unref?.();
+      forceTimer = setTimeout(() => {
+        signalGroup("SIGKILL");
+        finish(terminationFailure(), true);
+      }, 500);
+      forceTimer.unref?.();
+    };
+    const abort = () => terminate("cancel");
+    const collect = (chunk, target) => {
+      if (settled || termination !== null) return;
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      outputBytes += bytes.length;
+      if (outputBytes > outputLimit) {
+        terminate("output");
         return;
       }
-      if (error && !Number.isSafeInteger(error.code)) {
-        reject(childError("Local command failed.", "OPENBOT_LOCAL_COMMAND_FAILED"));
-        return;
-      }
-      resolve({
-        exitCode: error && Number.isSafeInteger(error.code) ? error.code : 0,
-        stdout,
-        stderr,
+      target.push(bytes);
+    };
+
+    try {
+      child = spawn(file, args, {
+        cwd: options.cwd,
+        env: options.env,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: options.windowsHide === true,
       });
+    } catch {
+      finish(childError("Local command failed.", "OPENBOT_LOCAL_COMMAND_FAILED"), true);
+      return;
+    }
+    child.stdout.on("data", (chunk) => collect(chunk, stdout));
+    child.stderr.on("data", (chunk) => collect(chunk, stderr));
+    child.once("error", () => {
+      signalGroup("SIGKILL");
+      finish(termination === null
+        ? childError("Local command failed.", "OPENBOT_LOCAL_COMMAND_FAILED")
+        : terminationFailure(), true);
     });
+    child.once("close", (code, closeSignal) => {
+      // A shell can exit while detached descendants remain. Kill the whole group
+      // before making completion or cancellation observable to the parent.
+      signalGroup("SIGKILL");
+      if (termination !== null) {
+        finish(terminationFailure(), true);
+        return;
+      }
+      if (!Number.isSafeInteger(code) || code < 0 || code > 255 || closeSignal !== null) {
+        finish(childError("Local command failed.", "OPENBOT_LOCAL_COMMAND_FAILED"), true);
+        return;
+      }
+      finish({
+        exitCode: code,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      }, false);
+    });
+    try { signal?.addEventListener?.("abort", abort, { once: true }); } catch {
+      terminate("cancel");
+    }
+    if (signal?.aborted) terminate("cancel");
+    if (timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => terminate("timeout"), timeoutMs);
+      timeoutTimer.unref?.();
+    }
   });
 }
 
-async function executeRequest(rawRequest, { workspacePath: rawWorkspacePath } = {}) {
+async function executeRequest(rawRequest, { workspacePath: rawWorkspacePath, signal } = {}) {
   const request = normalizeRequest(rawRequest);
-  const workspacePath = safeWorkspace(rawWorkspacePath);
+  throwIfCancelled(signal);
+  const workspacePath = await taskWorkspace(safeWorkspace(rawWorkspacePath), request.taskId);
+  throwIfCancelled(signal);
   let value;
   if (request.operation === "shell.execute") {
     const input = exactObject(request.arguments, ["command"], "Shell command");
@@ -114,14 +257,22 @@ async function executeRequest(rawRequest, { workspacePath: rawWorkspacePath } = 
       || input.command.includes("\0") || Buffer.byteLength(input.command, "utf8") > MAX_COMMAND_BYTES) {
       throw childError("Shell command is invalid.", "OPENBOT_LOCAL_ARGUMENTS_INVALID");
     }
+    const tempDirectory = await taskTempDirectory(workspacePath);
     value = await runFile("/bin/zsh", ["-f", "-c", input.command], {
       cwd: workspacePath,
-      env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+      env: {
+        PATH: LOCAL_SHELL_PATH,
+        HOME: workspacePath,
+        ZDOTDIR: workspacePath,
+        TMPDIR: tempDirectory,
+        SHELL: "/bin/zsh",
+        LANG: "C.UTF-8",
+      },
       encoding: "utf8",
       timeout: 25_000,
       maxBuffer: MAX_OUTPUT_BYTES,
       windowsHide: true,
-    });
+    }, signal);
   } else if (request.operation === "filesystem.read") {
     const input = exactObject(request.arguments, ["relativePath"], "Read request");
     const file = confinedPath(workspacePath, input.relativePath);
@@ -169,7 +320,7 @@ async function executeRequest(rawRequest, { workspacePath: rawWorkspacePath } = 
       timeout: 15_000,
       maxBuffer: 4096,
       windowsHide: true,
-    });
+    }, signal);
     if (result.exitCode !== 0) throw childError("Application could not be opened.", "OPENBOT_LOCAL_APPLICATION_FAILED");
     value = { opened: true, bundleId: input.bundleId };
   } else {
@@ -182,17 +333,52 @@ function installParentPort(port, workspacePath) {
   if (!port || typeof port.on !== "function" || typeof port.postMessage !== "function") {
     throw new TypeError("Local helper parent port is unavailable.");
   }
+  const active = new Map();
+  const fatal = () => {
+    for (const controller of active.values()) controller.abort();
+    try { port.postMessage({ type: "fatal" }); } catch {}
+  };
   port.on("message", async (event) => {
     const message = event?.data ?? event;
     if (message?.type === "authorize") return;
-    if (!message || message.type !== "run") {
-      port.postMessage({ type: "fatal" });
+    if (message?.type === "cancel") {
+      let input;
+      try {
+        input = exactObject(message, ["type", "requestId"], "Cancellation request");
+        if (input.type !== "cancel" || typeof input.requestId !== "string"
+          || !/^request-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.requestId)) {
+          throw childError("Cancellation request is invalid.", "OPENBOT_LOCAL_ARGUMENTS_INVALID");
+        }
+      } catch {
+        fatal();
+        return;
+      }
+      active.get(input.requestId.toLowerCase())?.abort();
       return;
     }
+    if (!message || message.type !== "run") {
+      fatal();
+      return;
+    }
+    let request;
+    let requestId = "";
+    let controller;
     try {
-      port.postMessage({ type: "reply", reply: await executeRequest(message.request, { workspacePath }) });
+      const input = exactObject(message, ["type", "request"], "Run request");
+      if (input.type !== "run") throw childError("Run request is invalid.", "OPENBOT_LOCAL_ARGUMENTS_INVALID");
+      request = normalizeRequest(input.request);
+      requestId = request.requestId;
+      if (active.has(requestId)) {
+        fatal();
+        return;
+      }
+      controller = new AbortController();
+      active.set(requestId, controller);
+      port.postMessage({
+        type: "reply",
+        reply: await executeRequest(request, { workspacePath, signal: controller.signal }),
+      });
     } catch (error) {
-      const requestId = typeof message.request?.requestId === "string" ? message.request.requestId : "";
       port.postMessage({
         type: "reply",
         reply: {
@@ -203,6 +389,8 @@ function installParentPort(port, workspacePath) {
             : "OPENBOT_LOCAL_OPERATION_FAILED",
         },
       });
+    } finally {
+      if (requestId !== "" && active.get(requestId) === controller) active.delete(requestId);
     }
   });
 }

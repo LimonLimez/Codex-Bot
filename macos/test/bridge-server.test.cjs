@@ -126,10 +126,12 @@ test("production prompt sessions choose the private main-process socket for prov
   const session = bridge.createPromptSession({
     botId: BOT_ID,
     conversationId: "conversation-private-1",
+    taskId: "native-child-transcript",
   });
   assert.equal(clients.length, 1);
   assert.equal(clients[0].config, providerConfig);
   assert.equal(clients[0].conversationId, "conversation-private-1");
+  assert.equal(clients[0].taskId, "native-child-transcript");
   assert.equal(typeof clients[0].isCurrent, "function");
   assert.equal(clients[0].isCurrent(providerConfig), true);
   assert.doesNotMatch(JSON.stringify(clients), /43210|aaaa|credential|endpoint/);
@@ -159,13 +161,59 @@ test("disposing a prompt session releases bridge ownership immediately and idemp
     loadConfig: () => Object.freeze(providerConfig),
     SocketClientClass: SocketFixture,
   });
-  const released = bridge.createPromptSession({ botId: BOT_ID });
-  bridge.createPromptSession({ botId: BOT_ID });
+  const released = bridge.createPromptSession({
+    botId: BOT_ID,
+    conversationId: "conversation-private-1",
+    taskId: "parent",
+  });
+  bridge.createPromptSession({
+    botId: BOT_ID,
+    conversationId: "conversation-private-1",
+    taskId: "native-child-transcript",
+  });
   released.dispose();
   released.dispose();
   assert.equal(disposals, 1);
   bridge.dispose();
   assert.equal(disposals, 2);
+});
+
+test("provider-aware prompt sessions reject missing or malformed native host identities", () => {
+  const { createBridge } = require(serverPath);
+  let clients = 0;
+  const providerConfig = {
+    botId: BOT_ID,
+    generation: 0,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  };
+  Object.defineProperties(providerConfig, {
+    endpoint: { value: "tcp://127.0.0.1:43210", enumerable: false },
+    credential: { value: "a".repeat(64), enumerable: false },
+  });
+  class SocketFixture {
+    constructor() { clients += 1; }
+    stream() { throw new Error("not used"); }
+    dispose() {}
+  }
+  const bridge = createBridge({
+    loadConfig: () => Object.freeze(providerConfig),
+    SocketClientClass: SocketFixture,
+  });
+
+  for (const options of [
+    { botId: BOT_ID, conversationId: "conversation-private-1" },
+    { botId: BOT_ID, taskId: "native-child-transcript" },
+    { botId: BOT_ID, conversationId: "conversation-private-1", taskId: "../forged" },
+    { botId: BOT_ID, conversationId: "conversation-private-1", taskId: "" },
+  ]) {
+    assert.throws(() => bridge.createPromptSession(options), {
+      code: "CODEX_BRIDGE_SESSION_INVALID",
+    });
+  }
+  assert.equal(clients, 0);
 });
 
 test("session ownership rejects mismatched bots and hostile options before transport", () => {

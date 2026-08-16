@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const net = require("node:net");
 const { types } = require("node:util");
 const { cloneJsonValue } = require("./message-codec.cjs");
@@ -85,6 +86,17 @@ function normalizePublicError(code) {
   return socketError();
 }
 
+function taskProof(capability, botId, conversationId, taskId) {
+  return crypto.createHmac("sha256", capability)
+    .update("openbot-native-task\0", "utf8")
+    .update(botId, "utf8")
+    .update("\0", "utf8")
+    .update(conversationId, "utf8")
+    .update("\0", "utf8")
+    .update(taskId, "utf8")
+    .digest("hex");
+}
+
 class FrameQueue {
   #values = [];
   #waiter = null;
@@ -135,18 +147,22 @@ class FrameQueue {
 class InferenceSocketClient {
   #config;
   #conversationId;
+  #taskId;
   #isCurrent;
   #net;
   #disposed = false;
   #operations = new Set();
 
-  constructor({ config, conversationId, isCurrent = () => true, netImpl = net } = {}) {
+  constructor({ config, conversationId, taskId, isCurrent = () => true, netImpl = net } = {}) {
     this.#config = safeConfig(config);
     if (typeof conversationId !== "string" || !ID.test(conversationId)
+      || conversationId.includes("..")
+      || typeof taskId !== "string" || !ID.test(taskId) || taskId.includes("..")
       || typeof isCurrent !== "function" || !netImpl || typeof netImpl.createConnection !== "function") {
       throw socketError();
     }
     this.#conversationId = conversationId;
+    this.#taskId = taskId;
     this.#isCurrent = isCurrent;
     this.#net = netImpl;
   }
@@ -177,6 +193,8 @@ class InferenceSocketClient {
     const operation = {
       usage, extendedUsage, providerMetadata, response,
       socket: null,
+      started: false,
+      cancelled: false,
       settled: false,
       completed: false,
       queue: new FrameQueue(),
@@ -192,6 +210,13 @@ class InferenceSocketClient {
         serviceTier: this.#config.serviceTier,
       },
       conversationId: this.#conversationId,
+      taskId: this.#taskId,
+      taskProof: taskProof(
+        this.#config.credential,
+        `bot-${this.#config.botId}`,
+        this.#conversationId,
+        this.#taskId,
+      ),
       messages: safeMessages,
       tools: safeTools,
       invocationId,
@@ -230,7 +255,13 @@ class InferenceSocketClient {
         const error = socketError("CODEX_BRIDGE_CANCELLED", "Codex bridge request was cancelled.");
         operation.queue.fail(error);
         operation.rejectConnection?.(error);
-        try { socket.destroy(); } catch {}
+        if (operation.started && typeof socket.end === "function") {
+          operation.cancelled = true;
+          try { socket.end(`${JSON.stringify({ type: "cancel" })}\n`); }
+          catch { try { socket.destroy(); } catch {} }
+        } else {
+          try { socket.destroy(); } catch {}
+        }
       };
       if (signal !== undefined) {
         signal.addEventListener("abort", onAbort, { once: true });
@@ -304,6 +335,7 @@ class InferenceSocketClient {
         request,
       })}\n`;
       if (Buffer.byteLength(serialized, "utf8") > MAX_FRAME_BYTES) throw socketError();
+      operation.started = true;
       await new Promise((resolve, reject) => {
         try { socket.write(serialized, (error) => error ? reject(socketError()) : resolve()); }
         catch { reject(socketError()); }
@@ -360,7 +392,11 @@ class InferenceSocketClient {
     if (!operation.completed && !operation.settled) {
       this.#reject(operation, socketError("CODEX_BRIDGE_CANCELLED", "Codex bridge request was cancelled."));
     }
-    try { operation.socket?.destroy?.(); } catch {}
+    if (operation.cancelled) {
+      try { operation.socket?.destroySoon?.(); } catch {}
+    } else {
+      try { operation.socket?.destroy?.(); } catch {}
+    }
     this.#operations.delete(operation);
   }
 

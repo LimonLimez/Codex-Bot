@@ -85,7 +85,7 @@ function createTccAdapter(electron) {
   });
 }
 
-function createLocalComputerRuntime({
+function createLocalComputerRuntimeComponents({
   electron,
   stateRoot,
   store,
@@ -121,11 +121,17 @@ function createLocalComputerRuntime({
       ...identity,
     }),
   });
-  return new BoundaryClass({ store, manager, broker });
+  const boundary = new BoundaryClass({ store, manager, broker });
+  return Object.freeze({ boundary, manager });
+}
+
+function createLocalComputerRuntime(options = {}) {
+  return createLocalComputerRuntimeComponents(options).boundary;
 }
 
 module.exports = {
   createLocalComputerRuntime,
+  createLocalComputerRuntimeComponents,
   createResourceChooser,
   createTccAdapter,
 };

@@ -12,21 +12,80 @@ const FORBIDDEN_SEGMENTS = new Set([
   "conversations", "cookies", "history", "logs",
 ]);
 const FORBIDDEN_SUFFIXES = [".log", ".pem", ".key", ".p12", ".mobileprovision"];
-const TEXT_SUFFIXES = new Set([
-  ".cjs", ".css", ".html", ".ini", ".js", ".json", ".md", ".mjs",
-  ".plist", ".sh", ".swift", ".toml", ".txt", ".xml", ".yaml", ".yml",
-]);
-const PERSONAL_PATH = /(?:\/Users\/[^/\s"'<>]+|\/home\/[^/\s"'<>]+|[A-Za-z]:\\Users\\[^\\\s"'<>]+)/;
-const PRIVATE_SECRET = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\b(?:ghp|github_pat|sk|sess)-[A-Za-z0-9_\-]{20,}\b|\bBearer\s+[A-Za-z0-9_./+\-=]{20,}\b|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*["'][A-Za-z0-9_./+\-=]{24,}["']/i;
+const PERSONAL_PATH = /(?:\/Users\/[^/\x00-\x20"'<>]+(?:\/[^\x00-\x20"'<>]*)?|\/home\/[^/\x00-\x20"'<>]+(?:\/[^\x00-\x20"'<>]*)?|[A-Za-z]:\\Users\\[^\\\x00-\x20"'<>]+(?:\\[^\x00-\x20"'<>]*)?)/;
+const STRICT_PRIVATE_SECRET = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|\bfixture-private-[A-Za-z0-9_-]*(?:auth|access|refresh|oauth|secret|token)[A-Za-z0-9_-]*\b|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|oauth[_-]?token|csrf[_-]?token|private[_-]?token|secret[_-]?token)\s*["'`]?\s*[:=]\s*(?:["'`][A-Za-z0-9_./+\-=]{3,}["'`]|(?=[A-Za-z0-9_./+\-=]{3,}(?:[^A-Za-z0-9_./+\-=]|$))(?=[A-Za-z0-9_./+\-=]*[0-9+\-=])[A-Za-z0-9_./+\-=]{3,})/i;
+const PLAIN_PRIVATE_SECRET = /\b(?:access_token|refresh_token|auth_token|client_secret|oauth_token|csrf_token|private_token|secret_token|password|passwd|cookie|session_cookie)\s*["'`]?\s*[:=]\s*(?:["'`][A-Za-z0-9_./+\-=]{3,}["'`]|[A-Za-z]{8,})(?=[^A-Za-z0-9_./+\-=]|$)/i;
+const GENERIC_TOKEN_SECRET = /\b(?:ghp|github_pat|sk|sess)-[A-Za-z0-9_\-]{20,}\b|\bBearer\s+[A-Za-z0-9_./+\-=]{6,}\b/i;
 const MANIFEST_RELATIVE = "Contents/Resources/INSTALLER-MANIFEST.json";
 const SIGNATURE_RELATIVES = new Set([
   "Contents/_CodeSignature",
   "Contents/_CodeSignature/CodeResources",
 ]);
-const REVIEWED_UPSTREAM_BINARIES = new Set([
-  "Contents/Resources/CLIProxy/cli-proxy-api",
-  "Contents/Resources/CodexRuntime/codex",
+const SCAN_CARRY_BYTES = 1024;
+const REVIEWED_PUBLIC_CI_ROOTS = new Map([
+  ["Contents/Resources/CLIProxy/cli-proxy-api", Object.freeze([
+    "/Users/runner/go/pkg",
+    "/Users/runner/hostedtoolcache/go",
+    "/Users/runner/work/CLIProxyAPI",
+  ])],
+  ["Contents/Resources/CodexRuntime/codex", Object.freeze([
+    "/Users/runner/.cargo/registry",
+    "/Users/runner/.cargo/git",
+    "/Users/runner/.rustup/toolchains",
+  ])],
 ]);
+const REVIEWED_UPSTREAM_BINARIES = new Set(REVIEWED_PUBLIC_CI_ROOTS.keys());
+
+function unreviewedPersonalPath(contents, relative = "", { allowTrailingPartial = false } = {}) {
+  if (typeof contents !== "string") return true;
+  const reviewedRoots = REVIEWED_PUBLIC_CI_ROOTS.get(relative) || [];
+  const matcher = new RegExp(`(?<![A-Za-z0-9._~%+\\-])(?=(${PERSONAL_PATH.source}))`, "gi");
+  for (const match of contents.matchAll(matcher)) {
+    const candidate = match[1];
+    if (allowTrailingPartial
+      && match.index + candidate.length === contents.length
+      && candidate.length < SCAN_CARRY_BYTES) {
+      continue;
+    }
+    const reviewed = path.posix.normalize(candidate) === candidate
+      && reviewedRoots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
+    if (!reviewed) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function credentialMaterialKind(contents, {
+  allowTrailingPartial = false,
+  exactReviewedBinary = false,
+  relative = "",
+} = {}) {
+  if (typeof contents !== "string") return "strict";
+  if (unreviewedPersonalPath(contents, relative, { allowTrailingPartial })
+    || STRICT_PRIVATE_SECRET.test(contents) || PLAIN_PRIVATE_SECRET.test(contents)) return "strict";
+  if (!exactReviewedBinary && GENERIC_TOKEN_SECRET.test(contents)) return "generic-token";
+  return null;
+}
+
+function forbiddenPathName(name) {
+  const normalized = name.toLowerCase();
+  return FORBIDDEN_SEGMENTS.has(normalized)
+    || /^\.env(?:\.|$)/.test(normalized)
+    || /^\.npmrc(?:\.|$)/.test(normalized)
+    || /(?:^|[-_. ])browser[-_. ]?profiles?(?:$|[-_. ])/.test(normalized)
+    || /(?:^|[-_.])bookmarks?(?:$|[-_.])/.test(normalized)
+    || /^local-permissions(?:\.|$)/.test(normalized)
+    || /^openbot-local(?:$|\.(?:db|json|sqlite|sqlite3))/.test(normalized)
+    || /^standalone-(?:conversations|transcripts)(?:\.|$)/.test(normalized)
+    || /(?:^|[-_.])(?:screenshots?|screen-shots?|frame)(?:[-_.0-9].*)?\.(?:png|jpe?g|webp)$/.test(normalized)
+    || /(?:^|[-_.])logs?(?:$|[-_.])/.test(normalized)
+    || /(?:^|[-_.])secrets?(?:$|[-_.])/.test(normalized)
+    || /(?:^|[-_.])(?:oauth[-_.]?)?tokens?(?:$|[-_.])/.test(normalized)
+    || /(?:^|[-_.])grants?(?:$|[-_.])/.test(normalized)
+    || /(?:^|[-_.])workspaces?(?:$|[-_.])/.test(normalized)
+    || /^user[ _.-]?data(?:$|\.(?:db|json|sqlite|sqlite3))/.test(normalized);
+}
 
 function sha256File(file) {
   const hash = crypto.createHash("sha256");
@@ -89,7 +148,7 @@ function collectManifestEntries(app) {
         walk(absolute);
       } else if (stat.isFile()) {
         entries.push(Object.freeze(relative === "Contents/MacOS/InstallCodexBot"
-          ? { path: relative, type: "signed-code" }
+          ? { path: relative, type: "signed-code", bytes: stat.size }
           : {
               path: relative,
               type: "file",
@@ -148,7 +207,8 @@ function loadInstallerManifest(app) {
       }
     } else if (entry.type === "signed-code") {
       if (entry.path !== "Contents/MacOS/InstallCodexBot"
-        || Object.keys(entry).sort().join(",") !== "path,type") {
+        || Object.keys(entry).sort().join(",") !== "bytes,path,type"
+        || !Number.isSafeInteger(entry.bytes) || entry.bytes < 1) {
         fail("installer manifest is invalid");
       }
     } else {
@@ -160,7 +220,7 @@ function loadInstallerManifest(app) {
 }
 
 function scanFile(file, relative) {
-  if (REVIEWED_UPSTREAM_BINARIES.has(relative)) return;
+  const exactReviewedBinary = REVIEWED_UPSTREAM_BINARIES.has(relative);
   const descriptor = fs.openSync(file, "r");
   const buffer = Buffer.allocUnsafe(1024 * 1024 + 1024);
   let carry = 0;
@@ -169,10 +229,15 @@ function scanFile(file, relative) {
       const bytes = fs.readSync(descriptor, buffer, carry, 1024 * 1024, null);
       const length = carry + bytes;
       const contents = buffer.subarray(0, length).toString("latin1");
-      if (PERSONAL_PATH.test(contents)) fail(`personal absolute path found in ${relative}`);
-      if (PRIVATE_SECRET.test(contents)) fail(`credential material found in ${relative}`);
+      const allowTrailingPartial = bytes !== 0;
+      if (unreviewedPersonalPath(contents, relative, { allowTrailingPartial })) {
+        fail(`personal absolute path found in ${relative}`);
+      }
+      if (credentialMaterialKind(contents, { allowTrailingPartial, exactReviewedBinary, relative }) != null) {
+        fail(`credential material found in ${relative}`);
+      }
       if (bytes === 0) break;
-      carry = Math.min(1024, length);
+      carry = Math.min(SCAN_CARRY_BYTES, length);
       buffer.copyWithin(0, length - carry, length);
     }
   } finally {
@@ -220,15 +285,14 @@ function auditTree(root, options = {}) {
       if (stat.isDirectory()) {
         if (!special && expectedEntry.type !== "directory") fail(`installer member type mismatch: ${relative}`);
         if (!special) seen.add(relative);
-        const normalized = entry.name.toLowerCase();
-        if (FORBIDDEN_SEGMENTS.has(normalized)) fail(`development or user-state directory is forbidden: ${relative}`);
+        if (forbiddenPathName(entry.name)) fail(`development or user-state directory is forbidden: ${relative}`);
         walk(absolute);
         continue;
       }
       if (!stat.isFile()) fail(`unsupported filesystem entry: ${relative}`);
       if (!special) {
         if (expectedEntry.type === "signed-code") {
-          if (stat.size < 1) fail(`installer member mismatch: ${relative}`);
+          if (expectedEntry.bytes !== stat.size) fail(`installer member mismatch: ${relative}`);
         } else if (expectedEntry.type !== "file" || expectedEntry.bytes !== stat.size
           || expectedEntry.sha256 !== sha256File(absolute)) fail(`installer member mismatch: ${relative}`);
         seen.add(relative);
@@ -236,7 +300,7 @@ function auditTree(root, options = {}) {
       fileCount += 1;
       totalBytes += stat.size;
       const normalized = entry.name.toLowerCase();
-      if (FORBIDDEN_SEGMENTS.has(normalized) || FORBIDDEN_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
+      if (forbiddenPathName(entry.name) || FORBIDDEN_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
         fail(`development, credential, or user-state file is forbidden: ${relative}`);
       }
       if (containsBytes(absolute, localHome)) {
@@ -307,6 +371,7 @@ module.exports = {
   auditDmg,
   auditTree,
   containsBytes,
+  credentialMaterialKind,
   parseArgs,
   writeInstallerManifest,
 };

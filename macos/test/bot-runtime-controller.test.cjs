@@ -77,6 +77,7 @@ function forwardingStore(store, overrides = {}) {
     create: (...args) => store.create(...args),
     rename: (...args) => store.rename(...args),
     updateProfile: (...args) => store.updateProfile(...args),
+    advanceSetup: (...args) => store.advanceSetup(...args),
     updateRuntime: (...args) => store.updateRuntime(...args),
     runtimeTransaction: (...args) => store.runtimeTransaction(...args),
     isCurrentRuntimeCommit: (...args) => store.isCurrentRuntimeCommit(...args),
@@ -297,6 +298,86 @@ test("bot facade preserves literal New Bot identity and publishes frozen sanitiz
   }
   assert.throws(() => { botEvents[0].bot.name = "forged"; }, TypeError);
   assert.equal((await controller.readBot(created.botId)).name, "Nova");
+});
+
+test("bot facade publishes only exact monotonic setup-stage transactions", async (t) => {
+  const store = await temporaryStore(t);
+  const controller = new BotRuntimeController({ store, provider: unavailableProvider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const botEvents = [];
+  controller.on("bot-changed", (event) => botEvents.push(event.bot));
+
+  const created = await controller.createBot();
+  assert.equal(created.setupStage, "profile-model");
+  const computer = await controller.advanceSetup(created.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  });
+  assert.equal(computer.setupStage, "computer");
+  await assert.rejects(controller.advanceSetup(created.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  }), /changed|stale/i);
+  const complete = await controller.advanceSetup(created.botId, {
+    expectedStage: "computer",
+    nextStage: "complete",
+  });
+  assert.equal(complete.setupStage, "complete");
+  assert.equal(botEvents.at(-1).setupStage, "complete");
+  assertDeepFrozen(botEvents.at(-1));
+});
+
+test("a committed-uncertain setup stage is reread and published only at its exact successor", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-setup-stage-controller-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const syncFailure = controllableDirectorySyncFailure(directory);
+  const store = new BotStore({
+    filePath: path.join(directory, "bots.json"),
+    fs: syncFailure.fs,
+    now: () => NOW,
+  });
+  const controller = new BotRuntimeController({ store, provider: unavailableProvider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const created = await controller.createBot();
+  const events = [];
+  controller.on("bot-changed", (event) => events.push(event.bot));
+
+  syncFailure.arm();
+  const recovered = await controller.advanceSetup(created.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  });
+  assert.equal(syncFailure.failures(), 1);
+  assert.equal(recovered.setupStage, "computer");
+  assert.equal(events.length, 1);
+  assert.equal(events[0].setupStage, "computer");
+  assertDeepFrozen(events[0]);
+});
+
+test("the bot controller carries an authoritative setup fence into the store transaction", async (t) => {
+  const base = await temporaryStore(t);
+  const current = await base.create();
+  const calls = [];
+  const store = forwardingStore(base, {
+    async advanceSetup(botId, transition, fence) {
+      calls.push([botId, transition, fence]);
+      fence(current);
+      return base.advanceSetup(botId, transition);
+    },
+  });
+  const controller = new BotRuntimeController({ store, provider: unavailableProvider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  let fenced = 0;
+  const result = await controller.advanceSetup(current.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  }, (bot) => {
+    fenced += 1;
+    assert.equal(bot, current);
+  });
+  assert.equal(result.setupStage, "computer");
+  assert.equal(fenced, 1);
+  assert.equal(calls.length, 1);
 });
 
 test("false provider capabilities fail closed without calling provision or local transport", async (t) => {

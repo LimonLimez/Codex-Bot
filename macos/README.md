@@ -34,10 +34,19 @@ Claude choices add a local `Ultra Code` presentation mode that reuses the
 approved Ultra animation and maps explicitly to the upstream `max` reasoning
 level; it is not sent as an invented provider value.
 
-Every Work bot requires its own explicitly configured and authorized remote
-runtime. When that provider is unavailable, the app reports that state and
-disables the affected action; there is no local computer, on-device browser, or
-shared-machine fallback.
+Computer access is an explicit per-bot choice during normal bot setup. A user
+can choose Free Local Desktop, configure a supported remote runtime, or choose
+Not Now. Free Local Desktop creates a dedicated Electron Chromium desktop and
+private browser partition for that bot on this Mac; it does not use a normal
+Chrome or Safari profile and is not represented as a cloud VM. File, shell, and
+other local actions go through the requesting bot's permission prompts and
+bot-scoped task workspace.
+
+A remote bot still requires its own explicitly configured and authorized
+remote runtime. When that provider is unavailable, the app reports that state
+and disables the affected action. OpenBot never silently substitutes Free
+Local Desktop, a shared machine, or another provider for the computer choice
+the user made.
 
 ## Compatibility and migration
 

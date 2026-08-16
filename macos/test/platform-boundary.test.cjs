@@ -93,7 +93,8 @@ test("macOS documentation and ignores preserve the distribution boundary", () =>
   assert.match(readme, /Windows.*unchanged/is);
   assert.match(readme, /Grok Bot 0\.20\.0/);
   assert.match(readme, /does not contain.*Grok Bot/is);
-  assert.match(readme, /no local.*fallback/is);
+  assert.match(readme, /Free Local Desktop.*dedicated Electron Chromium/is);
+  assert.match(readme, /never silently substitutes\s+Free\s+Local Desktop/is);
   assert.match(readme, /Codex 0\.147\.0/);
   assert.match(readme, /CLIProxyAPI 7\.2\.132/);
   assert.match(readme, /official Codex\s+account.*without.*ChatGPT\.app/is);
@@ -102,6 +103,8 @@ test("macOS documentation and ignores preserve the distribution boundary", () =>
   const privacy = fs.readFileSync(path.join(macRoot, "PRIVACY.md"), "utf8");
   assert.match(privacy, /official Codex\s+account.*OpenAI/is);
   assert.match(privacy, /CLIProxyAPI.*optional/is);
+  assert.match(privacy, /Free Local Desktop.*private\s+per-bot browser partition/is);
+  assert.match(privacy, /never\s+silently switches.*Free Local Desktop/is);
   assert.doesNotMatch(privacy, /Connecting a Codex.*CLIProxyAPI/is);
 
   const ignore = fs.readFileSync(path.join(macRoot, ".gitignore"), "utf8");

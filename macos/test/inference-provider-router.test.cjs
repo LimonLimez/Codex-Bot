@@ -96,6 +96,32 @@ test("Codex selections use only direct app-server and never create the optional 
   assert.doesNotMatch(JSON.stringify(calls), /credential|authToken|endpoint|CLIProxy|private/);
 });
 
+test("a private child workspace reaches only direct Codex and is never forwarded to optional providers", async () => {
+  const { InferenceProviderRouter } = require(routerPath);
+  const calls = [];
+  let current = selection();
+  const router = new InferenceProviderRouter({
+    readSelection: async () => current,
+    directTransport: transport("direct", calls),
+    createOptionalTransport: async () => transport("optional", calls),
+  });
+  const workspaceId = `workspace-${"b".repeat(64)}`;
+  const direct = await router.stream(request({ workspaceId }));
+  for await (const _event of direct.fullStream) {}
+  assert.equal(calls[0][0], "direct");
+  assert.equal(calls[0][1].workspaceId, workspaceId);
+
+  current = selection({
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "max",
+  });
+  const optional = await router.stream(request({ selection: current, workspaceId }));
+  for await (const _event of optional.fullStream) {}
+  assert.equal(calls[1][0], "optional");
+  assert.equal(typeof calls[1][1].workspaceId, "undefined");
+});
+
 test("reviewed Fable selections create one lazy optional transport and map Ultra Code upstream without changing storage", async () => {
   const { InferenceProviderRouter } = require(routerPath);
   const calls = [];

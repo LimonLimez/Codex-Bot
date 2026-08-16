@@ -125,6 +125,7 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/bridge/redaction.cjs",
         "dist/codex/bridge/runtime-config.cjs",
         "dist/codex/bridge/server.cjs",
+        "dist/codex/computer/computer-target-router.cjs",
         "dist/codex/desktop/cliproxy-inference-transport.cjs",
         "dist/codex/desktop/cliproxy-manager.cjs",
         "dist/codex/desktop/codex-account-controller.cjs",
@@ -133,9 +134,14 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/desktop/codex-runtime-integrity.cjs",
         "dist/codex/desktop/inference-bridge-server.cjs",
         "dist/codex/desktop/inference-provider-router.cjs",
+        "dist/codex/desktop/local-desktop-frame-ipc.cjs",
         "dist/codex/desktop/model-selection-store.cjs",
         "dist/codex/desktop/openbot-user-data.cjs",
         "dist/codex/desktop/runtime.cjs",
+        "dist/codex/desktop/standalone-conversation-controller.cjs",
+        "dist/codex/desktop/standalone-conversation-ipc.cjs",
+        "dist/codex/desktop/standalone-conversation-store.cjs",
+        "dist/codex/desktop/standalone-subagent-runner.cjs",
         "dist/codex/local/local-computer-boundary.cjs",
         "dist/codex/local/local-computer-runtime.cjs",
         "dist/codex/local/local-desktop-manager.cjs",
@@ -163,12 +169,17 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/node_modules/ws/lib/websocket.js",
         "dist/codex/node_modules/ws/package.json",
         "dist/codex/node_modules/ws/wrapper.mjs",
+        "dist/codex/renderer/chat-content.js",
         "dist/electron-main/main.cjs",
         "dist/electron-preload/preload.cjs",
         "dist/host/host-main.cjs",
         "dist/renderer/codex/bot-runtime-ui.js",
         "dist/renderer/codex/codex-ui.css",
         "dist/renderer/codex/model-controls.js",
+        "dist/renderer/codex/openbot-local-desktop-view.css",
+        "dist/renderer/codex/openbot-local-desktop-view.js",
+        "dist/renderer/codex/openbot-standalone-shell.css",
+        "dist/renderer/codex/openbot-standalone-shell.js",
         "dist/renderer/codex/reasoning-control.js",
         "dist/renderer/index.html",
         "package.json",
@@ -246,6 +257,16 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
   delete require.cache[require.resolve(remoteClientPath)];
   const remoteClient = require(remoteClientPath);
   assert.equal(typeof remoteClient.RemoteAppServerClient, "function");
+  const conversationRouterPath = path.join(
+    extracted,
+    "dist",
+    "codex",
+    "bots",
+    "conversation-router.cjs",
+  );
+  delete require.cache[require.resolve(conversationRouterPath)];
+  const conversationRouter = require(conversationRouterPath);
+  assert.equal(typeof conversationRouter.ConversationRouter, "function");
   assert.equal(
     JSON.parse(fs.readFileSync(path.join(extracted, "dist", "codex", "node_modules", "ws", "package.json"), "utf8")).version,
     "8.21.3",

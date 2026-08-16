@@ -2,6 +2,8 @@
 
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -208,6 +210,26 @@ test("official Codex streams through one ephemeral read-only app-server turn wit
   assert.match(manager.calls[1].params.input.map(({ text }) => text).join("\n"), /Conversation transcript/);
   assert.match(manager.calls[1].params.input.map(({ text }) => text).join("\n"), /Hello/);
   assert.doesNotMatch(JSON.stringify(manager.calls), /authToken|credential|CLIProxy|chat\/completions/);
+});
+
+test("native child workspace IDs select distinct private app-server working directories", async (t) => {
+  const { CodexDirectInferenceTransport } = require(transportPath);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-task-workspace-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const base = path.join(root, "empty-workspace");
+  fs.mkdirSync(base, { mode: 0o700 });
+  const manager = new FakeManager();
+  const transport = new CodexDirectInferenceTransport({ manager, workspacePath: base });
+  const workspaceId = `workspace-${"c".repeat(64)}`;
+
+  await collect(transport.stream(request({ workspaceId })).fullStream);
+  const cwd = manager.calls.find(({ method }) => method === "thread/start").params.cwd;
+  assert.equal(cwd, path.join(root, "task-workspaces", workspaceId));
+  const stat = fs.lstatSync(cwd);
+  assert.equal(stat.isDirectory(), true);
+  assert.equal(stat.isSymbolicLink(), false);
+  assert.equal(stat.mode & 0o077, 0);
+  assert.doesNotMatch(JSON.stringify(manager.calls), /native-child|taskId|taskProof/);
 });
 
 test("foreign notifications are ignored and manager or selection generation changes fail closed", async () => {

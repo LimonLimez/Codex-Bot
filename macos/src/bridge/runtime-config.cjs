@@ -50,21 +50,22 @@ function exactPlainObject(value) {
     fail();
   }
   let prototype;
+  let descriptors;
   let keys;
   try {
     prototype = Object.getPrototypeOf(value);
-    keys = Reflect.ownKeys(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    keys = Reflect.ownKeys(descriptors);
   } catch {
     fail();
   }
-  if (prototype !== Object.prototype || keys.some((key) => typeof key !== "string")) {
+  if (prototype !== Object.prototype || keys.some((key) => typeof key !== "string"
+    || !Object.hasOwn(descriptors[key], "value"))) {
     fail();
   }
   const names = keys;
-  if (
-    names.length !== CONFIG_KEYS.length ||
-    CONFIG_KEYS.some((key) => !names.includes(key))
-  ) {
+  if (names.length !== CONFIG_KEYS.length
+    || CONFIG_KEYS.some((key) => !names.includes(key))) {
     fail();
   }
 }

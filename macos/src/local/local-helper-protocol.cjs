@@ -170,6 +170,13 @@ function normalizeGeneration(value) {
   return value;
 }
 
+function normalizeTaskId(value) {
+  if (typeof value !== "string" || !SAFE_ID_PATTERN.test(value)) {
+    throw helperError("Local helper task is invalid.", "OPENBOT_LOCAL_HELPER_TASK_INVALID");
+  }
+  return value;
+}
+
 function normalizeRequest(value) {
   let cloned;
   try {
@@ -224,6 +231,65 @@ function normalizeReply(value) {
   return deepFreeze(reply);
 }
 
+function normalizeReplyIdentity(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("reply");
+    const prototype = Object.getPrototypeOf(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (prototype !== Object.prototype && prototype !== null) throw new Error("reply");
+    const ok = descriptors.ok;
+    const requestId = descriptors.requestId;
+    if (!ok || !("value" in ok) || typeof ok.value !== "boolean"
+      || !requestId || !("value" in requestId) || typeof requestId.value !== "string"
+      || !REQUEST_ID_PATTERN.test(requestId.value)) throw new Error("reply");
+    const allowed = ok.value ? SUCCESS_FIELDS : FAILURE_FIELDS;
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.length !== allowed.size || keys.some((key) => typeof key !== "string"
+      || !allowed.has(key) || !("value" in descriptors[key]))) throw new Error("reply");
+    if (!ok.value) {
+      const errorCode = descriptors.errorCode.value;
+      if (typeof errorCode !== "string" || !ERROR_CODE_PATTERN.test(errorCode)) throw new Error("reply");
+    }
+    return Object.freeze({ requestId: requestId.value.toLowerCase(), ok: ok.value });
+  } catch {
+    throw helperError("Local helper protocol failed.", "OPENBOT_LOCAL_HELPER_PROTOCOL_FAILED");
+  }
+}
+
+function normalizeShellReply(value) {
+  try {
+    const identity = normalizeReplyIdentity(value);
+    if (!identity.ok) return normalizeReply(value);
+    const top = Object.getOwnPropertyDescriptors(value);
+    const rawResult = top.value.value;
+    if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) throw new Error("result");
+    const prototype = Object.getPrototypeOf(rawResult);
+    const descriptors = Object.getOwnPropertyDescriptors(rawResult);
+    const fields = new Set(["exitCode", "stdout", "stderr"]);
+    const keys = Reflect.ownKeys(descriptors);
+    if ((prototype !== Object.prototype && prototype !== null) || keys.length !== fields.size
+      || keys.some((key) => typeof key !== "string" || !fields.has(key) || !("value" in descriptors[key]))) {
+      throw new Error("result");
+    }
+    const exitCode = descriptors.exitCode.value;
+    const stdout = descriptors.stdout.value;
+    const stderr = descriptors.stderr.value;
+    if (!Number.isSafeInteger(exitCode) || exitCode < 0 || exitCode > 255
+      || typeof stdout !== "string" || typeof stderr !== "string"
+      || Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8") > MAX_STRING_BYTES) {
+      throw new Error("result");
+    }
+    return deepFreeze({
+      requestId: identity.requestId,
+      ok: true,
+      value: { exitCode, stdout, stderr },
+    });
+  } catch (error) {
+    if (error instanceof LocalHelperError) throw error;
+    throw helperError("Local helper protocol failed.", "OPENBOT_LOCAL_HELPER_PROTOCOL_FAILED");
+  }
+}
+
 function assertCurrent(request, current) {
   let valid = false;
   try {
@@ -247,8 +313,11 @@ class LocalHelperProtocol extends EventEmitter {
   #setTimer;
   #clearTimer;
   #pending = new Map();
+  #operations = new Map();
   #unsubscribeMessage;
   #unsubscribeExit;
+  #disposePromise = null;
+  #disposing = false;
   #disposed = false;
 
   constructor({
@@ -259,7 +328,7 @@ class LocalHelperProtocol extends EventEmitter {
     clearTimer = clearTimeout,
   } = {}) {
     super();
-    if (!transport || typeof transport.send !== "function"
+    if (!transport || typeof transport.send !== "function" || typeof transport.cancel !== "function"
       || typeof transport.onMessage !== "function" || typeof transport.onExit !== "function"
       || typeof transport.dispose !== "function") {
       throw new TypeError("Local helper protocol requires a bounded transport.");
@@ -287,62 +356,144 @@ class LocalHelperProtocol extends EventEmitter {
   async run(value) {
     this.#assertActive();
     const request = normalizeRequest(value);
-    await this.#assertCurrent(request);
-    this.#assertActive();
-    if (this.#pending.has(request.requestId)) {
+    if (this.#operations.has(request.requestId) || this.#pending.has(request.requestId)) {
       throw helperError("Local helper request is already pending.", "OPENBOT_LOCAL_HELPER_DUPLICATE");
     }
 
-    let resolvePending;
-    let rejectPending;
-    const pending = new Promise((resolve, reject) => {
-      resolvePending = resolve;
-      rejectPending = reject;
-    });
-    const timer = this.#setTimer(() => {
-      if (!this.#pending.has(request.requestId)) return;
-      this.#terminate(helperError("Local helper operation timed out.", "OPENBOT_LOCAL_HELPER_TIMEOUT"));
-    }, this.#timeoutMs);
-    this.#pending.set(request.requestId, {
+    let finishOperation;
+    const operation = {
       request,
-      resolve: resolvePending,
-      reject: rejectPending,
-      timer,
-    });
+      cancelled: false,
+      cancelSent: false,
+      phase: "checking",
+      done: new Promise((resolve) => { finishOperation = resolve; }),
+      finish: () => finishOperation(),
+    };
+    this.#operations.set(request.requestId, operation);
+
     try {
-      await this.#transport.send(request);
       await this.#assertCurrent(request);
       this.#assertActive();
-    } catch (error) {
-      const failure = error instanceof LocalHelperError
-        ? error
-        : helperError("Local helper send failed.", "OPENBOT_LOCAL_HELPER_SEND_FAILED");
-      this.#settle(request.requestId, failure, true);
+      this.#assertOperationActive(operation);
+
+      let resolvePending;
+      let rejectPending;
+      const pending = new Promise((resolve, reject) => {
+        resolvePending = resolve;
+        rejectPending = reject;
+      });
+      const timer = this.#setTimer(() => {
+        if (!this.#pending.has(request.requestId)) return;
+        this.#terminate(helperError("Local helper operation timed out.", "OPENBOT_LOCAL_HELPER_TIMEOUT"));
+      }, this.#timeoutMs);
+      this.#pending.set(request.requestId, {
+        request,
+        operation,
+        resolve: resolvePending,
+        reject: rejectPending,
+        timer,
+      });
+      try {
+        operation.phase = "sending";
+        await this.#transport.send(request);
+        operation.phase = "pending";
+        if (operation.cancelled) await this.#cancelOperation(operation);
+        else {
+          await this.#assertCurrent(request);
+          this.#assertActive();
+        }
+      } catch (error) {
+        const failure = error instanceof LocalHelperError
+          ? error
+          : helperError("Local helper send failed.", "OPENBOT_LOCAL_HELPER_SEND_FAILED");
+        this.#settle(request.requestId, failure, true);
+      }
+      return await pending;
+    } finally {
+      if (this.#operations.get(request.requestId) === operation) this.#operations.delete(request.requestId);
+      operation.finish();
     }
-    return pending;
+  }
+
+  async cancelTask(value) {
+    this.#assertActive();
+    const taskId = normalizeTaskId(value);
+    const matches = [...this.#operations.values()]
+      .filter((operation) => operation.request.taskId === taskId);
+    for (const operation of matches) operation.cancelled = true;
+    try {
+      for (const operation of matches) {
+        if (operation.phase === "pending") await this.#cancelOperation(operation);
+      }
+    } catch {
+      const failure = helperError("Local helper cancellation failed.", "OPENBOT_LOCAL_HELPER_CANCEL_FAILED");
+      this.#terminate(failure);
+      throw failure;
+    }
+    await Promise.all(matches.map((operation) => operation.done));
   }
 
   dispose() {
-    this.#terminate(helperError("Local helper protocol is disposed.", "OPENBOT_LOCAL_HELPER_DISPOSED"));
+    if (this.#disposePromise) return this.#disposePromise;
+    if (this.#disposed) return Promise.resolve();
+    this.#disposing = true;
+    const operations = [...this.#operations.values()];
+    for (const operation of operations) operation.cancelled = true;
+    this.#disposePromise = (async () => {
+      try {
+        for (const operation of operations) {
+          if (operation.phase === "pending") await this.#cancelOperation(operation);
+        }
+        await Promise.all(operations.map((operation) => operation.done));
+      } catch {
+        this.#terminate(helperError("Local helper disposal failed.", "OPENBOT_LOCAL_HELPER_DISPOSED"));
+        return;
+      }
+      this.#terminate(helperError("Local helper protocol is disposed.", "OPENBOT_LOCAL_HELPER_DISPOSED"));
+    })();
+    return this.#disposePromise;
   }
 
   async #receive(value) {
     if (this.#disposed) return;
+    let identity;
     let reply;
     try {
-      reply = normalizeReply(value);
+      identity = normalizeReplyIdentity(value);
     } catch (error) {
       this.#terminate(error);
       return;
     }
-    const pending = this.#pending.get(reply.requestId);
+    const pending = this.#pending.get(identity.requestId);
     if (!pending) {
       this.#terminate(helperError("Local helper protocol failed.", "OPENBOT_LOCAL_HELPER_PROTOCOL_FAILED"));
       return;
     }
     try {
+      reply = pending.request.operation === "shell.execute" && identity.ok
+        ? normalizeShellReply(value)
+        : normalizeReply(value);
+    } catch (error) {
+      this.#terminate(error);
+      return;
+    }
+    // A correlated terminal reply for an operation we cancelled is the helper's
+    // process-group acknowledgement. The owning Computer may already have been
+    // removed while close or generation replacement waits for that acknowledgement.
+    if (pending.operation.cancelled) {
+      const code = !reply.ok && reply.errorCode === "OPENBOT_LOCAL_CANCELLED"
+        ? reply.errorCode
+        : "OPENBOT_LOCAL_HELPER_CANCELLED";
+      this.#settle(
+        reply.requestId,
+        helperError("Local helper task was cancelled.", code),
+        true,
+      );
+      return;
+    }
+    try {
       await this.#assertCurrent(pending.request);
-      this.#assertActive();
+      this.#assertNotDisposed();
     } catch (error) {
       this.#settle(reply.requestId, error, true);
       return;
@@ -356,14 +507,14 @@ class LocalHelperProtocol extends EventEmitter {
   }
 
   async #assertCurrent(request) {
-    this.#assertActive();
+    this.#assertNotDisposed();
     let current;
     try {
       current = await this.#readCurrentComputer(request.botId);
     } catch {
       throw helperError("Local helper request is stale.", "OPENBOT_LOCAL_HELPER_STALE");
     }
-    this.#assertActive();
+    this.#assertNotDisposed();
     assertCurrent(request, current);
   }
 
@@ -382,6 +533,7 @@ class LocalHelperProtocol extends EventEmitter {
 
   #terminate(error) {
     if (this.#disposed) return;
+    this.#disposing = true;
     this.#disposed = true;
     this.#failAll(error);
     try { this.#unsubscribeMessage?.(); } catch {}
@@ -396,9 +548,27 @@ class LocalHelperProtocol extends EventEmitter {
   }
 
   #assertActive() {
+    if (this.#disposed || this.#disposing) {
+      throw helperError("Local helper protocol is disposed.", "OPENBOT_LOCAL_HELPER_DISPOSED");
+    }
+  }
+
+  #assertNotDisposed() {
     if (this.#disposed) {
       throw helperError("Local helper protocol is disposed.", "OPENBOT_LOCAL_HELPER_DISPOSED");
     }
+  }
+
+  #assertOperationActive(operation) {
+    if (operation.cancelled) {
+      throw helperError("Local helper task was cancelled.", "OPENBOT_LOCAL_HELPER_CANCELLED");
+    }
+  }
+
+  async #cancelOperation(operation) {
+    if (operation.cancelSent || !this.#pending.has(operation.request.requestId)) return;
+    operation.cancelSent = true;
+    await this.#transport.cancel(operation.request.requestId);
   }
 }
 

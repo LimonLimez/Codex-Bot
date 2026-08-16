@@ -37,7 +37,13 @@
         lastConfirmedAt: localComputerEvidence ? "2026-08-15T12:34:56.000Z" : null,
         lastErrorCode: null,
       });
-      const bot = Object.freeze({ botId: BOT_ID, name: "New Bot", runtime: Object.freeze({ state: "ready" }), computer });
+      let bot = Object.freeze({
+        botId: BOT_ID,
+        name: "New Bot",
+        setupStage: "complete",
+        runtime: Object.freeze({ state: "ready" }),
+        computer,
+      });
       const requestedPower = params.get("effort") || "medium";
       const requestedEffort = requestedPower === "terra-light" || requestedPower === "sol-light"
         ? "low"
@@ -60,8 +66,33 @@
       });
       window.codexBots = Object.freeze({
         async list() { return [bot]; },
-        async create() { return bot; },
-        async rename(_botId, name) { return Object.freeze({ ...bot, name }); },
+        async create() {
+          bot = Object.freeze({
+            botId: BOT_ID,
+            name: "New Bot",
+            setupStage: "profile-model",
+            runtime: Object.freeze({ state: "ready" }),
+            computer,
+          });
+          return bot;
+        },
+        async rename(_botId, name) {
+          bot = Object.freeze({ ...bot, name });
+          return bot;
+        },
+        async updateProfile(_botId, profile) {
+          bot = Object.freeze({ ...bot, appearance: Object.freeze({ ...profile.appearance }) });
+          return bot;
+        },
+        async advanceSetup({ botId, expectedStage, nextStage }) {
+          const allowed = expectedStage === "profile-model" && nextStage === "computer"
+            || expectedStage === "computer" && nextStage === "complete";
+          if (botId !== BOT_ID || bot.setupStage !== expectedStage || !allowed) {
+            throw new Error("Fixture setup stage changed.");
+          }
+          bot = Object.freeze({ ...bot, setupStage: nextStage });
+          return bot;
+        },
         async retryRuntime() { return bot; },
         onChanged() { return () => {}; },
       });

@@ -196,6 +196,7 @@ class BotRuntimeController extends EventEmitter {
     super();
     if (!store
       || typeof store.create !== "function"
+      || typeof store.advanceSetup !== "function"
       || typeof store.updateRuntime !== "function"
       || typeof store.runtimeTransaction !== "function"
       || typeof store.isCurrentRuntimeCommit !== "function") {
@@ -257,6 +258,27 @@ class BotRuntimeController extends EventEmitter {
 
   async updateProfile(botId, profile) {
     const bot = await this.#store.updateProfile(botId, profile);
+    this.#publishBot(bot);
+    return publicBot(bot);
+  }
+
+  async advanceSetup(botId, transition, commitFence = undefined) {
+    let expectedNextStage = null;
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(transition, "nextStage");
+      if (descriptor && "value" in descriptor
+        && new Set(["computer", "complete"]).has(descriptor.value)) {
+        expectedNextStage = descriptor.value;
+      }
+    } catch {}
+    let bot;
+    try {
+      bot = await this.#store.advanceSetup(botId, transition, commitFence);
+    } catch (error) {
+      if (!isCommittedDurabilityUncertain(error) || expectedNextStage === null) throw error;
+      bot = await this.#store.read(botId);
+      if (!bot || bot.setupStage !== expectedNextStage) throw error;
+    }
     this.#publishBot(bot);
     return publicBot(bot);
   }

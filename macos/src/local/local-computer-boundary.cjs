@@ -200,6 +200,7 @@ class LocalComputerBoundary extends EventEmitter {
   #now;
   #randomUUID;
   #queues = new Map();
+  #disposePromise = null;
   #disposed = false;
   #onPermission;
 
@@ -316,13 +317,17 @@ class LocalComputerBoundary extends EventEmitter {
   }
 
   dispose() {
-    if (this.#disposed) return;
+    if (this.#disposePromise) return this.#disposePromise;
+    if (this.#disposed) return Promise.resolve();
     this.#disposed = true;
     this.#broker.off?.("request", this.#onPermission);
     this.#queues.clear();
     this.removeAllListeners();
-    try { this.#manager.dispose(); } catch {}
-    try { this.#broker.dispose(); } catch {}
+    this.#disposePromise = (async () => {
+      try { await this.#manager.dispose(); } catch {}
+      try { await this.#broker.dispose(); } catch {}
+    })();
+    return this.#disposePromise;
   }
 
   async #selectLocal(record, generation) {

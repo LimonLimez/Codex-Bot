@@ -178,6 +178,95 @@ test("desktop production startup selects the migrated OpenBot path before depend
   assert.equal(fs.readFileSync(path.join(target, "Preferences"), "utf8"), "legacy-preferences");
 });
 
+test("an exact acceptance flag isolates app data while preserving the real account home", (t) => {
+  const appDataPath = fs.realpathSync(fixture(t));
+  fs.chmodSync(appDataPath, 0o700);
+  const calls = [];
+  const electron = {
+    app: {
+      getPath(name) {
+        calls.push(["getPath", name]);
+        throw new Error("personal appData must not be read");
+      },
+      setPath(name, value) { calls.push(["setPath", name, value]); },
+    },
+  };
+  const runtimePath = path.join(__dirname, "..", "src", "desktop", "runtime.cjs");
+  delete require.cache[require.resolve(runtimePath)];
+  const { prepareProductionUserData } = require(runtimePath);
+  const accountEnvironment = {
+    HOME: process.env.HOME,
+    CODEX_HOME: process.env.CODEX_HOME,
+  };
+  const receipt = prepareProductionUserData(electron, publisherPath, {
+    argv: ["OpenBot", `--openbot-acceptance-app-data=${appDataPath}`],
+    currentUid: process.getuid(),
+    fsApi: fs,
+    tempDirectory: fs.realpathSync(os.tmpdir()),
+  });
+
+  assert.equal(receipt.userDataPath, path.join(appDataPath, "OpenBot"));
+  assert.deepEqual(calls, [["setPath", "userData", path.join(appDataPath, "OpenBot")]]);
+  assert.deepEqual({ HOME: process.env.HOME, CODEX_HOME: process.env.CODEX_HOME }, accountEnvironment);
+});
+
+test("malformed acceptance app-data intent fails before personal appData fallback", async (t) => {
+  const root = fs.realpathSync(fixture(t));
+  fs.chmodSync(root, 0o700);
+  const good = path.join(root, "good");
+  const loose = path.join(root, "loose");
+  const file = path.join(root, "file");
+  const parent = path.join(root, "parent");
+  const linkedParent = path.join(root, "linked-parent");
+  fs.mkdirSync(good, { mode: 0o700 });
+  fs.mkdirSync(loose, { mode: 0o755 });
+  fs.writeFileSync(file, "not a directory", { mode: 0o600 });
+  fs.mkdirSync(parent, { mode: 0o700 });
+  fs.mkdirSync(path.join(parent, "child"), { mode: 0o700 });
+  fs.symlinkSync(parent, linkedParent);
+  const outside = fs.realpathSync(process.cwd());
+  const runtimePath = path.join(__dirname, "..", "src", "desktop", "runtime.cjs");
+  delete require.cache[require.resolve(runtimePath)];
+  const { prepareProductionUserData } = require(runtimePath);
+  const invalidCases = [
+    { argv: ["OpenBot", "--openbot-acceptance-app-data"], currentUid: process.getuid() },
+    { argv: ["OpenBot", "--openbot-acceptance-app-data="], currentUid: process.getuid() },
+    { argv: ["OpenBot", "--openbot-acceptance-app-data=relative"], currentUid: process.getuid() },
+    { argv: ["OpenBot", `--openbot-acceptance-app-data=${outside}`], currentUid: process.getuid() },
+    { argv: ["OpenBot", `--openbot-acceptance-app-data=${file}`], currentUid: process.getuid() },
+    { argv: ["OpenBot", `--openbot-acceptance-app-data=${loose}`], currentUid: process.getuid() },
+    { argv: ["OpenBot", `--openbot-acceptance-app-data=${linkedParent}/child`], currentUid: process.getuid() },
+    { argv: ["OpenBot", `--openbot-acceptance-app-data=${good}`, `--openbot-acceptance-app-data=${good}`], currentUid: process.getuid() },
+    { argv: ["OpenBot", `--openbot-acceptance-app-data=${good}`], currentUid: process.getuid() + 1 },
+  ];
+  const overriddenIntentScan = ["OpenBot", `--openbot-acceptance-app-data=${good}`];
+  Object.defineProperty(overriddenIntentScan, "some", {
+    configurable: false,
+    enumerable: false,
+    value: () => false,
+    writable: false,
+  });
+  invalidCases.push({ argv: overriddenIntentScan, currentUid: process.getuid() });
+
+  for (const invalid of invalidCases) {
+    await t.test(invalid.argv.join(" "), () => {
+      let appDataReads = 0;
+      const electron = {
+        app: {
+          getPath() { appDataReads += 1; return root; },
+          setPath() { throw new Error("invalid acceptance path must not be selected"); },
+        },
+      };
+      assert.throws(() => prepareProductionUserData(electron, publisherPath, {
+        ...invalid,
+        fsApi: fs,
+        tempDirectory: fs.realpathSync(os.tmpdir()),
+      }), { code: "OPENBOT_USER_DATA_MIGRATION_FAILED" });
+      assert.equal(appDataReads, 0);
+    });
+  }
+});
+
 test("a file replaced by a symlink between inspection and copy can never cross into OpenBot", (t) => {
   const appDataPath = fixture(t);
   const legacy = path.join(appDataPath, "Codex Bot");

@@ -54,7 +54,7 @@ async function temporaryStore(t, options = {}) {
 
 function expectedBot(overrides = {}) {
   const base = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     botId: `bot-${BOT_A_UUID}`,
     name: "New Bot",
     appearance: {
@@ -76,6 +76,7 @@ function expectedBot(overrides = {}) {
       lastErrorCode: null,
     },
     computer: expectedComputer(),
+    setupStage: "profile-model",
   };
   return {
     ...base,
@@ -87,7 +88,7 @@ function expectedBot(overrides = {}) {
 }
 
 function validStoreDocument(bots = [], legacyImports = {}) {
-  return { schemaVersion: 2, bots, legacyImports };
+  return { schemaVersion: 3, bots, legacyImports };
 }
 
 function expectedComputer(overrides = {}) {
@@ -104,12 +105,21 @@ function expectedComputer(overrides = {}) {
 }
 
 function expectedV1Bot(overrides = {}) {
-  const { computer: _computer, ...bot } = expectedBot(overrides);
+  const { computer: _computer, setupStage: _setupStage, ...bot } = expectedBot(overrides);
   return { ...bot, schemaVersion: 1 };
+}
+
+function expectedV2Bot(overrides = {}) {
+  const { setupStage: _setupStage, ...bot } = expectedBot(overrides);
+  return { ...bot, schemaVersion: 2 };
 }
 
 function validV1StoreDocument(bots = [], legacyImports = {}) {
   return { schemaVersion: 1, bots, legacyImports };
+}
+
+function validV2StoreDocument(bots = [], legacyImports = {}) {
+  return { schemaVersion: 2, bots, legacyImports };
 }
 
 async function writeDocument(filePath, document) {
@@ -177,8 +187,111 @@ test("schema v1 migrates to an explicit not-now Computer target", async (t) => {
   const renamed = await store.rename(bot.botId, "Migrated Bot");
   const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
   assert.equal(renamed.name, "Migrated Bot");
-  assert.equal(persisted.schemaVersion, 2);
+  assert.equal(persisted.schemaVersion, 3);
   assert.deepEqual(persisted.bots[0].computer, expectedComputer());
+  assert.equal(persisted.bots[0].setupStage, "complete");
+});
+
+test("setup stage distinguishes fresh setup from migrated and adopted existing bots", async (t) => {
+  const v1 = await temporaryStore(t);
+  await writeDocument(v1.filePath, validV1StoreDocument([expectedV1Bot()]));
+  assert.equal((await v1.store.read(`bot-${BOT_A_UUID}`)).setupStage, "complete");
+
+  const v2 = await temporaryStore(t);
+  await writeDocument(v2.filePath, validV2StoreDocument([expectedV2Bot()]));
+  assert.equal((await v2.store.read(`bot-${BOT_A_UUID}`)).setupStage, "complete");
+
+  const fresh = await temporaryStore(t);
+  assert.equal((await fresh.store.create()).setupStage, "profile-model");
+  const adopted = await fresh.store.adoptLegacy({
+    migrationKey: "existing-profile",
+    name: "Existing Bot",
+    appearance: { shape: "gem", color: "blue" },
+    notifications: true,
+    conversations: [],
+  });
+  assert.equal(adopted.setupStage, "complete");
+});
+
+test("setup stage advances only through exact monotonic expected-stage transactions", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const created = await store.create();
+  assert.equal(created.setupStage, "profile-model");
+
+  const computer = await store.advanceSetup(created.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  });
+  assert.equal(computer.setupStage, "computer");
+  await assert.rejects(store.advanceSetup(created.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  }), /setup stage.*changed|stale/i);
+  await assert.rejects(store.advanceSetup(created.botId, {
+    expectedStage: "computer",
+    nextStage: "profile-model",
+  }), /monotonic|transition/i);
+  await assert.rejects(store.advanceSetup(created.botId, {
+    expectedStage: "computer",
+    nextStage: "computer",
+  }), /monotonic|transition/i);
+
+  const competing = new BotStore({ filePath, now: () => NOW, randomUUID: sequence([TEMP_C_UUID]) });
+  const outcomes = await Promise.allSettled([
+    store.advanceSetup(created.botId, { expectedStage: "computer", nextStage: "complete" }),
+    competing.advanceSetup(created.botId, { expectedStage: "computer", nextStage: "complete" }),
+  ]);
+  assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 1);
+  assert.equal(outcomes.filter(({ status }) => status === "rejected").length, 1);
+  assert.equal((await store.read(created.botId)).setupStage, "complete");
+
+  const hostile = new Proxy({}, {
+    getPrototypeOf() { throw new Error("/Users/private token=secret"); },
+  });
+  await assert.rejects(store.advanceSetup(created.botId, hostile), (error) => (
+    /plain data|setup transition/i.test(error?.message)
+      && !/Users|token|secret/i.test(error?.message)
+  ));
+});
+
+test("a failed setup-stage commit rolls back without changing the durable stage", async (t) => {
+  const base = await temporaryStore(t);
+  const created = await base.store.create();
+  const failingFs = {
+    ...fs,
+    rename: async () => {
+      const error = new Error("forced setup transaction rename failure");
+      error.code = "EIO";
+      throw error;
+    },
+  };
+  const failing = new BotStore({
+    filePath: base.filePath,
+    fs: failingFs,
+    now: () => NOW,
+    randomUUID: sequence([TEMP_C_UUID]),
+  });
+  await assert.rejects(failing.advanceSetup(created.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  }), /forced setup transaction rename failure/);
+  assert.equal((await base.store.read(created.botId)).setupStage, "profile-model");
+});
+
+test("a setup-stage commit fence rejects inside the serialized transition without advancing", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create();
+  let inspected = null;
+  await assert.rejects(store.advanceSetup(created.botId, {
+    expectedStage: "profile-model",
+    nextStage: "computer",
+  }, (current) => {
+    inspected = current;
+    throw new Error("authoritative setup receipt changed");
+  }), /authoritative setup receipt changed/);
+  assert.equal(inspected.botId, created.botId);
+  assert.equal(inspected.setupStage, "profile-model");
+  assert.equal((await store.read(created.botId)).setupStage, "profile-model");
 });
 
 test("Computer selection is exact monotonic and rejects hostile patches", async (t) => {
@@ -216,6 +329,34 @@ test("Computer selection is exact monotonic and rejects hostile patches", async 
       && !/secret-path-token/i.test(error?.message),
   );
   assert.deepEqual((await store.read(created.botId)).computer, selected.computer);
+});
+
+test("Computer local profile ownership is unique across bot updates and failed mutation is atomic", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const first = await store.create();
+  const second = await store.create();
+  const localProfileId = "local-11111111-1111-4111-8111-111111111111";
+  await store.updateComputer(first.botId, {
+    mode: "local",
+    generation: 1,
+    localProfileId,
+    nativeAgentId: null,
+    state: "starting",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+  });
+  const before = await fs.readFile(filePath, "utf8");
+  await assert.rejects(store.updateComputer(second.botId, {
+    mode: "local",
+    generation: 1,
+    localProfileId: localProfileId.toUpperCase(),
+    nativeAgentId: null,
+    state: "starting",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+  }), /duplicate local profile/i);
+  assert.equal(await fs.readFile(filePath, "utf8"), before);
+  assert.deepEqual((await store.read(second.botId)).computer, expectedComputer());
 });
 
 test("create stores a stable literal New Bot and ignores caller-owned identity", async (t) => {
@@ -1038,7 +1179,7 @@ test("failed atomic rename preserves the destination and cleans only its owned t
 test("load rejects malformed versions, keys, timestamps, states, and polluted records", async (t) => {
   const { filePath } = await temporaryStore(t);
   const cases = [
-    ["unsupported version", { schemaVersion: 3, bots: [], legacyImports: {} }, /schema version/i],
+    ["unsupported version", { schemaVersion: 4, bots: [], legacyImports: {} }, /schema version/i],
     ["unknown root key", { schemaVersion: 1, bots: [], legacyImports: {}, endpoint: "wss://private" }, /unsupported store field/i],
     ["duplicate bot ID", validStoreDocument([expectedBot(), expectedBot()]), /duplicate bot IDs/i],
     ["invalid timestamp", validStoreDocument([expectedBot({ updatedAt: "today" })]), /timestamp/i],
@@ -1103,6 +1244,35 @@ test("load rejects duplicate remote runtimes and conversation ownership", async 
   second.conversations = [{ source: "chatgpt", conversationId: "chat-shared" }];
   await writeDocument(filePath, validStoreDocument([first, second]));
   await assert.rejects(new BotStore({ filePath }).load(), /conversation.*another bot|duplicate conversation/i);
+});
+
+test("load, v2 migration, and create reject duplicate non-null local profile ownership", async (t) => {
+  const localProfileId = "local-11111111-1111-4111-8111-111111111111";
+  const localComputer = expectedComputer({
+    mode: "local",
+    generation: 1,
+    localProfileId,
+    state: "starting",
+  });
+  const duplicateBots = [
+    expectedBot({ botId: `bot-${BOT_A_UUID}`, computer: localComputer }),
+    expectedBot({
+      botId: `bot-${BOT_B_UUID}`,
+      computer: { ...localComputer, localProfileId: localProfileId.toUpperCase() },
+    }),
+  ];
+
+  const current = await temporaryStore(t);
+  await writeDocument(current.filePath, validStoreDocument(duplicateBots));
+  const beforeCreate = await fs.readFile(current.filePath, "utf8");
+  await assert.rejects(current.store.load(), /duplicate local profile/i);
+  await assert.rejects(current.store.create(), /duplicate local profile/i);
+  assert.equal(await fs.readFile(current.filePath, "utf8"), beforeCreate);
+
+  const previous = await temporaryStore(t);
+  await writeDocument(previous.filePath, validV2StoreDocument(duplicateBots.map(expectedV2Bot)));
+  await assert.rejects(previous.store.load(), /duplicate local profile/i);
+  assert.equal((JSON.parse(await fs.readFile(previous.filePath, "utf8"))).schemaVersion, 2);
 });
 
 test("adoptLegacy is idempotent, preserves allowed data, and survives later profile changes", async (t) => {

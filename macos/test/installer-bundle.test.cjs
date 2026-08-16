@@ -4,9 +4,32 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const childProcess = require("node:child_process");
 const test = require("node:test");
 
 const scriptPath = path.join(__dirname, "..", "scripts", "build-installer-app.cjs");
+
+function relativeFiles(root) {
+  const files = [];
+  const walk = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) walk(absolute);
+      else if (entry.isFile()) files.push(path.relative(root, absolute).split(path.sep).join("/"));
+      else assert.fail(`unsupported staged entry: ${absolute}`);
+    }
+  };
+  walk(root);
+  return files.sort();
+}
+
+function git(root, args) {
+  return childProcess.execFileSync("/usr/bin/git", args, {
+    cwd: root,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  }).trim();
+}
 
 test("installer builder pins the sidecar and refuses ad-hoc release packaging", () => {
   const {
@@ -75,6 +98,140 @@ test("installer bundles the macOS privacy notice instead of Windows release poli
   assert.match(bundledNotice, /Codex 0\.147\.0/);
   assert.match(bundledNotice, /CLIProxyAPI 7\.2\.132/);
   assert.doesNotMatch(bundledNotice, /Windows|0\.18\.0/);
+});
+
+test("installer stages only the exact exported patcher source script and asset closures", (t) => {
+  const {
+    PATCHER_ASSET_FILES,
+    PATCHER_SCRIPT_FILES,
+    PATCHER_SOURCE_FILES,
+    stagePatcherPayload,
+  } = require(scriptPath);
+  assert.equal(typeof stagePatcherPayload, "function");
+  assert.deepEqual(PATCHER_SCRIPT_FILES, [
+    "audit-grok-contract.cjs",
+    "patch-app.cjs",
+    "verify-vendor-app.cjs",
+  ]);
+  assert.deepEqual(PATCHER_ASSET_FILES, [
+    "grok-bot-0.20.0-contract.json",
+    "grok-bot-0.20.0-darwin-arm64.manifest.json",
+  ]);
+  assert.deepEqual(PATCHER_SOURCE_FILES, [
+    "bots/bot-store.cjs",
+    "bots/chatgpt-relay-codec.cjs",
+    "bots/conversation-router.cjs",
+    "bots/remote-app-server-client.cjs",
+    "bots/runtime-controller.cjs",
+    "bots/runtime-provider.cjs",
+    "bridge/codex-client.cjs",
+    "bridge/inference-socket-client.cjs",
+    "bridge/message-codec.cjs",
+    "bridge/redaction.cjs",
+    "bridge/runtime-config.cjs",
+    "bridge/server.cjs",
+    "computer/computer-target-router.cjs",
+    "desktop/cliproxy-inference-transport.cjs",
+    "desktop/cliproxy-manager.cjs",
+    "desktop/codex-account-controller.cjs",
+    "desktop/codex-app-server-manager.cjs",
+    "desktop/codex-direct-inference-transport.cjs",
+    "desktop/codex-runtime-integrity.cjs",
+    "desktop/inference-bridge-server.cjs",
+    "desktop/inference-provider-router.cjs",
+    "desktop/local-desktop-frame-ipc.cjs",
+    "desktop/model-selection-store.cjs",
+    "desktop/openbot-user-data.cjs",
+    "desktop/runtime.cjs",
+    "desktop/standalone-conversation-controller.cjs",
+    "desktop/standalone-conversation-ipc.cjs",
+    "desktop/standalone-conversation-store.cjs",
+    "desktop/standalone-subagent-runner.cjs",
+    "local/local-computer-boundary.cjs",
+    "local/local-computer-runtime.cjs",
+    "local/local-desktop-manager.cjs",
+    "local/local-helper-child.cjs",
+    "local/local-helper-protocol.cjs",
+    "local/local-helper-transport.cjs",
+    "local/local-permission-broker.cjs",
+    "local/local-permission-store.cjs",
+    "patch/anchors.cjs",
+    "patch/desktop.cjs",
+    "patch/diff-audit.cjs",
+    "patch/host-inference.cjs",
+    "patch/renderer.cjs",
+    "renderer/bot-runtime-ui.js",
+    "renderer/chat-content.js",
+    "renderer/codex-ui.css",
+    "renderer/model-controls.js",
+    "renderer/openbot-local-desktop-view.css",
+    "renderer/openbot-local-desktop-view.js",
+    "renderer/openbot-standalone-shell.css",
+    "renderer/openbot-standalone-shell.js",
+    "renderer/reasoning-control.js",
+  ]);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-patcher-payload-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const patcher = path.join(root, "Patcher");
+  stagePatcherPayload({
+    macRoot: path.join(__dirname, ".."),
+    patcherRoot: patcher,
+  });
+  assert.deepEqual(relativeFiles(patcher), [
+    ...PATCHER_ASSET_FILES.map((file) => `assets/${file}`),
+    ...PATCHER_SCRIPT_FILES.map((file) => `scripts/${file}`),
+    ...PATCHER_SOURCE_FILES.map((file) => `src/${file}`),
+  ].sort());
+
+  for (const relative of [
+    "src/bots/remote-provider-live-gate.cjs",
+    "src/bots/remote-provider-live-report.cjs",
+    "src/bots/reviewed-adapter-worker-source.cjs",
+    "scripts/verify-codex-runtime.cjs",
+    "assets/cliproxyapi-7.2.132-darwin-aarch64.json",
+    "assets/cliproxyapi-model-catalog-2026-08-14.json",
+    "assets/openai-codex-0.147.0-darwin-arm64.json",
+  ]) {
+    assert.equal(fs.existsSync(path.join(__dirname, "..", relative)), true, `${relative} remains a build-time input`);
+    assert.equal(fs.existsSync(path.join(patcher, relative)), false, `${relative} is not shipped`);
+  }
+});
+
+test("release checkout capture requires a clean HEAD exactly equal to origin main while development stays dirty-safe", (t) => {
+  const { captureReleaseCheckout, verifyReleaseCheckout } = require(scriptPath);
+  assert.equal(typeof captureReleaseCheckout, "function");
+  assert.equal(typeof verifyReleaseCheckout, "function");
+
+  const nonRepository = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-development-checkout-test-"));
+  t.after(() => fs.rmSync(nonRepository, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(nonRepository, "dirty.txt"), "development\n");
+  assert.equal(captureReleaseCheckout({ repoRoot: nonRepository, release: false }), null);
+
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-release-checkout-test-"));
+  t.after(() => fs.rmSync(repo, { recursive: true, force: true }));
+  git(repo, ["init", "-q"]);
+  git(repo, ["config", "user.name", "OpenBot Test"]);
+  git(repo, ["config", "user.email", "openbot-test@example.invalid"]);
+  fs.writeFileSync(path.join(repo, "release.txt"), "one\n");
+  git(repo, ["add", "release.txt"]);
+  git(repo, ["commit", "-q", "-m", "release"]);
+  const mainCommit = git(repo, ["rev-parse", "HEAD"]);
+  git(repo, ["update-ref", "refs/remotes/origin/main", mainCommit]);
+
+  const captured = captureReleaseCheckout({ repoRoot: repo, release: true });
+  assert.deepEqual(captured, { commit: mainCommit });
+  assert.deepEqual(verifyReleaseCheckout({ repoRoot: repo, release: true, captured }), captured);
+
+  fs.writeFileSync(path.join(repo, "untracked.txt"), "dirty\n");
+  assert.throws(() => captureReleaseCheckout({ repoRoot: repo, release: true }), /clean|dirty|worktree/i);
+  fs.rmSync(path.join(repo, "untracked.txt"));
+
+  fs.writeFileSync(path.join(repo, "release.txt"), "two\n");
+  git(repo, ["add", "release.txt"]);
+  git(repo, ["commit", "-q", "-m", "later"]);
+  assert.throws(() => captureReleaseCheckout({ repoRoot: repo, release: true }), /origin\/main|exact.*commit/i);
+  assert.throws(() => verifyReleaseCheckout({ repoRoot: repo, release: true, captured }), /changed|exact.*commit/i);
 });
 
 test("exact pinned inputs build an isolated signed development installer bundle", {

@@ -102,3 +102,36 @@ test("production local runtime owns the exact store broker manager and boundary 
   assert.equal(made.boundary.broker instanceof FakeBroker, true);
   assert.equal(typeof made.manager.helperFactory, "function");
 });
+
+test("local runtime components expose one private manager without changing the boundary factory", async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-local-components-"));
+  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
+  class FakePermissionStore {}
+  class FakeBroker {
+    constructor() { Object.assign(this, { on() {}, off() {}, dispose() {}, decide() {}, list() {}, revoke() {}, request() {}, cancelBot() {} }); }
+  }
+  class FakeManager {
+    constructor() { Object.assign(this, { open() {}, close() {}, dispose() {}, run() {}, navigate() {}, capture() {} }); }
+  }
+  class FakeBoundary { constructor(options) { this.options = options; } }
+  const options = {
+    electron: {
+      BrowserWindow: class {}, session: { fromPartition() {} }, utilityProcess: { fork() {} },
+      dialog: { showOpenDialog() {} }, systemPreferences: {},
+    },
+    stateRoot,
+    store: { read() {}, updateComputer() {} },
+    PermissionStoreClass: FakePermissionStore,
+    BrokerClass: FakeBroker,
+    ManagerClass: FakeManager,
+    BoundaryClass: FakeBoundary,
+  };
+  const { createLocalComputerRuntime, createLocalComputerRuntimeComponents } = require(runtimePath);
+  const components = createLocalComputerRuntimeComponents(options);
+  assert.deepEqual(Object.keys(components).sort(), ["boundary", "manager"]);
+  assert.equal(Object.isFrozen(components), true);
+  assert.equal(components.boundary instanceof FakeBoundary, true);
+  assert.equal(components.manager instanceof FakeManager, true);
+  assert.equal(components.boundary.options.manager, components.manager);
+  assert.equal(createLocalComputerRuntime(options) instanceof FakeBoundary, true);
+});

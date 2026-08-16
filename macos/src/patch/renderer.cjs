@@ -8,14 +8,22 @@ const ASSETS = Object.freeze([
   "bot-runtime-ui.js",
   "codex-ui.css",
   "model-controls.js",
+  "openbot-local-desktop-view.css",
+  "openbot-local-desktop-view.js",
+  "openbot-standalone-shell.css",
+  "openbot-standalone-shell.js",
   "reasoning-control.js",
 ]);
 const TITLE = "<title>Grok Bot</title>";
 const CODEX_TITLE = "<title>OpenBot</title>";
 const HEAD_END = "  </head>";
 const CODEX_HEAD = `    <link rel="stylesheet" href="./codex/codex-ui.css">
+    <link rel="stylesheet" href="./codex/openbot-local-desktop-view.css">
+    <link rel="stylesheet" href="./codex/openbot-standalone-shell.css">
     <script src="./codex/model-controls.js" defer></script>
     <script src="./codex/reasoning-control.js" defer></script>
+    <script src="./codex/openbot-local-desktop-view.js" defer></script>
+    <script src="./codex/openbot-standalone-shell.js" defer></script>
     <script src="./codex/bot-runtime-ui.js" defer></script>
   </head>`;
 
