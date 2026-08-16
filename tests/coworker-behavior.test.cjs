@@ -695,6 +695,85 @@ test(
   },
 );
 
+test(
+  "group pass reasoning never leaks through SendMessage",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async () => {
+      const events = [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "leaked-pass-call",
+                    function: {
+                      name: "SendMessage",
+                      arguments: JSON.stringify({
+                        type: "text",
+                        content:
+                          'We need respond current group. Nothing to add. Must plain "(pass)" no tool according special. final is invisible? Group says emit exactly pass as assistant text and call no tool. Do so.',
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [],
+          usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+        },
+      ];
+      return new Response(
+        `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    };
+
+    try {
+      const result = bridge
+        .createPromptSession({ agentId: "group-pass-leak-bot" })
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-pass-leak-invocation", [sendMessageTool()], {});
+      const events = [];
+      for await (const event of result.fullStream) events.push(event);
+      const response = await result.response;
+      assert.equal(
+        events.some((event) => event.type === "tool-call"),
+        false,
+      );
+      assert.equal(
+        events.some(
+          (event) =>
+            event.type === "text-delta" && event.textDelta === "(pass)",
+        ),
+        true,
+      );
+      assert.deepEqual(response.messages[0].content, [
+        { type: "text", text: "(pass)" },
+      ]);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
 test("SendMessage normalization removes provider-filled fields from other message types", () => {
   const generated = {
     type: "text",

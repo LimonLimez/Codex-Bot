@@ -453,6 +453,21 @@ function verifyHostComputerSeatRoutingSource(hostSource) {
   }
 }
 
+function verifyComputerResultEvidenceSource(hostSource) {
+  const describeOutcome = sourceRegion(
+    hostSource,
+    "function describeOutcome",
+    "\nfunction renderComputerResult",
+    "Computer result summary",
+  );
+  assertPatchInvariant(
+    describeOutcome.includes(
+      "if (success2.log != null && success2.log.length > 0)",
+    ) && describeOutcome.includes("lines2.push(success2.log);"),
+    "Computer result text evidence reaches the model beside its screenshot",
+  );
+}
+
 function verifyLocalExecComputerIsolationSource(localExecSource) {
   const manager = uniqueFunctionRegion(
     localExecSource,
@@ -1636,6 +1651,15 @@ try {
 
   text = replaceOnce(
     text,
+    "  if (success2.screenshotPath != null && success2.screenshotPath.length > 0) {",
+    `  if (success2.log != null && success2.log.length > 0) {
+    lines2.push(success2.log);
+  }
+  if (success2.screenshotPath != null && success2.screenshotPath.length > 0) {`,
+    "computer page text evidence",
+  );
+  text = replaceOnce(
+    text,
     '    return createImageResult(output.result.value.screenshot, "image/webp", summary);',
     '    return createImageResult(output.result.value.screenshot, process.env.GROK_BOT_WINDOWS_COMPUTER_BRIDGE ? "image/png" : "image/webp", summary);',
     "computer image result",
@@ -1714,6 +1738,7 @@ try {
   verifyCoworkerHostBehaviorSource(text);
   verifyBrowserSeatLifecycleSource(text);
   verifyHostComputerSeatRoutingSource(text);
+  verifyComputerResultEvidenceSource(text);
 
   fs.writeFileSync(file, text, "utf8");
 }
@@ -2254,6 +2279,7 @@ module.exports = {
   verifyCoworkerHostBehaviorSource,
   verifyBrowserSeatLifecycleSource,
   verifyHostComputerSeatRoutingSource,
+  verifyComputerResultEvidenceSource,
   verifyHostAgentIdentitySource,
   verifyHostLocalOnlySource,
   verifyLocalExecComputerIsolationSource,

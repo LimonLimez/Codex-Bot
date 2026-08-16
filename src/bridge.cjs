@@ -9,7 +9,7 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8317/v1";
 const DEFAULT_API_KEY = "codex-bot-local";
 const DEFAULT_MODEL = "gpt-5.6-terra";
 const DEFAULT_REASONING_EFFORT = "high";
-const COWORKER_POLICY_VERSION = "2026-08-16.3";
+const COWORKER_POLICY_VERSION = "2026-08-16.4";
 
 const DIGITAL_COWORKER_POLICY = `
 <digital_coworker_compatibility version="${COWORKER_POLICY_VERSION}">
@@ -969,6 +969,23 @@ function constrainGroupChatTools(openAITools) {
     });
 }
 
+function isLeakedGroupPassReasoning(call) {
+  if (call?.name !== SEND_MESSAGE_TOOL_NAME) return false;
+  let args;
+  try {
+    args = JSON.parse(call.args || "{}");
+  } catch {
+    return false;
+  }
+  const content = typeof args?.content === "string" ? args.content.trim() : "";
+  if (/^\(?pass\)?[.!]?$/i.test(content)) return true;
+  return (
+    /\b(?:nothing to add|call no tool|final is invisible|respond current group)\b/i.test(
+      content,
+    ) && /\(?pass\)?/i.test(content)
+  );
+}
+
 const POST_SEND_MESSAGE_INSTRUCTION = `<post_send_message_step>
 A SendMessage call in the immediately preceding completed tool batch already delivered a user-visible message. SendMessage is intentionally unavailable for this inference step. Do not repeat or paraphrase that delivered message. Continue with the remaining non-message tools if work remains; otherwise finish now with a short private assistant completion.
 </post_send_message_step>`;
@@ -1473,6 +1490,16 @@ class CLIProxyExecutor {
               toolName: call.name,
             };
           }
+        }
+        if (
+          groupChatStep &&
+          calls.size === 1 &&
+          isLeakedGroupPassReasoning(calls.values().next().value)
+        ) {
+          calls.clear();
+          textParts.length = 0;
+          textParts.push("(pass)");
+          yield { type: "text-delta", textDelta: "(pass)" };
         }
         if (groupChatStep && calls.size > 0) textParts.length = 0;
         if (textParts.length)

@@ -12,12 +12,41 @@ const {
   replaceFunction,
   verifyBrowserSeatLifecycleSource,
   verifyHostComputerSeatRoutingSource,
+  verifyComputerResultEvidenceSource,
   verifyHostAgentIdentitySource,
   verifyLocalExecComputerIsolationSource,
   verifyRendererComposerIdentitySource,
   verifyRendererRuntimeBindingsSource,
   verifySettingsViewSource,
 } = require(path.join(root, "scripts", "patch-app.cjs"));
+
+function computerResultEvidenceFixture(includeEvidence = true) {
+  return `function describeOutcome(result, operation) {
+  const success2 = result.result.value;
+  const lines2 = ["Computer action ran on the box desktop."];
+  ${
+    includeEvidence
+      ? `if (success2.log != null && success2.log.length > 0) {
+    lines2.push(success2.log);
+  }`
+      : ""
+  }
+  return lines2.join("\\n");
+}
+function renderComputerResult(output, operation) { return output; }
+`;
+}
+
+test("Computer result summaries preserve readable page evidence beside screenshots", () => {
+  assert.doesNotThrow(() =>
+    verifyComputerResultEvidenceSource(computerResultEvidenceFixture(true)),
+  );
+  assert.throws(
+    () =>
+      verifyComputerResultEvidenceSource(computerResultEvidenceFixture(false)),
+    /text evidence reaches the model/i,
+  );
+});
 
 function browserSeatLifecycleFixture() {
   return `function createHostGatewayApi(deps) {
