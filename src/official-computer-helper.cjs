@@ -1790,7 +1790,7 @@ function createOfficialComputerCore(options = {}) {
     process.env.CODEX_OFFICIAL_COMPUTER_STATE ||
     path.join(
       process.env.LOCALAPPDATA || __dirname,
-      "Codex Bot Bridge",
+      "Open Bot",
       "official-computer",
     );
   const configPath = path.join(stateDir, "credentials.json");

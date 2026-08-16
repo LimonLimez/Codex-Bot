@@ -258,6 +258,21 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   const manifest = read("installer/CodexBot.iss");
   const builder = read("scripts/build-installer.ps1");
   const disable = read("src/runtime/Disable-Always-On.ps1");
+  const packageMetadata = JSON.parse(read("package.json"));
+  assert.equal(packageMetadata.name, "open-bot");
+  assert.equal(
+    packageMetadata.homepage,
+    "https://github.com/LimonLimez/Open-Bot",
+  );
+  assert.equal(
+    packageMetadata.repository.url,
+    "https://github.com/LimonLimez/Open-Bot.git",
+  );
+  assert.match(
+    manifest,
+    /#define AppURL "https:\/\/github\.com\/LimonLimez\/Open-Bot"/,
+  );
+  assert.doesNotMatch(manifest, /LimonLimez\/Codex-Bot/);
   assert.doesNotMatch(manifest, /Source: "\.\.\\(?:src|scripts|assets)\\\*"/i);
   assert.match(builder, /cliProxyVersion = '7\.2\.130'/);
   assert.match(
@@ -269,7 +284,7 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   assert.match(builder, /package\.json'[)]\s*\|\s*ConvertFrom-Json/);
   assert.match(
     builder,
-    /\$canonicalInstallerName\s*=\s*"CodexBot-Setup-\$packageVersion\.exe"/,
+    /\$canonicalInstallerName\s*=\s*"OpenBot-Setup-\$packageVersion\.exe"/,
   );
   assert.match(
     builder,
@@ -277,7 +292,7 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   );
   assert.match(
     builder,
-    /\$installerName\s*=\s*"CodexBot-Setup-\$packageVersion-DEVELOPMENT-\$developmentBuildId\.exe"/,
+    /\$installerName\s*=\s*"OpenBot-Setup-\$packageVersion-DEVELOPMENT-\$developmentBuildId\.exe"/,
   );
   assert.match(builder, /yyyyMMdd'T'HHmmssfff'Z'/);
   assert.match(
@@ -290,7 +305,7 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   assert.match(builder, /BuildKind = if \(\$isDevelopmentBuild\)/);
   assert.match(builder, /Publishable = -not \$isDevelopmentBuild/);
   assert.match(builder, /CanonicalName = \$canonicalInstallerName/);
-  assert.doesNotMatch(builder, /Get-ChildItem[^\r\n]+CodexBot-Setup-\*\.exe/);
+  assert.doesNotMatch(builder, /Get-ChildItem[^\r\n]+OpenBot-Setup-\*\.exe/);
   assert.match(
     builder,
     /\$actualSidecar\s*=\s*\(Get-Content -Raw -LiteralPath \$hashFile\)\.Trim\(\)/,
@@ -304,16 +319,16 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   assert.match(builder, /Release builds require a clean Git worktree/);
   assert.match(builder, /DEVELOPMENT TEST BUILD/);
   assert.match(builder, /Remove-Item -LiteralPath \$staleOutput -Force/);
-  assert.match(manifest, /#define AppCanonicalVersion "0\.1\.4"/);
+  assert.match(manifest, /#define AppCanonicalVersion "0\.1\.5"/);
   assert.match(
     manifest,
     /#define DevelopmentBuild GetEnv\("CODEX_BOT_INSTALLER_DEVELOPMENT"\)/,
   );
-  assert.match(manifest, /#define AppName "Codex Bot DEVELOPMENT TEST BUILD"/);
-  assert.match(manifest, /#define AppVersion "0\.1\.4 DEVELOPMENT TEST BUILD"/);
+  assert.match(manifest, /#define AppName "Open Bot DEVELOPMENT TEST BUILD"/);
+  assert.match(manifest, /#define AppVersion "0\.1\.5 DEVELOPMENT TEST BUILD"/);
   assert.match(
     manifest,
-    /#define AppVersionInfoDescription "Codex Bot DEVELOPMENT TEST installer - DO NOT PUBLISH"/,
+    /#define AppVersionInfoDescription "Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH"/,
   );
   assert.match(
     manifest,
@@ -321,7 +336,7 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   );
   assert.match(
     manifest,
-    /#define AppOutputBaseFilename "CodexBot-Setup-0\.1\.4"/,
+    /#define AppOutputBaseFilename "OpenBot-Setup-0\.1\.5"/,
   );
   assert.match(manifest, /OutputBaseFilename=\{#AppOutputBaseFilename\}/);
   assert.match(
@@ -443,14 +458,18 @@ test("account switching uses a visible OpenAI device code instead of a hidden br
   const connection = read("src/codex-connection.cjs");
   const bridge = read("src/browser-seat-bridge.cjs");
   const ui = read("src/renderer/codex-ui.js");
-  assert.match(connection, /"-codex-device-login", "-no-browser"/);
+  assert.match(connection, /loginFlag: "-codex-device-login"/);
+  assert.match(
+    connection,
+    /\[\s*provider\.loginFlag,\s*"-no-browser",[\s\S]{0,180}"-config",\s*config,?\s*\]/,
+  );
   assert.match(connection, /Codex device URL/);
   assert.match(connection, /Codex device code/);
   assert.match(
     bridge,
-    /const device = await connectionManager\.beginCodexOAuth\(\)/,
+    /const login = await connectionManager\.beginProviderLogin/,
   );
-  assert.match(ui, /Open OpenAI sign-in/);
+  assert.match(ui, /Open \$\{device\.providerLabel \|\| "provider"\} sign-in/);
   assert.doesNotMatch(connection, /stdio: "ignore"/);
 });
 
@@ -501,7 +520,7 @@ test("fresh installs enter the genuine workspace behind the local Codex connecti
   assert.match(ui, /document\.body\.append\(onboarding\)/);
 });
 
-test("the first-run Codex connection gate blocks the workspace and offers both supported routes", () => {
+test("the first-run provider gate blocks the workspace and offers every reviewed route", () => {
   const ui = read("src/renderer/codex-ui.js");
   const helperSource = ui.match(
     /function hasCodexConnection\(status\) \{[\s\S]*?\n\}/,
@@ -532,8 +551,10 @@ test("the first-run Codex connection gate blocks the workspace and offers both s
     }),
     true,
   );
-  assert.match(ui, /Connect Codex to start/);
-  assert.match(ui, /Use Codex OAuth/);
+  assert.match(ui, /Connect an AI provider to start/);
+  assert.match(ui, /data-codex-provider/);
+  assert.match(ui, /data-login-kind/);
+  assert.match(ui, /data-codex-vertex-form/);
   assert.match(ui, /Use OpenAI API key/);
   assert.match(ui, /child\.inert = true/);
   assert.match(ui, /data-codex-connection-required/);
@@ -542,7 +563,7 @@ test("the first-run Codex connection gate blocks the workspace and offers both s
     /for \(const eventName of \["beforeinput", "keydown", "submit"\]\)/,
   );
   assert.match(ui, /onboarding\?\.remove\(\)/);
-  assert.match(ui, /Manage Codex connection/);
+  assert.match(ui, /Manage AI provider/);
   assert.doesNotMatch(ui, /\u00c2|\u00c3|\u00e2[\u0080-\u00bf]|\uFFFD/);
 });
 
@@ -581,8 +602,14 @@ test("official cloud-computer release disclosures and packaging remain explicit"
     assert.match(document, /Windows DPAPI/i);
     assert.match(document, /verified remote deletion/i);
   }
-  assert.match(readme, /Codex remains the local chat and planning model/);
-  assert.match(security, /Codex remains the local chat and planning model/);
+  assert.match(
+    readme,
+    /selected AI provider remains the local chat and planning model/i,
+  );
+  assert.match(
+    security,
+    /selected AI provider remains the local chat and planning route/i,
+  );
   assert.doesNotMatch(
     readme,
     /No xAI inference, vendor-backend fallback, or Grok Bot usage-credit route/,

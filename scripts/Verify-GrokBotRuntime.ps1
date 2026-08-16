@@ -53,6 +53,44 @@ function Get-TreeEntries([string]$Root) {
     return @($entries | ForEach-Object { $_ })
 }
 
+function Get-Sha256Hex([string]$LiteralPath) {
+    $stream = [IO.File]::Open(
+        $LiteralPath,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Get-PortableAuthenticodeSignature([string]$LiteralPath) {
+    $authenticodeCommand = Get-Command Get-AuthenticodeSignature -ErrorAction SilentlyContinue
+    if ($null -ne $authenticodeCommand) {
+        return Get-AuthenticodeSignature -LiteralPath $LiteralPath
+    }
+
+    $signatureHelper = [System.Management.Automation.PSObject].Assembly.GetType(
+        'System.Management.Automation.SignatureHelper',
+        $true
+    )
+    $getSignature = $signatureHelper.GetMethods(
+        [Reflection.BindingFlags]'Static,NonPublic'
+    ) | Where-Object { $_.Name -ceq 'GetSignature' } | Select-Object -First 1
+    if ($null -eq $getSignature) {
+        throw 'The built-in Windows Authenticode verifier is unavailable.'
+    }
+    return $getSignature.Invoke($null, @($LiteralPath, $null))
+}
+
 if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
     throw "The supported-runtime manifest is missing: $ManifestPath"
 }
@@ -123,7 +161,7 @@ if ($extra.Count -ne 0) {
 }
 
 foreach ($relative in $expectedFiles.Keys) {
-    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $actualFiles[$relative]).Hash.ToUpperInvariant()
+    $actualHash = (Get-Sha256Hex -LiteralPath $actualFiles[$relative]).ToUpperInvariant()
     if ($actualHash -cne $expectedFiles[$relative]) {
         throw "The selected Grok Bot tree contains a hash mismatch: '$relative'."
     }
@@ -131,7 +169,7 @@ foreach ($relative in $expectedFiles.Keys) {
 
 $vendorExe = $actualFiles['Grok Bot.exe']
 if ([string]::IsNullOrWhiteSpace($vendorExe)) { throw 'The supported-runtime manifest does not include Grok Bot.exe.' }
-$signature = Get-AuthenticodeSignature -LiteralPath $vendorExe
+$signature = Get-PortableAuthenticodeSignature -LiteralPath $vendorExe
 if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $signature.SignerCertificate) {
     throw "Grok Bot.exe does not have a valid Authenticode signature (status: $($signature.Status))."
 }

@@ -81,7 +81,7 @@ function createCursorAccountEdgePort(deps) {
       logout: async () => identity(),
       cancelTrial: async () => ({
         ok: false,
-        message: "Vendor account services are disabled in Codex Bot local-only mode."
+        message: "Vendor account services are disabled in Open Bot local-only mode."
       })
     };
   }
@@ -162,7 +162,7 @@ function authTransitions() {
   return { noteSignedOut: () => {}, forceOnboarding: () => {} };
 }
 function shell() {
-  /* Renderer Sentry is disabled in the Codex Bot local-only build. */
+  /* Renderer Sentry is disabled in the Open Bot local-only build. */
   return { children: p.jsx(Gzn, {}) };
 }
 function uJt() {
@@ -307,7 +307,7 @@ test("post-patch verifier rejects removal of the direct-launch handoff", () => {
 });
 
 test("wrapped-launch predicate accepts only the launcher's exact loopback descriptor", () => {
-  const stateRoot = "C:\\Users\\test\\AppData\\Local\\Codex Bot";
+  const stateRoot = "C:\\Users\\test\\AppData\\Local\\Open Bot";
   assert.equal(
     evaluateWrappedLaunchEnvironment({
       CODEX_BOT_STATE_ROOT: stateRoot,

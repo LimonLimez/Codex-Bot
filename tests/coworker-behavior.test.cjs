@@ -179,6 +179,152 @@ test("team messaging and question-widget schemas pass through the local tool bri
   assert.deepEqual(converted[0].function.parameters, widgetParameters);
 });
 
+test("SendMessage normalization removes provider-filled fields from other message types", () => {
+  const generated = {
+    type: "text",
+    content: "yo, what’s up?",
+    url: "https://placeholder.invalid",
+    images: [],
+    alt: "placeholder",
+    reply_to: "",
+    channel: "",
+    widget: {
+      prompt: "placeholder",
+      options: [{ label: "placeholder" }],
+    },
+    bcId: "placeholder",
+    secret: {
+      label: "placeholder",
+      connector: "placeholder",
+      field: "placeholder",
+    },
+  };
+  assert.deepEqual(
+    bridge.normalizeSendMessageToolCallArgs("SendMessage", generated),
+    {
+      type: "text",
+      content: "yo, what’s up?",
+      images: [],
+      reply_to: "",
+      channel: "",
+    },
+  );
+  assert.strictEqual(
+    bridge.normalizeSendMessageToolCallArgs("Unknown", generated),
+    generated,
+  );
+});
+
+test(
+  "a streamed casual SendMessage reaches the host without cross-type placeholder fields",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+      fastMode: false,
+    });
+    const generated = JSON.stringify({
+      type: "text",
+      content: "yo, what’s up?",
+      url: "",
+      images: [],
+      alt: "x",
+      reply_to: "",
+      channel: "",
+      widget: {
+        prompt: "x",
+        options: [{ label: "x", value: "x" }],
+      },
+      bcId: "x",
+      secret: { label: "x", connector: "x", field: "x" },
+    });
+    globalThis.fetch = async () => {
+      const midpoint = Math.floor(generated.length / 2);
+      const events = [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "send-casual",
+                    function: {
+                      name: "SendMessage",
+                      arguments: generated.slice(0, midpoint),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    function: { arguments: generated.slice(midpoint) },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ];
+      const body = events
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${body}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+    try {
+      const session = bridge.createPromptSession({ agentId: "casual-bot" });
+      const result = session
+        .getExecutor([{ role: "user", content: "yo" }])
+        .stream({}, "casual-invocation", [
+          {
+            name: "SendMessage",
+            description: "Send a visible message.",
+            parameters: { type: "object", properties: {} },
+          },
+        ]);
+      const events = [];
+      for await (const event of result.fullStream) events.push(event);
+      const response = await result.response;
+      const streamedArgs = JSON.parse(
+        events
+          .filter((event) => event.type === "tool-call-delta")
+          .map((event) => event.argsTextDelta)
+          .join(""),
+      );
+      const expected = {
+        type: "text",
+        content: "yo, what’s up?",
+        images: [],
+        reply_to: "",
+        channel: "",
+      };
+      assert.deepEqual(streamedArgs, expected);
+      assert.deepEqual(response.messages[0].content[0].args, expected);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
 test("Computer compatibility is schema-gated, bounded, and fail-closed", () => {
   const converted = bridge.convertTools([computerTool()]);
   const guidance = bridge.computerToolUseMessage(converted);
@@ -296,9 +442,10 @@ test("Computer compatibility is schema-gated, bounded, and fail-closed", () => {
   ]);
   assert.strictEqual(
     wrappedUnknown[0].function.parameters,
-    wrappedUnknownParameters,
-    "only the actual Computer tool may unwrap the compatibility schema",
+    wrappedUnknownParameters.jsonSchema,
+    "every exactly branded AI SDK wrapper must become provider-valid JSON Schema",
   );
+  assert.equal(wrappedUnknown[0].function.parameters.type, "object");
 
   for (const parameters of [
     { jsonSchema: computerParameters() },
@@ -308,6 +455,11 @@ test("Computer compatibility is schema-gated, bounded, and fail-closed", () => {
     aiSdkJsonSchema(computerParameters(), { validate: "not-a-validator" }),
   ]) {
     const lookalike = bridge.convertTools([computerTool({ parameters })]);
+    assert.strictEqual(
+      lookalike[0].function.parameters,
+      parameters,
+      "unbranded or malformed wrappers must remain untouched",
+    );
     assert.equal(bridge.computerToolUseMessage(lookalike), null);
     assert.strictEqual(
       bridge.normalizeComputerToolCallArgs(
@@ -346,6 +498,93 @@ test("Computer compatibility is schema-gated, bounded, and fail-closed", () => {
       duplicates,
     ),
     unknownPayload,
+  );
+});
+
+test("Kimi receives Moonshot-compatible local JSON Schema references without changing other providers", () => {
+  const parameters = {
+    type: "object",
+    properties: {
+      trigger: {
+        anyOf: [
+          {
+            type: "object",
+            properties: { kind: { type: "string", enum: ["manual"] } },
+            required: ["kind"],
+          },
+          {
+            type: "object",
+            properties: {
+              listeners: {
+                type: "array",
+                items: { $ref: "#/properties/trigger/anyOf/0" },
+              },
+            },
+          },
+        ],
+      },
+    },
+  };
+  const converted = bridge.convertTools([
+    { name: "update_state", parameters: aiSdkJsonSchema(parameters) },
+  ]);
+  assert.strictEqual(
+    bridge.normalizeToolsForProvider(converted, "claude"),
+    converted,
+  );
+
+  const kimi = bridge.normalizeToolsForProvider(converted, "kimi");
+  const kimiParameters = kimi[0].function.parameters;
+  assert.notStrictEqual(kimiParameters, parameters);
+  assert.equal(
+    kimiParameters.properties.trigger.anyOf[1].properties.listeners.items.$ref,
+    "#/$defs/codex_moonshot_ref_0",
+  );
+  assert.deepEqual(kimiParameters.$defs.codex_moonshot_ref_0, {
+    type: "object",
+    properties: { kind: { type: "string", enum: ["manual"] } },
+    required: ["kind"],
+  });
+  assert.equal(
+    parameters.properties.trigger.anyOf[1].properties.listeners.items.$ref,
+    "#/properties/trigger/anyOf/0",
+    "provider normalization must not mutate the host schema",
+  );
+});
+
+test("Kimi membership and unusable-auth failures are actionable without exposing upstream payloads", () => {
+  const kimi = { provider: "kimi" };
+  assert.match(
+    bridge.providerHttpFailureMessage(
+      kimi,
+      402,
+      '{"error":{"message":"We\'re unable to verify your membership benefits at this time. Please ensure your membership is active. SECRET_SENTINEL"}}',
+    ),
+    /sign-in succeeded.*active Kimi coding membership/i,
+  );
+  assert.doesNotMatch(
+    bridge.providerHttpFailureMessage(
+      kimi,
+      402,
+      "membership benefits SECRET_SENTINEL",
+    ),
+    /SECRET_SENTINEL/,
+  );
+  assert.match(
+    bridge.providerHttpFailureMessage(
+      kimi,
+      503,
+      "auth_unavailable: no auth available (providers=kimi, model=kimi-k3)",
+    ),
+    /no usable Kimi coding credential.*active Kimi coding membership/i,
+  );
+  assert.equal(
+    bridge.providerHttpFailureMessage(
+      { provider: "codex" },
+      500,
+      "reviewed detail",
+    ),
+    "CLIProxyAPI 500: reviewed detail",
   );
 });
 

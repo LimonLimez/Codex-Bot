@@ -1,6 +1,6 @@
-#define AppCanonicalVersion "0.1.4"
-#define AppPublisher "Codex Bot contributors"
-#define AppURL "https://github.com/LimonLimez/Codex-Bot"
+#define AppCanonicalVersion "0.1.5"
+#define AppPublisher "Open Bot contributors"
+#define AppURL "https://github.com/LimonLimez/Open-Bot"
 #define DevelopmentBuild GetEnv("CODEX_BOT_INSTALLER_DEVELOPMENT")
 #define VendorVersion "0.18.0"
 #define VendorInstallerName "Grok_Bot_0.18.0_Setup.exe"
@@ -9,17 +9,17 @@
 #define VendorInstallerSize "125825552"
 
 #if DevelopmentBuild == "1"
-  #define AppName "Codex Bot DEVELOPMENT TEST BUILD"
-  #define AppVersion "0.1.4 DEVELOPMENT TEST BUILD"
+  #define AppName "Open Bot DEVELOPMENT TEST BUILD"
+  #define AppVersion "0.1.5 DEVELOPMENT TEST BUILD"
   #define AppOutputBaseFilename GetEnv("CODEX_BOT_INSTALLER_OUTPUT_BASENAME")
-  #define AppVersionInfoDescription "Codex Bot DEVELOPMENT TEST installer - DO NOT PUBLISH"
-  #define AppVersionInfoProductName "Codex Bot DEVELOPMENT TEST BUILD"
+  #define AppVersionInfoDescription "Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH"
+  #define AppVersionInfoProductName "Open Bot DEVELOPMENT TEST BUILD"
 #else
-  #define AppName "Codex Bot"
-  #define AppVersion "0.1.4"
-  #define AppOutputBaseFilename "CodexBot-Setup-0.1.4"
-  #define AppVersionInfoDescription "Codex Bot installer"
-  #define AppVersionInfoProductName "Codex Bot"
+  #define AppName "Open Bot"
+  #define AppVersion "0.1.5"
+  #define AppOutputBaseFilename "OpenBot-Setup-0.1.5"
+  #define AppVersionInfoDescription "Open Bot installer"
+  #define AppVersionInfoProductName "Open Bot"
 #endif
 
 [Setup]
@@ -28,10 +28,10 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
-AppSupportURL=https://github.com/LimonLimez/Codex-Bot/issues
-AppUpdatesURL=https://github.com/LimonLimez/Codex-Bot/releases
-DefaultDirName={localappdata}\Programs\Codex Bot
-DefaultGroupName=Codex Bot
+AppSupportURL=https://github.com/LimonLimez/Open-Bot/issues
+AppUpdatesURL=https://github.com/LimonLimez/Open-Bot/releases
+DefaultDirName={localappdata}\Programs\Open Bot
+DefaultGroupName=Open Bot
 DisableProgramGroupPage=yes
 OutputDir=..\artifacts
 OutputBaseFilename={#AppOutputBaseFilename}
@@ -42,7 +42,7 @@ PrivilegesRequired=lowest
 RedirectionGuard=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayName=Codex Bot
+UninstallDisplayName=Open Bot
 CloseApplications=yes
 RestartApplications=no
 VersionInfoVersion={#AppCanonicalVersion}.0
@@ -50,7 +50,7 @@ VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppVersionInfoDescription}
 VersionInfoProductName={#AppVersionInfoProductName}
 SetupIconFile=..\assets\codex-bot.ico
-UninstallDisplayIcon={app}\app\Codex Bot.exe
+UninstallDisplayIcon={app}\app\Open Bot.exe
 
 [Files]
 Source: "..\src\bridge.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion
@@ -81,32 +81,41 @@ Source: "..\scripts\Verify-GrokBotRuntime.ps1"; Flags: dontcopy
 Source: "..\assets\grok-bot-0.18.0-windows-x64.manifest.json"; DestDir: "{app}\tools\integrity"; Flags: ignoreversion
 Source: "..\assets\grok-bot-0.18.0-windows-x64.manifest.json"; Flags: dontcopy
 Source: "..\assets\codex-bot.ico"; DestDir: "{app}\tools\assets"; Flags: ignoreversion
+Source: "..\assets\provider-icons\openai-codex.png"; DestDir: "{app}\tools\assets\provider-icons"; Flags: ignoreversion
+Source: "..\assets\provider-icons\anthropic-claude.png"; DestDir: "{app}\tools\assets\provider-icons"; Flags: ignoreversion
+Source: "..\assets\provider-icons\moonshot-kimi.png"; DestDir: "{app}\tools\assets\provider-icons"; Flags: ignoreversion
+Source: "..\assets\provider-icons\xai.png"; DestDir: "{app}\tools\assets\provider-icons"; Flags: ignoreversion
+Source: "..\assets\provider-icons\google-vertex.png"; DestDir: "{app}\tools\assets\provider-icons"; Flags: ignoreversion
 Source: "..\node_modules\*"; DestDir: "{app}\tools\node_modules"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\build\vendor\cliproxyapi\cli-proxy-api.exe"; DestDir: "{app}\tools\cliproxyapi"; Flags: ignoreversion
 Source: "..\build\vendor\cliproxyapi\LICENSE"; DestDir: "{app}\licenses"; DestName: "CLIProxyAPI-LICENSE.txt"; Flags: ignoreversion
-Source: "..\LICENSE"; DestDir: "{app}\licenses"; DestName: "CodexBotBridge-LICENSE.txt"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}\licenses"; DestName: "OpenBot-LICENSE.txt"; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{code:GetVendorRoot}\*"; DestDir: "{app}\app"; ExternalSize: 496010226; Flags: external ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
+Type: files; Name: "{app}\app\Open Bot.exe"
 Type: files; Name: "{app}\app\Codex Bot.exe"
+Type: files; Name: "{app}\app\resources\app.openbot.asar"
 Type: files; Name: "{app}\app\resources\app.codex.asar"
+Type: filesandordirs; Name: "{app}\app\resources\app.openbot.asar.unpacked"
 Type: filesandordirs; Name: "{app}\app\resources\app.codex.asar.unpacked"
 
 [Icons]
-Name: "{autoprograms}\Codex Bot"; Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; WorkingDir: "{app}"
-Name: "{autodesktop}\Codex Bot"; Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autoprograms}\Open Bot"; Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; WorkingDir: "{app}"
+Name: "{autodesktop}\Open Bot"; Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: checkedonce
 
 [Run]
-Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; Description: "Launch Codex Bot"; Flags: nowait postinstall skipifsilent runhidden
+Filename: "{sys}\wscript.exe"; Parameters: "//B //NoLogo ""{app}\tools\runtime\CodexBot-Hidden-Runner.vbs"" launcher"; Description: "Launch Open Bot"; Flags: nowait postinstall skipifsilent runhidden
 
 [UninstallRun]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\tools\runtime\Disable-Always-On.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "DisableCodexBotBridge"
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\tools\runtime\Disable-Always-On.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "DisableOpenBot"
 
 [UninstallDelete]
+Type: files; Name: "{app}\app\Open Bot.exe"
 Type: files; Name: "{app}\app\Codex Bot.exe"
 
 [Code]
@@ -169,7 +178,7 @@ begin
     wpSelectDir,
     'Grok Bot frontend',
     'Choose how Setup obtains the required third-party frontend.',
-    'Setup always reuses an exact Grok Bot 0.18.0 installation when one is available and never modifies it. Otherwise you can authorize Setup to download the exact separate 120 MiB per-user installer directly from downloads.cursor.com, verify its pinned SHA-256 and Anysphere signature, and install it as a separate vendor app. That app remains installed if Codex Bot Setup fails, is canceled, or Codex Bot is later uninstalled. Cursor Terms of Service and Privacy Policy apply: https://cursor.com/terms-of-service and https://cursor.com/privacy.',
+    'Setup always reuses an exact Grok Bot 0.18.0 installation when one is available and never modifies it. Otherwise you can authorize Setup to download the exact separate 120 MiB per-user installer directly from downloads.cursor.com, verify its pinned SHA-256 and Anysphere signature, and install it as a separate vendor app. That app remains installed if Open Bot Setup fails, is canceled, or Open Bot is later uninstalled. Cursor Terms of Service and Privacy Policy apply: https://cursor.com/terms-of-service and https://cursor.com/privacy.',
     True,
     False
   );
@@ -179,7 +188,7 @@ begin
 
   DownloadPage := CreateDownloadPage(
     'Downloading official Grok Bot 0.18.0',
-    'The vendor installer is downloaded directly from downloads.cursor.com and is not contained in Codex Bot.',
+    'The vendor installer is downloaded directly from downloads.cursor.com and is not contained in Open Bot.',
     @OnVendorDownloadProgress
   );
   DownloadPage.ShowBaseNameInsteadOfUrl := True;
@@ -412,6 +421,9 @@ var
   ResultCode: Integer;
   Parameters: String;
   DownloadedBytes: Int64;
+  VerifyAttempt: Integer;
+  VerifyStarted: Boolean;
+  VerifyDiagnostic: AnsiString;
 begin
   Result := False;
   VendorDownloadPolicyError := '';
@@ -449,22 +461,40 @@ begin
 
   Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{tmp}\Verify-GrokBotInstaller.ps1') + '" -InstallerPath "' +
-    ExpandConstant('{tmp}\{#VendorInstallerName}') + '"';
-  if not Exec(
-    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
-    Parameters,
-    ExpandConstant('{tmp}'),
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  ) then
+    ExpandConstant('{tmp}\{#VendorInstallerName}') + '" -DiagnosticPath "' +
+    ExpandConstant('{tmp}\grok-installer-verification.txt') + '"';
+  VerifyStarted := False;
+  ResultCode := -1;
+  for VerifyAttempt := 1 to 3 do
   begin
-    LastVendorError := 'Could not start the pinned Grok Bot installer integrity check.';
-    Exit;
+    VerifyStarted := Exec(
+      ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+      Parameters,
+      ExpandConstant('{tmp}'),
+      SW_HIDE,
+      ewWaitUntilTerminated,
+      ResultCode
+    );
+    if not VerifyStarted then
+    begin
+      LastVendorError := 'Could not start the pinned Grok Bot installer integrity check.';
+      Exit;
+    end;
+    if ResultCode = 0 then
+      Break;
+    if VerifyAttempt < 3 then
+      Sleep(1000);
   end;
   if ResultCode <> 0 then
   begin
+    VerifyDiagnostic := '';
+    LoadStringFromFile(
+      ExpandConstant('{tmp}\grok-installer-verification.txt'),
+      VerifyDiagnostic
+    );
     LastVendorError := 'The downloaded Grok Bot installer failed its pinned size, SHA-256, version, or Authenticode signer check and was not executed.';
+    if VerifyDiagnostic <> '' then
+      LastVendorError := LastVendorError + ' ' + VerifyDiagnostic;
     Exit;
   end;
   Result := True;
@@ -485,7 +515,7 @@ begin
   begin
     VendorProgressPage.SetText(
       'Installing the verified official Grok Bot 0.18.0 user app...',
-      'This separate vendor application remains installed if Codex Bot Setup is later canceled or fails.'
+      'This separate vendor application remains installed if Open Bot Setup is later canceled or fails.'
     );
     VendorProgressPage.Show;
     VendorProgressPage.Animate;
@@ -509,7 +539,7 @@ begin
   end;
   if ResultCode <> 0 then
   begin
-    LastVendorError := Format('The official Grok Bot 0.18.0 user installer failed (exit code %d). Any separate vendor files it created are not managed or removed by Codex Bot Setup.', [ResultCode]);
+    LastVendorError := Format('The official Grok Bot 0.18.0 user installer failed (exit code %d). Any separate vendor files it created are not managed or removed by Open Bot Setup.', [ResultCode]);
     Exit;
   end;
   VendorInstalledBySetup := True;
@@ -649,15 +679,15 @@ begin
     if not Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Parameters, ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ResultCode) then
     begin
       InstallExitCode := 1;
-      RaiseException('Could not start the Codex Bot installation step.');
+      RaiseException('Could not start the Open Bot installation step.');
     end;
     if ResultCode <> 0 then
     begin
       InstallExitCode := ResultCode;
       if VendorInstalledBySetup then
-        RaiseException(Format('Codex Bot patching failed (exit code %d). The separately installed official Grok Bot app remains installed and is not rolled back by Codex Bot Setup.', [ResultCode]))
+        RaiseException(Format('Open Bot patching failed (exit code %d). The separately installed official Grok Bot app remains installed and is not rolled back by Open Bot Setup.', [ResultCode]))
       else
-        RaiseException(Format('Codex Bot patching failed (exit code %d). The separate Grok Bot installation was not changed.', [ResultCode]));
+        RaiseException(Format('Open Bot patching failed (exit code %d). The separate Grok Bot installation was not changed.', [ResultCode]));
     end;
   end;
 end;
@@ -668,7 +698,7 @@ begin
   RemoveUserDataOnUninstall := False;
   if not UninstallSilent then
     RemoveUserDataOnUninstall := MsgBox(
-      'Also permanently delete Codex Bot conversations, account sign-ins, browser profiles, downloads, and local settings?' + #13#10 + #13#10 +
+      'Also permanently delete Open Bot conversations, account sign-ins, browser profiles, downloads, and local settings?' + #13#10 + #13#10 +
       'Choose No to keep that data for a future reinstall.',
       mbConfirmation,
       MB_YESNO
@@ -682,13 +712,13 @@ var
 begin
   if (CurUninstallStep = usPostUninstall) and RemoveUserDataOnUninstall then
   begin
-    StateRoot := AddBackslash(ExpandConstant('{localappdata}\Codex Bot Bridge'));
+    StateRoot := AddBackslash(ExpandConstant('{localappdata}\Open Bot'));
     LocalAppDataRoot := AddBackslash(ExpandConstant('{localappdata}'));
     if Pos(Uppercase(LocalAppDataRoot), Uppercase(StateRoot)) = 1 then
     begin
       if (not DelTree(StateRoot, True, True, True)) or DirExists(StateRoot) then
         MsgBox(
-          'Codex Bot was uninstalled, but Windows could not delete all local conversations, account sign-ins, browser profiles, downloads, and settings.' + #13#10 + #13#10 +
+          'Open Bot was uninstalled, but Windows could not delete all local conversations, account sign-ins, browser profiles, downloads, and settings.' + #13#10 + #13#10 +
           'Close programs using this folder and delete it manually:' + #13#10 + StateRoot,
           mbError,
           MB_OK

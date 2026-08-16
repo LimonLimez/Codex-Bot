@@ -23,6 +23,7 @@ let official;
 let privateManager;
 let originalOfficial;
 let originalPrivate;
+const openedOfficialLogins = [];
 
 function deferred() {
   let resolve;
@@ -113,7 +114,12 @@ test.before(async () => {
     executeSeatActions: privateManager.executeSeatActions,
   };
   official.status = async () => safeStatus("private");
-  server = bridge.startViewServer();
+  server = bridge.startViewServer({
+    openOfficialLogin: async (loginUrl) => {
+      openedOfficialLogins.push(loginUrl);
+      return loginUrl;
+    },
+  });
   if (!server.listening) await once(server, "listening");
 });
 
@@ -123,7 +129,10 @@ test.after(async () => {
   fs.rmSync(stateRoot, { recursive: true, force: true });
 });
 
-test.afterEach(() => restoreMocks());
+test.afterEach(() => {
+  restoreMocks();
+  openedOfficialLogins.length = 0;
+});
 
 test("official control route requires authentication and an exact JSON schema", async () => {
   let loginCalls = 0;
@@ -371,6 +380,7 @@ test("helper results are allowlisted before anything reaches the renderer", asyn
     "loginUrl",
     "state",
   ]);
+  assert.deepEqual(openedOfficialLogins, [loginUrl]);
 
   const frame = await request("/api/frame?seatKey=employee-a");
   assert.equal(frame.status, 200);

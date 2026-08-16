@@ -29,6 +29,7 @@ param(
     [string]$ExpectedVendorManifestSha256
 )
 
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
@@ -126,7 +127,7 @@ function Get-ArtifactAudit {
         throw 'The expected installer version is invalid.'
     }
     $escapedVersion = [Regex]::Escape($ExpectedVersion)
-    $expectedNamePattern = '^CodexBot-Setup-' + $escapedVersion + '-DEVELOPMENT-\d{8}T\d{9}Z-' + [Regex]::Escape($ExpectedRevision) + '\.exe$'
+    $expectedNamePattern = '^OpenBot-Setup-' + $escapedVersion + '-DEVELOPMENT-\d{8}T\d{9}Z-' + [Regex]::Escape($ExpectedRevision) + '\.exe$'
     if ($ExpectedInstallerName -cnotmatch $expectedNamePattern) {
         throw 'The pinned installer name is not the current DEVELOPMENT build naming form.'
     }
@@ -161,8 +162,8 @@ function Get-ArtifactAudit {
     }
 
     $metadata = $installer.VersionInfo
-    if (([string]$metadata.ProductName).TrimEnd() -cne 'Codex Bot DEVELOPMENT TEST BUILD' -or
-        ([string]$metadata.FileDescription).TrimEnd() -cne 'Codex Bot DEVELOPMENT TEST installer - DO NOT PUBLISH' -or
+    if (([string]$metadata.ProductName).TrimEnd() -cne 'Open Bot DEVELOPMENT TEST BUILD' -or
+        ([string]$metadata.FileDescription).TrimEnd() -cne 'Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH' -or
         ([string]$metadata.ProductVersion).TrimEnd() -cne "$ExpectedVersion DEVELOPMENT TEST BUILD") {
         throw 'The installer does not carry the required DEVELOPMENT/DO NOT PUBLISH PE metadata.'
     }
@@ -201,25 +202,30 @@ function Get-ArtifactAudit {
 function Get-CleanBaselineReport {
     $indicators = New-Object Collections.Generic.List[string]
     $pathChecks = [ordered]@{
-        'local-program-codex-bot' = (Join-Path $env:LOCALAPPDATA 'Programs\Codex Bot')
+        'local-program-open-bot' = (Join-Path $env:LOCALAPPDATA 'Programs\Open Bot')
+        'local-program-codex-bot-legacy' = (Join-Path $env:LOCALAPPDATA 'Programs\Codex Bot')
         'local-program-grok-bot' = (Join-Path $env:LOCALAPPDATA 'Programs\Grok Bot')
         'local-program-grok-bot-hyphenated' = (Join-Path $env:LOCALAPPDATA 'Programs\grok-bot')
         'local-program-cursor' = (Join-Path $env:LOCALAPPDATA 'Programs\Cursor')
-        'local-state-codex-bridge' = (Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge')
-        'local-state-codex-bot' = (Join-Path $env:LOCALAPPDATA 'Codex Bot')
+        'local-state-open-bot' = (Join-Path $env:LOCALAPPDATA 'Open Bot')
+        'local-state-codex-bridge-legacy' = (Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge')
+        'local-state-codex-bot-legacy' = (Join-Path $env:LOCALAPPDATA 'Codex Bot')
         'local-state-grok-bot' = (Join-Path $env:LOCALAPPDATA 'Grok Bot')
         'local-state-cursor' = (Join-Path $env:LOCALAPPDATA 'Cursor')
-        'roaming-state-codex-bot' = (Join-Path $env:APPDATA 'Codex Bot')
+        'roaming-state-open-bot' = (Join-Path $env:APPDATA 'Open Bot')
+        'roaming-state-codex-bot-legacy' = (Join-Path $env:APPDATA 'Codex Bot')
         'roaming-state-grok-bot' = (Join-Path $env:APPDATA 'Grok Bot')
         'roaming-state-cursor' = (Join-Path $env:APPDATA 'Cursor')
         'profile-state-codex' = (Join-Path $env:USERPROFILE '.codex')
         'profile-state-cursor' = (Join-Path $env:USERPROFILE '.cursor')
-        'machine-program-codex-bot' = (Join-Path $env:ProgramFiles 'Codex Bot')
+        'machine-program-open-bot' = (Join-Path $env:ProgramFiles 'Open Bot')
+        'machine-program-codex-bot-legacy' = (Join-Path $env:ProgramFiles 'Codex Bot')
         'machine-program-grok-bot' = (Join-Path $env:ProgramFiles 'Grok Bot')
         'machine-program-cursor' = (Join-Path $env:ProgramFiles 'Cursor')
     }
     if (-not [string]::IsNullOrWhiteSpace(${env:ProgramFiles(x86)})) {
-        $pathChecks['machine-x86-codex-bot'] = Join-Path ${env:ProgramFiles(x86)} 'Codex Bot'
+        $pathChecks['machine-x86-open-bot'] = Join-Path ${env:ProgramFiles(x86)} 'Open Bot'
+        $pathChecks['machine-x86-codex-bot-legacy'] = Join-Path ${env:ProgramFiles(x86)} 'Codex Bot'
         $pathChecks['machine-x86-grok-bot'] = Join-Path ${env:ProgramFiles(x86)} 'Grok Bot'
         $pathChecks['machine-x86-cursor'] = Join-Path ${env:ProgramFiles(x86)} 'Cursor'
     }
@@ -236,17 +242,19 @@ function Get-CleanBaselineReport {
         if (-not (Test-Path -LiteralPath $root)) { continue }
         foreach ($key in Get-ChildItem -LiteralPath $root -ErrorAction Stop) {
             $displayName = [string](Get-ItemPropertyValue -LiteralPath $key.PSPath -Name DisplayName -ErrorAction SilentlyContinue)
-            if ($displayName -match '(?i)^(?:Codex Bot|Grok Bot|Cursor)(?:\s|$)') {
+            if ($displayName -match '(?i)^(?:Open Bot|Codex Bot|Grok Bot|Cursor)(?:\s|$)') {
                 $kind = if ($root -match 'HKEY_CURRENT_USER') { 'hkcu' } elseif ($root -match 'WOW6432Node') { 'hklm32' } else { 'hklm64' }
-                $product = if ($displayName -match '(?i)^Codex Bot') { 'codex-bot' } elseif ($displayName -match '(?i)^Grok Bot') { 'grok-bot' } else { 'cursor' }
+                $product = if ($displayName -match '(?i)^(?:Open Bot|Codex Bot)') { 'open-bot' } elseif ($displayName -match '(?i)^Grok Bot') { 'grok-bot' } else { 'cursor' }
                 $indicators.Add("registry:$kind-$product")
             }
         }
     }
     $appPathChecks = @(
+        'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\Open Bot.exe',
         'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\Codex Bot.exe',
         'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\Grok Bot.exe',
         'Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\App Paths\Cursor.exe',
+        'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\App Paths\Open Bot.exe',
         'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\App Paths\Codex Bot.exe',
         'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\App Paths\Grok Bot.exe',
         'Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\App Paths\Cursor.exe'
@@ -255,7 +263,7 @@ function Get-CleanBaselineReport {
         if (Test-Path -LiteralPath $appPathChecks[$index]) { $indicators.Add("app-path:$index") }
     }
 
-    $processNames = @('Codex Bot', 'Grok Bot', 'Cursor', 'codex-bot', 'grok-bot')
+    $processNames = @('Open Bot', 'Codex Bot', 'Grok Bot', 'Cursor', 'open-bot', 'codex-bot', 'grok-bot')
     foreach ($process in Get-Process -ErrorAction Stop) {
         if ($processNames -icontains $process.ProcessName) {
             $indicators.Add('process:' + $process.ProcessName.ToLowerInvariant().Replace(' ', '-'))
@@ -266,8 +274,8 @@ function Get-CleanBaselineReport {
     }
     foreach ($task in Get-ScheduledTask -ErrorAction Stop) {
         $taskIdentity = ([string]$task.TaskPath + [string]$task.TaskName)
-        if ($taskIdentity -match '(?i)(Codex Bot|Grok Bot|Cursor)') {
-            $product = if ($taskIdentity -match '(?i)Codex Bot') { 'codex-bot' } elseif ($taskIdentity -match '(?i)Grok Bot') { 'grok-bot' } else { 'cursor' }
+        if ($taskIdentity -match '(?i)(Open Bot|Codex Bot|Grok Bot|Cursor)') {
+            $product = if ($taskIdentity -match '(?i)(Open Bot|Codex Bot)') { 'open-bot' } elseif ($taskIdentity -match '(?i)Grok Bot') { 'grok-bot' } else { 'cursor' }
             $indicators.Add("scheduled-task:$product")
         }
     }
@@ -341,7 +349,7 @@ function Get-ValidatedRuntimeSecret {
 }
 
 function Read-GuestRuntimeInMemory {
-    $runtimePath = Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge\runtime.json'
+    $runtimePath = Join-Path $env:LOCALAPPDATA 'Open Bot\runtime.json'
     if (-not (Test-Path -LiteralPath $runtimePath -PathType Leaf)) {
         throw 'The guest runtime configuration is missing.'
     }
@@ -372,7 +380,7 @@ function Get-VerifiedGuestListenerReport {
         [Parameter(Mandatory = $true)][string]$CodexRoot
     )
 
-    $codexExecutable = [IO.Path]::GetFullPath((Join-Path $CodexRoot 'app\Codex Bot.exe'))
+    $codexExecutable = [IO.Path]::GetFullPath((Join-Path $CodexRoot 'app\Open Bot.exe'))
     $vendorExecutable = [IO.Path]::GetFullPath((Join-Path $CodexRoot 'app\Grok Bot.exe'))
     $proxyExecutable = [IO.Path]::GetFullPath((Join-Path $CodexRoot 'tools\cliproxyapi\cli-proxy-api.exe'))
     $identityHelper = Join-Path $CodexRoot 'tools\runtime\Local-Service-Identity.ps1'
@@ -597,7 +605,7 @@ function Get-GuestBackendVerification {
     $models = $null
     $frame = $null
     try {
-        $codexRoot = Join-Path $env:LOCALAPPDATA 'Programs\Codex Bot'
+        $codexRoot = Join-Path $env:LOCALAPPDATA 'Programs\Open Bot'
         $runtime = Read-GuestRuntimeInMemory
         $listeners = Get-VerifiedGuestListenerReport -Runtime $runtime -CodexRoot $codexRoot
 
@@ -833,11 +841,11 @@ function Test-InstalledCodexRuntime {
         }
         $result.actualFileCount = $actual.Count
         if ($actual.Count -ne ($expected.Count + 1) -or
-            -not $actual.ContainsKey('Codex Bot.exe')) {
+            -not $actual.ContainsKey('Open Bot.exe')) {
             return [pscustomobject]$result
         }
         foreach ($relative in $actual.Keys) {
-            if (-not $expected.ContainsKey($relative) -and $relative -ine 'Codex Bot.exe') {
+            if (-not $expected.ContainsKey($relative) -and $relative -ine 'Open Bot.exe') {
                 return [pscustomobject]$result
             }
         }
@@ -857,10 +865,10 @@ function Test-InstalledCodexRuntime {
             }
         }
 
-        $branded = Get-Item -LiteralPath $actual['Codex Bot.exe']
+        $branded = Get-Item -LiteralPath $actual['Open Bot.exe']
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $branded.FullName).Hash.ToLowerInvariant() -cne $ExpectedBrandedExecutableSha256.ToLowerInvariant() -or
-            ([string]$branded.VersionInfo.ProductName).TrimEnd() -cne 'Codex Bot' -or
-            ([string]$branded.VersionInfo.FileDescription).TrimEnd() -cne 'Codex Bot') {
+            ([string]$branded.VersionInfo.ProductName).TrimEnd() -cne 'Open Bot' -or
+            ([string]$branded.VersionInfo.FileDescription).TrimEnd() -cne 'Open Bot') {
             return [pscustomobject]$result
         }
         $result.brandedExecutablePresent = $true
@@ -888,10 +896,10 @@ function Test-InstalledCodexRuntime {
 }
 
 function Get-PostInstallReport {
-    $codexRoot = Join-Path $env:LOCALAPPDATA 'Programs\Codex Bot'
+    $codexRoot = Join-Path $env:LOCALAPPDATA 'Programs\Open Bot'
     $vendorRoot = Join-Path $env:LOCALAPPDATA 'Programs\Grok Bot'
-    $runtimePath = Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge\runtime.json'
-    $codexExecutable = Join-Path $codexRoot 'app\Codex Bot.exe'
+    $runtimePath = Join-Path $env:LOCALAPPDATA 'Open Bot\runtime.json'
+    $codexExecutable = Join-Path $codexRoot 'app\Open Bot.exe'
     $vendorExecutable = Join-Path $vendorRoot 'Grok Bot.exe'
     $copiedVendorExecutable = Join-Path $codexRoot 'app\Grok Bot.exe'
     $runtimeVerifier = Join-Path $codexRoot 'tools\integrity\Verify-GrokBotRuntime.ps1'
@@ -1038,14 +1046,14 @@ function Write-EvidenceManifest {
 }
 
 function Stop-GuestProductProcessesForEvidenceExport {
-    $codexRoot = Join-Path $env:LOCALAPPDATA 'Programs\Codex Bot'
+    $codexRoot = Join-Path $env:LOCALAPPDATA 'Programs\Open Bot'
     $disableAlwaysOn = Join-Path $codexRoot 'tools\runtime\Disable-Always-On.ps1'
     if (Test-Path -LiteralPath $disableAlwaysOn -PathType Leaf) {
         try { & $disableAlwaysOn } catch { throw 'Guest product shutdown failed before evidence export.' }
     }
     $paths = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
     foreach ($path in @(
-        (Join-Path $codexRoot 'app\Codex Bot.exe'),
+        (Join-Path $codexRoot 'app\Open Bot.exe'),
         (Join-Path $codexRoot 'app\Grok Bot.exe'),
         (Join-Path $codexRoot 'tools\cliproxyapi\cli-proxy-api.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Grok Bot\Grok Bot.exe')
@@ -1116,17 +1124,17 @@ try {
     $baseline = Get-CleanBaselineReport
     Write-JsonEvidence -Name 'baseline.json' -Value $baseline
     if (-not $baseline.clean) {
-        throw 'The Sandbox baseline contains Codex Bot, Grok Bot, or Cursor installation/state indicators. The installer was not executed.'
+        throw 'The Sandbox baseline contains Open Bot, legacy Codex Bot, Grok Bot, or Cursor installation/state indicators. The installer was not executed.'
     }
     $summary.cleanBaseline = $true
 
     $installerPath = Join-Path $ArtifactDirectory $ExpectedInstallerName
     if ($Scenario -eq 'Interactive') {
         Write-Host ''
-        Write-Host 'Codex Bot interactive acceptance (manual decisions only)'
+        Write-Host 'Open Bot interactive acceptance (manual decisions only)'
         Write-Host '1. In Setup, select the option to download and install pinned Grok Bot 0.18.0.'
         Write-Host '2. Review and handle any SmartScreen or permission decision yourself.'
-        Write-Host '3. Keep Launch Codex Bot selected, then complete Setup.'
+        Write-Host '3. Keep Launch Open Bot selected, then complete Setup.'
         Write-Host 'The harness does not click Setup, SmartScreen, permissions, or authentication UI.'
         Write-Host ''
         $installerProcess = Start-Process -FilePath $installerPath -ArgumentList @("/LOG=$rawInstallerLog") -Wait -PassThru
@@ -1157,7 +1165,7 @@ try {
     if ($Scenario -eq 'Interactive') {
         Write-Host ''
         Write-Host 'Authentication remains entirely manual and is never recorded by this harness.'
-        Write-Host 'In Codex Bot, complete the Codex sign-in using the app UI.'
+        Write-Host 'In Open Bot, complete the Codex sign-in using the app UI.'
         [void](Read-Host 'After you have reviewed the connected Codex state, press Enter (do not type credentials here)')
         Write-Host 'In Settings, choose the Cursor vendor-computer sign-in and complete it at cursor.com.'
         [void](Read-Host 'After you have reviewed the connected vendor-computer state, press Enter (do not type credentials here)')
@@ -1173,7 +1181,7 @@ try {
 
         Write-Host ''
         Write-Host 'Live direct-navigation review (manual only):'
-        Write-Host '1. In a Codex Bot chat, send: Go directly to https://x.com. Use CTRL+L and verify the final hostname; do not use any page search field.'
+        Write-Host '1. In an Open Bot chat, send: Go directly to https://x.com. Use CTRL+L and verify the final hostname; do not use any page search field.'
         Write-Host '2. Review and decide any chat approval card yourself. The harness never clicks Allow or Deny.'
         Write-Host '3. Inspect the shared computer and confirm it opened x.com directly, not a Wikipedia or other site search-results page.'
         [void](Read-Host 'After you have personally verified direct x.com navigation, press Enter')

@@ -31,7 +31,7 @@ function run(command, args, options = {}) {
   return childProcess.spawnSync(command, args, {
     cwd: root,
     encoding: "utf8",
-    env: process.env,
+    env: { ...process.env, PSModulePath: undefined },
     ...options,
   });
 }
@@ -55,19 +55,19 @@ function createDevelopmentInstallerFixture(t) {
     revisionResult.stderr || revisionResult.stdout,
   );
   const revision = revisionResult.stdout.trim().toLowerCase();
-  const installerName = `CodexBot-Setup-0.1.4-DEVELOPMENT-20260814T000000000Z-${revision}.exe`;
+  const installerName = `OpenBot-Setup-0.1.5-DEVELOPMENT-20260814T000000000Z-${revision}.exe`;
   const installer = path.join(temporary, installerName);
   const source = path.join(temporary, "fixture.cs");
   fs.writeFileSync(
     source,
     String.raw`using System.Reflection;
-[assembly: AssemblyTitle("Codex Bot DEVELOPMENT TEST installer - DO NOT PUBLISH")]
-[assembly: AssemblyDescription("Codex Bot DEVELOPMENT TEST installer - DO NOT PUBLISH")]
-[assembly: AssemblyCompany("Codex Bot contributors")]
-[assembly: AssemblyProduct("Codex Bot DEVELOPMENT TEST BUILD")]
-[assembly: AssemblyVersion("0.1.4.0")]
-[assembly: AssemblyFileVersion("0.1.4.0")]
-[assembly: AssemblyInformationalVersion("0.1.4 DEVELOPMENT TEST BUILD")]
+[assembly: AssemblyTitle("Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH")]
+[assembly: AssemblyDescription("Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH")]
+[assembly: AssemblyCompany("Open Bot contributors")]
+[assembly: AssemblyProduct("Open Bot DEVELOPMENT TEST BUILD")]
+[assembly: AssemblyVersion("0.1.5.0")]
+[assembly: AssemblyFileVersion("0.1.5.0")]
+[assembly: AssemblyInformationalVersion("0.1.5 DEVELOPMENT TEST BUILD")]
 internal static class Program { private static void Main() {} }
 `,
     "utf8",
@@ -187,10 +187,10 @@ test("dry run generates two isolated WSB scenarios from an audited DEVELOPMENT p
   assert.equal(receipt.brandedExecutableSha256, fixture.hash);
   assert.match(receipt.patchInputsSha256, /^[a-f0-9]{64}$/);
   assert.match(receipt.vendorManifestSha256, /^[a-f0-9]{64}$/);
-  assert.equal(receipt.productName, "Codex Bot DEVELOPMENT TEST BUILD");
+  assert.equal(receipt.productName, "Open Bot DEVELOPMENT TEST BUILD");
   assert.equal(
     receipt.fileDescription,
-    "Codex Bot DEVELOPMENT TEST installer - DO NOT PUBLISH",
+    "Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH",
   );
 });
 
@@ -222,7 +222,7 @@ test("generation fails closed on an unreviewed hash, non-development name, or re
     "ascii",
   );
 
-  const releaseName = "CodexBot-Setup-0.1.4.exe";
+  const releaseName = "OpenBot-Setup-0.1.5.exe";
   const releaseInstaller = path.join(fixture.temporary, releaseName);
   fs.copyFileSync(fixture.installer, releaseInstaller);
   const releaseHash = sha256(releaseInstaller);
@@ -279,6 +279,7 @@ try {
     {
       env: {
         ...process.env,
+        PSModulePath: undefined,
         CODEX_BOT_GENERATOR: generator,
         CODEX_BOT_INSTALLER: fixture.installer,
         CODEX_BOT_SIDECAR: fixture.sidecar,
@@ -312,7 +313,7 @@ test("sandbox runner enforces clean baseline, sanitization, and manual authentic
     generatorSource,
     /Enable-WindowsOptionalFeature|dism(?:\.exe)?\s+\/Enable-Feature/i,
   );
-  assert.match(runnerSource, /Codex Bot Bridge/);
+  assert.match(runnerSource, /Open Bot/);
   assert.match(runnerSource, /Programs\\Grok Bot/);
   assert.match(runnerSource, /Programs\\Cursor/);
   assert.match(runnerSource, /uninstall-registry/);
@@ -322,7 +323,7 @@ test("sandbox runner enforces clean baseline, sanitization, and manual authentic
   assert.match(runnerSource, /\/BOOTSTRAPGROKBOT=1/);
   assert.match(
     runnerSource,
-    /Test-InstalledCodexRuntime[\s\S]*resources\/app\.asar[\s\S]*Codex Bot\.exe/,
+    /Test-InstalledCodexRuntime[\s\S]*resources\/app\.asar[\s\S]*Open Bot\.exe/,
   );
   assert.match(runnerSource, /vendorRuntimeVerified/);
   assert.match(runnerSource, /Read-Host[\s\S]*do not type credentials here/);
@@ -473,13 +474,14 @@ internal static class Program {
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        String.raw`. $env:CODEX_BOT_RUNNER -Scenario Silent -ArtifactDirectory fixture -HarnessDirectory fixture -EvidenceDirectory fixture -ExpectedSha256 $('0' * 64) -ExpectedInstallerName fixture -ExpectedVersion 0.1.4 -ExpectedRevision 14fcf819cd7a -ExpectedBrandedExecutableSha256 $('1' * 64) -ExpectedPatchInputsSha256 $('2' * 64) -ExpectedVendorManifestSha256 $('3' * 64)
+        String.raw`. $env:CODEX_BOT_RUNNER -Scenario Silent -ArtifactDirectory fixture -HarnessDirectory fixture -EvidenceDirectory fixture -ExpectedSha256 $('0' * 64) -ExpectedInstallerName fixture -ExpectedVersion 0.1.5 -ExpectedRevision 14fcf819cd7a -ExpectedBrandedExecutableSha256 $('1' * 64) -ExpectedPatchInputsSha256 $('2' * 64) -ExpectedVendorManifestSha256 $('3' * 64)
 $verified = Test-DeterministicPatchedAsar -VendorSourceAsar $env:CODEX_BOT_SOURCE -InstalledPatchedAsar $env:CODEX_BOT_INSTALLED -VendorElectronExecutable $env:CODEX_BOT_EXECUTABLE -PatcherPath $env:CODEX_BOT_PATCHER -RuntimePath $env:CODEX_BOT_RUNTIME
 if ($verified) { exit 0 } else { exit 7 }`,
       ],
       {
         env: {
           ...process.env,
+          PSModulePath: undefined,
           CODEX_BOT_RUNNER: runner,
           CODEX_BOT_SOURCE: source,
           CODEX_BOT_INSTALLED: installed,

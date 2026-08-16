@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
-  <title id="title">Codex Bot Bridge</title>
+  <title id="title">Open Bot</title>
   <rect width="256" height="256" rx="58" fill="#111111"/>
   <path d="M58 104c0-31 25-56 56-56h28c31 0 56 25 56 56v48c0 31-25 56-56 56h-28c-31 0-56-25-56-56z" fill="#ff7a18"/>
   <circle cx="99" cy="126" r="10" fill="#111111"/>

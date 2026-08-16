@@ -462,10 +462,7 @@ test("the stock-branding sweep preserves Cursor wording in Codex-owned UI", () =
 
   replaceVisibleBranding({ nodes: [stockNode, ownedNode] });
 
-  assert.equal(
-    stockNode.nodeValue,
-    "Sign in with Codex with your Codex account",
-  );
+  assert.equal(stockNode.nodeValue, "Connect an AI provider");
   assert.equal(
     ownedNode.nodeValue,
     "Sign in to Cursor with your Cursor account",
@@ -507,49 +504,17 @@ test("official vendor login links are accepted only at the exact trusted route",
     assert.throws(() => validateOfficialLoginUrl(value), /unsafe link/, value);
 });
 
-test("official sign-in opens only a validated noreferrer anchor", () => {
-  const opened = [];
-  const document = {
-    created: 0,
-    body: {
-      append(link) {
-        link.appended = true;
-      },
-    },
-    documentElement: {
-      append() {
-        throw new Error("body should be preferred");
-      },
-    },
-    createElement(tag) {
-      this.created += 1;
-      assert.equal(tag, "a");
-      return {
-        click() {
-          assert.equal(this.appended, true);
-          opened.push({ href: this.href, target: this.target, rel: this.rel });
-        },
-        remove() {
-          this.removed = true;
-        },
-      };
-    },
-  };
+test("official sign-in validates the bridge-opened Cursor URL without a popup", () => {
   const openOfficialLoginLink = Function(
-    "document",
     `"use strict"; ${validatorSource}; ${openerSource}; return openOfficialLoginLink;`,
-  )(document);
+  )();
   const safe = officialLoginUrl();
   assert.equal(openOfficialLoginLink(safe), safe);
-  assert.deepEqual(opened, [
-    { href: safe, target: "_blank", rel: "noopener noreferrer" },
-  ]);
-  assert.equal(document.created, 1);
   assert.throws(
     () => openOfficialLoginLink(safe.replace("cursor.com", "evil.example")),
     /unsafe link/,
   );
-  assert.equal(document.created, 1);
+  assert.doesNotMatch(openerSource, /createElement|\.click\s*\(/);
   assert.doesNotMatch(ui, /window\.open\s*\(/);
 });
 

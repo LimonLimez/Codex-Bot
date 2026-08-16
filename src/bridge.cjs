@@ -57,7 +57,7 @@ function diagnostic(event, fields = {}) {
   try {
     const stateRoot =
       process.env.CODEX_BOT_STATE_ROOT ||
-      path.join(process.env.LOCALAPPDATA || os.tmpdir(), "Codex Bot Bridge");
+      path.join(process.env.LOCALAPPDATA || os.tmpdir(), "Open Bot");
     const file = path.join(stateRoot, "logs", "bridge.jsonl");
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.appendFileSync(
@@ -250,6 +250,7 @@ const UNAVAILABLE_TOOL_NAMES = new Set([
 ]);
 
 const COMPUTER_TOOL_NAME = "Computer";
+const SEND_MESSAGE_TOOL_NAME = "SendMessage";
 const MAX_COMPATIBLE_COMPUTER_ACTIONS = 10;
 const AI_SDK_SCHEMA_SYMBOL = Symbol.for("vercel.ai.schema");
 const AI_SDK_VALIDATOR_SYMBOL = Symbol.for("vercel.ai.validator");
@@ -461,6 +462,36 @@ function normalizeComputerToolCallArgs(toolName, args, openAITools) {
     : { ...primary };
 }
 
+const SEND_MESSAGE_FIELDS_BY_TYPE = Object.freeze({
+  text: new Set(["type", "content", "images", "reply_to", "channel"]),
+  attachment: new Set(["type", "url", "alt", "reply_to", "channel"]),
+  widget: new Set(["type", "widget", "reply_to"]),
+  "cursor-agent": new Set(["type", "bcId", "reply_to"]),
+  "secret-request": new Set(["type", "secret", "reply_to"]),
+});
+
+function normalizeSendMessageToolCallArgs(toolName, args) {
+  if (toolName !== SEND_MESSAGE_TOOL_NAME || !isPlainObject(args)) return args;
+  const allowed = SEND_MESSAGE_FIELDS_BY_TYPE[args.type];
+  if (allowed == null) return args;
+
+  let changed = false;
+  const normalized = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (
+      Object.values(SEND_MESSAGE_FIELDS_BY_TYPE).some((fields) =>
+        fields.has(key),
+      ) &&
+      !allowed.has(key)
+    ) {
+      changed = true;
+      continue;
+    }
+    normalized[key] = value;
+  }
+  return changed ? normalized : args;
+}
+
 function convertTools(tools) {
   const converted = (tools || [])
     .filter(
@@ -477,10 +508,7 @@ function convertTools(tools) {
         description: tool.description || "",
         parameters:
           tool.parameters && typeof tool.parameters === "object"
-            ? tool.name === COMPUTER_TOOL_NAME ||
-              tool.name === UPDATE_STATE_TOOL_NAME
-              ? unwrapAiSdkJsonSchema(tool.parameters)
-              : tool.parameters
+            ? unwrapAiSdkJsonSchema(tool.parameters)
             : { type: "object", properties: {}, additionalProperties: true },
       },
     }));
@@ -500,7 +528,100 @@ function convertTools(tools) {
   );
 }
 
-const SEND_MESSAGE_TOOL_NAME = "SendMessage";
+function resolveLocalJsonSchemaReference(root, reference) {
+  if (reference === "#") return root;
+  if (typeof reference !== "string" || !reference.startsWith("#/")) return null;
+  let pointer;
+  try {
+    pointer = decodeURIComponent(reference.slice(2));
+  } catch {
+    return null;
+  }
+  let value = root;
+  for (const rawToken of pointer.split("/")) {
+    const token = rawToken.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (
+      value == null ||
+      typeof value !== "object" ||
+      !Object.hasOwn(value, token)
+    ) {
+      return null;
+    }
+    value = value[token];
+  }
+  return value;
+}
+
+function moonshotJsonSchema(parameters) {
+  if (!isPlainObject(parameters)) return parameters;
+  const references = new Map();
+  const pending = [];
+  const existingDefinitions = isPlainObject(parameters.$defs)
+    ? parameters.$defs
+    : {};
+  let nextDefinition = 0;
+  let visitedNodes = 0;
+
+  function definitionReference(reference) {
+    if (reference.startsWith("#/$defs/")) return reference;
+    const target = resolveLocalJsonSchemaReference(parameters, reference);
+    if (target == null || typeof target !== "object") return reference;
+    if (references.has(reference))
+      return `#/$defs/${references.get(reference)}`;
+    let name;
+    do {
+      name = `codex_moonshot_ref_${nextDefinition++}`;
+    } while (Object.hasOwn(existingDefinitions, name));
+    references.set(reference, name);
+    pending.push({ name, target });
+    return `#/$defs/${name}`;
+  }
+
+  function clone(value, depth = 0) {
+    visitedNodes += 1;
+    if (visitedNodes > 100_000 || depth > 100)
+      throw new Error("Tool schema is too complex to normalize for Kimi.");
+    if (Array.isArray(value))
+      return value.map((item) => clone(item, depth + 1));
+    if (!isPlainObject(value)) return value;
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+      const normalized =
+        key === "$ref" && typeof item === "string"
+          ? definitionReference(item)
+          : clone(item, depth + 1);
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        value: normalized,
+        writable: true,
+      });
+    }
+    return result;
+  }
+
+  const normalized = clone(parameters);
+  if (pending.length === 0) return normalized;
+  const definitions = isPlainObject(normalized.$defs) ? normalized.$defs : {};
+  normalized.$defs = definitions;
+  for (let index = 0; index < pending.length; index += 1) {
+    const { name, target } = pending[index];
+    definitions[name] = clone(target);
+  }
+  return normalized;
+}
+
+function normalizeToolsForProvider(openAITools, providerId) {
+  if (providerId !== "kimi") return openAITools;
+  return (openAITools || []).map((tool) => ({
+    ...tool,
+    function: {
+      ...tool.function,
+      parameters: moonshotJsonSchema(tool.function.parameters),
+    },
+  }));
+}
+
 const UPDATE_STATE_TOOL_NAME = "update_state";
 
 function activeNameAssignmentInstruction(name) {
@@ -898,6 +1019,26 @@ function resolveFastRequest(connection) {
   };
 }
 
+function providerHttpFailureMessage(connection, status, detail) {
+  const provider = connection?.provider;
+  const text = String(detail || "");
+  if (
+    provider === "kimi" &&
+    status === 402 &&
+    /membership benefits|membership is active/i.test(text)
+  ) {
+    return "Kimi sign-in succeeded, but Moonshot could not verify an active Kimi coding membership for this account. Activate or restore the membership, then reconnect Kimi.";
+  }
+  if (
+    provider === "kimi" &&
+    status === 503 &&
+    /auth_unavailable|no auth available/i.test(text)
+  ) {
+    return "Kimi is signed in, but Moonshot has no usable Kimi coding credential for this request. Confirm this account has an active Kimi coding membership, then reconnect Kimi.";
+  }
+  return `CLIProxyAPI ${status}: ${text}`;
+}
+
 const MAX_SSE_LINE_BYTES = 1_000_000;
 
 function sseEventFromLine(line) {
@@ -991,11 +1132,15 @@ class CLIProxyExecutor {
       !nameAssignmentStep &&
       isRoleOrientationTurn(this.messages) &&
       roleOrientationCanUseSendMessage(baseOpenAITools, options.toolChoice);
-    const openAITools = nameAssignmentStep
+    const policyOpenAITools = nameAssignmentStep
       ? constrainNameAssignmentTools(baseOpenAITools, assignedName)
       : roleOrientationStep
         ? constrainRoleOrientationTools(baseOpenAITools)
         : baseOpenAITools;
+    const openAITools = normalizeToolsForProvider(
+      policyOpenAITools,
+      connection.provider,
+    );
     const computerGuidance = computerToolUseMessage(openAITools);
     let inventoryIndex = 0;
     while (
@@ -1090,7 +1235,9 @@ class CLIProxyExecutor {
           const detail = connectionManager.redactSensitiveText(
             (await httpResponse.text()).slice(0, 4000),
           );
-          throw new Error(`CLIProxyAPI ${httpResponse.status}: ${detail}`);
+          throw new Error(
+            providerHttpFailureMessage(connection, httpResponse.status, detail),
+          );
         }
         for await (const event of sseEvents(httpResponse.body)) {
           if (event.id) responseId = event.id;
@@ -1125,7 +1272,7 @@ class CLIProxyExecutor {
                   ? UPDATE_STATE_TOOL_NAME
                   : tc.function?.name || "",
                 args: "",
-                bufferComputerArgs: false,
+                bufferToolArgs: false,
                 bufferedArgDeltas: [],
                 emittedArgDelta: false,
               };
@@ -1140,7 +1287,11 @@ class CLIProxyExecutor {
             if (!nameAssignmentStep && !isNew && tc.function?.name) {
               call.name += tc.function.name;
             }
-            if (call.bufferComputerArgs && call.name !== COMPUTER_TOOL_NAME) {
+            if (
+              call.bufferToolArgs &&
+              call.name !== COMPUTER_TOOL_NAME &&
+              call.name !== SEND_MESSAGE_TOOL_NAME
+            ) {
               for (const bufferedDelta of call.bufferedArgDeltas) {
                 yield {
                   type: "tool-call-delta",
@@ -1149,7 +1300,7 @@ class CLIProxyExecutor {
                   argsTextDelta: bufferedDelta,
                 };
               }
-              call.bufferComputerArgs = false;
+              call.bufferToolArgs = false;
               call.bufferedArgDeltas = [];
               call.emittedArgDelta = true;
             }
@@ -1158,11 +1309,12 @@ class CLIProxyExecutor {
               if (nameAssignmentStep) {
                 continue;
               } else if (
-                computerGuidance != null &&
-                call.name === COMPUTER_TOOL_NAME &&
+                ((computerGuidance != null &&
+                  call.name === COMPUTER_TOOL_NAME) ||
+                  call.name === SEND_MESSAGE_TOOL_NAME) &&
                 !call.emittedArgDelta
               ) {
-                call.bufferComputerArgs = true;
+                call.bufferToolArgs = true;
                 call.bufferedArgDeltas.push(tc.function.arguments);
               } else {
                 call.emittedArgDelta = true;
@@ -1199,9 +1351,12 @@ class CLIProxyExecutor {
               args = {};
             }
           }
-          if (call.bufferComputerArgs) {
+          if (call.bufferToolArgs) {
             const normalizedArgs = parsedArgs
-              ? normalizeComputerToolCallArgs(call.name, args, openAITools)
+              ? normalizeSendMessageToolCallArgs(
+                  call.name,
+                  normalizeComputerToolCallArgs(call.name, args, openAITools),
+                )
               : args;
             const normalized = normalizedArgs !== args;
             args = normalizedArgs;
@@ -1334,6 +1489,9 @@ module.exports = {
   constrainRoleOrientationTools,
   isRoleOrientationTurn,
   normalizeComputerToolCallArgs,
+  normalizeSendMessageToolCallArgs,
+  normalizeToolsForProvider,
+  providerHttpFailureMessage,
   resolveFastRequest,
   toolInventoryMessage,
   trailingCompletedToolBatchMessageMode,

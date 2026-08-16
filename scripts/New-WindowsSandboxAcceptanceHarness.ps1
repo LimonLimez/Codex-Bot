@@ -91,7 +91,7 @@ function Test-DevelopmentInstallerArtifact {
     }
 
     $escapedVersion = [Regex]::Escape($ExpectedVersion)
-    $namePattern = '^CodexBot-Setup-' + $escapedVersion + '-DEVELOPMENT-(?<timestamp>\d{8}T\d{9}Z)-(?<revision>[A-Fa-f0-9]{7,12})\.exe$'
+    $namePattern = '^OpenBot-Setup-' + $escapedVersion + '-DEVELOPMENT-(?<timestamp>\d{8}T\d{9}Z)-(?<revision>[A-Fa-f0-9]{7,12})\.exe$'
     if ($installer.Name -cnotmatch $namePattern) {
         throw "Only the current versioned DEVELOPMENT installer is accepted: $($installer.Name)"
     }
@@ -136,10 +136,10 @@ function Test-DevelopmentInstallerArtifact {
     $productName = ([string]$VersionInfo.ProductName).TrimEnd()
     $fileDescription = ([string]$VersionInfo.FileDescription).TrimEnd()
     $productVersion = ([string]$VersionInfo.ProductVersion).TrimEnd()
-    if ($productName -cne 'Codex Bot DEVELOPMENT TEST BUILD') {
-        throw 'The installer PE metadata is not labeled Codex Bot DEVELOPMENT TEST BUILD.'
+    if ($productName -cne 'Open Bot DEVELOPMENT TEST BUILD') {
+        throw 'The installer PE metadata is not labeled Open Bot DEVELOPMENT TEST BUILD.'
     }
-    if ($fileDescription -cne 'Codex Bot DEVELOPMENT TEST installer - DO NOT PUBLISH') {
+    if ($fileDescription -cne 'Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH') {
         throw 'The installer PE metadata is missing the DEVELOPMENT/DO NOT PUBLISH description.'
     }
     if ($productVersion -cne "$ExpectedVersion DEVELOPMENT TEST BUILD") {
