@@ -29,11 +29,7 @@ const MAX_ACTIVE = Math.max(
 );
 const DATA_ROOT =
   process.env.GROK_BOT_BROWSER_SEAT_DATA ||
-  path.join(
-    process.env.LOCALAPPDATA || __dirname,
-    "Codex Bot Bridge",
-    "browser-seats",
-  );
+  path.join(process.env.LOCALAPPDATA || __dirname, "Open Bot", "browser-seats");
 const CHROME_CANDIDATES = [
   process.env.GROK_BOT_BROWSER_EXECUTABLE,
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -615,7 +611,7 @@ async function launchSeat(key) {
   fs.mkdirSync(profileDir, { recursive: true });
   fs.mkdirSync(downloadsDir, { recursive: true });
   // Chrome may reopen crash-recovery tabs before Playwright can attach routes or
-  // init scripts. Codex Bot's sanitized session snapshot is canonical, so make
+  // init scripts. Open Bot's sanitized session snapshot is canonical, so make
   // Chrome itself start clean while retaining cookies and all other profile data.
   preparePersistentProfileForSafeLaunch(profileDir);
   const publicWebProxy = createPublicWebProxy();

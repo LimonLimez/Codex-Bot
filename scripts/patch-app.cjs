@@ -38,6 +38,16 @@ function sha256(file) {
     .digest("hex");
 }
 
+function pngDataUri(file) {
+  const bytes = fs.readFileSync(file);
+  if (
+    bytes.length < 8 ||
+    !bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))
+  )
+    throw new Error(`Provider icon is not a PNG: ${file}`);
+  return `data:image/png;base64,${bytes.toString("base64")}`;
+}
+
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
 }
@@ -481,7 +491,7 @@ function verifyHostLocalOnlySource(hostSource) {
     'if (process.env.GROK_BOT_LOCAL_ONLY === "1" || skipLabeling)',
     'if (process.env.GROK_BOT_LOCAL_ONLY === "1") return { flushPendingUploads: async () => {} };',
     "skillsCatalog: async () => []",
-    "Vendor backend RPCs are disabled in Codex Bot local-only mode.",
+    "Vendor backend RPCs are disabled in Open Bot local-only mode.",
   ]) {
     assertPatchInvariant(
       hostSource.includes(marker),
@@ -664,7 +674,7 @@ function verifyRendererLocalOnlySource(rendererSource) {
   assertPatchInvariant(
     rendererSource.includes("children: p.jsx(Gzn, {})") &&
       rendererSource.includes(
-        "Renderer Sentry is disabled in the Codex Bot local-only build",
+        "Renderer Sentry is disabled in the Open Bot local-only build",
       ) &&
       !rendererSource.includes("tBn();"),
     "workspace shell is direct and renderer Sentry stays disabled",
@@ -936,7 +946,7 @@ function verifyLocalAuthIsolationSources(mainSource, rendererSource) {
     mainSource,
     [
       "function createCursorAccountEdgePort",
-      "Vendor account services are disabled in Codex Bot local-only mode.",
+      "Vendor account services are disabled in Open Bot local-only mode.",
     ],
     "desktop account edge",
   ).source;
@@ -1121,7 +1131,7 @@ function walk(directory, visitor) {
 function applyBranding(root) {
   const extensions = new Set([".js", ".cjs", ".mjs", ".json", ".html", ".css"]);
   const replacements = [
-    ["Grok Bot", "Codex Bot"],
+    ["Grok Bot", "Open Bot"],
     ["grok bot", "codex bot"],
     ["X-Grok-Seat-Token", "X-Codex-Seat-Token"],
     ["Sign In with Cursor", "Sign in with Codex"],
@@ -1149,10 +1159,10 @@ function patchPackage(root) {
   const packageJson = readJson(file);
   if (packageJson.version !== SUPPORTED.version)
     throw new Error(`Unsupported Grok Bot version ${packageJson.version}`);
-  packageJson.productName = "Codex Bot";
+  packageJson.productName = "Open Bot";
   packageJson.description = "Codex-powered digital coworker";
-  packageJson.author = "Codex Bot community build";
-  packageJson.homepage = "https://github.com/LimonLimez/Codex-Bot";
+  packageJson.author = "Open Bot community build";
+  packageJson.homepage = "https://github.com/LimonLimez/Open-Bot";
   writeText(file, `${JSON.stringify(packageJson, null, 2)}\n`);
 }
 
@@ -1164,10 +1174,10 @@ function patchElectronMain(root) {
     throw new Error("Electron local-only startup anchor not found");
   const localOnlyBootstrap = `"use strict";
 function showCodexBotLocalOnlyLaunchError(detail) {
-  const message = "Codex Bot must start through its local runtime. " + detail;
+  const message = "Open Bot must start through its local runtime. " + detail;
   process.stderr.write("[codex-bot] " + message + "\\n");
   try {
-    require("electron").dialog.showErrorBox("Codex Bot could not start", message);
+    require("electron").dialog.showErrorBox("Open Bot could not start", message);
   } catch {}
 }
 function isCodexBotWrappedLaunchEnvironment() {
@@ -1251,7 +1261,7 @@ process.env.SAND_BACKEND_URL = "http://127.0.0.1:1";
   text = replaceOnce(
     text,
     "  return (next) => async (req) => {\n    const [auth2, machineId] = await Promise.all([",
-    '  return (next) => async (req) => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") {\n      throw new Error("Vendor backend RPCs are disabled in Codex Bot local-only mode.");\n    }\n    const [auth2, machineId] = await Promise.all([',
+    '  return (next) => async (req) => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") {\n      throw new Error("Vendor backend RPCs are disabled in Open Bot local-only mode.");\n    }\n    const [auth2, machineId] = await Promise.all([',
     "desktop vendor backend isolation",
   );
   text = replaceOnce(
@@ -1300,8 +1310,8 @@ function createDesktopAccountAuthorizer(deps) {`,
   return {
     kind: "logged-in",
     authId: "codex-bot-local",
-    name: "Codex Bot User",
-    displayName: "Codex Bot User",
+    name: "Open Bot",
+    displayName: "Open Bot",
     email: null,
     isAnysphereUser: false
   };
@@ -1326,8 +1336,8 @@ function createCursorAccountEdgePort(deps) {
       getUsageSummary: async () => null,
       getPrReviewPreferences: async () => NO_SAND_PR_REVIEW_PREFERENCES,
       getPrivacyModeEnabled: async () => true,
-      cancelTrial: async () => ({ ok: false, message: "Vendor account services are disabled in Codex Bot local-only mode." }),
-      invokeDashboardAction: async () => ({ ok: false, message: "Vendor account services are disabled in Codex Bot local-only mode." })
+      cancelTrial: async () => ({ ok: false, message: "Vendor account services are disabled in Open Bot local-only mode." }),
+      invokeDashboardAction: async () => ({ ok: false, message: "Vendor account services are disabled in Open Bot local-only mode." })
     };
   }`,
     "desktop synthetic local identity",
@@ -1348,7 +1358,7 @@ function createCursorAccountEdgePort(deps) {
   text = replaceOnce(
     text,
     "import_electron51.app.whenReady().then(async () => {",
-    'if (process.platform === "win32") {\n  import_electron51.app.setAppUserModelId("io.github.limonlimez.codexbot");\n}\nimport_electron51.app.whenReady().then(async () => {',
+    'if (process.platform === "win32") {\n  import_electron51.app.setAppUserModelId("io.github.limonlimez.openbot");\n}\nimport_electron51.app.whenReady().then(async () => {',
     "Windows application id",
   );
   fs.writeFileSync(file, text, "utf8");
@@ -1394,7 +1404,7 @@ try {
   const inferenceReplacement = `function createCursorInferencePromptSession(options2) {
   const bridgePath = process.env.GROK_BOT_CLIPROXY_BRIDGE;
   if (bridgePath == null || bridgePath.trim() === "") {
-    throw new Error("GROK_BOT_CLIPROXY_BRIDGE is required in the Codex Bot build.");
+    throw new Error("GROK_BOT_CLIPROXY_BRIDGE is required in the Open Bot build.");
   }
   return require(bridgePath).createPromptSession(options2, imageResizingMiddleware);
 }`;
@@ -1463,7 +1473,7 @@ try {
   text = replaceOnce(
     text,
     "  return (next) => async (req) => {\n    const [auth2, machineId] = await Promise.all([",
-    '  return (next) => async (req) => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") {\n      throw new Error("Vendor backend RPCs are disabled in Codex Bot local-only mode.");\n    }\n    const [auth2, machineId] = await Promise.all([',
+    '  return (next) => async (req) => {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") {\n      throw new Error("Vendor backend RPCs are disabled in Open Bot local-only mode.");\n    }\n    const [auth2, machineId] = await Promise.all([',
     "host vendor backend isolation",
   );
 
@@ -1758,8 +1768,8 @@ function patchRenderer(root, viewToken, viewPort) {
   return {
     kind: "logged-in",
     authId: "codex-bot-local",
-    name: "Codex Bot User",
-    displayName: "Codex Bot User",
+    name: "Open Bot",
+    displayName: "Open Bot",
     email: null,
     isAnysphereUser: false,
   };
@@ -1791,7 +1801,7 @@ function patchRenderer(root, viewToken, viewPort) {
   void n;
   const unavailable = async () => ({
     ok: false,
-    message: "Vendor account services are disabled in Codex Bot local-only mode.",
+    message: "Vendor account services are disabled in Open Bot local-only mode.",
   });
   return {
     async getCursorAuthStatus(t) {
@@ -1859,7 +1869,7 @@ function patchRenderer(root, viewToken, viewPort) {
   text = replaceOnce(
     text,
     "tBn();",
-    "/* Renderer Sentry is disabled in the Codex Bot local-only build. */",
+    "/* Renderer Sentry is disabled in the Open Bot local-only build. */",
     "renderer telemetry isolation",
   );
   const pauseGate = uniqueFunctionRegion(
@@ -2095,7 +2105,7 @@ function patchRenderer(root, viewToken, viewPort) {
   );
   fs.writeFileSync(htmlFile, html, "utf8");
 
-  const codexUi = fs.readFileSync(
+  let codexUi = fs.readFileSync(
     path.join(PROJECT_ROOT, "src", "renderer", "codex-ui.js"),
     "utf8",
   );
@@ -2104,6 +2114,23 @@ function patchRenderer(root, viewToken, viewPort) {
     !codexUi.includes("__CODEX_VIEW_PORT__")
   ) {
     throw new Error("Renderer connection placeholder is missing");
+  }
+  const providerIcons = Object.freeze({
+    __OPEN_BOT_ICON_CODEX__: "openai-codex.png",
+    __OPEN_BOT_ICON_CLAUDE__: "anthropic-claude.png",
+    __OPEN_BOT_ICON_KIMI__: "moonshot-kimi.png",
+    __OPEN_BOT_ICON_XAI__: "xai.png",
+    __OPEN_BOT_ICON_VERTEX__: "google-vertex.png",
+  });
+  for (const [placeholder, filename] of Object.entries(providerIcons)) {
+    if (codexUi.split(placeholder).length !== 2)
+      throw new Error(
+        `Renderer provider icon placeholder is missing or ambiguous: ${placeholder}`,
+      );
+    codexUi = codexUi.replace(
+      placeholder,
+      pngDataUri(path.join(PROJECT_ROOT, "assets", "provider-icons", filename)),
+    );
   }
   writeText(
     path.join(root, "dist", "renderer", "codex-ui.js"),

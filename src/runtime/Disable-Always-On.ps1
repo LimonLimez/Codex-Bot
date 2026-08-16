@@ -1,8 +1,10 @@
 $ErrorActionPreference = 'SilentlyContinue'
+Stop-ScheduledTask -TaskName 'Open Bot' -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName 'Open Bot' -Confirm:$false -ErrorAction SilentlyContinue
 Stop-ScheduledTask -TaskName 'Codex Bot Bridge' -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'Codex Bot Bridge' -Confirm:$false -ErrorAction SilentlyContinue
 $installRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$portable = [IO.Path]::GetFullPath((Join-Path $installRoot 'app\Codex Bot.exe'))
+$portable = [IO.Path]::GetFullPath((Join-Path $installRoot 'app\Open Bot.exe'))
 $proxy = [IO.Path]::GetFullPath((Join-Path $installRoot 'tools\cliproxyapi\cli-proxy-api.exe'))
 $watchdogPath = Join-Path $PSScriptRoot 'CodexBot-Watchdog.ps1'
 Get-CimInstance Win32_Process | Where-Object {

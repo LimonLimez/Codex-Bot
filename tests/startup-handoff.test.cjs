@@ -16,10 +16,7 @@ test("installation registers the watchdog but leaves first-run startup to the la
   const launcher = read("src/runtime/Launch-Codex-Bot.ps1");
 
   assert.match(installer, /& \$enableAlwaysOn/);
-  assert.match(
-    enableAlwaysOn,
-    /Register-ScheduledTask -TaskName 'Codex Bot Bridge'/,
-  );
+  assert.match(enableAlwaysOn, /Register-ScheduledTask -TaskName 'Open Bot'/);
   assert.doesNotMatch(enableAlwaysOn, /Start-ScheduledTask/);
 
   const desktopStart = launcher.indexOf(
@@ -27,7 +24,7 @@ test("installation registers the watchdog but leaves first-run startup to the la
     launcher.indexOf("if ($DebugRenderer)"),
   );
   const watchdogStart = launcher.indexOf(
-    "Start-ScheduledTask -TaskName 'Codex Bot Bridge'",
+    "Start-ScheduledTask -TaskName 'Open Bot'",
   );
   assert.ok(desktopStart >= 0, "launcher must start the desktop");
   assert.ok(

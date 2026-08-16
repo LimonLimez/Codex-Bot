@@ -116,6 +116,7 @@ function Get-AuthenticodeSignature {
       encoding: "utf8",
       env: {
         ...process.env,
+        PSModulePath: undefined,
         CODEX_BOT_TEST_VERIFIER: runtimeVerifier,
         CODEX_BOT_TEST_TREE: fixture.tree,
         CODEX_BOT_TEST_MANIFEST: fixture.manifestPath,
@@ -264,11 +265,11 @@ test("the vendor-installer verifier pins size, bytes, metadata, and artifact sig
     assert.ok(source.includes(pin), `missing installer pin: ${pin}`);
   }
   assert.match(source, /FileAttributes\]::ReparsePoint/);
-  assert.match(source, /Get-FileHash -Algorithm SHA256/);
-  assert.match(source, /Get-AuthenticodeSignature/);
+  assert.match(source, /Security\.Cryptography\.SHA256/);
+  assert.match(source, /System\.Management\.Automation\.SignatureHelper/);
   assert.ok(
-    source.indexOf("Get-FileHash -Algorithm SHA256") <
-      source.indexOf("Get-AuthenticodeSignature"),
+    source.indexOf("Security.Cryptography.SHA256") <
+      source.indexOf("SignatureHelper"),
     "the exact bytes must be pinned before trusting their signature",
   );
 
@@ -345,7 +346,7 @@ test("the bootstrap downloads only the explicitly authorized vendor-hosted pinne
   assert.match(inno, /exact separate 120 MiB per-user installer/);
   assert.match(
     inno,
-    /remains installed if Codex Bot Setup fails, is canceled, or Codex Bot is later uninstalled/,
+    /remains installed if Open Bot Setup fails, is canceled, or Open Bot is later uninstalled/,
   );
   assert.match(inno, /VendorChoicePage\.SelectedValueIndex := -1/);
   assert.doesNotMatch(inno, /VendorChoicePage\.SelectedValueIndex := [01]/);
@@ -1142,7 +1143,7 @@ test("bootstrap silent, cancellation, and rollback semantics are explicit", () =
   );
   assert.match(
     inno,
-    /separate vendor application remains installed if Codex Bot Setup is later canceled or fails/i,
+    /separate vendor application remains installed if Open Bot Setup is later canceled or fails/i,
   );
   assert.match(inno, /separate vendor installation was not rolled back/i);
   assert.match(
@@ -1185,6 +1186,30 @@ test("both installer phases verify the complete runtime before Grok Bot.exe can 
   assert.ok(
     verification >= 0 && firstLaunch > verification,
     "copied runtime verification must precede every vendor-process launch",
+  );
+});
+
+test("upgrades remove only the managed Chromium debug log before exact runtime verification", () => {
+  const install = fs.readFileSync(
+    path.join(root, "scripts", "Install-CodexBot.ps1"),
+    "utf8",
+  );
+  const cleanup = install.indexOf(
+    "Remove-Item -LiteralPath $managedRuntimeDebugLog -Force",
+  );
+  const verification = install.indexOf(
+    "& $runtimeVerifier -InstallRoot $appRoot -ManifestPath $runtimeManifest",
+  );
+
+  assert.match(
+    install,
+    /\$managedRuntimeDebugLog = Join-Path \$appRoot 'debug\.log'/,
+  );
+  assert.ok(cleanup >= 0 && verification > cleanup);
+  assert.doesNotMatch(
+    install.slice(0, verification),
+    /Remove-Item[^\r\n]*\$appRoot[^\r\n]*-Recurse/i,
+    "upgrade cleanup must not replace complete-tree verification with a broad app deletion",
   );
 });
 

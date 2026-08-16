@@ -8,9 +8,9 @@ $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
 $appRoot = Join-Path $InstallRoot 'app'
 $toolsRoot = Join-Path $InstallRoot 'tools'
 $vendorExe = Join-Path $appRoot 'Grok Bot.exe'
-$codexExe = Join-Path $appRoot 'Codex Bot.exe'
+$openBotExe = Join-Path $appRoot 'Open Bot.exe'
 $sourceAsar = Join-Path $appRoot 'resources\app.asar'
-$patchedAsar = Join-Path $appRoot 'resources\app.codex.asar'
+$patchedAsar = Join-Path $appRoot 'resources\app.openbot.asar'
 $patchedUnpacked = $patchedAsar + '.unpacked'
 $targetUnpacked = $sourceAsar + '.unpacked'
 $patcher = Join-Path $toolsRoot 'scripts\patch-app.cjs'
@@ -25,9 +25,18 @@ $runtimeVerifier = Join-Path $toolsRoot 'integrity\Verify-GrokBotRuntime.ps1'
 $runtimeManifest = Join-Path $toolsRoot 'integrity\grok-bot-0.18.0-windows-x64.manifest.json'
 $disableAlwaysOn = Join-Path $toolsRoot 'runtime\Disable-Always-On.ps1'
 $enableAlwaysOn = Join-Path $toolsRoot 'runtime\Enable-Always-On.ps1'
+$managedRuntimeDebugLog = Join-Path $appRoot 'debug.log'
 
 foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandIcon, $proxyExe, $officialComputerClient, $officialComputerHelper, $noVncPackage, $webSocketPackage, $runtimeVerifier, $runtimeManifest, $disableAlwaysOn, $enableAlwaysOn)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Installer input is missing: $required" }
+}
+
+# Chromium can leave this managed diagnostic file beside the derived executable.
+# It is not part of the vendor tree and must not make an otherwise exact upgrade
+# fail before the copied runtime is verified. Any other unexpected path remains
+# a hard failure in the complete-tree verifier below.
+if (Test-Path -LiteralPath $managedRuntimeDebugLog) {
+    Remove-Item -LiteralPath $managedRuntimeDebugLog -Force
 }
 
 # The copied runtime is untrusted until its complete tree and pinned signer have
@@ -35,7 +44,11 @@ foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandI
 & $runtimeVerifier -InstallRoot $appRoot -ManifestPath $runtimeManifest | Out-Null
 & $disableAlwaysOn
 
-$stateRoot = Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge'
+$stateRoot = Join-Path $env:LOCALAPPDATA 'Open Bot'
+$legacyStateRoot = Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge'
+if ((Test-Path -LiteralPath $legacyStateRoot) -and -not (Test-Path -LiteralPath $stateRoot)) {
+    Move-Item -LiteralPath $legacyStateRoot -Destination $stateRoot
+}
 $runtimePath = Join-Path $stateRoot 'runtime.json'
 $cliproxyRoot = Join-Path $stateRoot 'cliproxy'
 $authRoot = Join-Path $cliproxyRoot 'auth'
@@ -192,16 +205,16 @@ try {
     $patchProcess = Start-Process -FilePath $vendorExe -ArgumentList $patchArguments -Wait -PassThru -WindowStyle Hidden -RedirectStandardOutput $patchLog -RedirectStandardError $patchErrorLog
     if ($patchProcess.ExitCode -ne 0) {
         $detail = if (Test-Path -LiteralPath $patchErrorLog) { (Get-Content -Raw -LiteralPath $patchErrorLog).Trim() } else { '' }
-        throw "Codex Bot patcher failed with exit code $($patchProcess.ExitCode). $detail"
+        throw "Open Bot patcher failed with exit code $($patchProcess.ExitCode). $detail"
     }
-    Copy-Item -LiteralPath $vendorExe -Destination $codexExe -Force
-    $brandProcess = Start-Process -FilePath $vendorExe -ArgumentList @("`"$brandScript`"", "`"$codexExe`"", "`"$brandIcon`"") -Wait -PassThru -WindowStyle Hidden
+    Copy-Item -LiteralPath $vendorExe -Destination $openBotExe -Force
+    $brandProcess = Start-Process -FilePath $vendorExe -ArgumentList @("`"$brandScript`"", "`"$openBotExe`"", "`"$brandIcon`"") -Wait -PassThru -WindowStyle Hidden
     if ($brandProcess.ExitCode -ne 0) { throw "Executable branding failed with exit code $($brandProcess.ExitCode)" }
 } finally {
     Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
 }
 
-if (-not (Test-Path -LiteralPath $patchedAsar)) { throw 'The patcher did not create app.codex.asar.' }
+if (-not (Test-Path -LiteralPath $patchedAsar)) { throw 'The patcher did not create app.openbot.asar.' }
 Move-Item -LiteralPath $patchedAsar -Destination $sourceAsar -Force
 if (Test-Path -LiteralPath $patchedUnpacked) {
     if (Test-Path -LiteralPath $targetUnpacked) {
@@ -216,4 +229,4 @@ if (Test-Path -LiteralPath $patchedUnpacked) {
 # starts the desktop first, then hands supervision to this task, avoiding two
 # first-run processes racing to claim the same private listeners.
 & $enableAlwaysOn
-Write-Output "Codex Bot installed successfully. Runtime state: $stateRoot"
+Write-Output "Open Bot installed successfully. Runtime state: $stateRoot"

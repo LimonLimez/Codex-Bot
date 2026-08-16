@@ -6,7 +6,7 @@ const path = require("node:path");
 
 const STATE_ROOT =
   process.env.CODEX_BOT_STATE_ROOT ||
-  path.join(process.env.LOCALAPPDATA || __dirname, "Codex Bot Bridge");
+  path.join(process.env.LOCALAPPDATA || __dirname, "Open Bot");
 const HELPER_PATH = path.join(__dirname, "official-computer-helper.cjs");
 const REQUEST_TIMEOUT_MS = 120000;
 const DEFAULT_INPUT_REQUEST_TIMEOUT_MS = 105000;

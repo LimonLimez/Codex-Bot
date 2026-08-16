@@ -1,6 +1,19 @@
 const CODEX_SERVICE = "http://127.0.0.1:__CODEX_VIEW_PORT__";
 const CODEX_TOKEN = "__CODEX_VIEW_TOKEN__";
 const CODEX_DEVICE_URL = "https://auth.openai.com/codex/device";
+const PROVIDER_LOGIN_TARGETS = Object.freeze({
+  codex: Object.freeze({ host: "auth.openai.com", path: "/codex/device" }),
+  claude: Object.freeze({ host: "claude.ai", path: "/oauth/authorize" }),
+  antigravity: Object.freeze({
+    host: "accounts.google.com",
+    path: "/o/oauth2/v2/auth",
+  }),
+  kimi: Object.freeze({
+    host: "www.kimi.com",
+    path: "/code/authorize_device",
+  }),
+  xai: Object.freeze({ host: "accounts.x.ai", path: "/oauth2/device" }),
+});
 globalThis.__CODEX_BOT_VIEW_TOKEN__ = CODEX_TOKEN;
 const headers = { "X-Codex-Seat-Token": CODEX_TOKEN };
 let lastStatus = null;
@@ -12,10 +25,24 @@ let officialComputerOperationInFlight = false;
 let officialPermissionOperationInFlight = false;
 let officialEnableAfterCursorLogin = false;
 let officialEnableContinuationInFlight = false;
+let providerActivationInFlight = false;
+let providerConnectionNotice = { message: "", tone: "info" };
+let selectedProviderId = null;
 let officialComputerNotice = { message: "", tone: "info" };
 let officialPermissionNotice = { message: "", tone: "info" };
 let pendingOAuthDevice = null;
 let activeModelPicker = null;
+let onboardingStep = "providers";
+let onboardingComputerChoice = "private";
+const PROVIDER_LOGIN_TIMEOUT_MS = 10 * 60 * 1_000;
+const ONBOARDING_STORAGE_KEY = "open-bot.onboarding.v1.complete";
+const PROVIDER_ICON_DATA = Object.freeze({
+  codex: "__OPEN_BOT_ICON_CODEX__",
+  claude: "__OPEN_BOT_ICON_CLAUDE__",
+  kimi: "__OPEN_BOT_ICON_KIMI__",
+  xai: "__OPEN_BOT_ICON_XAI__",
+  vertex: "__OPEN_BOT_ICON_VERTEX__",
+});
 const agentStatusCache = new Map();
 const pendingAgentStatusLoads = new Map();
 const officialApprovalLoads = new WeakSet();
@@ -94,6 +121,53 @@ function reasoningLabel(value) {
     : "Default";
 }
 
+function reasoningSliderHtml(
+  efforts,
+  current,
+  { attribute, id, compact = false },
+) {
+  const values = efforts.length ? efforts : REASONING_FALLBACKS;
+  const selectedIndex = Math.max(0, values.indexOf(current));
+  const progress =
+    values.length <= 1 ? 0 : (selectedIndex / (values.length - 1)) * 100;
+  const stops = values
+    .map(
+      (effort, index) =>
+        `<span class="${index <= selectedIndex ? "is-active" : ""}" title="${escapeHtml(reasoningLabel(effort))}"></span>`,
+    )
+    .join("");
+  return `
+    <div class="codex-reasoning-slider${compact ? " is-compact" : ""}">
+      <div class="codex-reasoning-slider-heading"><span>Reasoning</span><strong id="${id}-value" data-codex-reasoning-value>${escapeHtml(reasoningLabel(values[selectedIndex]))}</strong></div>
+      <input id="${id}" type="range" min="0" max="${values.length - 1}" step="1" value="${selectedIndex}" aria-labelledby="${id}-label" aria-valuetext="${escapeHtml(reasoningLabel(values[selectedIndex]))}" data-reasoning-values="${escapeHtml(values.join("|"))}" style="--codex-slider-progress:${progress}%" ${attribute} />
+      <span class="codex-visually-hidden" id="${id}-label">Reasoning effort</span>
+      <div class="codex-reasoning-stops" aria-hidden="true">${stops}</div>
+    </div>`;
+}
+
+function updateReasoningSlider(control) {
+  if (!control) return null;
+  const values = String(control.dataset.reasoningValues || "")
+    .split("|")
+    .filter(Boolean);
+  const index = Math.max(
+    0,
+    Math.min(values.length - 1, Number(control.value) || 0),
+  );
+  const value = values[index] || null;
+  const progress = values.length <= 1 ? 0 : (index / (values.length - 1)) * 100;
+  control.style.setProperty("--codex-slider-progress", `${progress}%`);
+  control.setAttribute("aria-valuetext", reasoningLabel(value));
+  const root = control.closest(".codex-reasoning-slider");
+  const label = root?.querySelector("[data-codex-reasoning-value]");
+  if (label) label.textContent = reasoningLabel(value);
+  for (const [stopIndex, stop] of [
+    ...(root?.querySelectorAll(".codex-reasoning-stops>span") || []),
+  ].entries())
+    stop.classList.toggle("is-active", stopIndex <= index);
+  return value;
+}
+
 function hasCodexConnection(status) {
   return Boolean(
     status?.account?.signedIn || status?.connection?.mode === "api-key",
@@ -161,6 +235,30 @@ function initials(name) {
     .toUpperCase();
 }
 
+function onboardingCompleted() {
+  try {
+    return localStorage.getItem(ONBOARDING_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function rememberOnboardingCompleted() {
+  try {
+    localStorage.setItem(ONBOARDING_STORAGE_KEY, "true");
+  } catch {}
+}
+
+function providerLogo(providerId) {
+  const suppliedIcon = PROVIDER_ICON_DATA[providerId];
+  if (suppliedIcon)
+    return `<img aria-hidden="true" src="${suppliedIcon}" alt="" />`;
+  const common = 'aria-hidden="true" viewBox="0 0 40 40"';
+  if (providerId === "antigravity")
+    return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#fff"/><path d="M31.8 20.3c0-1-.1-1.8-.3-2.7H20v4.8h6.7a5.8 5.8 0 0 1-2.5 3.7v3.2h4.1c2.4-2.2 3.5-5.4 3.5-9Z" fill="#4285F4"/><path d="M20 32c3.3 0 6.1-1.1 8.2-2.9l-4.1-3.1a7.5 7.5 0 0 1-11.2-3.9H8.7v3.3A12 12 0 0 0 20 32Z" fill="#34A853"/><path d="M12.9 22.2a7.3 7.3 0 0 1 0-4.5v-3.3H8.7a12 12 0 0 0 0 11l4.2-3.2Z" fill="#FBBC05"/><path d="M20 12.5c1.9 0 3.6.7 4.9 1.9l3.6-3.5A12 12 0 0 0 8.7 14.5l4.2 3.3a7.4 7.4 0 0 1 7.1-5.3Z" fill="#EA4335"/></svg>`;
+  return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#7357ff"/><path d="m20 8 10.5 12L20 32 9.5 20 20 8Zm0 6.4L15.1 20l4.9 5.6 4.9-5.6-4.9-5.6Z" fill="#fff"/></svg>`;
+}
+
 function formatNumber(value) {
   return new Intl.NumberFormat().format(Number(value || 0));
 }
@@ -182,11 +280,11 @@ function availabilityHtml(availability, activeOAuth) {
     : "";
   const label =
     availability.state === "usage-limit"
-      ? "Codex OAuth usage limit reached."
+      ? "Provider usage limit reached."
       : availability.state === "model-cooldown"
-        ? "This Codex model is temporarily cooling down."
-        : "The last Codex request failed.";
-  return `<div class="codex-availability" role="status"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(availability.message || "")}${escapeHtml(reset)}</span><span>Use an OpenAI API key below to keep working now.</span></div>`;
+        ? "This model is temporarily cooling down."
+        : "The last provider request failed.";
+  return `<div class="codex-availability" role="status"><strong>${escapeHtml(label)}</strong><span>${escapeHtml(availability.message || "")}${escapeHtml(reset)}</span><span>Choose another connected provider or use an OpenAI API key to keep working.</span></div>`;
 }
 
 function validateOfficialLoginUrl(value) {
@@ -247,16 +345,10 @@ function validateOfficialLoginUrl(value) {
 }
 
 function openOfficialLoginLink(value) {
-  const safeUrl = validateOfficialLoginUrl(value);
-  const link = document.createElement("a");
-  link.href = safeUrl;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.hidden = true;
-  (document.body || document.documentElement).append(link);
-  link.click();
-  link.remove();
-  return safeUrl;
+  // The authenticated local bridge opens this exact URL through Windows so
+  // Electron popup policy cannot silently swallow the sign-in tab. Keep a
+  // second renderer-side validation before we begin polling.
+  return validateOfficialLoginUrl(value);
 }
 
 function setOfficialComputerNotice(message, tone = "info", root = document) {
@@ -528,12 +620,6 @@ function defaultInferenceHtml(status) {
         `<option value="${escapeHtml(model.id)}"${model.id === defaults.model ? " selected" : ""}>${escapeHtml(model.label)}</option>`,
     )
     .join("");
-  const reasoningOptions = state.reasoningEfforts
-    .map(
-      (effort) =>
-        `<option value="${escapeHtml(effort)}"${effort === defaults.reasoningEffort ? " selected" : ""}>${escapeHtml(reasoningLabel(effort))}</option>`,
-    )
-    .join("");
   return `
     <section class="codex-card codex-default-inference" aria-labelledby="codex-default-inference-title">
       <div class="codex-card-heading">
@@ -545,11 +631,11 @@ function defaultInferenceHtml(status) {
       </div>
       <div class="codex-setting-grid">
         <label>Model<select data-codex-default-model>${modelOptions}</select></label>
-        <label>Reasoning<select data-codex-default-reasoning>${reasoningOptions}</select></label>
       </div>
-      <button class="codex-switch-row" type="button" role="switch" aria-checked="${defaults.fastMode ? "true" : "false"}" data-codex-default-fast>
+      ${reasoningSliderHtml(state.reasoningEfforts, defaults.reasoningEffort, { attribute: "data-codex-default-reasoning", id: "codex-default-reasoning" })}
+      <button class="codex-switch-row" type="button" role="switch" aria-checked="${defaults.fastMode && state.fastCapability?.supported !== false ? "true" : "false"}" data-codex-default-fast${state.fastCapability?.supported === false ? " disabled" : ""}>
         <span class="codex-switch-icon">${boltIcon({ size: 15 })}</span>
-        <span><strong>Fast mode</strong><small>Prioritizes lower latency. Direct API keys use premium per-token pricing; OAuth can consume allowance faster.</small></span>
+        <span><strong>Fast mode</strong><small>${state.fastCapability?.supported === false ? "This provider does not expose Fast mode through CLIProxyAPI." : "Prioritizes lower latency. Direct API keys use premium per-token pricing; Codex OAuth can consume allowance faster."}</small></span>
         <span class="codex-switch-track"><span></span></span>
       </button>
       <p class="codex-settings-notice" data-codex-settings-notice aria-live="polite"></p>
@@ -575,16 +661,140 @@ async function request(path, body) {
 }
 globalThis.__CODEX_BOT_VIEW_REQUEST__ = request;
 
+function acceptAuthoritativeStatus(status) {
+  const previousProvider = lastStatus?.connection?.provider || null;
+  const nextProvider = status?.connection?.provider || null;
+  lastStatus = status;
+  if (previousProvider && nextProvider && previousProvider !== nextProvider) {
+    agentStatusCache.clear();
+    pendingAgentStatusLoads.clear();
+    if (activeModelPicker) renderActiveModelPicker(status);
+  }
+  return lastStatus;
+}
+
+function clearProviderConnectionPoll() {
+  clearInterval(connectionPollTimer);
+  connectionPollTimer = null;
+}
+
+function providerCredentialReady(status, pending = pendingOAuthDevice) {
+  if (!pending?.provider) return false;
+  const provider = status?.providers?.find(
+    (item) => item.id === pending.provider,
+  );
+  if (!provider?.signedIn) return false;
+  const previous = pending.previousCredentialRevision;
+  const current = provider.credentialRevision;
+  if (previous == null) return current != null;
+  return current != null && Number(current) !== Number(previous);
+}
+
+async function cancelPendingProviderLogin(
+  panel,
+  { message = "Provider sign-in cancelled.", restoreActive = true } = {},
+) {
+  const pending = pendingOAuthDevice;
+  if (!pending?.provider) return false;
+  pendingOAuthDevice = null;
+  clearProviderConnectionPoll();
+  let failure = null;
+  try {
+    await request("/api/codex/auth", {
+      action: "cancel-provider-login",
+      provider: pending.provider,
+    });
+  } catch (error) {
+    failure = error;
+  }
+  const select = panel?.querySelector?.("[data-codex-provider]");
+  if (restoreActive && select && lastStatus?.connection?.provider)
+    select.value =
+      lastStatus.connection.provider === "openai-api-key"
+        ? "codex"
+        : lastStatus.connection.provider;
+  if (panel) syncProviderControls(panel);
+  const notice = panel?.querySelector?.("[data-codex-notice]");
+  if (notice) {
+    notice.textContent = failure?.message || message;
+    notice.dataset.tone = failure ? "error" : "info";
+  }
+  providerConnectionNotice = {
+    message: failure?.message || message,
+    tone: failure ? "error" : "info",
+  };
+  return !failure;
+}
+
+async function completePendingProviderLogin(status) {
+  const pending = pendingOAuthDevice;
+  if (!pending?.provider) return status;
+  const backendLogin = status?.providerLogin;
+  if (backendLogin?.provider === pending.provider) {
+    if (backendLogin.state === "connected") {
+      pendingOAuthDevice = null;
+      selectedProviderId = pending.provider;
+      clearProviderConnectionPoll();
+      providerConnectionNotice = {
+        message:
+          backendLogin.message ||
+          `${pending.providerLabel || "Provider"} connected. Models and reasoning controls are now updated for this provider.`,
+        tone: "info",
+      };
+      return status;
+    }
+    if (backendLogin.state === "error" || backendLogin.state === "cancelled") {
+      pendingOAuthDevice = null;
+      clearProviderConnectionPoll();
+      providerConnectionNotice = {
+        message:
+          backendLogin.message ||
+          `${pending.providerLabel || "Provider"} sign-in did not finish locally. Try again.`,
+        tone: backendLogin.state === "error" ? "error" : "info",
+      };
+      return status;
+    }
+  }
+  if (Date.now() >= Number(pending.deadlineAt || 0)) {
+    await cancelPendingProviderLogin(null, {
+      message: `${pending.providerLabel || "Provider"} sign-in timed out. Try again.`,
+    });
+    return status;
+  }
+  if (!providerCredentialReady(status, pending) || providerActivationInFlight)
+    return status;
+  providerActivationInFlight = true;
+  try {
+    const result = await request("/api/codex/auth", {
+      action: "use-provider",
+      provider: pending.provider,
+    });
+    pendingOAuthDevice = null;
+    clearProviderConnectionPoll();
+    providerConnectionNotice = {
+      message: `${pending.providerLabel || "Provider"} connected. Models and reasoning controls are now updated for this provider.`,
+      tone: "info",
+    };
+    return result.status || status;
+  } catch (error) {
+    if (pendingOAuthDevice === pending)
+      pendingOAuthDevice = { ...pending, error: error.message };
+    providerConnectionNotice = { message: error.message, tone: "error" };
+    return status;
+  } finally {
+    providerActivationInFlight = false;
+  }
+}
+
 async function loadStatus() {
   try {
     const previousOfficial = officialComputerState(lastStatus);
-    lastStatus = await request("/api/codex/status");
+    let status = acceptAuthoritativeStatus(await request("/api/codex/status"));
+    status = await completePendingProviderLogin(status);
+    acceptAuthoritativeStatus(status);
     let currentOfficial = officialComputerState(lastStatus);
-    if (hasCodexConnection(lastStatus)) {
-      pendingOAuthDevice = null;
-      clearInterval(connectionPollTimer);
-      connectionPollTimer = null;
-    }
+    if (!pendingOAuthDevice && hasCodexConnection(lastStatus))
+      clearProviderConnectionPoll();
     if (
       previousOfficial.state === "signing-in" &&
       currentOfficial.connected &&
@@ -714,10 +924,15 @@ function pollForConnection() {
 function replaceVisibleBranding(root = document.body) {
   if (!root) return;
   const replacements = [
-    [/Codex Bot/g, "Codex Bot"],
-    [/Sign In with Cursor/g, "Sign in with Codex"],
-    [/Sign in to Cursor/g, "Sign in with Codex"],
-    [/Cursor account/g, "Codex account"],
+    [/Codex Bot/g, "Open Bot"],
+    [/Grok Bot/g, "Open Bot"],
+    [
+      /Sign (?:In with|in to) Cursor with your Cursor account/g,
+      "Connect an AI provider",
+    ],
+    [/Sign In with Cursor/g, "Connect an AI provider"],
+    [/Sign in to Cursor/g, "Connect an AI provider"],
+    [/Cursor account/g, "AI provider account"],
     [/Signed in to Cursor/g, "Signed in to Codex"],
   ];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -731,7 +946,7 @@ function replaceVisibleBranding(root = document.body) {
       next = next.replace(pattern, replacement);
     if (next !== node.nodeValue) node.nodeValue = next;
   }
-  document.title = "Codex Bot";
+  document.title = "Open Bot";
 }
 
 function hideUnavailableSurfaces() {
@@ -761,7 +976,7 @@ function hideUnavailableSurfaces() {
       element.style.setProperty("display", "none", "important");
       element.dataset.codexUnavailable = "true";
     } else if (text === "Log out") {
-      element.textContent = "Manage Codex connection";
+      element.textContent = "Manage AI provider";
       element.dataset.codexManageConnection = "true";
     }
   }
@@ -793,66 +1008,292 @@ function hideUnavailableSurfaces() {
 
 function updateSidebarIdentity(status) {
   const account = status?.account;
-  if (!account?.signedIn) return;
+  const activeName = account?.signedIn ? String(account.name || "") : "";
+  const displayName =
+    (activeName && !/ account$/i.test(activeName) ? activeName : null) ||
+    status?.owner?.name ||
+    activeName ||
+    (status?.connection?.mode === "api-key" ? "OpenAI API" : null);
+  if (!displayName) return;
   for (const name of document.querySelectorAll(
     ".sand-agents-sidebar__account-name",
   )) {
-    if (name.tagName !== "INPUT") name.textContent = account.name;
+    if (name.tagName !== "INPUT") name.textContent = displayName;
   }
   const footer = document.querySelector(".sand-agents-sidebar__account");
   if (!footer) return;
-  footer.title = `${account.name}${account.email ? ` - ${account.email}` : ""} - ${status.connection.route}`;
+  const walker = document.createTreeWalker(footer, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    if (
+      ["Codex Bot User", "Codex Bot", "Open Bot User", "Open Bot"].includes(
+        walker.currentNode.nodeValue?.trim(),
+      )
+    )
+      walker.currentNode.nodeValue = displayName;
+  }
+  footer.title = `${displayName}${account?.email ? ` - ${account.email}` : ""} - ${status.connection.route}`;
   const image = footer.querySelector("img");
-  if (image && account.avatarUrl) image.src = account.avatarUrl;
+  if (image && account?.avatarUrl) image.src = account.avatarUrl;
   else if (image) {
     const holder = image.parentElement;
     image.remove();
-    if (holder) holder.textContent = initials(account.name);
+    if (holder) holder.textContent = initials(displayName);
   }
+}
+
+function onboardingProviders(status) {
+  const account = status?.account || {};
+  return Array.isArray(status?.providers) && status.providers.length
+    ? status.providers
+    : [
+        {
+          id: "codex",
+          label: "OpenAI Codex",
+          description: "Use a ChatGPT account with Codex access.",
+          loginKind: "device",
+          signedIn: Boolean(account.signedIn),
+        },
+      ];
+}
+
+function onboardingProviderStepHtml(status) {
+  const providers = onboardingProviders(status);
+  const connection = status?.connection || {};
+  const account = status?.account || {};
+  const selectedId =
+    pendingOAuthDevice?.provider ||
+    selectedProviderId ||
+    connection.provider ||
+    account.provider ||
+    "codex";
+  const selected =
+    providers.find((provider) => provider.id === selectedId) || providers[0];
+  const options = providers
+    .map(
+      (provider) =>
+        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selected.id ? " selected" : ""}>${escapeHtml(provider.label)}</option>`,
+    )
+    .join("");
+  const tiles = providers
+    .map((provider) => {
+      const active =
+        provider.signedIn &&
+        connection.mode !== "api-key" &&
+        connection.provider === provider.id;
+      const pending = pendingOAuthDevice?.provider === provider.id;
+      const state = pending
+        ? "Waiting for sign-in"
+        : active
+          ? "Ready to use"
+          : provider.signedIn
+            ? "Connected"
+            : provider.loginKind === "service-account"
+              ? "Import key"
+              : "Sign in";
+      return `<button class="codex-provider-tile${active ? " is-active" : ""}" type="button" data-codex-onboarding-provider="${escapeHtml(provider.id)}" aria-pressed="${active ? "true" : "false"}"${pending ? " disabled" : ""}>
+        <span class="codex-provider-logo">${providerLogo(provider.id)}</span>
+        <span class="codex-provider-tile-copy"><strong>${escapeHtml(provider.label)}</strong><small>${escapeHtml(state)}</small></span>
+        <span class="codex-provider-state" aria-hidden="true">${active || provider.signedIn ? "✓" : "→"}</span>
+      </button>`;
+    })
+    .join("");
+  return `<section class="codex-onboarding-panel" aria-labelledby="codex-connect-title">
+    <div class="codex-onboarding-heading">
+      <span class="codex-step-count">1 of 3</span>
+      <h2 id="codex-connect-title">Sign in to providers</h2>
+      <p>Choose the AI account you want Open Bot to use. You can connect more providers later in Settings.</p>
+    </div>
+    <div class="codex-provider-grid" role="group" aria-label="AI providers">${tiles}</div>
+    <select class="codex-visually-hidden" data-codex-provider aria-label="Selected AI provider">${options}</select>
+    <button class="codex-visually-hidden" type="button" data-codex-provider-connect>${escapeHtml(selected?.signedIn ? `Use ${selected.label}` : `Connect ${selected.label}`)}</button>
+    <div class="codex-onboarding-detail">
+      <p data-codex-provider-description>${escapeHtml(selected?.description || "")}</p>
+      <button type="button" class="codex-text-action" data-codex-key-toggle>Use an OpenAI API key instead</button>
+    </div>
+    <form class="codex-vertex-form" data-codex-vertex-form${selected?.loginKind === "service-account" ? "" : " hidden"}>
+      <label for="codex-onboarding-vertex-key">Google service-account JSON</label>
+      <input id="codex-onboarding-vertex-key" type="file" accept="application/json,.json" required />
+      <button type="submit">Verify & import for Vertex AI</button>
+      <small>The key is handed only to the bundled local importer and the temporary upload is deleted.</small>
+    </form>
+    <form class="codex-key-form" data-codex-key-form hidden>
+      <label for="codex-onboarding-api-key">OpenAI API key</label>
+      <div><input id="codex-onboarding-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-..." required /><button type="submit">Verify & use</button></div>
+    </form>
+    <p class="codex-notice" data-codex-notice data-tone="${escapeHtml(providerConnectionNotice.tone)}" aria-live="polite">${escapeHtml(providerConnectionNotice.message)}</p>
+    <div class="codex-onboarding-footer">
+      <span>${hasCodexConnection(status) ? `${escapeHtml(status.account?.name || status.connection?.providerLabel || "Provider")} is connected.` : "Connect one provider to continue."}</span>
+      <button class="codex-primary-action" type="button" data-codex-onboarding-next="computer"${hasCodexConnection(status) ? "" : " disabled"}>Continue</button>
+    </div>
+  </section>`;
+}
+
+function onboardingComputerStepHtml(status) {
+  const computer = officialComputerState(status);
+  const officialReady = computer.mode === "official" && computer.ready;
+  const cloudSelected =
+    officialReady || onboardingComputerChoice === "official";
+  const privateSelected = !cloudSelected;
+  const busy = officialComputerOperationInFlight;
+  const cloudAction = !computer.connected
+    ? computer.state === "signing-in"
+      ? `<button type="button" disabled>Waiting for Cursor sign-in...</button><button type="button" data-codex-official-cancel>Cancel</button>`
+      : `<label class="codex-computer-ack"><input type="checkbox" data-codex-official-ack aria-describedby="codex-onboarding-cloud-warning" /><span>I understand vendor credits, telemetry, and background services may apply.</span></label><button type="button" data-codex-official-login>Sign in to Cursor & enable</button>`
+    : officialReady
+      ? '<span class="codex-onboarding-success">Connected and ready</span>'
+      : `<label class="codex-computer-ack"><input type="checkbox" data-codex-official-ack aria-describedby="codex-onboarding-cloud-warning" /><span>I understand vendor credits, telemetry, and background services may apply.</span></label><button type="button" data-codex-computer-official>Enable cloud computer</button>`;
+  return `<section class="codex-onboarding-panel" aria-labelledby="codex-computer-title">
+    <div class="codex-onboarding-heading">
+      <span class="codex-step-count">2 of 3</span>
+      <h2 id="codex-computer-title">Choose where employees browse</h2>
+      <p>Start with private browser seats on this PC, or connect the experimental shared vendor cloud computer.</p>
+    </div>
+    <div class="codex-onboarding-computers" role="radiogroup" aria-label="Computer mode">
+      <button class="codex-onboarding-computer${privateSelected ? " is-selected" : ""}" type="button" role="radio" aria-checked="${privateSelected ? "true" : "false"}" data-codex-onboarding-private>
+        <span class="codex-computer-glyph is-private" aria-hidden="true"><svg viewBox="0 0 32 32"><rect x="4" y="6" width="24" height="17" rx="3"/><path d="M11 27h10M16 23v4"/></svg></span>
+        <span><strong>Private browser</strong><small>Recommended · persistent profiles isolated per employee on this PC.</small></span>
+        <span class="codex-choice-check" aria-hidden="true"></span>
+      </button>
+      <div class="codex-onboarding-computer codex-cloud-choice${cloudSelected ? " is-selected" : ""}" role="radio" aria-checked="${cloudSelected ? "true" : "false"}">
+        <button class="codex-cloud-choice-main" type="button" data-codex-onboarding-cloud${busy ? " disabled" : ""}>
+          <span class="codex-computer-glyph is-cloud" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M9 24h15a5 5 0 0 0 .6-10A8 8 0 0 0 9.5 12 6 6 0 0 0 9 24Z"/><path d="M12 19h8"/></svg></span>
+          <span><strong>Vendor cloud computer</strong><small>Experimental · one shared remote screen; vendor billing and telemetry may apply.</small></span>
+          <span class="codex-choice-check" aria-hidden="true"></span>
+        </button>
+        <div class="codex-cloud-setup"${cloudSelected ? "" : " hidden"}>
+          <p id="codex-onboarding-cloud-warning">Sign in at cursor.com with an account that has cloud-computer access. This is separate from your AI provider login.</p>
+          <div class="codex-official-actions">${cloudAction}</div>
+          ${computer.lastError ? `<p class="codex-official-error" role="alert">${escapeHtml(computer.lastError)}</p>` : ""}
+          <p class="codex-settings-notice" data-codex-official-notice data-tone="${officialComputerNotice.tone}" aria-live="polite">${escapeHtml(officialComputerNotice.message)}</p>
+        </div>
+      </div>
+    </div>
+    <div class="codex-onboarding-footer">
+      <button class="codex-text-action" type="button" data-codex-onboarding-back="providers">Back</button>
+      <button class="codex-primary-action" type="button" data-codex-onboarding-next="complete"${privateSelected || officialReady ? "" : " disabled"}>Continue</button>
+    </div>
+  </section>`;
+}
+
+function onboardingCompleteStepHtml(status) {
+  const provider =
+    status?.connection?.providerLabel ||
+    status?.account?.providerLabel ||
+    "AI provider";
+  const computer = officialComputerState(status);
+  const computerLabel =
+    computer.mode === "official" && computer.ready
+      ? "Vendor cloud computer"
+      : "Private browser";
+  return `<section class="codex-onboarding-panel codex-onboarding-complete" aria-labelledby="codex-complete-title">
+    <div class="codex-complete-mark" aria-hidden="true"><svg viewBox="0 0 48 48"><circle cx="24" cy="24" r="22"/><path d="m14 24 7 7 14-15"/></svg></div>
+    <div class="codex-onboarding-heading">
+      <span class="codex-step-count">3 of 3</span>
+      <h2 id="codex-complete-title">You’re all set</h2>
+      <p>Your provider is connected and your computer mode is ready. Create an employee and give it a real outcome to own.</p>
+    </div>
+    <dl class="codex-onboarding-summary">
+      <div><dt>AI provider</dt><dd>${escapeHtml(provider)}</dd></div>
+      <div><dt>Computer</dt><dd>${escapeHtml(computerLabel)}</dd></div>
+      <div><dt>Account</dt><dd>${escapeHtml(status?.account?.name || "Connected")}</dd></div>
+    </dl>
+    <div class="codex-onboarding-footer is-complete">
+      <button class="codex-text-action" type="button" data-codex-onboarding-back="computer">Back</button>
+      <button class="codex-primary-action" type="button" data-codex-onboarding-finish>Enter Open Bot</button>
+    </div>
+  </section>`;
+}
+
+function firstRunOnboardingHtml(status) {
+  if (onboardingStep === "computer") return onboardingComputerStepHtml(status);
+  if (onboardingStep === "complete") return onboardingCompleteStepHtml(status);
+  return onboardingProviderStepHtml(status);
 }
 
 function connectionPanelHtml(status, { firstRun = false } = {}) {
   const account = status.account || {};
   const connection = status.connection || {};
+  const providers =
+    Array.isArray(status.providers) && status.providers.length
+      ? status.providers
+      : [
+          {
+            id: "codex",
+            label: "OpenAI Codex",
+            description: "Use a ChatGPT account with Codex access.",
+            loginKind: "device",
+            signedIn: Boolean(account.signedIn),
+          },
+        ];
   const usage = status.usage || {};
   const apiKeyActive = connection.mode === "api-key";
+  const connectedProviderId =
+    connection.provider === "openai-api-key"
+      ? account.provider || "codex"
+      : connection.provider || account.provider || "codex";
+  const connectedProvider = providers.find(
+    (provider) => provider.id === connectedProviderId,
+  ) ||
+    providers[0] || {
+      id: "codex",
+      label: "OpenAI Codex",
+      description: "Use a ChatGPT account with Codex access.",
+      loginKind: "device",
+      signedIn: Boolean(account.signedIn),
+    };
+  const selectedProvider =
+    providers.find(
+      (provider) => provider.id === pendingOAuthDevice?.provider,
+    ) ||
+    providers.find((provider) => provider.id === selectedProviderId) ||
+    connectedProvider;
+  const providerOptions = providers
+    .map(
+      (provider) =>
+        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selectedProvider.id ? " selected" : ""}>${escapeHtml(provider.label)}${provider.signedIn ? " — connected" : ""}</option>`,
+    )
+    .join("");
   const plan = account.plan
     ? account.plan[0].toUpperCase() + account.plan.slice(1)
-    : "Unknown plan";
-  const accountName = account.signedIn
-    ? account.name
-    : apiKeyActive
-      ? "OpenAI API key connected"
+    : null;
+  const accountName = apiKeyActive
+    ? "OpenAI API key connected"
+    : account.signedIn
+      ? account.name
       : "Not connected";
-  const accountDetail = account.signedIn
-    ? account.email || "Codex OAuth account"
-    : apiKeyActive
-      ? "Stored securely for this Windows user"
-      : "Connect a Codex account or OpenAI API key";
+  const accountDetail = apiKeyActive
+    ? "Stored securely for this Windows user"
+    : account.signedIn
+      ? account.email || `${connectedProvider.label} account`
+      : "Choose a provider or use an OpenAI API key";
   const connectionDetail =
-    apiKeyActive && !account.signedIn ? "Direct OpenAI API" : plan;
-  const avatar = account.avatarUrl
-    ? `<img class="codex-avatar" src="${escapeHtml(account.avatarUrl)}" alt="" />`
-    : `<span class="codex-avatar codex-initials">${escapeHtml(initials(account.name))}</span>`;
-  const activeOAuth = connection.mode === "codex-oauth";
-  const oauthLabel =
-    activeOAuth && account.signedIn
-      ? "Refresh Codex sign-in"
-      : account.signedIn
-        ? "Switch to Codex OAuth"
-        : "Use Codex OAuth";
+    apiKeyActive && !account.signedIn
+      ? "Direct OpenAI API"
+      : plan || connectedProvider.label;
+  const avatar =
+    !apiKeyActive && account.avatarUrl
+      ? `<img class="codex-avatar" src="${escapeHtml(account.avatarUrl)}" alt="" />`
+      : `<span class="codex-avatar codex-initials">${escapeHtml(apiKeyActive ? "OA" : initials(account.name))}</span>`;
+  const activeOAuth = !apiKeyActive;
+  const providerActionLabel = selectedProvider.signedIn
+    ? activeOAuth
+      ? connectedProvider.id === selectedProvider.id
+        ? `Reconnect ${selectedProvider.label}`
+        : `Use ${selectedProvider.label}`
+      : `Use ${selectedProvider.label}`
+    : `Connect ${selectedProvider.label}`;
   const currentAvailability = availabilityHtml(usage.availability, activeOAuth);
   const firstRunIntroduction = firstRun
     ? `<div class="codex-first-run-copy">
-        <h2 id="codex-connect-title">Connect Codex to start</h2>
-        <p>Choose the account Codex Bot will use for your employees' work. No xAI subscription is required.</p>
+        <h2 id="codex-connect-title">Connect an AI provider to start</h2>
+        <p>Choose which account and model family your employees will use. CLIProxyAPI keeps the connection local and routes only to your selection.</p>
       </div>`
     : "";
   const firstRunAssurance = firstRun
-    ? `<p class="codex-connection-assurance">Codex OAuth opens the official OpenAI device page. API keys are verified before they are stored.</p>`
+    ? `<p class="codex-connection-assurance">Each sign-in opens only that provider's reviewed official authorization page. API keys and imported credentials are stored only for this Windows user.</p>`
     : "";
   return `
-    <section class="codex-card${firstRun ? " codex-first-run-card" : ""}" aria-label="Codex account">
+    <section class="codex-card${firstRun ? " codex-first-run-card" : ""}" aria-label="AI provider connection">
       ${firstRunIntroduction}
       <div class="codex-account-row">
         ${avatar}
@@ -863,24 +1304,35 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         </div>
       </div>
       ${currentAvailability}
+      <div class="codex-provider-picker">
+        <label for="codex-provider-select">AI provider</label>
+        <select id="codex-provider-select" data-codex-provider>${providerOptions}</select>
+        <p data-codex-provider-description>${escapeHtml(selectedProvider.description)}</p>
+      </div>
       <div class="codex-actions">
-        <button type="button" data-codex-oauth>${oauthLabel}</button>
+        <button type="button" data-codex-provider-connect${selectedProvider.loginKind === "service-account" ? " hidden" : ""}>${escapeHtml(providerActionLabel)}</button>
         <button type="button" data-codex-key-toggle>Use OpenAI API key</button>
       </div>
+      <form class="codex-vertex-form" data-codex-vertex-form${selectedProvider.loginKind === "service-account" ? "" : " hidden"}>
+        <label for="codex-vertex-key">Google service-account JSON</label>
+        <input id="codex-vertex-key" type="file" accept="application/json,.json" required />
+        <button type="submit">Verify & import for Vertex AI</button>
+        <small>The key is handed only to the bundled local CLIProxyAPI importer, then the temporary upload is deleted. It is never written to logs.</small>
+      </form>
       <form class="codex-key-form" data-codex-key-form hidden>
         <label for="codex-api-key">OpenAI API key</label>
         <div><input id="codex-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-..." required /><button type="submit">Verify & use</button></div>
         <small>The key is verified with OpenAI and stored with Windows user-level encryption. It is never written to logs.</small>
       </form>
       ${firstRunAssurance}
-      <p class="codex-notice" data-codex-notice aria-live="polite"></p>
+      <p class="codex-notice" data-codex-notice data-tone="${escapeHtml(providerConnectionNotice.tone)}" aria-live="polite">${escapeHtml(providerConnectionNotice.message)}</p>
     </section>
     ${
       firstRun
         ? ""
         : `
-    <section class="codex-card" aria-label="Codex Bot usage">
-      <h3>Actual Codex Bot usage</h3>
+    <section class="codex-card" aria-label="Open Bot usage">
+      <h3>Local bridge usage</h3>
       <div class="codex-metrics">
         <div><strong>${formatNumber(usage.requests)}</strong><span>requests</span></div>
         <div><strong>${formatNumber(usage.totalTokens)}</strong><span>total tokens</span></div>
@@ -889,26 +1341,64 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         <div><strong>${formatNumber(usage.toolCalls)}</strong><span>tool calls</span></div>
       </div>
       <p>${escapeHtml(connection.model)} &middot; reasoning ${escapeHtml(connection.reasoningEffort)} &middot; last completion ${escapeHtml(formatDate(usage.lastCompletedAt))}</p>
-      <small>These are measured bridge totals, not a made-up plan quota. OpenAI does not expose your Codex subscription's remaining allowance through this OAuth route.</small>
+      <small>These are measured local bridge totals, not a provider quota. Remaining subscription or account allowance may not be available through the selected route.</small>
     </section>
     ${defaultInferenceHtml(status)}`
     }`;
 }
 
-function renderOAuthDevicePrompt(notice, device = pendingOAuthDevice) {
-  if (!notice || device?.url !== CODEX_DEVICE_URL || !device?.code) return;
+function validateProviderLoginUrl(providerId, value) {
+  try {
+    const target = PROVIDER_LOGIN_TARGETS[providerId];
+    const candidate = new URL(String(value || ""));
+    if (
+      !target ||
+      candidate.protocol !== "https:" ||
+      candidate.username ||
+      candidate.password ||
+      candidate.port ||
+      candidate.hash ||
+      candidate.hostname !== target.host ||
+      (target.path && candidate.pathname.replace(/\/+$/, "") !== target.path) ||
+      (!target.path && (!candidate.pathname || candidate.pathname === "/"))
+    )
+      return null;
+    if (providerId === "codex" && (candidate.search || candidate.hash))
+      return null;
+    return providerId === "codex" ? CODEX_DEVICE_URL : candidate.toString();
+  } catch {
+    return null;
+  }
+}
+
+function renderOAuthDevicePrompt(
+  notice,
+  device = pendingOAuthDevice,
+  panel = notice?.closest?.("[data-codex-local]"),
+) {
+  const trustedUrl = validateProviderLoginUrl(device?.provider, device?.url);
+  if (!notice || !trustedUrl) return;
   notice.replaceChildren();
-  notice.dataset.tone = "info";
+  notice.dataset.tone = device.error ? "error" : "info";
   const message = document.createElement("span");
-  message.textContent = `${device.message || "Complete Codex sign-in."} `;
+  message.textContent = `${device.error || device.message || "Complete provider sign-in."} `;
   const link = document.createElement("a");
-  link.href = CODEX_DEVICE_URL;
+  link.href = trustedUrl;
   link.target = "_blank";
   link.rel = "noreferrer";
-  link.textContent = "Open OpenAI sign-in";
-  const code = document.createElement("strong");
-  code.textContent = ` Code: ${device.code}`;
-  notice.append(message, link, code);
+  link.textContent = `Open ${device.providerLabel || "provider"} sign-in`;
+  notice.append(message, link);
+  if (device.code) {
+    const code = document.createElement("strong");
+    code.textContent = ` Code: ${device.code}`;
+    notice.append(code);
+  }
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.dataset.codexProviderCancel = "true";
+  cancel.textContent = "Cancel sign-in";
+  cancel.addEventListener("click", () => cancelPendingProviderLogin(panel));
+  notice.append(" ", cancel);
 }
 
 function beginOfficialComputerOperation(panel, message) {
@@ -971,7 +1461,7 @@ async function startCursorSignInAndEnable(panel) {
       throw error;
     }
     setOfficialComputerNotice(
-      "Finish signing in to Cursor. After sign-in, Codex Bot will check access and enable the shared vendor computer.",
+      "Finish signing in to Cursor. After sign-in, Open Bot will check access and enable the shared vendor computer.",
       "info",
       panel,
     );
@@ -1067,8 +1557,50 @@ async function enableConnectedOfficialComputer(panel) {
   }
 }
 
+function syncProviderControls(panel) {
+  const select = panel.querySelector("[data-codex-provider]");
+  const selected = select?.selectedOptions?.[0];
+  if (!selected) return null;
+  const provider = {
+    id: selected.value,
+    label: selected.dataset.label || selected.textContent.trim(),
+    description: selected.dataset.description || "",
+    loginKind: selected.dataset.loginKind || "oauth",
+    signedIn: selected.dataset.signedIn === "true",
+    credentialRevision: selected.dataset.credentialRevision
+      ? Number(selected.dataset.credentialRevision)
+      : null,
+  };
+  const activeProvider = lastStatus?.connection?.provider;
+  const activeOAuth = lastStatus?.connection?.mode !== "api-key";
+  const description = panel.querySelector("[data-codex-provider-description]");
+  if (description) description.textContent = provider.description;
+  const connect = panel.querySelector("[data-codex-provider-connect]");
+  const vertexForm = panel.querySelector("[data-codex-vertex-form]");
+  const vertex = provider.loginKind === "service-account";
+  const pending = pendingOAuthDevice?.provider === provider.id;
+  if (connect) {
+    connect.hidden = vertex;
+    connect.disabled = pending;
+    connect.textContent = pending
+      ? `Waiting for ${provider.label}`
+      : provider.signedIn
+        ? activeOAuth && activeProvider === provider.id
+          ? `Reconnect ${provider.label}`
+          : `Use ${provider.label}`
+        : `Connect ${provider.label}`;
+  }
+  if (vertexForm) vertexForm.hidden = !vertex;
+  return provider;
+}
+
 function wireConnectionPanel(panel) {
-  renderOAuthDevicePrompt(panel.querySelector("[data-codex-notice]"));
+  syncProviderControls(panel);
+  renderOAuthDevicePrompt(
+    panel.querySelector("[data-codex-notice]"),
+    pendingOAuthDevice,
+    panel,
+  );
   const acknowledgement = panel.querySelector("[data-codex-official-ack]");
   acknowledgement?.addEventListener("change", () => {
     if (acknowledgement.checked) {
@@ -1081,6 +1613,66 @@ function wireConnectionPanel(panel) {
         setOfficialComputerNotice("", "info", panel);
     }
   });
+  for (const tile of panel.querySelectorAll(
+    "[data-codex-onboarding-provider]",
+  )) {
+    tile.addEventListener("click", async () => {
+      const providerId = tile.dataset.codexOnboardingProvider;
+      const select = panel.querySelector("[data-codex-provider]");
+      if (!providerId || !select) return;
+      selectedProviderId = providerId;
+      select.value = providerId;
+      if (
+        pendingOAuthDevice?.provider &&
+        pendingOAuthDevice.provider !== providerId
+      )
+        await cancelPendingProviderLogin(panel, {
+          message: "Previous provider sign-in cancelled.",
+          restoreActive: false,
+        });
+      providerConnectionNotice = { message: "", tone: "info" };
+      const provider = syncProviderControls(panel);
+      if (provider?.loginKind !== "service-account")
+        panel.querySelector("[data-codex-provider-connect]")?.click();
+      else panel.querySelector("[data-codex-vertex-form] input")?.focus();
+    });
+  }
+  panel
+    .querySelector("[data-codex-onboarding-private]")
+    ?.addEventListener("click", async () => {
+      onboardingComputerChoice = "private";
+      await selectPrivateComputer(panel);
+      if (lastStatus) installCodexOnboarding(lastStatus);
+    });
+  panel
+    .querySelector("[data-codex-onboarding-cloud]")
+    ?.addEventListener("click", () => {
+      onboardingComputerChoice = "official";
+      if (lastStatus) installCodexOnboarding(lastStatus);
+    });
+  for (const control of panel.querySelectorAll(
+    "[data-codex-onboarding-back]",
+  )) {
+    control.addEventListener("click", () => {
+      onboardingStep = control.dataset.codexOnboardingBack || "providers";
+      if (lastStatus) installCodexOnboarding(lastStatus);
+    });
+  }
+  for (const control of panel.querySelectorAll(
+    "[data-codex-onboarding-next]",
+  )) {
+    control.addEventListener("click", () => {
+      if (control.disabled) return;
+      onboardingStep = control.dataset.codexOnboardingNext || "computer";
+      if (lastStatus) installCodexOnboarding(lastStatus);
+    });
+  }
+  panel
+    .querySelector("[data-codex-onboarding-finish]")
+    ?.addEventListener("click", () => {
+      rememberOnboardingCompleted();
+      if (lastStatus) installCodexOnboarding(lastStatus);
+    });
   const permissionAcknowledgement = panel.querySelector(
     "[data-codex-vendor-permission-ack]",
   );
@@ -1201,37 +1793,135 @@ function wireConnectionPanel(panel) {
       if (!form.hidden) form.querySelector("input")?.focus();
     });
   panel
-    .querySelector("[data-codex-oauth]")
-    ?.addEventListener("click", async (event) => {
+    .querySelector("[data-codex-provider]")
+    ?.addEventListener("change", async (event) => {
+      const selectControl = event.currentTarget;
+      selectedProviderId = selectControl.value;
+      if (
+        pendingOAuthDevice?.provider &&
+        pendingOAuthDevice.provider !== selectedProviderId
+      ) {
+        await cancelPendingProviderLogin(panel, {
+          message: "Previous provider sign-in cancelled.",
+          restoreActive: false,
+        });
+        if (selectControl.isConnected) selectControl.value = selectedProviderId;
+      }
+      providerConnectionNotice = { message: "", tone: "info" };
       const notice = panel.querySelector("[data-codex-notice]");
-      event.currentTarget.disabled = true;
-      const canReuseOAuth = Boolean(
-        lastStatus?.account?.signedIn &&
-        lastStatus?.connection?.mode !== "codex-oauth",
+      if (notice) {
+        notice.textContent = "";
+        notice.dataset.tone = "info";
+      }
+      syncProviderControls(panel);
+    });
+  panel
+    .querySelector("[data-codex-provider-connect]")
+    ?.addEventListener("click", async (event) => {
+      const connectControl = event.currentTarget;
+      const notice = panel.querySelector("[data-codex-notice]");
+      const provider = syncProviderControls(panel);
+      if (!provider || provider.loginKind === "service-account") return;
+      connectControl.disabled = true;
+      const canReuseProvider = Boolean(
+        provider.signedIn &&
+        (lastStatus?.connection?.provider !== provider.id ||
+          lastStatus?.connection?.mode === "api-key"),
       );
-      notice.textContent = canReuseOAuth
-        ? "Switching to Codex OAuth..."
-        : "Preparing the official OpenAI sign-in...";
+      notice.textContent = canReuseProvider
+        ? `Switching to ${provider.label}...`
+        : `Preparing ${provider.label} sign-in...`;
       notice.dataset.tone = "info";
+      providerConnectionNotice = {
+        message: notice.textContent,
+        tone: "info",
+      };
       try {
-        const action = canReuseOAuth ? "use-oauth" : "oauth";
-        const result = await request("/api/codex/auth", { action });
-        if (result.url && result.code) {
-          pendingOAuthDevice = result;
-          renderOAuthDevicePrompt(notice, result);
+        const action = canReuseProvider ? "use-provider" : "provider-login";
+        const result = await request("/api/codex/auth", {
+          action,
+          provider: provider.id,
+        });
+        if (result.url) {
+          pendingOAuthDevice = {
+            ...result,
+            startedAt: Date.now(),
+            deadlineAt: Date.now() + PROVIDER_LOGIN_TIMEOUT_MS,
+          };
+          providerConnectionNotice = {
+            message: pendingOAuthDevice.message,
+            tone: "info",
+          };
+          renderOAuthDevicePrompt(notice, pendingOAuthDevice, panel);
           pollForConnection();
         } else {
-          notice.textContent = result.message || "Codex OAuth selected.";
+          providerConnectionNotice = {
+            message: result.message || `${provider.label} is now selected.`,
+            tone: "info",
+          };
+          notice.textContent = providerConnectionNotice.message;
           if (result.status) {
-            lastStatus = result.status;
+            acceptAuthoritativeStatus(result.status);
             applyUi();
           }
         }
       } catch (error) {
         notice.textContent = error.message;
         notice.dataset.tone = "error";
+        providerConnectionNotice = { message: error.message, tone: "error" };
       } finally {
-        event.currentTarget.disabled = false;
+        if (connectControl.isConnected) syncProviderControls(panel);
+      }
+    });
+  panel
+    .querySelector("[data-codex-vertex-form]")
+    ?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const provider = syncProviderControls(panel);
+      if (provider?.id !== "vertex") return;
+      const input = event.currentTarget.querySelector("input[type='file']");
+      const submit = event.currentTarget.querySelector("button[type='submit']");
+      const notice = panel.querySelector("[data-codex-notice]");
+      const file = input?.files?.[0];
+      if (!file) {
+        notice.textContent = "Choose a Google service-account JSON file.";
+        notice.dataset.tone = "error";
+        input?.focus();
+        return;
+      }
+      submit.disabled = true;
+      notice.textContent = "Verifying and importing the Vertex key locally...";
+      notice.dataset.tone = "info";
+      try {
+        if (file.size > 512_000)
+          throw new Error(
+            "The Vertex service-account key is unexpectedly large.",
+          );
+        const serviceAccount = JSON.parse(await file.text());
+        const result = await request("/api/codex/auth", {
+          action: "vertex-import",
+          provider: "vertex",
+          serviceAccount,
+        });
+        input.value = "";
+        pendingOAuthDevice = null;
+        if (result.status) {
+          acceptAuthoritativeStatus(result.status);
+          providerConnectionNotice = {
+            message:
+              "Vertex AI connected. Models and reasoning controls are now updated for Vertex AI.",
+            tone: "info",
+          };
+          applyUi();
+        } else {
+          notice.textContent = "Vertex AI credentials imported and selected.";
+          await loadStatus();
+        }
+      } catch (error) {
+        notice.textContent = error.message;
+        notice.dataset.tone = "error";
+      } finally {
+        submit.disabled = false;
       }
     });
   panel
@@ -1250,9 +1940,17 @@ function wireConnectionPanel(panel) {
           apiKey: input.value,
         });
         input.value = "";
-        pendingOAuthDevice = null;
+        if (pendingOAuthDevice)
+          await cancelPendingProviderLogin(panel, {
+            message:
+              "Provider sign-in cancelled; using the verified OpenAI API key.",
+          });
         if (result.status) {
-          lastStatus = result.status;
+          acceptAuthoritativeStatus(result.status);
+          providerConnectionNotice = {
+            message: "OpenAI API key verified. New requests will use it.",
+            tone: "info",
+          };
           applyUi();
         } else {
           notice.textContent =
@@ -1300,10 +1998,16 @@ function wireConnectionPanel(panel) {
     });
   panel
     .querySelector("[data-codex-default-reasoning]")
+    ?.addEventListener("input", (event) =>
+      updateReasoningSlider(event.currentTarget),
+    );
+  panel
+    .querySelector("[data-codex-default-reasoning]")
     ?.addEventListener("change", (event) => {
-      saveDefault(event.currentTarget, {
-        reasoningEffort: event.currentTarget.value,
-      }).catch(() => loadStatus());
+      const reasoningEffort = updateReasoningSlider(event.currentTarget);
+      saveDefault(event.currentTarget, { reasoningEffort }).catch(() =>
+        loadStatus(),
+      );
     });
   panel
     .querySelector("[data-codex-default-fast]")
@@ -1337,6 +2041,9 @@ function installConnectionPanel(status) {
     }
     const signature = JSON.stringify({
       status,
+      pendingOAuthDevice,
+      selectedProviderId,
+      providerConnectionNotice,
       officialComputerOperationInFlight,
       officialPermissionOperationInFlight,
       officialComputerNotice,
@@ -1380,22 +2087,23 @@ function setWorkspaceConnectionGate(blocked, onboarding) {
 
 function installCodexOnboarding(status) {
   let onboarding = document.querySelector("[data-codex-onboarding]");
-  if (hasCodexConnection(status)) {
+  if (hasCodexConnection(status) && onboardingCompleted()) {
     setWorkspaceConnectionGate(false, onboarding);
     onboarding?.remove();
     return;
   }
+  if (!hasCodexConnection(status)) onboardingStep = "providers";
   if (!document.body) return;
   if (!onboarding) {
     onboarding = document.createElement("div");
     onboarding.dataset.codexOnboarding = "true";
     onboarding.innerHTML = `
-      <main class="codex-first-run-dialog" role="dialog" aria-modal="true" aria-labelledby="codex-connect-title">
+      <main class="codex-first-run-dialog" role="dialog" aria-modal="true" aria-label="Set up Open Bot">
         <header class="codex-first-run-brand">
           <img src="./assets/app-icon-C7NKj2u7.png" alt="" />
           <div>
-            <h1>Codex Bot</h1>
-            <p>Always-on employees, powered by your Codex connection.</p>
+            <h1>Open Bot</h1>
+            <p>Always-on employees, powered by the AI provider you choose.</p>
           </div>
         </header>
         <div data-codex-local></div>
@@ -1404,28 +2112,41 @@ function installCodexOnboarding(status) {
   }
   setWorkspaceConnectionGate(true, onboarding);
   const panel = onboarding.querySelector("[data-codex-local]");
-  const signature = status ? JSON.stringify(status) : "checking";
+  const signature = status
+    ? JSON.stringify({
+        status,
+        pendingOAuthDevice,
+        selectedProviderId,
+        providerConnectionNotice,
+        onboardingStep,
+        onboardingComputerChoice,
+        officialComputerOperationInFlight,
+        officialComputerNotice,
+      })
+    : "checking";
   if (panel.dataset.signature !== signature) {
     panel.dataset.signature = signature;
     if (status) {
-      panel.innerHTML = connectionPanelHtml(status, { firstRun: true });
+      panel.innerHTML = firstRunOnboardingHtml(status);
       wireConnectionPanel(panel);
     } else {
       panel.innerHTML = `
         <section class="codex-card codex-first-run-card" aria-busy="true">
           <div class="codex-first-run-copy">
-            <h2 id="codex-connect-title">Checking your Codex connection...</h2>
-            <p>Codex Bot is confirming the private local service before opening your workspace.</p>
+            <h2 id="codex-connect-title">Checking your AI provider connection...</h2>
+            <p>Open Bot is confirming the private local bridge before opening your workspace.</p>
           </div>
           <p class="codex-notice" data-codex-notice aria-live="polite">This usually takes a moment.</p>
         </section>`;
     }
   }
-  if (status && onboarding.dataset.codexInitialFocus !== "true") {
+  if (status && onboarding.dataset.codexInitialFocus !== onboardingStep) {
     requestAnimationFrame(() => {
-      const target = panel.querySelector("[data-codex-oauth], input, button");
+      const target = panel.querySelector(
+        "[data-codex-onboarding-provider]:not([disabled]), [data-codex-onboarding-private], [data-codex-onboarding-finish], input:not([disabled]), button:not([disabled])",
+      );
       if (!target) return;
-      onboarding.dataset.codexInitialFocus = "true";
+      onboarding.dataset.codexInitialFocus = onboardingStep;
       target.focus();
     });
   }
@@ -1502,13 +2223,6 @@ function modelPickerHtml(status) {
     </button>`;
     })
     .join("");
-  const reasoningRows = state.reasoningEfforts
-    .map((effort) => {
-      const selected = effort === effective.reasoningEffort;
-      return `
-    <button type="button" role="radio" aria-checked="${selected ? "true" : "false"}" tabindex="${selected ? "0" : "-1"}" data-codex-pick-reasoning="${escapeHtml(effort)}">${escapeHtml(reasoningLabel(effort))}</button>`;
-    })
-    .join("");
   return `
     <div class="codex-model-popover-heading">
       <div><strong>Response settings</strong><span>${state.override ? "Custom for this employee" : "Using workspace defaults"}</span></div>
@@ -1518,13 +2232,10 @@ function modelPickerHtml(status) {
       <span class="codex-model-popover-label" id="codex-model-options-label">Model</span>
       <div class="codex-model-choices" role="radiogroup" aria-labelledby="codex-model-options-label">${modelRows}</div>
     </section>
-    <section aria-labelledby="codex-reasoning-options-label">
-      <span class="codex-model-popover-label" id="codex-reasoning-options-label">Reasoning</span>
-      <div class="codex-reasoning-choices" role="radiogroup" aria-labelledby="codex-reasoning-options-label">${reasoningRows}</div>
-    </section>
-    <button class="codex-switch-row codex-popover-fast" type="button" role="switch" aria-checked="${effective.fastMode ? "true" : "false"}" data-codex-pick-fast>
+    <section>${reasoningSliderHtml(state.reasoningEfforts, effective.reasoningEffort, { attribute: "data-codex-pick-reasoning", id: "codex-agent-reasoning", compact: true })}</section>
+    <button class="codex-switch-row codex-popover-fast" type="button" role="switch" aria-checked="${effective.fastMode && state.fastCapability?.supported !== false ? "true" : "false"}" data-codex-pick-fast${state.fastCapability?.supported === false ? " disabled" : ""}>
       <span class="codex-switch-icon">${boltIcon({ size: 15 })}</span>
-      <span><strong>Fast mode</strong><small>Prioritize lower latency. Direct API keys use premium per-token pricing; OAuth can consume allowance faster.</small></span>
+      <span><strong>Fast mode</strong><small>${state.fastCapability?.supported === false ? "Unavailable for this provider." : "Prioritize lower latency. Direct API keys use premium per-token pricing; Codex OAuth can consume allowance faster."}</small></span>
       <span class="codex-switch-track"><span></span></span>
     </button>
     <div class="codex-model-popover-footer">
@@ -1626,7 +2337,7 @@ async function updateActiveAgentPreference(patch, focusSelector) {
   if (!activeModelPicker) return;
   const { agentId, element } = activeModelPicker;
   const notice = element.querySelector("[data-codex-model-save-status]");
-  for (const control of element.querySelectorAll("button"))
+  for (const control of element.querySelectorAll("button,input,select"))
     control.disabled = true;
   if (notice) notice.textContent = "Saving...";
   try {
@@ -1641,7 +2352,7 @@ async function updateActiveAgentPreference(patch, focusSelector) {
     if (notice?.isConnected) {
       notice.textContent = error.message;
       notice.dataset.tone = "error";
-      for (const control of element.querySelectorAll("button"))
+      for (const control of element.querySelectorAll("button,input,select"))
         control.disabled = false;
     }
   }
@@ -1780,7 +2491,7 @@ function renderOfficialApprovalCard(form, pending) {
     ${actions ? `<ul>${actions}</ul>` : ""}
     <figure>
       <img src="${escapeHtml(expectedSource)}" alt="Exact shared vendor screen this action will use" data-codex-chat-approval-frame />
-      <figcaption>Allow once unlocks only this exact action on this displayed screen. If the screen or session changes, Codex Bot asks again.</figcaption>
+      <figcaption>Allow once unlocks only this exact action on this displayed screen. If the screen or session changes, Open Bot asks again.</figcaption>
     </figure>
     <div class="codex-chat-approval-actions">
       <button type="button" data-codex-chat-allow disabled>Allow once</button>
@@ -1965,14 +2676,6 @@ document.addEventListener(
       );
       return;
     }
-    const reasoningControl = target.closest?.("[data-codex-pick-reasoning]");
-    if (reasoningControl) {
-      updateActiveAgentPreference(
-        { reasoningEffort: reasoningControl.dataset.codexPickReasoning },
-        `[data-codex-pick-reasoning="${CSS.escape(reasoningControl.dataset.codexPickReasoning)}"]`,
-      );
-      return;
-    }
     const fastControl = target.closest?.("[data-codex-pick-fast]");
     if (fastControl) {
       updateActiveAgentPreference(
@@ -2003,6 +2706,32 @@ document.addEventListener(
     }
     if (!element.contains(target) && target !== activeModelPicker.button)
       closeModelPicker({ returnFocus: false });
+  },
+  true,
+);
+
+document.addEventListener(
+  "input",
+  (event) => {
+    if (!activeModelPicker) return;
+    const control = event.target.closest?.("[data-codex-pick-reasoning]");
+    if (control && activeModelPicker.element.contains(control))
+      updateReasoningSlider(control);
+  },
+  true,
+);
+
+document.addEventListener(
+  "change",
+  (event) => {
+    if (!activeModelPicker) return;
+    const control = event.target.closest?.("[data-codex-pick-reasoning]");
+    if (!control || !activeModelPicker.element.contains(control)) return;
+    const reasoningEffort = updateReasoningSlider(control);
+    updateActiveAgentPreference(
+      { reasoningEffort },
+      "[data-codex-pick-reasoning]",
+    );
   },
   true,
 );
@@ -2050,13 +2779,34 @@ style.textContent = `
   .codex-initials { display:grid; place-items:center; background:#202020; border:1px solid rgba(255,255,255,.16); font-weight:650; }
   .codex-account-copy { display:grid; gap:2px; min-width:0; }
   .codex-actions,.codex-key-form>div { display:flex; flex-wrap:wrap; gap:8px; }
+  .codex-provider-picker,.codex-vertex-form { display:grid; gap:7px; }
+  .codex-provider-picker>label,.codex-vertex-form>label { color:var(--sand-text-secondary,#d5d5d5); font-size:12px; font-weight:600; }
+  .codex-provider-picker>select { width:100%; min-height:40px; border:1px solid rgba(127,127,127,.38); border-radius:10px; padding:0 11px; color:inherit; background:#1d1d1d; color-scheme:dark; }
+  .codex-provider-picker>p { color:var(--sand-text-tertiary,#aaa); font-size:12px; line-height:1.45; }
+  .codex-vertex-form { padding:11px; border:1px solid rgba(127,127,127,.28); border-radius:10px; background:rgba(127,127,127,.055); }
+  .codex-vertex-form input[type="file"] { width:100%; min-height:38px; color:var(--sand-text-secondary,#d5d5d5); font-size:12px; }
+  .codex-vertex-form input[type="file"]::file-selector-button { margin-inline-end:9px; border:1px solid rgba(127,127,127,.35); border-radius:8px; padding:7px 10px; color:inherit; background:rgba(127,127,127,.14); cursor:pointer; }
   .codex-card button { border:1px solid rgba(127,127,127,.35); border-radius:999px; color:inherit; background:rgba(127,127,127,.14); padding:7px 12px; cursor:pointer; }
   .codex-card button:hover { background:rgba(127,127,127,.23); }
   .codex-card button:disabled { opacity:.55; cursor:wait; }
   .codex-card button:focus-visible,.codex-card input:focus-visible,.codex-card select:focus-visible,.codex-notice a:focus-visible { outline:2px solid #9dc6ff; outline-offset:2px; }
-  .codex-setting-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+  .codex-setting-grid { display:grid; grid-template-columns:1fr; gap:10px; }
   .codex-setting-grid label { display:grid; gap:6px; color:var(--sand-text-tertiary,#aaa); font-size:12px; }
   .codex-setting-grid select { width:100%; min-height:36px; border:1px solid rgba(127,127,127,.35); border-radius:9px; padding:0 10px; color:inherit; background:#1d1d1d; color-scheme:dark; }
+  .codex-reasoning-slider { display:grid; grid-template-rows:auto 28px; gap:7px; padding:10px 11px 11px; border:1px solid rgba(127,127,127,.28); border-radius:10px; background:rgba(127,127,127,.055); }
+  .codex-reasoning-slider-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--sand-text-tertiary,#aaa); font-size:12px; }
+  .codex-reasoning-slider-heading strong { color:var(--sand-text-primary,#f4f4f4); font-size:12px; font-weight:650; }
+  .codex-reasoning-slider input[type="range"],.codex-reasoning-stops { grid-column:1; grid-row:2; }
+  .codex-reasoning-slider input[type="range"] { position:relative; z-index:2; width:100%; height:28px; margin:0; appearance:none; -webkit-appearance:none; background:transparent; cursor:pointer; }
+  .codex-reasoning-slider input[type="range"]::-webkit-slider-runnable-track { height:6px; border-radius:999px; background:linear-gradient(90deg,#7fa5ff 0 var(--codex-slider-progress),rgba(127,127,127,.34) var(--codex-slider-progress) 100%); }
+  .codex-reasoning-slider input[type="range"]::-webkit-slider-thumb { width:20px; height:20px; margin-top:-7px; appearance:none; -webkit-appearance:none; border:2px solid #f7f9ff; border-radius:50%; background:#5f86eb; box-shadow:0 3px 9px rgba(0,0,0,.38); }
+  .codex-reasoning-slider input[type="range"]:focus-visible { outline:2px solid #9dc6ff; outline-offset:4px; border-radius:999px; }
+  .codex-reasoning-slider input[type="range"]:disabled { opacity:.48; cursor:not-allowed; }
+  .codex-reasoning-stops { z-index:1; display:flex; align-items:center; justify-content:space-between; height:28px; margin-inline:8px; pointer-events:none; }
+  .codex-reasoning-stops>span { width:4px; height:4px; border-radius:50%; background:#7b7b7b; box-shadow:0 0 0 2px #1d1d1d; }
+  .codex-reasoning-stops>span.is-active { background:#d9e5ff; }
+  .codex-reasoning-slider.is-compact { padding:8px 9px 9px; }
+  .codex-visually-hidden { position:absolute !important; width:1px !important; height:1px !important; padding:0 !important; margin:-1px !important; overflow:hidden !important; clip:rect(0,0,0,0) !important; white-space:nowrap !important; border:0 !important; }
   .codex-switch-row { width:100%; display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:10px; text-align:left; border-radius:10px !important; padding:10px !important; }
   .codex-switch-row>span:nth-child(2) { display:grid; gap:2px; }
   .codex-switch-icon { display:grid; place-items:center; width:28px; height:28px; border-radius:8px; color:#9cbcff; background:rgba(91,130,255,.14); }
@@ -2138,10 +2888,6 @@ style.textContent = `
   .codex-choice-indicator { display:grid; place-items:center; width:16px; height:16px; border:1px solid #666; border-radius:50%; }
   .codex-model-choice[aria-checked="true"] .codex-choice-indicator { border-color:#91b2ff; }
   .codex-model-choice[aria-checked="true"] .codex-choice-indicator>span { width:7px; height:7px; border-radius:50%; background:#91b2ff; }
-  .codex-reasoning-choices { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:4px; padding:3px; border-radius:10px; background:rgba(255,255,255,.055); }
-  .codex-reasoning-choices button { min-height:30px; border:0; border-radius:7px; background:transparent; font-size:11px; }
-  .codex-reasoning-choices button:hover { background:rgba(255,255,255,.06); }
-  .codex-reasoning-choices button[aria-checked="true"] { background:#e8e8e8; color:#111; box-shadow:0 1px 3px rgba(0,0,0,.25); }
   .codex-popover-fast { border:1px solid rgba(255,255,255,.1) !important; background:rgba(255,255,255,.035) !important; }
   .codex-model-popover-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:30px; }
   .codex-model-popover-footer button { border:0; padding:5px 0; color:#a9c7ff; background:transparent; font-size:11px; }
@@ -2166,7 +2912,7 @@ style.textContent = `
   .codex-chat-approval-actions span { flex:1 0 220px; color:#d6c9b3; font-size:11px; line-height:1.4; }
   html[data-codex-connection-required],html[data-codex-connection-required] body { overflow:hidden !important; }
   [data-codex-onboarding] { position:fixed; inset:0; z-index:2147483647; display:grid; place-items:center; overflow:auto; padding:clamp(20px,5vw,56px); background:rgba(11,11,11,.94); backdrop-filter:blur(12px); color:#f5f5f5; animation:codex-connect-enter 320ms cubic-bezier(.16,1,.3,1) both; }
-  .codex-first-run-dialog { width:min(680px,100%); display:grid; gap:22px; }
+  .codex-first-run-dialog { width:min(860px,100%); display:grid; gap:22px; }
   .codex-first-run-brand { display:flex; align-items:center; gap:14px; }
   .codex-first-run-brand img { width:52px; height:52px; flex:none; }
   .codex-first-run-brand h1 { margin:0 0 3px; font-size:21px; line-height:1.2; letter-spacing:-.02em; }
@@ -2176,8 +2922,65 @@ style.textContent = `
   .codex-first-run-copy { display:grid; gap:7px; }
   .codex-first-run-copy h2 { max-width:24ch; font-size:clamp(22px,4vw,28px); line-height:1.14; letter-spacing:-.025em; text-wrap:balance; }
   .codex-first-run-copy p { max-width:62ch; color:#bdbdbd; line-height:1.55; }
-  .codex-first-run-card [data-codex-oauth] { border-color:#f2f2f2; background:#f2f2f2; color:#111; font-weight:650; }
-  .codex-first-run-card [data-codex-oauth]:hover { background:#fff; }
+  .codex-first-run-card [data-codex-provider-connect] { border-color:#f2f2f2; background:#f2f2f2; color:#111; font-weight:650; }
+  .codex-first-run-card [data-codex-provider-connect]:hover { background:#fff; }
+  .codex-visually-hidden { position:absolute !important; width:1px !important; height:1px !important; overflow:hidden !important; clip:rect(0 0 0 0) !important; clip-path:inset(50%) !important; white-space:nowrap !important; }
+  .codex-vertex-form[hidden],.codex-key-form[hidden] { display:none !important; }
+  .codex-onboarding-panel { display:grid; gap:20px; padding:clamp(20px,4vw,30px); border:1px solid rgba(255,255,255,.15); border-radius:18px; background:#171717; box-shadow:0 24px 70px rgba(0,0,0,.32); }
+  .codex-onboarding-heading { display:grid; gap:7px; }
+  .codex-onboarding-heading h2 { margin:0; max-width:28ch; font-size:clamp(24px,4vw,32px); line-height:1.08; letter-spacing:-.035em; text-wrap:balance; }
+  .codex-onboarding-heading p { max-width:62ch; margin:0; color:#bdbdbd; font-size:14px; line-height:1.55; }
+  .codex-step-count { color:#91b8ff; font-size:11px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }
+  .codex-provider-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+  .codex-provider-tile { min-width:0; min-height:78px; display:grid; grid-template-columns:38px minmax(0,1fr) auto; align-items:center; gap:11px; padding:13px; border:1px solid rgba(255,255,255,.13); border-radius:13px; color:#f2f2f2; background:#202020; text-align:left; font:inherit; cursor:pointer; transition:border-color 140ms ease,background 140ms ease,transform 140ms ease; }
+  .codex-provider-tile:hover { border-color:rgba(151,190,255,.58); background:#252525; transform:translateY(-1px); }
+  .codex-provider-tile.is-active { border-color:#78a9ff; background:#1c2636; box-shadow:inset 0 0 0 1px rgba(120,169,255,.2); }
+  .codex-provider-tile:disabled { opacity:.72; cursor:wait; transform:none; }
+  .codex-provider-logo { width:38px; height:38px; display:grid; place-items:center; overflow:hidden; border-radius:10px; }
+  .codex-provider-logo svg, .codex-provider-logo img { width:100%; height:100%; display:block; object-fit:contain; }
+  .codex-provider-tile-copy { min-width:0; display:grid; gap:3px; }
+  .codex-provider-tile-copy strong,.codex-provider-tile-copy small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .codex-provider-tile-copy strong { font-size:13px; }
+  .codex-provider-tile-copy small { color:#aaa; font-size:11px; }
+  .codex-provider-state { color:#91b8ff; font-size:15px; }
+  .codex-onboarding-detail { display:flex; align-items:center; justify-content:space-between; gap:14px; min-height:24px; }
+  .codex-onboarding-detail p { margin:0; color:#aaa; font-size:12px; line-height:1.45; }
+  .codex-text-action { border:0; padding:6px 0; color:#a9c7ff; background:transparent; font:inherit; font-size:12px; cursor:pointer; }
+  .codex-onboarding-footer { min-height:44px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding-top:4px; border-top:1px solid rgba(255,255,255,.09); }
+  .codex-onboarding-footer>span { color:#aaa; font-size:12px; }
+  .codex-primary-action { min-height:40px; border:1px solid #f3f3f3; border-radius:10px; padding:9px 17px; color:#111; background:#f3f3f3; font:inherit; font-weight:700; cursor:pointer; }
+  .codex-primary-action:hover { background:#fff; }
+  .codex-primary-action:disabled { border-color:#484848; color:#888; background:#303030; cursor:not-allowed; }
+  .codex-provider-tile:focus-visible,.codex-primary-action:focus-visible,.codex-text-action:focus-visible,.codex-onboarding-computer:focus-visible,.codex-cloud-choice-main:focus-visible { outline:2px solid #9dc6ff; outline-offset:3px; }
+  .codex-onboarding-computers { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; align-items:start; }
+  .codex-onboarding-computer { min-width:0; display:grid; grid-template-columns:44px minmax(0,1fr) 18px; align-items:start; gap:12px; padding:16px; border:1px solid rgba(255,255,255,.13); border-radius:14px; color:#eee; background:#202020; text-align:left; font:inherit; }
+  button.codex-onboarding-computer { cursor:pointer; }
+  .codex-onboarding-computer.is-selected { border-color:#78a9ff; background:#1c2636; box-shadow:inset 0 0 0 1px rgba(120,169,255,.18); }
+  .codex-onboarding-computer>span:nth-child(2),.codex-cloud-choice-main>span:nth-child(2) { min-width:0; display:grid; gap:5px; }
+  .codex-onboarding-computer small,.codex-cloud-choice-main small { color:#aaa; font-size:11px; line-height:1.45; }
+  .codex-computer-glyph { width:42px; height:42px; display:grid; place-items:center; border-radius:11px; color:#a9c7ff; background:rgba(124,169,255,.12); }
+  .codex-computer-glyph svg { width:25px; height:25px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+  .codex-computer-glyph.is-cloud { color:#e6bd74; background:rgba(230,189,116,.11); }
+  .codex-choice-check { width:16px; height:16px; margin-top:2px; border:1px solid #666; border-radius:50%; }
+  .is-selected .codex-choice-check { border:5px solid #78a9ff; }
+  .codex-cloud-choice { display:block; padding:0; overflow:hidden; }
+  .codex-cloud-choice-main { width:100%; display:grid; grid-template-columns:44px minmax(0,1fr) 18px; align-items:start; gap:12px; padding:16px; border:0; color:inherit; background:transparent; text-align:left; font:inherit; cursor:pointer; }
+  .codex-cloud-setup { display:grid; gap:12px; padding:0 16px 16px; border-top:1px solid rgba(255,255,255,.09); }
+  .codex-cloud-setup[hidden] { display:none; }
+  .codex-cloud-setup>p { margin:12px 0 0; color:#bbb; font-size:11px; line-height:1.5; }
+  .codex-cloud-setup .codex-official-actions { display:grid; gap:9px; }
+  .codex-cloud-setup button { min-height:36px; border:1px solid rgba(255,255,255,.2); border-radius:9px; color:#eee; background:#292929; font:inherit; cursor:pointer; }
+  .codex-computer-ack { display:grid; grid-template-columns:auto 1fr; gap:8px; color:#bbb; font-size:11px; line-height:1.45; }
+  .codex-onboarding-success { color:#9ed7a8; font-size:12px; font-weight:650; }
+  .codex-onboarding-complete { place-items:center; text-align:center; }
+  .codex-onboarding-complete .codex-onboarding-heading { place-items:center; }
+  .codex-complete-mark { width:62px; height:62px; color:#9ed7a8; }
+  .codex-complete-mark svg { width:100%; height:100%; fill:rgba(100,190,120,.1); stroke:currentColor; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+  .codex-onboarding-summary { width:min(520px,100%); display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; overflow:hidden; margin:0; border:1px solid rgba(255,255,255,.1); border-radius:12px; background:rgba(255,255,255,.1); }
+  .codex-onboarding-summary div { display:grid; gap:5px; padding:13px; background:#202020; }
+  .codex-onboarding-summary dt { color:#999; font-size:10px; letter-spacing:.06em; text-transform:uppercase; }
+  .codex-onboarding-summary dd { margin:0; overflow:hidden; color:#eee; font-size:12px; font-weight:650; text-overflow:ellipsis; white-space:nowrap; }
+  .codex-onboarding-footer.is-complete { width:100%; }
   .codex-connection-assurance { color:#bdbdbd; font-size:12px; line-height:1.5; }
   [data-codex-onboarding] ::selection { background:#b9d7ff; color:#111; }
   @keyframes codex-connect-enter { from { opacity:.72; transform:translateY(10px); filter:blur(4px); } to { opacity:1; transform:none; filter:none; } }
@@ -2194,6 +2997,9 @@ style.textContent = `
     .codex-chat-approval { width:calc(100% - 16px); margin-inline:8px; }
     .codex-chat-approval-heading { display:grid; }
     .codex-chat-approval-actions button { flex:1; }
+    .codex-provider-grid,.codex-onboarding-computers,.codex-onboarding-summary { grid-template-columns:1fr; }
+    .codex-onboarding-detail,.codex-onboarding-footer { align-items:stretch; flex-direction:column; }
+    .codex-onboarding-footer .codex-primary-action { width:100%; }
   }
   @media (prefers-reduced-motion:reduce) { [data-codex-onboarding],.codex-model-popover { animation:none; } .codex-switch-track,.codex-switch-track>span,.codex-computer-radio span { transition:none; } }
   @media (forced-colors:active) {

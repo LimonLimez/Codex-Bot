@@ -15,7 +15,7 @@ $packageVersion = [string]$package.version
 if ($packageVersion -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
     throw "package.json contains an invalid release version: $packageVersion"
 }
-$canonicalInstallerName = "CodexBot-Setup-$packageVersion.exe"
+$canonicalInstallerName = "OpenBot-Setup-$packageVersion.exe"
 
 $requiredBootstrapInputs = @(
     (Join-Path $projectRoot 'scripts\Verify-GrokBotInstaller.ps1'),
@@ -46,7 +46,7 @@ if ($isDevelopmentBuild) {
     $gitRevision = $gitRevision.Trim().ToLowerInvariant()
     $developmentTimestamp = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmssfff'Z'", [Globalization.CultureInfo]::InvariantCulture)
     $developmentBuildId = "$developmentTimestamp-$gitRevision"
-    $installerName = "CodexBot-Setup-$packageVersion-DEVELOPMENT-$developmentBuildId.exe"
+    $installerName = "OpenBot-Setup-$packageVersion-DEVELOPMENT-$developmentBuildId.exe"
     Write-Warning "DEVELOPMENT TEST BUILD: $installerName is non-publishable and cannot replace the canonical release installer."
 } else {
     $installerName = $canonicalInstallerName
