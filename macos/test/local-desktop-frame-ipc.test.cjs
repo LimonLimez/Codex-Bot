@@ -294,6 +294,47 @@ test("hostile destroyed senders and non-main frames fail closed before boundary 
   installed.dispose();
 });
 
+test("distinct Electron wrappers for one main frame pass while different frame IDs fail closed", async () => {
+  const value = fixture();
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const select = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select);
+  const frameWrapper = (routingId) => ({
+    processId: 71,
+    routingId,
+    isDestroyed() { return false; },
+  });
+  Object.defineProperty(value.first.sender, "mainFrame", {
+    configurable: true,
+    get() { return frameWrapper(19); },
+  });
+  const senderFrame = frameWrapper(19);
+  assert.notEqual(value.first.sender.mainFrame, senderFrame);
+
+  await select(
+    ipcEvent(value.first.sender, senderFrame),
+    { botId: BOT_A, viewGeneration: 1 },
+  );
+  await tick();
+  assert.equal(value.timers.length, 1);
+  assert.equal(value.timers[0].cleared, false);
+  assert.equal(value.readCalls.length > 0, true);
+  assert.equal(value.manager.openCalls.length, 1);
+
+  const readsBeforeChild = value.readCalls.length;
+  await assert.rejects(
+    select(
+      ipcEvent(value.first.sender, frameWrapper(20)),
+      { botId: BOT_B, viewGeneration: 2 },
+    ),
+    { code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED" },
+  );
+  assert.equal(value.readCalls.length, readsBeforeChild);
+  assert.equal(value.timers.length, 1);
+  assert.equal(value.timers[0].cleared, false);
+  installed.dispose();
+});
+
 test("manager-owned hidden Local Desktop windows cannot subscribe to frame bytes", async () => {
   const value = fixture();
   const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);

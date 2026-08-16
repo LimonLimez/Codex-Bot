@@ -87,6 +87,21 @@ function sameIdentity(left, right) {
     && left.targetGeneration === right.targetGeneration;
 }
 
+function sameFrame(left, right) {
+  if (left === right) return true;
+  try {
+    const leftProcessId = left?.processId;
+    const leftRoutingId = left?.routingId;
+    const rightProcessId = right?.processId;
+    const rightRoutingId = right?.routingId;
+    return Number.isSafeInteger(leftProcessId) && leftProcessId >= 0
+      && Number.isSafeInteger(leftRoutingId) && leftRoutingId >= 0
+      && Number.isSafeInteger(rightProcessId) && rightProcessId >= 0
+      && Number.isSafeInteger(rightRoutingId) && rightRoutingId >= 0
+      && leftProcessId === rightProcessId && leftRoutingId === rightRoutingId;
+  } catch { return false; }
+}
+
 function displayFrame(value, identity) {
   const frame = exactObject(value, FRAME_FIELDS);
   if (frame.botId !== identity.botId || frame.targetId !== identity.targetId
@@ -130,7 +145,7 @@ function installLocalDesktopFrameIpc({
       const senderFrame = event?.senderFrame;
       if (!sender || !senderFrame || typeof sender.isDestroyed !== "function" || sender.isDestroyed()
         || typeof sender.send !== "function" || typeof sender.once !== "function" || typeof sender.off !== "function"
-        || sender.mainFrame !== senderFrame || typeof senderFrame.isDestroyed !== "function"
+        || !sameFrame(sender.mainFrame, senderFrame) || typeof senderFrame.isDestroyed !== "function"
         || senderFrame.isDestroyed()) return null;
       const window = electron.BrowserWindow.fromWebContents(sender);
       if (!window || typeof window.isDestroyed !== "function" || window.isDestroyed()
@@ -143,7 +158,7 @@ function installLocalDesktopFrameIpc({
   function currentView(view) {
     if (disposed || senderViews.get(view.sender) !== view) return false;
     try {
-      if (view.sender.isDestroyed() || view.sender.mainFrame !== view.senderFrame
+      if (view.sender.isDestroyed() || !sameFrame(view.sender.mainFrame, view.senderFrame)
         || view.senderFrame.isDestroyed()) return false;
       const window = electron.BrowserWindow.fromWebContents(view.sender);
       return Boolean(window && !window.isDestroyed() && window.webContents === view.sender
