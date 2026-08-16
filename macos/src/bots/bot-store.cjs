@@ -5,7 +5,8 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 const MAX_BOTS = 4096;
 const MAX_CONVERSATIONS = 2048;
 const MAX_NAME_LENGTH = 160;
@@ -23,6 +24,17 @@ const APPEARANCE_FIELDS = new Set(["shape", "color", "image", "title", "descript
 const PROFILE_FIELDS = new Set(["appearance", "notifications"]);
 const RUNTIME_FIELDS = new Set(["provider", "remoteRuntimeId", "state", "lastConfirmedAt", "lastErrorCode"]);
 const RUNTIME_TRANSACTION_FIELDS = new Set(["expectedLastErrorCode", "afterCommit"]);
+const COMPUTER_FIELDS = new Set([
+  "mode",
+  "generation",
+  "localProfileId",
+  "nativeAgentId",
+  "state",
+  "lastConfirmedAt",
+  "lastErrorCode",
+]);
+const COMPUTER_MODES = new Set(["not-now", "local", "cursor"]);
+const COMPUTER_STATES = new Set(["unconfigured", "starting", "ready", "reconnecting", "unavailable"]);
 const BOT_FIELDS = new Set([
   "schemaVersion",
   "botId",
@@ -33,7 +45,9 @@ const BOT_FIELDS = new Set([
   "updatedAt",
   "conversations",
   "runtime",
+  "computer",
 ]);
+const LEGACY_BOT_FIELDS = new Set([...BOT_FIELDS].filter((field) => field !== "computer"));
 const STORE_FIELDS = new Set(["schemaVersion", "bots", "legacyImports"]);
 const LEGACY_FIELDS = new Set(["migrationKey", "name", "appearance", "notifications", "conversations"]);
 const LEGACY_IMPORT_FIELDS = new Set(["botId", "fingerprint"]);
@@ -71,6 +85,16 @@ const DEFAULT_RUNTIME = Object.freeze({
   provider: null,
   remoteRuntimeId: null,
   state: "unprovisioned",
+  lastConfirmedAt: null,
+  lastErrorCode: null,
+});
+
+const DEFAULT_COMPUTER = Object.freeze({
+  mode: "not-now",
+  generation: 0,
+  localProfileId: null,
+  nativeAgentId: null,
+  state: "unconfigured",
   lastConfirmedAt: null,
   lastErrorCode: null,
 });
@@ -373,6 +397,49 @@ function normalizeRuntime(value) {
   return normalized;
 }
 
+function normalizeComputer(value) {
+  const computer = assertPlainObject(value, "Computer");
+  assertExactKeys(computer, COMPUTER_FIELDS, "Computer");
+  if (!COMPUTER_MODES.has(computer.mode)) throw new Error("Computer mode is invalid.");
+  if (!Number.isSafeInteger(computer.generation) || computer.generation < 0) {
+    throw new Error("Computer generation is invalid.");
+  }
+  const localProfileId = computer.localProfileId === null
+    ? null
+    : normalizeIdentifier(computer.localProfileId, "Local profile ID");
+  if (localProfileId !== null && !/^local-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(localProfileId)) {
+    throw new Error("Local profile ID is invalid.");
+  }
+  const nativeAgentId = normalizeIdentifier(computer.nativeAgentId, "Native agent ID", { nullable: true });
+  if (!COMPUTER_STATES.has(computer.state)) throw new Error("Computer state is invalid.");
+  const normalized = {
+    mode: computer.mode,
+    generation: computer.generation,
+    localProfileId: localProfileId?.toLowerCase() ?? null,
+    nativeAgentId,
+    state: computer.state,
+    lastConfirmedAt: normalizeTimestamp(computer.lastConfirmedAt, "Computer confirmation", { nullable: true }),
+    lastErrorCode: normalizeIdentifier(computer.lastErrorCode, "Computer error code", { nullable: true, errorCode: true }),
+  };
+  if (normalized.mode === "local" && normalized.localProfileId === null) {
+    throw new Error("Local Computer mode requires a local profile ID.");
+  }
+  if (normalized.mode === "cursor" && normalized.nativeAgentId === null) {
+    throw new Error("Cursor Computer mode requires a native agent ID.");
+  }
+  if (normalized.mode === "not-now" && normalized.state !== "unconfigured") {
+    throw new Error("Not-now Computer mode must remain unconfigured.");
+  }
+  if (normalized.state === "ready" && normalized.lastConfirmedAt === null) {
+    throw new Error("A ready Computer target requires confirmation.");
+  }
+  if (normalized.state === "unconfigured"
+    && (normalized.lastConfirmedAt !== null || normalized.lastErrorCode !== null)) {
+    throw new Error("An unconfigured Computer target cannot contain status metadata.");
+  }
+  return normalized;
+}
+
 function normalizeBotRecord(value) {
   const record = assertPlainObject(value, "Bot");
   assertExactKeys(record, BOT_FIELDS, "Bot");
@@ -396,7 +463,42 @@ function normalizeBotRecord(value) {
     updatedAt,
     conversations: record.conversations.map(normalizeConversationRef),
     runtime: normalizeRuntime(record.runtime),
+    computer: normalizeComputer(record.computer),
   };
+}
+
+function migrateLegacyStore(value) {
+  const store = assertPlainObject(value, "Store");
+  assertExactKeys(store, STORE_FIELDS, "Store");
+  if (store.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+    throw new Error("Unsupported bot store schema version.");
+  }
+  if (!Array.isArray(store.bots) || store.bots.length > MAX_BOTS) {
+    throw new Error("Bot store bots are invalid or oversized.");
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    bots: store.bots.map((rawBot) => {
+      const bot = assertPlainObject(rawBot, "Bot");
+      assertExactKeys(bot, LEGACY_BOT_FIELDS, "Bot");
+      if (bot.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+        throw new Error("Bot schema version is unsupported.");
+      }
+      return {
+        ...bot,
+        schemaVersion: SCHEMA_VERSION,
+        computer: { ...DEFAULT_COMPUTER },
+      };
+    }),
+    legacyImports: store.legacyImports,
+  };
+}
+
+function normalizeLoadedStore(value) {
+  if (value?.schemaVersion === LEGACY_SCHEMA_VERSION) {
+    return normalizeStore(migrateLegacyStore(value));
+  }
+  return normalizeStore(value);
 }
 
 function normalizeMigrationKey(value) {
@@ -595,6 +697,18 @@ function normalizedRuntimePatch(value) {
   return patch;
 }
 
+function normalizedComputerPatch(value) {
+  let patch;
+  try {
+    patch = assertPlainObject(cloneData(value), "Computer patch");
+  } catch {
+    throw new TypeError("Computer patch must contain plain data values only.");
+  }
+  assertAllowedKeys(patch, COMPUTER_FIELDS, "Computer patch");
+  if (!Object.keys(patch).length) throw new Error("Computer patch is empty.");
+  return patch;
+}
+
 class BotStore {
   #filePath;
   #fs;
@@ -651,6 +765,7 @@ class BotStore {
         updatedAt: timestamp,
         conversations: [],
         runtime: { ...DEFAULT_RUNTIME },
+        computer: { ...DEFAULT_COMPUTER },
       };
       next.bots.push(record);
       return record.botId;
@@ -685,6 +800,7 @@ class BotStore {
         createdAt: timestamp,
         updatedAt: timestamp,
         runtime: { ...DEFAULT_RUNTIME },
+        computer: { ...DEFAULT_COMPUTER },
       });
       next.legacyImports[legacy.migrationKey] = { botId, fingerprint };
       return { botId, unchanged: false };
@@ -728,6 +844,20 @@ class BotStore {
     return this.#mutate((next) => {
       const bot = this.#requiredBot(next, normalizedBotId);
       bot.runtime = normalizeRuntime({ ...bot.runtime, ...patch });
+      bot.updatedAt = safeNow(this.#now);
+      return bot.botId;
+    });
+  }
+
+  async updateComputer(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const patch = normalizedComputerPatch(value);
+    return this.#mutate((next) => {
+      const bot = this.#requiredBot(next, normalizedBotId);
+      if (Object.hasOwn(patch, "generation") && patch.generation < bot.computer.generation) {
+        throw new Error("Computer generation is stale.");
+      }
+      bot.computer = normalizeComputer({ ...bot.computer, ...patch });
       bot.updatedAt = safeNow(this.#now);
       return bot.botId;
     });
@@ -912,7 +1042,7 @@ class BotStore {
       if (error instanceof SyntaxError) throw new Error("Bot store is malformed.");
       throw error;
     }
-    return normalizeStore(cloneData(parsed));
+    return normalizeLoadedStore(cloneData(parsed));
   }
 
   async #writeFile(state) {

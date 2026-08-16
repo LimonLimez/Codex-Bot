@@ -54,7 +54,7 @@ async function temporaryStore(t, options = {}) {
 
 function expectedBot(overrides = {}) {
   const base = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     botId: `bot-${BOT_A_UUID}`,
     name: "New Bot",
     appearance: {
@@ -75,16 +75,40 @@ function expectedBot(overrides = {}) {
       lastConfirmedAt: null,
       lastErrorCode: null,
     },
+    computer: expectedComputer(),
   };
   return {
     ...base,
     ...overrides,
     appearance: { ...base.appearance, ...(overrides.appearance || {}) },
     runtime: { ...base.runtime, ...(overrides.runtime || {}) },
+    computer: { ...base.computer, ...(overrides.computer || {}) },
   };
 }
 
 function validStoreDocument(bots = [], legacyImports = {}) {
+  return { schemaVersion: 2, bots, legacyImports };
+}
+
+function expectedComputer(overrides = {}) {
+  return {
+    mode: "not-now",
+    generation: 0,
+    localProfileId: null,
+    nativeAgentId: null,
+    state: "unconfigured",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+    ...overrides,
+  };
+}
+
+function expectedV1Bot(overrides = {}) {
+  const { computer: _computer, ...bot } = expectedBot(overrides);
+  return { ...bot, schemaVersion: 1 };
+}
+
+function validV1StoreDocument(bots = [], legacyImports = {}) {
   return { schemaVersion: 1, bots, legacyImports };
 }
 
@@ -141,6 +165,58 @@ function assertRuntimeTransactionBusy(outcome) {
     message: outcome.error?.message,
   }), /bots\.json|codex-bot-store-|endpoint|authToken|secret/i);
 }
+
+test("schema v1 migrates to an explicit not-now Computer target", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  await writeDocument(filePath, validV1StoreDocument([expectedV1Bot()]));
+
+  const bot = await store.read(`bot-${BOT_A_UUID}`);
+  assert.deepEqual(bot.computer, expectedComputer());
+  assert.equal((JSON.parse(await fs.readFile(filePath, "utf8"))).schemaVersion, 1);
+
+  const renamed = await store.rename(bot.botId, "Migrated Bot");
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.equal(renamed.name, "Migrated Bot");
+  assert.equal(persisted.schemaVersion, 2);
+  assert.deepEqual(persisted.bots[0].computer, expectedComputer());
+});
+
+test("Computer selection is exact monotonic and rejects hostile patches", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create();
+  assert.deepEqual(created.computer, expectedComputer());
+
+  const selected = await store.updateComputer(created.botId, {
+    mode: "local",
+    generation: 1,
+    localProfileId: "local-11111111-1111-4111-8111-111111111111",
+    nativeAgentId: null,
+    state: "starting",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+  });
+  assert.deepEqual(selected.computer, expectedComputer({
+    mode: "local",
+    generation: 1,
+    localProfileId: "local-11111111-1111-4111-8111-111111111111",
+    state: "starting",
+  }));
+
+  await assert.rejects(store.updateComputer(created.botId, {
+    mode: "not-now",
+    generation: 0,
+  }), /generation.*stale/i);
+
+  const hostile = new Proxy({}, {
+    getPrototypeOf() { throw new Error("secret-path-token"); },
+  });
+  await assert.rejects(
+    store.updateComputer(created.botId, hostile),
+    (error) => /plain data|computer patch/i.test(error?.message)
+      && !/secret-path-token/i.test(error?.message),
+  );
+  assert.deepEqual((await store.read(created.botId)).computer, selected.computer);
+});
 
 test("create stores a stable literal New Bot and ignores caller-owned identity", async (t) => {
   const { filePath, store } = await temporaryStore(t);
@@ -962,7 +1038,7 @@ test("failed atomic rename preserves the destination and cleans only its owned t
 test("load rejects malformed versions, keys, timestamps, states, and polluted records", async (t) => {
   const { filePath } = await temporaryStore(t);
   const cases = [
-    ["unsupported version", { schemaVersion: 2, bots: [], legacyImports: {} }, /schema version/i],
+    ["unsupported version", { schemaVersion: 3, bots: [], legacyImports: {} }, /schema version/i],
     ["unknown root key", { schemaVersion: 1, bots: [], legacyImports: {}, endpoint: "wss://private" }, /unsupported store field/i],
     ["duplicate bot ID", validStoreDocument([expectedBot(), expectedBot()]), /duplicate bot IDs/i],
     ["invalid timestamp", validStoreDocument([expectedBot({ updatedAt: "today" })]), /timestamp/i],
