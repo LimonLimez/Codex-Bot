@@ -38,6 +38,7 @@ const IPC_CHANNELS = Object.freeze({
   computerSelectMode: "openbot-computer:select-mode",
   computerRead: "openbot-computer:read",
   permissionDecide: "openbot-computer:permission-decide",
+  permissionRequestsList: "openbot-computer:permission-requests-list",
   permissionsList: "openbot-computer:permissions-list",
   permissionRevoke: "openbot-computer:permission-revoke",
 });
@@ -123,6 +124,138 @@ function computerRevokeRequest(value) {
     botId: computerBotId(request.botId),
     grantId: request.grantId.toLowerCase(),
   });
+}
+
+const COMPUTER_PUBLIC_FIELDS = Object.freeze([
+  "mode", "generation", "localProfileId", "nativeAgentId", "state", "lastConfirmedAt", "lastErrorCode",
+]);
+const PROMPT_PUBLIC_FIELDS = Object.freeze([
+  "requestId", "botId", "targetId", "targetGeneration", "capability", "resourceLabel", "reason",
+]);
+const GRANT_PUBLIC_FIELDS = Object.freeze([
+  "grantId", "botId", "capability", "resourceId", "resourceLabel", "scope", "createdAt",
+]);
+const COMPUTER_MODES = new Set(["local", "cursor", "not-now"]);
+const COMPUTER_STATES = new Set(["unconfigured", "starting", "ready", "reconnecting", "unavailable"]);
+const COMPUTER_CAPABILITIES = new Set([
+  "filesystem.read", "filesystem.write", "shell.execute", "application.open", "application.automate", "screen.capture",
+]);
+const TARGET_ID = /^local-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PERMISSION_ID = /^permission-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const GRANT_ID = /^grant-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+
+function exactPublicArray(value, maximum) {
+  let descriptors;
+  let prototype;
+  try {
+    if (!Array.isArray(value)) throw sanitizedComputerFailure();
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch { throw sanitizedComputerFailure(); }
+  const length = descriptors.length && "value" in descriptors.length ? descriptors.length.value : -1;
+  const keys = Reflect.ownKeys(descriptors);
+  if (prototype !== Array.prototype || !Number.isSafeInteger(length) || length < 0 || length > maximum
+    || keys.length !== length + 1 || keys.some((key) => {
+      if (key === "length") return !("value" in descriptors[key]);
+      return typeof key !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(key)
+        || Number(key) >= length || !("value" in descriptors[key]);
+    })) throw sanitizedComputerFailure();
+  return Array.from({ length }, (_, index) => descriptors[String(index)].value);
+}
+
+function canonicalTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+
+function boundedPublicText(value, maximum = 320) {
+  return typeof value === "string" && value.length > 0 && value.trim() === value
+    && Buffer.byteLength(value, "utf8") <= maximum && !/[\0-\x1f\x7f\\/]/.test(value)
+    && !/(?:^|\s)~(?:\/|\s|$)/.test(value)
+    && !/(?:^|\s)(?:file:|\/Users\/)/i.test(value);
+}
+
+function computerRecordPublic(value) {
+  const record = exactPlainInput(value, COMPUTER_PUBLIC_FIELDS);
+  if (!COMPUTER_MODES.has(record.mode)
+    || !Number.isSafeInteger(record.generation) || record.generation < 0
+    || !COMPUTER_STATES.has(record.state)
+    || !(record.localProfileId === null || (typeof record.localProfileId === "string" && TARGET_ID.test(record.localProfileId)))
+    || !(record.nativeAgentId === null || (typeof record.nativeAgentId === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(record.nativeAgentId)))
+    || !(record.lastConfirmedAt === null || canonicalTimestamp(record.lastConfirmedAt))
+    || !(record.lastErrorCode === null || (typeof record.lastErrorCode === "string"
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.lastErrorCode)))) throw sanitizedComputerFailure();
+  if (record.mode === "local" && record.localProfileId === null) throw sanitizedComputerFailure();
+  if (record.mode === "cursor" && record.nativeAgentId === null) throw sanitizedComputerFailure();
+  if (record.mode === "not-now" && record.state !== "unconfigured") throw sanitizedComputerFailure();
+  if (record.state === "ready" && record.lastConfirmedAt === null) throw sanitizedComputerFailure();
+  return record;
+}
+
+function computerEnvelopePublic(value, expectedBotId = null) {
+  const envelope = exactPlainInput(value, ["botId", "computer"]);
+  const botId = computerBotId(envelope.botId);
+  if (expectedBotId !== null && botId !== expectedBotId) throw sanitizedComputerFailure();
+  return computerPublic({ botId, computer: computerRecordPublic(envelope.computer) });
+}
+
+function permissionPromptPublic(value, expectedBotId = null) {
+  const prompt = exactPlainInput(value, PROMPT_PUBLIC_FIELDS);
+  const botId = computerBotId(prompt.botId);
+  if ((expectedBotId !== null && botId !== expectedBotId)
+    || typeof prompt.requestId !== "string" || !PERMISSION_ID.test(prompt.requestId)
+    || typeof prompt.targetId !== "string" || !TARGET_ID.test(prompt.targetId)
+    || !Number.isSafeInteger(prompt.targetGeneration) || prompt.targetGeneration < 0
+    || !COMPUTER_CAPABILITIES.has(prompt.capability)
+    || !boundedPublicText(prompt.resourceLabel)
+    || !boundedPublicText(prompt.reason, 512)) {
+    throw sanitizedComputerFailure();
+  }
+  return {
+    requestId: prompt.requestId.toLowerCase(),
+    botId,
+    targetId: prompt.targetId.toLowerCase(),
+    targetGeneration: prompt.targetGeneration,
+    capability: prompt.capability,
+    resourceLabel: prompt.resourceLabel,
+    reason: prompt.reason,
+  };
+}
+
+function permissionRequestsPublic(value, expectedBotId) {
+  const envelope = exactPlainInput(value, ["botId", "requests"]);
+  const botId = computerBotId(envelope.botId);
+  if (botId !== expectedBotId) throw sanitizedComputerFailure();
+  const requests = exactPublicArray(envelope.requests, 32)
+    .map((entry) => permissionPromptPublic(entry, botId));
+  return computerPublic({ botId, requests });
+}
+
+function permissionGrantPublic(value, expectedBotId) {
+  const grant = exactPlainInput(value, GRANT_PUBLIC_FIELDS);
+  const botId = computerBotId(grant.botId);
+  if (botId !== expectedBotId || typeof grant.grantId !== "string" || !GRANT_ID.test(grant.grantId)
+    || !COMPUTER_CAPABILITIES.has(grant.capability)
+    || typeof grant.resourceId !== "string" || !RESOURCE_ID.test(grant.resourceId)
+    || grant.resourceId.includes("..") || !boundedPublicText(grant.resourceLabel)
+    || grant.scope !== "always" || !canonicalTimestamp(grant.createdAt)) throw sanitizedComputerFailure();
+  return {
+    grantId: grant.grantId.toLowerCase(), botId, capability: grant.capability,
+    resourceId: grant.resourceId, resourceLabel: grant.resourceLabel,
+    scope: "always", createdAt: grant.createdAt,
+  };
+}
+
+function permissionsPublic(value, expectedBotId) {
+  const envelope = exactPlainInput(value, ["botId", "permissions"]);
+  const botId = computerBotId(envelope.botId);
+  if (botId !== expectedBotId) throw sanitizedComputerFailure();
+  const permissions = exactPublicArray(envelope.permissions, 256)
+    .map((entry) => permissionGrantPublic(entry, botId));
+  return computerPublic({ botId, permissions });
 }
 
 function computerPublic(value) {
@@ -525,6 +658,7 @@ function installDesktopRuntime(electron, injected = {}) {
     async selectMode() { throw sanitizedComputerFailure(); },
     async read() { throw sanitizedComputerFailure(); },
     async decidePermission() { throw sanitizedComputerFailure(); },
+    async listPermissionRequests() { throw sanitizedComputerFailure(); },
     async listPermissions() { throw sanitizedComputerFailure(); },
     async revokePermission() { throw sanitizedComputerFailure(); },
     dispose() {},
@@ -574,11 +708,13 @@ function installDesktopRuntime(electron, injected = {}) {
   }
 
   function currentWindowSender(event) {
-    if (typeof electron.BrowserWindow.fromWebContents !== "function") return true;
+    if (typeof electron.BrowserWindow.fromWebContents !== "function"
+      || !event?.sender || typeof event.sender.isDestroyed !== "function") return false;
     try {
       const window = electron.BrowserWindow.fromWebContents(event?.sender);
-      return Boolean(window && !window.isDestroyed?.() && window.webContents === event.sender
-        && !window.webContents.isDestroyed?.());
+      return Boolean(window && typeof window.isDestroyed === "function" && !window.isDestroyed()
+        && window.webContents === event.sender && typeof window.webContents?.isDestroyed === "function"
+        && !window.webContents.isDestroyed());
     } catch { return false; }
   }
 
@@ -669,21 +805,30 @@ function installDesktopRuntime(electron, injected = {}) {
       accountController.catalogState(),
     ));
   });
-  handle(IPC_CHANNELS.computerSelectMode, (value) => (
-    computerBoundary.selectMode(computerModeRequest(value))
-  ), { requireCurrentWindow: true, computer: true });
-  handle(IPC_CHANNELS.computerRead, (botId) => (
-    computerBoundary.read(computerBotId(botId))
-  ), { requireCurrentWindow: true, computer: true });
-  handle(IPC_CHANNELS.permissionDecide, (value) => (
-    computerBoundary.decidePermission(computerDecisionRequest(value))
-  ), { requireCurrentWindow: true, computer: true });
-  handle(IPC_CHANNELS.permissionsList, (botId) => (
-    computerBoundary.listPermissions(computerBotId(botId))
-  ), { requireCurrentWindow: true, computer: true });
-  handle(IPC_CHANNELS.permissionRevoke, (value) => (
-    computerBoundary.revokePermission(computerRevokeRequest(value))
-  ), { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.computerSelectMode, async (value) => {
+    const request = computerModeRequest(value);
+    return computerEnvelopePublic(await computerBoundary.selectMode(request), request.botId);
+  }, { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.computerRead, async (value) => {
+    const botId = computerBotId(value);
+    return computerEnvelopePublic(await computerBoundary.read(botId), botId);
+  }, { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.permissionDecide, async (value) => {
+    const request = computerDecisionRequest(value);
+    return permissionsPublic(await computerBoundary.decidePermission(request), request.botId);
+  }, { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.permissionRequestsList, async (value) => {
+    const botId = computerBotId(value);
+    return permissionRequestsPublic(await computerBoundary.listPermissionRequests(botId), botId);
+  }, { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.permissionsList, async (value) => {
+    const botId = computerBotId(value);
+    return permissionsPublic(await computerBoundary.listPermissions(botId), botId);
+  }, { requireCurrentWindow: true, computer: true });
+  handle(IPC_CHANNELS.permissionRevoke, async (value) => {
+    const request = computerRevokeRequest(value);
+    return permissionsPublic(await computerBoundary.revokePermission(request), request.botId);
+  }, { requireCurrentWindow: true, computer: true });
 
   const onBotChanged = (event) => broadcast(event);
   const onRuntimeChanged = (event) => {
@@ -694,10 +839,10 @@ function installDesktopRuntime(electron, injected = {}) {
   const onAccountChanged = (event) => broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
   const onCatalogChanged = (event) => broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
   const onComputerChanged = (event) => {
-    try { broadcastChannel(COMPUTER_CHANGE_CHANNEL, computerPublic(event)); } catch {}
+    try { broadcastChannel(COMPUTER_CHANGE_CHANNEL, computerEnvelopePublic(event)); } catch {}
   };
   const onComputerPermission = (event) => {
-    try { broadcastChannel(COMPUTER_PERMISSION_CHANNEL, computerPublic(event)); } catch {}
+    try { broadcastChannel(COMPUTER_PERMISSION_CHANNEL, computerPublic(permissionPromptPublic(event))); } catch {}
   };
   controller.on?.("bot-changed", onBotChanged);
   controller.on?.("runtime-changed", onRuntimeChanged);

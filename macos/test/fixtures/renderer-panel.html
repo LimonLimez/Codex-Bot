@@ -25,7 +25,19 @@
       document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
       document.documentElement.dataset.layout = params.get("layout") === "narrow" ? "narrow" : "wide";
       const BOT_ID = "bot-11111111-1111-4111-8111-111111111111";
-      const bot = Object.freeze({ botId: BOT_ID, name: "New Bot", runtime: Object.freeze({ state: "ready" }) });
+      const computerEvidence = params.get("computer") || "";
+      const localComputerEvidence = computerEvidence === "permission"
+        || computerEvidence === "grants" || computerEvidence === "computer-change";
+      let computer = Object.freeze({
+        mode: localComputerEvidence ? "local" : "not-now",
+        generation: localComputerEvidence ? 1 : 0,
+        localProfileId: localComputerEvidence ? "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : null,
+        nativeAgentId: null,
+        state: localComputerEvidence ? "ready" : "unconfigured",
+        lastConfirmedAt: localComputerEvidence ? "2026-08-15T12:34:56.000Z" : null,
+        lastErrorCode: null,
+      });
+      const bot = Object.freeze({ botId: BOT_ID, name: "New Bot", runtime: Object.freeze({ state: "ready" }), computer });
       const requestedPower = params.get("effort") || "medium";
       const requestedEffort = requestedPower === "terra-light" || requestedPower === "sol-light"
         ? "low"
@@ -87,6 +99,50 @@
             status: "ready",
             models: Object.freeze(models),
           });
+        },
+      });
+      window.openbotComputer = Object.freeze({
+        async read(botId) { return Object.freeze({ botId, computer }); },
+        async selectMode(value) {
+          computer = Object.freeze({
+            ...computer,
+            mode: value.mode,
+            generation: computer.generation + 1,
+            localProfileId: value.mode === "local" ? "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" : computer.localProfileId,
+            state: value.mode === "local" ? "ready" : "unconfigured",
+            lastConfirmedAt: value.mode === "local" ? "2026-08-15T12:34:56.000Z" : null,
+          });
+          return Object.freeze({ botId: value.botId, computer });
+        },
+        async listPermissions(botId) {
+          const permissions = computerEvidence === "grants"
+            ? Object.freeze([Object.freeze({
+              grantId: "grant-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+              botId,
+              capability: "filesystem.read",
+              resourceId: "workspace",
+              resourceLabel: "OpenBot Workspace",
+              scope: "always",
+              createdAt: "2026-08-15T12:34:56.000Z",
+            })])
+            : Object.freeze([]);
+          return Object.freeze({ botId, permissions });
+        },
+        async listPermissionRequests(botId) { return Object.freeze({ botId, requests: Object.freeze([]) }); },
+        async decidePermission(value) { return Object.freeze({ botId: value.botId, permissions: Object.freeze([]) }); },
+        async revokePermission(value) { return Object.freeze({ botId: value.botId, permissions: Object.freeze([]) }); },
+        onChanged() { return () => {}; },
+        onPermissionRequested(listener) {
+          if (computerEvidence === "permission") setTimeout(() => listener(Object.freeze({
+            requestId: "permission-cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            botId: BOT_ID,
+            targetId: computer.localProfileId,
+            targetGeneration: computer.generation,
+            capability: "application.open",
+            resourceLabel: "Google Chrome",
+            reason: "Open an approved app for this task",
+          })), 40);
+          return () => {};
         },
       });
     </script>

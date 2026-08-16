@@ -37,7 +37,7 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /create:\(\)=>__codexInvoke\("create"\)/);
   for (const method of [
     "selectMode", "read", "decidePermission", "listPermissions",
-    "revokePermission", "onChanged", "onPermissionRequested",
+    "listPermissionRequests", "revokePermission", "onChanged", "onPermissionRequested",
   ]) {
     assert.match(preload, new RegExp(`${method}:`));
   }

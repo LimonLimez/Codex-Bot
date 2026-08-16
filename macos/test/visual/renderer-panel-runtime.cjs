@@ -20,7 +20,7 @@ async function main() {
   const catalog = argument("catalog", "full");
   if (!Number.isInteger(width) || !Number.isInteger(height) || width < 640 || height < 480
     || !new Set(["terra-light", "sol-light", "medium", "high", "xhigh", "max", "ultra", "ultra-code"]).has(effort)
-    || !new Set(["closed", "entry", "steady", "later", "advanced", "hold", "drag", "wheel", "arrows", "focus", "hover", "disabled", "reduced", "fast-entry", "fast-steady", "fast-exit"]).has(phase)
+    || !new Set(["closed", "entry", "steady", "later", "advanced", "hold", "drag", "wheel", "arrows", "focus", "hover", "disabled", "reduced", "fast-entry", "fast-steady", "fast-exit", "computer-setup", "computer-change", "permission", "grants"]).has(phase)
     || !new Set(["standard", "priority"]).has(tier)
     || !new Set(["dark", "light"]).has(theme)
     || !new Set(["wide", "narrow"]).has(layout)
@@ -48,6 +48,7 @@ async function main() {
     layout,
     catalog,
     disabled: phase === "disabled" ? "true" : "false",
+    computer: phase,
   } });
   const expectedLabel = effort === "terra-light" || effort === "sol-light" ? "Light"
     : effort === "medium" ? "Standard"
@@ -55,10 +56,106 @@ async function main() {
         : effort === "xhigh" ? "Extra High"
           : effort === "ultra-code" ? "Ultra Code"
             : effort[0].toUpperCase() + effort.slice(1);
-  const sliderRect = await window.webContents.executeJavaScript(`(() => {
+  const sliderRect = await window.webContents.executeJavaScript(`(async () => {
+    const phase = ${JSON.stringify(phase)};
+    if (phase === "computer-setup") {
+      document.querySelector(".codex-bot-new")?.click();
+      await new Promise((resolve, reject) => {
+        let remainingFrames = 120;
+        const waitForSetup = () => {
+          const setup = document.querySelector(".codex-computer-setup");
+          if (setup && !setup.hidden) return resolve();
+          if (remainingFrames-- <= 0) return reject(new Error("Computer setup did not open."));
+          requestAnimationFrame(waitForSetup);
+        };
+        waitForSetup();
+      });
+      const setup = document.querySelector(".codex-computer-setup");
+      const choices = [...document.querySelectorAll(".codex-computer-choice-input")];
+      const proceed = document.querySelector(".codex-computer-continue");
+      if (!setup || setup.hidden || choices.length !== 3 || choices.some((choice) => choice.checked)
+        || !proceed?.disabled) throw new Error("Computer setup did not originate from production state.");
+      const rect = setup.getBoundingClientRect();
+      if (rect.top < 12 || rect.right > innerWidth - 12 || rect.bottom > innerHeight - 12 || rect.left < 12) {
+        throw new Error("Computer setup is clipped by the viewport.");
+      }
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    }
+    if (phase === "computer-change") {
+      document.querySelector(".codex-computer-change")?.click();
+      await new Promise((resolve, reject) => {
+        let remainingFrames = 120;
+        const waitForSetup = () => {
+          const setup = document.querySelector(".codex-computer-setup");
+          if (setup && !setup.hidden) return resolve();
+          if (remainingFrames-- <= 0) return reject(new Error("Change Computer setup did not open."));
+          requestAnimationFrame(waitForSetup);
+        };
+        waitForSetup();
+      });
+      const setup = document.querySelector(".codex-computer-setup");
+      const cancel = document.querySelector(".codex-computer-cancel");
+      const proceed = document.querySelector(".codex-computer-continue");
+      if (!setup || setup.hidden || !cancel || cancel.hidden || cancel.disabled || !proceed?.disabled) {
+        throw new Error("Change Computer setup did not expose its dismissible production state.");
+      }
+      const rect = setup.getBoundingClientRect();
+      if (rect.top < 12 || rect.right > innerWidth - 12 || rect.bottom > innerHeight - 12 || rect.left < 12) {
+        throw new Error("Change Computer setup is clipped by the viewport.");
+      }
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    }
+    if (phase === "permission") {
+      await new Promise((resolve, reject) => {
+        let remainingFrames = 120;
+        const waitForPermission = () => {
+          const sheet = document.querySelector(".codex-permission-sheet");
+          if (sheet && !sheet.hidden) return resolve();
+          if (remainingFrames-- <= 0) return reject(new Error("Permission sheet did not open."));
+          requestAnimationFrame(waitForPermission);
+        };
+        waitForPermission();
+      });
+      const sheet = document.querySelector(".codex-permission-sheet");
+      if (!sheet || sheet.hidden || !/Google Chrome/.test(sheet.textContent)
+        || !/Always Allow for This Bot/.test(sheet.textContent)) {
+        throw new Error("Permission sheet did not originate from production state.");
+      }
+      const rect = sheet.getBoundingClientRect();
+      const always = sheet.querySelector(".codex-permission-always")?.getBoundingClientRect();
+      if (rect.top < 12 || rect.right > innerWidth - 12 || rect.bottom > innerHeight - 12 || rect.left < 12
+        || !always || always.width < 136 || always.height > 56) {
+        throw new Error("Permission actions are clipped or unreadable.");
+      }
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    }
+    if (phase === "grants") {
+      await new Promise((resolve, reject) => {
+        let remainingFrames = 120;
+        const waitForGrant = () => {
+          const grant = document.querySelector(".codex-computer-grant");
+          if (grant) return resolve();
+          if (remainingFrames-- <= 0) return reject(new Error("Saved Computer grant did not render."));
+          requestAnimationFrame(waitForGrant);
+        };
+        waitForGrant();
+      });
+      const grant = document.querySelector(".codex-computer-grant");
+      const label = grant?.querySelector(".codex-computer-grant-label");
+      const computerStatus = document.querySelector(".codex-computer-status");
+      if (!/OpenBot Workspace/.test(grant?.textContent) || !/Revoke/.test(grant?.textContent)) {
+        throw new Error("Saved Computer grant did not originate from production state.");
+      }
+      const rect = grant.getBoundingClientRect();
+      if (rect.height > 56 || !label || label.scrollWidth > label.clientWidth
+        || computerStatus?.textContent !== "Runs on this Mac"
+        || computerStatus.scrollWidth > computerStatus.clientWidth) {
+        throw new Error("Saved Computer grant is clipped or oversized.");
+      }
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    }
     const trigger = document.querySelector(".codex-model-trigger");
     if (!trigger) throw new Error("Power trigger did not mount.");
-    const phase = ${JSON.stringify(phase)};
     if (phase === "closed" || phase === "disabled") {
       const popover = document.querySelector(".codex-power-popover");
       if (trigger.getAttribute("aria-expanded") !== "false"
@@ -111,6 +208,7 @@ async function main() {
     window.webContents.sendInputEvent({ type: "mouseMove", x: sliderRect.x, y: sliderRect.y, movementX: 0, movementY: 0 });
   }
   const delay = phase === "entry" || phase === "fast-entry" ? 280
+    : phase === "computer-setup" || phase === "computer-change" || phase === "permission" || phase === "grants" ? 240
     : phase === "hold" ? 560
       : phase === "later" ? 3300
       : phase === "fast-steady" || tier === "priority" ? 720

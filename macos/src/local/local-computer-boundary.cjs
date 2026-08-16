@@ -178,6 +178,13 @@ function publicPermissions(botId, permissions) {
   return freezeClone({ botId, permissions });
 }
 
+function publicPermissionRequests(botId, requests) {
+  if (!Array.isArray(requests) || requests.length > 32) {
+    throw boundaryError("Computer permission requests are unavailable.", "OPENBOT_COMPUTER_RESULT_INVALID");
+  }
+  return freezeClone({ botId, requests });
+}
+
 function sameComputer(left, right) {
   return Boolean(left && right
     && left.mode === right.mode
@@ -202,6 +209,7 @@ class LocalComputerBoundary extends EventEmitter {
       || !manager || typeof manager.open !== "function" || typeof manager.close !== "function"
       || typeof manager.dispose !== "function"
       || !broker || typeof broker.decide !== "function" || typeof broker.list !== "function"
+      || typeof broker.listPending !== "function"
       || typeof broker.revoke !== "function" || typeof broker.dispose !== "function"
       || typeof now !== "function" || typeof randomUUID !== "function") {
       throw new TypeError("Local Computer boundary dependencies are invalid.");
@@ -291,6 +299,12 @@ class LocalComputerBoundary extends EventEmitter {
     this.#assertActive();
     const normalizedBotId = normalizeBotId(botId);
     return publicPermissions(normalizedBotId, await this.#broker.list(normalizedBotId));
+  }
+
+  async listPermissionRequests(botId) {
+    this.#assertActive();
+    const normalizedBotId = normalizeBotId(botId);
+    return publicPermissionRequests(normalizedBotId, await this.#broker.listPending(normalizedBotId));
   }
 
   async revokePermission(value) {

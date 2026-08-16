@@ -9,14 +9,17 @@ const brokerPath = path.join(__dirname, "..", "src", "local", "local-permission-
 
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
+const BOT_C = "bot-33333333-3333-4333-8333-333333333333";
 const TARGET_A = "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TARGET_B = "local-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const TARGET_C = "local-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const REQUEST_A = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 function request(botId = BOT_A, generation = 4, overrides = {}) {
+  const targetId = botId === BOT_A ? TARGET_A : botId === BOT_B ? TARGET_B : TARGET_C;
   return {
     botId,
-    targetId: botId === BOT_A ? TARGET_A : TARGET_B,
+    targetId,
     targetGeneration: generation,
     capability: "filesystem.read",
     resourceId: "folder-a",
@@ -27,12 +30,13 @@ function request(botId = BOT_A, generation = 4, overrides = {}) {
 }
 
 function computer(botId = BOT_A, generation = 4, overrides = {}) {
+  const localProfileId = botId === BOT_A ? TARGET_A : botId === BOT_B ? TARGET_B : TARGET_C;
   return {
     botId,
     computer: {
       mode: "local",
       generation,
-      localProfileId: botId === BOT_A ? TARGET_A : TARGET_B,
+      localProfileId,
       nativeAgentId: null,
       state: "ready",
       lastConfirmedAt: "2026-08-15T12:34:56.000Z",
@@ -107,14 +111,14 @@ function fixture(overrides = {}) {
   const tcc = {
     ensure: mock.fn(async (input) => calls.tcc.push(input)),
   };
-  const readCurrentComputer = mock.fn(async () => current);
+  const readCurrentComputer = overrides.readCurrentComputer || mock.fn(async () => current);
   const { LocalPermissionBroker } = require(brokerPath);
   const broker = new LocalPermissionBroker({
     store,
     readCurrentComputer,
     chooseResource,
     tcc,
-    randomUUID: () => REQUEST_A,
+    randomUUID: overrides.randomUUID || (() => REQUEST_A),
   });
   return {
     bookmark,
@@ -156,6 +160,149 @@ test("broker applies one current per-bot Allow Once decision exactly once", asyn
   assert.equal(effect.mock.callCount(), 1);
   assert.equal(chooseResource.mock.callCount(), 1);
   assert.equal(tcc.ensure.mock.callCount(), 1);
+});
+
+test("broker replays frozen bot-scoped pending requests until they settle", async () => {
+  const { broker } = fixture();
+  const effect = mock.fn(async () => "done");
+  const { pending, prompt } = await promptFor(broker, () => broker.request(request(), effect));
+  const rejected = pending.catch((error) => error);
+
+  const replay = await broker.listPending(BOT_A);
+  assert.deepEqual(replay, [prompt]);
+  assert.notEqual(replay[0], prompt);
+  assertDeepFrozen(replay);
+  assert.deepEqual(await broker.listPending(BOT_B), []);
+
+  await assert.rejects(
+    broker.decide({ ...identity(prompt), decision: "deny" }),
+    /denied/i,
+  );
+  assert.match((await rejected).message, /denied/i);
+  assert.deepEqual(await broker.listPending(BOT_A), []);
+});
+
+test("broker lists grants only for the current local Computer identity", async () => {
+  const grant = Object.freeze({
+    grantId: "grant-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    botId: BOT_A,
+    capability: "filesystem.read",
+    resourceId: "folder-a",
+    resourceLabel: "Folder A",
+    scope: "always",
+    createdAt: "2026-08-15T12:34:56.000Z",
+  });
+  const listed = [];
+  const { broker, setCurrent, store } = fixture({
+    store: {
+      listPublic: mock.fn(async (botId, target) => {
+        listed.push({ botId, target });
+        return target?.targetId === TARGET_A && target?.targetGeneration === 4 ? [grant] : [];
+      }),
+    },
+  });
+  assert.deepEqual(await broker.list(BOT_A), [grant]);
+  assert.deepEqual(listed, [{
+    botId: BOT_A,
+    target: { targetId: TARGET_A, targetGeneration: 4 },
+  }]);
+  setCurrent(computer(BOT_A, 4, { localProfileId: TARGET_B }));
+  assert.deepEqual(await broker.list(BOT_A), []);
+  assert.deepEqual(listed.at(-1), {
+    botId: BOT_A,
+    target: { targetId: TARGET_B, targetGeneration: 4 },
+  });
+  setCurrent(computer(BOT_A, 5));
+  assert.deepEqual(await broker.list(BOT_A), []);
+  setCurrent(computer(BOT_A, 5, { mode: "not-now", state: "unconfigured", localProfileId: null }));
+  assert.deepEqual(await broker.list(BOT_A), []);
+  assert.equal(store.listPublic.mock.callCount(), 3, "non-local Computers must not expose old grants");
+  broker.dispose();
+});
+
+test("broker suppresses a grant list that becomes stale while storage is pending", async () => {
+  const held = deferred();
+  const grant = Object.freeze({
+    grantId: "grant-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    botId: BOT_A,
+    capability: "filesystem.read",
+    resourceId: "folder-a",
+    resourceLabel: "Folder A",
+    scope: "always",
+    createdAt: "2026-08-15T12:34:56.000Z",
+  });
+  const { broker, readCurrentComputer, setCurrent, store } = fixture({
+    store: {
+      listPublic: mock.fn(async () => held.promise),
+    },
+  });
+  const listing = broker.list(BOT_A);
+  while (store.listPublic.mock.callCount() === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  setCurrent(computer(BOT_A, 5));
+  held.resolve([grant]);
+
+  assert.deepEqual(await listing, []);
+  assert.equal(readCurrentComputer.mock.callCount(), 2);
+  broker.dispose();
+});
+
+test("broker bounds pending permission work per bot and globally", async (context) => {
+  let nextId = 0;
+  const { broker } = fixture({
+    randomUUID() {
+      nextId += 1;
+      return `00000000-0000-4000-8000-${String(nextId).padStart(12, "0")}`;
+    },
+    readCurrentComputer: mock.fn(async (botId) => computer(botId)),
+  });
+  context.after(() => broker.dispose());
+  const held = [];
+  const pendingCounts = new Map();
+  const addPending = async (botId) => {
+    const promise = broker.request(request(botId), async () => "done");
+    held.push(promise.catch((error) => error));
+    const expected = (pendingCounts.get(botId) ?? 0) + 1;
+    pendingCounts.set(botId, expected);
+    while ((await broker.listPending(botId)).length < expected) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+  for (let index = 0; index < 32; index += 1) await addPending(BOT_A);
+  let perBotOutcome = null;
+  const perBotOverflow = broker.request(request(BOT_A), async () => "overflow");
+  void perBotOverflow.then(
+    (value) => { perBotOutcome = { value }; },
+    (error) => { perBotOutcome = { error }; },
+  );
+  for (let attempts = 0; attempts < 100 && perBotOutcome === null
+    && (await broker.listPending(BOT_A)).length < 33; attempts += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal((await broker.listPending(BOT_A)).length, 32);
+  assert.equal(perBotOutcome?.error?.code, "OPENBOT_PERMISSION_QUEUE_FULL");
+  for (let index = 0; index < 32; index += 1) await addPending(BOT_B);
+  let globalOutcome = null;
+  const globalOverflow = broker.request(request(BOT_C), async () => "overflow");
+  void globalOverflow.then(
+    (value) => { globalOutcome = { value }; },
+    (error) => { globalOutcome = { error }; },
+  );
+  for (let attempts = 0; attempts < 100 && globalOutcome === null
+    && (await broker.listPending(BOT_C)).length < 1; attempts += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal((await broker.listPending(BOT_C)).length, 0);
+  assert.equal(globalOutcome?.error?.code, "OPENBOT_PERMISSION_QUEUE_FULL");
+  assert.equal((await broker.listPending(BOT_A)).length, 32);
+  assert.equal((await broker.listPending(BOT_B)).length, 32);
+  broker.cancelBot(BOT_A);
+  broker.cancelBot(BOT_B);
+  broker.cancelBot(BOT_C);
+  const settled = await Promise.all(held);
+  assert.equal(settled.every((error) => error?.code === "OPENBOT_PERMISSION_CANCELLED"), true);
 });
 
 test("bot switch and generation change suppress stale permission effects", async () => {

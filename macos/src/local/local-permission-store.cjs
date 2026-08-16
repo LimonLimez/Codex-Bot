@@ -32,6 +32,7 @@ const REQUEST_FIELDS = new Set([
   "resourceId",
   "resourceLabel",
 ]);
+const TARGET_FILTER_FIELDS = new Set(["targetId", "targetGeneration"]);
 const CAPABILITIES = new Set([
   "filesystem.read",
   "filesystem.write",
@@ -171,6 +172,15 @@ function normalizeTimestamp(value) {
     throw new Error("Grant timestamp is invalid.");
   }
   return value;
+}
+
+function normalizeTargetFilter(value) {
+  const input = assertPlainObject(cloneRequest(value), "Permission target");
+  assertExactKeys(input, TARGET_FILTER_FIELDS, "Permission target");
+  return {
+    targetId: normalizeTargetId(input.targetId),
+    targetGeneration: normalizeGeneration(input.targetGeneration),
+  };
 }
 
 function normalizeGrantId(value) {
@@ -382,12 +392,15 @@ class LocalPermissionStore {
     });
   }
 
-  async listPublic(botId) {
+  async listPublic(botId, target = null) {
     const normalizedBotId = normalizeBotId(botId);
+    const normalizedTarget = target === null ? null : normalizeTargetFilter(target);
     return enqueuePath(this.#filePath, async () => {
       const state = await this.#readFile();
       return deepFreeze(state.grants
-        .filter((grant) => grant.botId === normalizedBotId)
+        .filter((grant) => grant.botId === normalizedBotId
+          && (normalizedTarget === null || (grant.targetId === normalizedTarget.targetId
+            && grant.targetGeneration === normalizedTarget.targetGeneration)))
         .map(publicGrant));
     });
   }

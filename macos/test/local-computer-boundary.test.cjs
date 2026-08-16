@@ -73,6 +73,15 @@ function fixture(overrides = {}) {
     scope: "always",
     createdAt: "2026-08-15T12:00:00.000Z",
   })]);
+  broker.listPending = mock.fn(async () => [Object.freeze({
+    requestId: "permission-dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    capability: "filesystem.read",
+    resourceLabel: "OpenBot Workspace",
+    reason: "Read a selected file",
+  })]);
   broker.revoke = mock.fn(async () => {});
   broker.cancelBot = mock.fn();
   broker.dispose = mock.fn();
@@ -178,6 +187,10 @@ test("permission prompts and decisions expose metadata only and disposal is exac
   assert.doesNotMatch(JSON.stringify(permissions), /private-helper-result|bookmark|Users/i);
 
   assert.deepEqual(await boundary.listPermissions(BOT_A), permissions);
+  const pending = await boundary.listPermissionRequests(BOT_A);
+  assert.deepEqual(pending, { botId: BOT_A, requests: await broker.listPending(BOT_A) });
+  assert.equal(Object.isFrozen(pending), true);
+  assert.equal(Object.isFrozen(pending.requests), true);
   assert.deepEqual(await boundary.revokePermission({ botId: BOT_A, grantId: GRANT_A }), permissions);
   assert.deepEqual(broker.revoke.mock.calls[0].arguments, [{ botId: BOT_A, grantId: GRANT_A }]);
 
@@ -188,6 +201,27 @@ test("permission prompts and decisions expose metadata only and disposal is exac
   broker.emit("request", prompt);
   assert.equal(prompts.length, 1);
   await assert.rejects(boundary.read(BOT_A), /disposed/i);
+});
+
+test("permission request publication is bounded to the broker's per-bot capacity", async () => {
+  const prompt = (index) => Object.freeze({
+    requestId: `permission-${String(index).padStart(8, "0")}-1111-4111-8111-111111111111`,
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    capability: "filesystem.read",
+    resourceLabel: `Folder ${index}`,
+    reason: "Read a selected file",
+  });
+  const { boundary, broker } = fixture({
+    broker: { listPending: mock.fn(async () => Array.from({ length: 32 }, (_, index) => prompt(index))) },
+  });
+  assert.equal((await boundary.listPermissionRequests(BOT_A)).requests.length, 32);
+  broker.listPending.mock.mockImplementation(async () => Array.from({ length: 33 }, (_, index) => prompt(index)));
+  await assert.rejects(boundary.listPermissionRequests(BOT_A), {
+    code: "OPENBOT_COMPUTER_RESULT_INVALID",
+  });
+  boundary.dispose();
 });
 
 test("same-bot mode selections serialize and hostile input reaches no dependency", async () => {

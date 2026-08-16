@@ -5,6 +5,8 @@ const { EventEmitter } = require("node:events");
 
 const MAX_TEXT_BYTES = 512;
 const MAX_BOOKMARK_BYTES = 64 * 1024;
+const MAX_PENDING_PER_BOT = 32;
+const MAX_PENDING_TOTAL = 64;
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const REQUEST_FIELDS = new Set([
   "botId",
@@ -241,6 +243,28 @@ function assertCurrent(request, current) {
   }
 }
 
+function currentLocalTarget(botId, value) {
+  const current = cloneInput(value, "Current Computer");
+  if (!current || typeof current !== "object" || current.botId !== botId
+    || !current.computer || typeof current.computer !== "object"
+    || current.computer.mode !== "local" || current.computer.state !== "ready"
+    || typeof current.computer.localProfileId !== "string"
+    || !TARGET_ID_PATTERN.test(current.computer.localProfileId)
+    || !Number.isSafeInteger(current.computer.generation) || current.computer.generation < 0) {
+    return null;
+  }
+  return {
+    targetId: current.computer.localProfileId.toLowerCase(),
+    targetGeneration: current.computer.generation,
+  };
+}
+
+function sameTarget(left, right) {
+  return left !== null && right !== null
+    && left.targetId === right.targetId
+    && left.targetGeneration === right.targetGeneration;
+}
+
 function normalizeBookmark(value) {
   const bookmark = Buffer.isBuffer(value)
     ? Buffer.from(value)
@@ -323,6 +347,16 @@ class LocalPermissionBroker extends EventEmitter {
     }
 
     if (this.#disposed) throw brokerError("Permission broker is disposed.", "OPENBOT_PERMISSION_DISPOSED");
+    let botPending = 0;
+    for (const entry of this.#pending.values()) {
+      if (entry.request.botId === request.botId) botPending += 1;
+    }
+    if (botPending >= MAX_PENDING_PER_BOT || this.#pending.size >= MAX_PENDING_TOTAL) {
+      throw brokerError(
+        "Too many Computer permission requests are pending.",
+        "OPENBOT_PERMISSION_QUEUE_FULL",
+      );
+    }
     const requestId = `permission-${safeUUID(this.#randomUUID)}`;
     return new Promise((resolve, reject) => {
       this.#pending.set(requestId, { request, effect, resolve, reject });
@@ -374,10 +408,32 @@ class LocalPermissionBroker extends EventEmitter {
   async list(botId) {
     if (this.#disposed) throw brokerError("Permission broker is disposed.", "OPENBOT_PERMISSION_DISPOSED");
     try {
-      return await this.#store.listPublic(normalizeBotId(botId));
+      const normalizedBotId = normalizeBotId(botId);
+      const target = currentLocalTarget(
+        normalizedBotId,
+        await this.#readCurrentComputer(normalizedBotId),
+      );
+      if (target === null) return Object.freeze([]);
+      const grants = await this.#store.listPublic(normalizedBotId, target);
+      const confirmedTarget = currentLocalTarget(
+        normalizedBotId,
+        await this.#readCurrentComputer(normalizedBotId),
+      );
+      return sameTarget(target, confirmedTarget) ? grants : Object.freeze([]);
     } catch (error) {
       throw safeFailure(error);
     }
+  }
+
+  async listPending(botId) {
+    if (this.#disposed) throw brokerError("Permission broker is disposed.", "OPENBOT_PERMISSION_DISPOSED");
+    const normalizedBotId = normalizeBotId(botId);
+    const prompts = [];
+    for (const [requestId, entry] of this.#pending) {
+      if (entry.request.botId !== normalizedBotId) continue;
+      prompts.push(frozenPrompt(requestId, entry.request));
+    }
+    return Object.freeze(prompts);
   }
 
   async revoke(value) {

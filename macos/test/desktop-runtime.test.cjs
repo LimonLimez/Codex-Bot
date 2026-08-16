@@ -314,10 +314,10 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
     "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy",
     "catalogList", "computerRead", "computerSelectMode", "connectProvider", "create", "list",
-    "permissionDecide", "permissionRevoke", "permissionsList", "read", "readModel", "rename",
+    "permissionDecide", "permissionRequestsList", "permissionRevoke", "permissionsList", "read", "readModel", "rename",
     "retryRuntime", "selectBot", "selectModel", "updateProfile",
   ]);
-  assert.equal(handlers.size, 22);
+  assert.equal(handlers.size, 23);
   assert.equal(Object.isFrozen(installed), true);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
@@ -423,14 +423,46 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
     scope: "always",
     createdAt: "2026-08-15T12:34:56.000Z",
   });
+  const prompt = Object.freeze({
+    requestId: "permission-11111111-1111-4111-8111-111111111111",
+    botId: BOT_A,
+    targetId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    targetGeneration: 1,
+    capability: "filesystem.read",
+    resourceLabel: "Folder A",
+    reason: "Read an approved file",
+  });
+  const resultOverrides = Object.create(null);
+  const resultOr = (name, fallback) => (
+    Object.prototype.hasOwnProperty.call(resultOverrides, name) ? resultOverrides[name] : fallback
+  );
   const computerBoundary = {
     on(event, listener) { listeners.set(event, listener); },
     off(event, listener) { if (listeners.get(event) === listener) listeners.delete(event); },
-    async selectMode(value) { calls.push(["select-mode", value]); return computer; },
-    async read(botId) { calls.push(["computer-read", botId]); return computer; },
-    async decidePermission(value) { calls.push(["permission-decide", value]); return computer; },
-    async listPermissions(botId) { calls.push(["permissions-list", botId]); return [grant]; },
-    async revokePermission(value) { calls.push(["permission-revoke", value]); return []; },
+    async selectMode(value) {
+      calls.push(["select-mode", value]);
+      return resultOr("select", { botId: value.botId, computer });
+    },
+    async read(botId) {
+      calls.push(["computer-read", botId]);
+      return resultOr("read", { botId, computer });
+    },
+    async decidePermission(value) {
+      calls.push(["permission-decide", value]);
+      return resultOr("decide", { botId: value.botId, permissions: [grant] });
+    },
+    async listPermissions(botId) {
+      calls.push(["permissions-list", botId]);
+      return resultOr("permissions", { botId, permissions: [grant] });
+    },
+    async listPermissionRequests(botId) {
+      calls.push(["permission-requests-list", botId]);
+      return resultOr("requests", { botId, requests: [prompt] });
+    },
+    async revokePermission(value) {
+      calls.push(["permission-revoke", value]);
+      return resultOr("revoke", { botId: value.botId, permissions: [] });
+    },
     dispose() { calls.push(["computer-dispose"]); },
   };
   const controller = { on() {}, off() {}, dispose() {} };
@@ -453,20 +485,36 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
   });
   const event = { sender };
   const selected = await handlers.get(IPC_CHANNELS.computerSelectMode)(event, { botId: BOT_A, mode: "local" });
-  assert.deepEqual(selected, computer);
+  assert.deepEqual(selected, { botId: BOT_A, computer });
   assert.equal(Object.isFrozen(selected), true);
   const computerReadHandler = handlers.get(IPC_CHANNELS.computerRead);
-  assert.deepEqual(await computerReadHandler(event, BOT_A), computer);
-  assert.deepEqual(await handlers.get(IPC_CHANNELS.permissionsList)(event, BOT_A), [grant]);
-  await handlers.get(IPC_CHANNELS.permissionDecide)(event, {
+  assert.deepEqual(await computerReadHandler(event, BOT_A), { botId: BOT_A, computer });
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.permissionsList)(event, BOT_A), {
+    botId: BOT_A,
+    permissions: [grant],
+  });
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.permissionRequestsList)(event, BOT_A), {
+    botId: BOT_A,
+    requests: [prompt],
+  });
+  const permissionDecideHandler = handlers.get(IPC_CHANNELS.permissionDecide);
+  const decision = {
     requestId: "permission-11111111-1111-4111-8111-111111111111",
     botId: BOT_A,
     targetId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
     targetGeneration: 1,
     decision: "once",
+  };
+  assert.deepEqual(await permissionDecideHandler(event, decision), {
+    botId: BOT_A,
+    permissions: [grant],
   });
-  await handlers.get(IPC_CHANNELS.permissionRevoke)(event, { botId: BOT_A, grantId: grant.grantId });
-  assert.equal(calls.length, 5);
+  const permissionRevokeHandler = handlers.get(IPC_CHANNELS.permissionRevoke);
+  assert.deepEqual(await permissionRevokeHandler(event, { botId: BOT_A, grantId: grant.grantId }), {
+    botId: BOT_A,
+    permissions: [],
+  });
+  assert.equal(calls.length, 6);
 
   await assert.rejects(
     handlers.get(IPC_CHANNELS.computerSelectMode)(event, new Proxy({}, {
@@ -482,7 +530,111 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
     handlers.get(IPC_CHANNELS.computerRead)({ sender: {} }, BOT_A),
     { code: "OPENBOT_COMPUTER_OPERATION_FAILED" },
   );
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 6);
+  resultOverrides.read = { botId: BOT_A, computer, unexpected: true };
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  delete resultOverrides.read;
+  assert.equal(calls.length, 7);
+
+  let accessorReads = 0;
+  resultOverrides.read = Object.defineProperty({ botId: BOT_A }, "computer", {
+    enumerable: true,
+    get() { accessorReads += 1; return computer; },
+  });
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  assert.equal(accessorReads, 0);
+  resultOverrides.read = { botId: BOT_A, computer: { ...computer, unexpected: true } };
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  resultOverrides.read = { botId: BOT_B, computer };
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  resultOverrides.read = Object.assign(Object.create({ inherited: true }), { botId: BOT_A, computer });
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  resultOverrides.read = { botId: BOT_A, computer, [Symbol("private")]: true };
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  delete resultOverrides.read;
+
+  const permissionsHandler = handlers.get(IPC_CHANNELS.permissionsList);
+  const sparsePermissions = [];
+  sparsePermissions.length = 1;
+  resultOverrides.permissions = { botId: BOT_A, permissions: sparsePermissions };
+  await assert.rejects(permissionsHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  const accessorPermissions = [];
+  Object.defineProperty(accessorPermissions, "0", {
+    enumerable: true,
+    get() { accessorReads += 1; return grant; },
+  });
+  resultOverrides.permissions = { botId: BOT_A, permissions: accessorPermissions };
+  await assert.rejects(permissionsHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  assert.equal(accessorReads, 0);
+  resultOverrides.permissions = { botId: BOT_A, permissions: [{ ...grant, unexpected: true }] };
+  await assert.rejects(permissionsHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  resultOverrides.permissions = { botId: BOT_B, permissions: [{ ...grant, botId: BOT_B }] };
+  await assert.rejects(permissionsHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  delete resultOverrides.permissions;
+
+  const requestsHandler = handlers.get(IPC_CHANNELS.permissionRequestsList);
+  resultOverrides.requests = { botId: BOT_A, requests: [{ ...prompt, extra: true }] };
+  await assert.rejects(requestsHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  resultOverrides.requests = { botId: BOT_B, requests: [{ ...prompt, botId: BOT_B }] };
+  await assert.rejects(requestsHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  delete resultOverrides.requests;
+
+  resultOverrides.select = { botId: BOT_B, computer };
+  await assert.rejects(
+    handlers.get(IPC_CHANNELS.computerSelectMode)(event, { botId: BOT_A, mode: "local" }),
+    { code: "OPENBOT_COMPUTER_OPERATION_FAILED" },
+  );
+  delete resultOverrides.select;
+  resultOverrides.decide = { botId: BOT_B, permissions: [{ ...grant, botId: BOT_B }] };
+  await assert.rejects(permissionDecideHandler(event, decision), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  delete resultOverrides.decide;
+  resultOverrides.revoke = { botId: BOT_B, permissions: [] };
+  await assert.rejects(permissionRevokeHandler(event, { botId: BOT_A, grantId: grant.grantId }), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  delete resultOverrides.revoke;
+
+  const callsBeforeInvalidSender = calls.length;
+  const fromWebContents = electron.BrowserWindow.fromWebContents;
+  delete electron.BrowserWindow.fromWebContents;
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  electron.BrowserWindow.fromWebContents = fromWebContents;
+  assert.equal(calls.length, callsBeforeInvalidSender);
+  const senderIsDestroyed = sender.isDestroyed;
+  sender.isDestroyed = () => true;
+  await assert.rejects(computerReadHandler(event, BOT_A), {
+    code: "OPENBOT_COMPUTER_OPERATION_FAILED",
+  });
+  sender.isDestroyed = senderIsDestroyed;
+  assert.equal(calls.length, callsBeforeInvalidSender);
 
   listeners.get("changed")({ botId: BOT_A, computer });
   listeners.get("permission-requested")({
@@ -495,6 +647,19 @@ test("desktop exposes exact local computer methods and rejects hostile IPC befor
     reason: "Read an approved file",
   });
   assert.deepEqual(sends.map(([channel]) => channel), [COMPUTER_CHANGE_CHANNEL, COMPUTER_PERMISSION_CHANNEL]);
+  listeners.get("permission-requested")({ ...prompt, reason: " Read an approved file" });
+  listeners.get("permission-requested")({ ...prompt, unexpected: true });
+  const accessorComputer = Object.defineProperty({}, "mode", {
+    enumerable: true,
+    get() { accessorReads += 1; return "local"; },
+  });
+  for (const [key, value] of Object.entries(computer)) {
+    if (key !== "mode") Object.defineProperty(accessorComputer, key, { enumerable: true, value });
+  }
+  listeners.get("changed")({ botId: BOT_A, computer: accessorComputer });
+  listeners.get("changed")({ botId: BOT_A, computer, [Symbol("private")]: true });
+  assert.equal(sends.length, 2);
+  assert.equal(accessorReads, 0);
   assert.doesNotMatch(JSON.stringify(sends), /bookmark|Users|authToken|endpoint/);
   installed.dispose();
   assert.equal(handlers.has(IPC_CHANNELS.computerRead), false);

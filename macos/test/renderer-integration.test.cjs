@@ -130,6 +130,30 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.doesNotMatch(botUi, /popover\.append\([^;]*reasoningView\.warning/s);
 });
 
+test("Computer status and actions remain legible in the dark compact panel", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  const root = css.match(/:root\s*\{(?<body>[\s\S]*?)\}/)?.groups?.body ?? "";
+  const color = (name) => root.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i"))?.[1];
+  const luminance = (hex) => {
+    const channels = hex.slice(1).match(/../g).map((part) => Number.parseInt(part, 16) / 255)
+      .map((part) => part <= 0.03928 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  };
+  const foreground = luminance(color("codex-blue-strong"));
+  const background = luminance(color("codex-surface"));
+  const contrast = (Math.max(foreground, background) + 0.05)
+    / (Math.min(foreground, background) + 0.05);
+  assert.ok(contrast >= 4.5, `dark action contrast must be at least 4.5:1, got ${contrast.toFixed(2)}:1`);
+  assert.match(
+    css,
+    /\.codex-computer-status\s*\{[^}]*min-width:\s*0[^}]*overflow:\s*visible[^}]*overflow-wrap:\s*anywhere[^}]*text-overflow:\s*clip[^}]*white-space:\s*normal/s,
+  );
+  assert.match(
+    css,
+    /\.codex-computer-setup-actions\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*flex-end[^}]*gap:\s*[4-9]px/s,
+  );
+});
+
 test("visual disabled and later-Ultra evidence comes from production state instead of DOM mutation", () => {
   const runtime = fs.readFileSync(visualRuntimePath, "utf8");
   const fixture = fs.readFileSync(visualFixturePath, "utf8");
@@ -139,4 +163,8 @@ test("visual disabled and later-Ultra evidence comes from production state inste
   assert.doesNotMatch(runtime, /slider\.disabled\s*=|classList\.add\("is-disabled"\)/);
   assert.match(fixture, /params\.get\("disabled"\) === "true"/);
   assert.match(fixture, /selectBot\(\)[\s\S]*new Promise\(\(\) => \{\}\)/s);
+  assert.match(runtime, /computer-setup/);
+  assert.match(runtime, /computer-change/);
+  assert.match(runtime, /Permission sheet did not originate from production state/);
+  assert.match(fixture, /window\.openbotComputer/);
 });

@@ -92,6 +92,18 @@ test("persistent grants are private mode 0600 exact-bot and revocable", async (t
   assert.equal((await store.authorize(request(BOT_A, { capability: "filesystem.write" }))).allowed, false);
 
   assert.deepEqual(await store.listPublic(BOT_A), [grant]);
+  assert.deepEqual(await store.listPublic(BOT_A, {
+    targetId: TARGET_A,
+    targetGeneration: 4,
+  }), [grant]);
+  assert.deepEqual(await store.listPublic(BOT_A, {
+    targetId: TARGET_A,
+    targetGeneration: 5,
+  }), []);
+  assert.deepEqual(await store.listPublic(BOT_A, {
+    targetId: TARGET_B,
+    targetGeneration: 4,
+  }), []);
   assert.deepEqual(await store.listPublic(BOT_B), []);
   const contents = await fs.readFile(filePath, "utf8");
   assert.doesNotMatch(contents, /bookmark-private|\/Users\/|harlin/i);
@@ -140,7 +152,7 @@ test("concurrent Store instances remain atomic and deleteBot removes only exact 
 test("hostile inputs paths malformed stores and symlinks fail closed without leaking data", async (t) => {
   const { store, filePath, directory } = await fixture(t);
   await assert.rejects(store.remember(request(BOT_A, {
-    resourceLabel: "/Users/harlin/Documents/private",
+    resourceLabel: "/Users/example/Documents/private",
   }), Buffer.from("bookmark")), /label|path/i);
   await assert.rejects(store.remember(request(BOT_A, {
     resourceId: "../private",

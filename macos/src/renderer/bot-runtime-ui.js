@@ -64,6 +64,49 @@
     ultra: "Ultra",
     "ultra-code": "Ultra Code",
   });
+  const COMPUTER_CHOICES = Object.freeze([
+    Object.freeze({ value: "local", label: "Free Local Desktop" }),
+    Object.freeze({ value: "cursor", label: "Cursor Remote Computer" }),
+    Object.freeze({ value: "not-now", label: "Not Now" }),
+  ]);
+  const DEFAULT_COMPUTER = Object.freeze({
+    mode: "not-now",
+    generation: 0,
+    localProfileId: null,
+    nativeAgentId: null,
+    state: "unconfigured",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+  });
+  const COMPUTER_MODES = new Set(COMPUTER_CHOICES.map((entry) => entry.value));
+  const COMPUTER_STATES = new Set(["unconfigured", "starting", "ready", "reconnecting", "unavailable"]);
+  const PERMISSION_DECISIONS = new Set(["deny", "once", "always"]);
+  const TARGET_ID = /^local-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const PERMISSION_ID = /^permission-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const GRANT_ID = /^grant-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  const RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+  const PERMISSION_CAPABILITIES = new Set([
+    "filesystem.read",
+    "filesystem.write",
+    "shell.execute",
+    "application.open",
+    "application.automate",
+    "screen.capture",
+  ]);
+  const COMPUTER_FIELDS = Object.freeze([
+    "mode", "generation", "localProfileId", "nativeAgentId", "state",
+    "lastConfirmedAt", "lastErrorCode",
+  ]);
+  const PROMPT_FIELDS = Object.freeze([
+    "requestId", "botId", "targetId", "targetGeneration", "capability",
+    "resourceLabel", "reason",
+  ]);
+  const GRANT_FIELDS = Object.freeze([
+    "grantId", "botId", "capability", "resourceId", "resourceLabel", "scope", "createdAt",
+  ]);
+  const MAX_PUBLIC_GRANTS = 256;
+  const MAX_PENDING_PER_BOT = 32;
+  const MAX_PENDING_TOTAL = 64;
 
   function isUltraEffect(effort) {
     return effort === "ultra" || effort === "ultra-code";
@@ -102,6 +145,168 @@
     });
   }
 
+  function computerPresentation(computer) {
+    if (computer.mode === "local") {
+      if (computer.state === "ready") return Object.freeze({ label: "Runs on this Mac", tone: "ready" });
+      if (computer.state === "starting") return Object.freeze({ label: "Starting on this Mac…", tone: "pending" });
+      if (computer.state === "reconnecting") return Object.freeze({ label: "Reconnecting on this Mac…", tone: "pending" });
+      return Object.freeze({ label: "Local Computer unavailable", tone: "unavailable" });
+    }
+    if (computer.mode === "cursor") {
+      if (computer.state === "ready") return Object.freeze({ label: "Cursor Remote Computer ready", tone: "ready" });
+      if (computer.state === "starting" || computer.state === "reconnecting") {
+        return Object.freeze({ label: "Connecting Cursor Remote Computer…", tone: "pending" });
+      }
+      return Object.freeze({ label: "Connect Cursor for Remote Computer", tone: "unavailable" });
+    }
+    return Object.freeze({ label: "Computer not configured", tone: "neutral" });
+  }
+
+  function exactDataObject(value, fields, message) {
+    let descriptors;
+    let prototype;
+    try {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error();
+      prototype = Object.getPrototypeOf(value);
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    } catch {
+      throw new Error(message);
+    }
+    const keys = Reflect.ownKeys(descriptors);
+    if ((prototype !== Object.prototype && prototype !== null)
+      || keys.length !== fields.length
+      || keys.some((key) => typeof key !== "string" || !fields.includes(key)
+        || !("value" in descriptors[key]))
+      || fields.some((field) => !descriptors[field])) {
+      throw new Error(message);
+    }
+    return Object.fromEntries(fields.map((field) => [field, descriptors[field].value]));
+  }
+
+  function exactDataArray(value, maximum, message) {
+    let descriptors;
+    let prototype;
+    try {
+      if (!Array.isArray(value)) throw new Error();
+      prototype = Object.getPrototypeOf(value);
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    } catch {
+      throw new Error(message);
+    }
+    const lengthDescriptor = descriptors.length;
+    const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : -1;
+    const keys = Reflect.ownKeys(descriptors);
+    if (prototype !== Array.prototype || !Number.isSafeInteger(length) || length < 0 || length > maximum
+      || keys.length !== length + 1 || keys.some((key) => {
+        if (key === "length") return !("value" in descriptors[key]);
+        return typeof key !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(key)
+          || Number(key) >= length || !("value" in descriptors[key]);
+      })) {
+      throw new Error(message);
+    }
+    return Array.from({ length }, (_, index) => descriptors[String(index)].value);
+  }
+
+  function validTimestamp(value) {
+    if (typeof value !== "string") return false;
+    const time = Date.parse(value);
+    return Number.isFinite(time) && new Date(time).toISOString() === value;
+  }
+
+  function utf8Length(value) {
+    try { return new TextEncoder().encode(value).byteLength; }
+    catch { return Number.POSITIVE_INFINITY; }
+  }
+
+  function validPublicText(value, maximum = 320) {
+    return typeof value === "string" && value.length > 0 && value.trim() === value
+      && utf8Length(value) <= maximum && !/[\0-\x1f\x7f\\/]/.test(value)
+      && !/(?:^|\s)~(?:\/|\s|$)/.test(value)
+      && !/(?:^|\s)(?:file:|\/Users\/)/i.test(value);
+  }
+
+  function validResourceLabel(value) {
+    return validPublicText(value);
+  }
+
+  function normalizeComputer(value) {
+    const record = exactDataObject(value, COMPUTER_FIELDS, "Computer state is unavailable.");
+    if (!COMPUTER_MODES.has(record.mode)
+      || !Number.isSafeInteger(record.generation) || record.generation < 0
+      || !COMPUTER_STATES.has(record.state)
+      || !(record.localProfileId === null || (typeof record.localProfileId === "string" && TARGET_ID.test(record.localProfileId)))
+      || !(record.nativeAgentId === null || (typeof record.nativeAgentId === "string"
+        && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(record.nativeAgentId)))
+      || !(record.lastConfirmedAt === null || validTimestamp(record.lastConfirmedAt))
+      || !(record.lastErrorCode === null || (typeof record.lastErrorCode === "string"
+        && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.lastErrorCode)))) {
+      throw new Error("Computer state is unavailable.");
+    }
+    if (record.mode === "local" && record.localProfileId === null) throw new Error("Computer state is unavailable.");
+    if (record.mode === "cursor" && record.nativeAgentId === null) throw new Error("Computer state is unavailable.");
+    if (record.mode === "not-now" && record.state !== "unconfigured") throw new Error("Computer state is unavailable.");
+    if (record.state === "ready" && record.lastConfirmedAt === null) throw new Error("Computer state is unavailable.");
+    return Object.freeze(record);
+  }
+
+  function normalizeComputerEnvelope(value, expectedBotId = null) {
+    const envelope = exactDataObject(value, ["botId", "computer"], "Computer state is unavailable.");
+    if (typeof envelope.botId !== "string" || !BOT_ID.test(envelope.botId)
+      || (expectedBotId !== null && envelope.botId !== expectedBotId)) {
+      throw new Error("Computer state is unavailable.");
+    }
+    return Object.freeze({ botId: envelope.botId, computer: normalizeComputer(envelope.computer) });
+  }
+
+  function normalizePermissionPrompt(value) {
+    const prompt = exactDataObject(value, PROMPT_FIELDS, "Permission request is unavailable.");
+    if (typeof prompt.requestId !== "string" || !PERMISSION_ID.test(prompt.requestId)
+      || typeof prompt.botId !== "string" || !BOT_ID.test(prompt.botId)
+      || typeof prompt.targetId !== "string" || !TARGET_ID.test(prompt.targetId)
+      || !Number.isSafeInteger(prompt.targetGeneration) || prompt.targetGeneration < 0
+      || !PERMISSION_CAPABILITIES.has(prompt.capability)
+      || !validResourceLabel(prompt.resourceLabel)
+      || !validPublicText(prompt.reason, 512)) throw new Error("Permission request is unavailable.");
+    return Object.freeze(prompt);
+  }
+
+  function normalizePermissionRequests(value, botId) {
+    const envelope = exactDataObject(
+      value,
+      ["botId", "requests"],
+      "Computer permission requests are unavailable.",
+    );
+    if (envelope.botId !== botId) throw new Error("Computer permission requests are unavailable.");
+    const raw = exactDataArray(
+      envelope.requests,
+      MAX_PENDING_PER_BOT,
+      "Computer permission requests are unavailable.",
+    );
+    return Object.freeze(raw.map((entry) => {
+      const prompt = normalizePermissionPrompt(entry);
+      if (prompt.botId !== botId) throw new Error("Computer permission requests are unavailable.");
+      return prompt;
+    }));
+  }
+
+  function normalizePermissions(value, botId) {
+    const envelope = exactDataObject(value, ["botId", "permissions"], "Computer permissions are unavailable.");
+    if (envelope.botId !== botId) throw new Error("Computer permissions are unavailable.");
+    const raw = exactDataArray(envelope.permissions, MAX_PUBLIC_GRANTS, "Computer permissions are unavailable.");
+    return Object.freeze(raw.map((entry) => {
+      const grant = exactDataObject(entry, GRANT_FIELDS, "Computer permissions are unavailable.");
+      if (grant.botId !== botId || typeof grant.grantId !== "string" || !GRANT_ID.test(grant.grantId)
+        || !PERMISSION_CAPABILITIES.has(grant.capability)
+        || typeof grant.resourceId !== "string" || !RESOURCE_ID.test(grant.resourceId)
+        || grant.resourceId.includes("..") || grant.resourceId.includes("/") || grant.resourceId.includes("\\")
+        || !validResourceLabel(grant.resourceLabel) || grant.scope !== "always"
+        || !validTimestamp(grant.createdAt)) {
+        throw new Error("Computer permissions are unavailable.");
+      }
+      return Object.freeze(grant);
+    }));
+  }
+
   function normalizeBot(value) {
     if (
       value == null ||
@@ -121,6 +326,7 @@
       botId: value.botId,
       name: value.name,
       runtime: Object.freeze({ state: value.runtime.state }),
+      computer: normalizeComputer(value.computer ?? DEFAULT_COMPUTER),
     });
   }
 
@@ -251,6 +457,7 @@
     facade,
     runtimeFacade = null,
     accountFacade = null,
+    computerFacade = null,
     onSelectionChanged = () => {},
     onRuntimeEvent = () => {},
     onStateChanged = () => {},
@@ -270,18 +477,209 @@
     let unsubscribe = null;
     let runtimeUnsubscribe = null;
     let catalogUnsubscribe = null;
+    let computerUnsubscribe = null;
+    let permissionUnsubscribe = null;
+    let computerSubscribed = false;
+    let permissionSubscribed = false;
     let disposed = false;
     let selectionEpoch = 0;
     let modelRequestEpoch = 0;
     let selectionFlight = null;
     let selectionPending = false;
+    let creationPending = false;
+    let creationBotId = null;
     let modelSelection = null;
     let modelCatalog = OPTIONAL_MODEL_CATALOG;
     let catalogGeneration = -1;
     let catalogStatus = "loading";
+    let computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
+    let computerSetupBotId = null;
+    let mandatorySetupBotId = null;
+    let permissionRequest = null;
+    const permissionQueue = new Map();
+    const permissionRefreshes = new Map();
+    const permissionRefreshDirty = new Set();
+    const permissionReadEpochs = new Map();
+    const permissionCommitEpochs = new Map();
+    const computerBacklog = new Map();
+    const computerIngress = new Map();
+    let permissionIngress = 0;
+    let permissionDecisionRequestId = null;
+    let permissions = Object.freeze([]);
 
     function activeBot() {
       return activeBotId == null ? null : bots.get(activeBotId) ?? null;
+    }
+
+    function promptMatchesComputer(prompt, record) {
+      return Boolean(record && prompt.botId === record.botId
+        && record.computer.mode === "local" && record.computer.state === "ready"
+        && record.computer.localProfileId === prompt.targetId
+        && record.computer.generation === prompt.targetGeneration);
+    }
+
+    function computerPermissionTarget(computer) {
+      return computer?.mode === "local" && computer.state === "ready"
+        && typeof computer.localProfileId === "string"
+        && Number.isSafeInteger(computer.generation)
+        ? `${computer.localProfileId}:${computer.generation}`
+        : null;
+    }
+
+    function sameComputerIdentity(left, right) {
+      return Boolean(left && right
+        && left.mode === right.mode
+        && left.generation === right.generation
+        && left.localProfileId === right.localProfileId
+        && left.nativeAgentId === right.nativeAgentId
+        && left.state === right.state
+        && left.lastConfirmedAt === right.lastConfirmedAt
+        && left.lastErrorCode === right.lastErrorCode);
+    }
+
+    function currentPermissionTarget(botId) {
+      return computerPermissionTarget(bots.get(botId)?.computer);
+    }
+
+    function beginPermissionRead(botId) {
+      const epoch = (permissionReadEpochs.get(botId) ?? 0) + 1;
+      permissionReadEpochs.set(botId, epoch);
+      return epoch;
+    }
+
+    function commitPermissionRead(botId, epoch) {
+      if (epoch < (permissionCommitEpochs.get(botId) ?? 0)) return false;
+      permissionCommitEpochs.set(botId, epoch);
+      return true;
+    }
+
+    function invalidatePermissionReads(botId) {
+      const epoch = beginPermissionRead(botId);
+      permissionCommitEpochs.set(botId, epoch);
+      return epoch;
+    }
+
+    async function refreshPermissionsForTarget(botId, target, ingress) {
+      if (disposed || target === null || !computerFacade
+        || typeof computerFacade.listPermissions !== "function") return false;
+      const readEpoch = beginPermissionRead(botId);
+      try {
+        const nextPermissions = normalizePermissions(await computerFacade.listPermissions(botId), botId);
+        if (disposed || activeBotId !== botId || currentPermissionTarget(botId) !== target
+          || (computerIngress.get(botId) ?? 0) !== ingress
+          || !commitPermissionRead(botId, readEpoch)) return false;
+        permissions = nextPermissions;
+        publish();
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    function activePermissionRequests() {
+      const record = activeBot();
+      if (!record) return Object.freeze([]);
+      return Object.freeze([...permissionQueue.values()]
+        .map((entry) => entry.prompt)
+        .filter((prompt) => promptMatchesComputer(prompt, record)));
+    }
+
+    function refreshPermissionRequest() {
+      const requests = activePermissionRequests();
+      permissionRequest = requests[0] ?? null;
+      return requests;
+    }
+
+    function permissionQueueHasRoom(prompt) {
+      if (permissionQueue.has(prompt.requestId)) return true;
+      let botPending = 0;
+      for (const entry of permissionQueue.values()) {
+        if (entry.prompt.botId === prompt.botId) botPending += 1;
+      }
+      return botPending < MAX_PENDING_PER_BOT && permissionQueue.size < MAX_PENDING_TOTAL;
+    }
+
+    function makePermissionQueueRoom(prompt) {
+      if (permissionQueueHasRoom(prompt)) return true;
+      let botPending = 0;
+      for (const entry of permissionQueue.values()) {
+        if (entry.prompt.botId === prompt.botId) botPending += 1;
+      }
+      if (botPending >= MAX_PENDING_PER_BOT || prompt.botId !== activeBotId) return false;
+      for (const [requestId, entry] of permissionQueue) {
+        if (entry.prompt.botId === prompt.botId) continue;
+        permissionQueue.delete(requestId);
+        if (permissionQueueHasRoom(prompt)) return true;
+      }
+      return permissionQueueHasRoom(prompt);
+    }
+
+    function refreshAuthoritativePermissionRequests(botId) {
+      if (disposed || !bots.has(botId) || !computerFacade
+        || typeof computerFacade.listPermissionRequests !== "function") return null;
+      const current = permissionRefreshes.get(botId);
+      if (current) {
+        permissionRefreshDirty.add(botId);
+        return current;
+      }
+      const marker = permissionIngress;
+      const operation = Promise.resolve()
+        .then(() => computerFacade.listPermissionRequests(botId))
+        .then((value) => {
+          if (!disposed && bots.has(botId)) reconcilePermissionRequests(botId, value, marker);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (permissionRefreshes.get(botId) !== operation) return;
+          permissionRefreshes.delete(botId);
+          if (permissionRefreshDirty.delete(botId) && !disposed) {
+            void refreshAuthoritativePermissionRequests(botId);
+          }
+        });
+      permissionRefreshes.set(botId, operation);
+      return operation;
+    }
+
+    function enqueuePermission(value, { shouldPublish = true } = {}) {
+      if (disposed) return false;
+      const prompt = normalizePermissionPrompt(value);
+      const record = bots.get(prompt.botId);
+      if (record && !promptMatchesComputer(prompt, record)) return false;
+      if (!makePermissionQueueRoom(prompt)) {
+        void refreshAuthoritativePermissionRequests(prompt.botId);
+        return false;
+      }
+      permissionQueue.set(prompt.requestId, Object.freeze({ prompt, ingress: ++permissionIngress }));
+      refreshPermissionRequest();
+      if (shouldPublish) publish();
+      return true;
+    }
+
+    function reconcilePermissionRequests(botId, value, marker, { shouldPublish = true } = {}) {
+      const requests = normalizePermissionRequests(value, botId);
+      for (const [requestId, entry] of permissionQueue) {
+        if (entry.prompt.botId === botId && entry.ingress <= marker) permissionQueue.delete(requestId);
+      }
+      for (const prompt of requests) {
+        if (!promptMatchesComputer(prompt, bots.get(botId))) continue;
+        const current = permissionQueue.get(prompt.requestId);
+        if (current && current.ingress > marker) continue;
+        if (!makePermissionQueueRoom(prompt)) continue;
+        permissionQueue.set(prompt.requestId, Object.freeze({ prompt, ingress: marker }));
+      }
+      refreshPermissionRequest();
+      if (shouldPublish) publish();
+      return requests;
+    }
+
+    function prunePermissionRequests(botId) {
+      const record = bots.get(botId);
+      for (const [requestId, entry] of permissionQueue) {
+        if (entry.prompt.botId === botId && !promptMatchesComputer(entry.prompt, record)) {
+          permissionQueue.delete(requestId);
+        }
+      }
+      refreshPermissionRequest();
     }
 
     function snapshot() {
@@ -298,6 +696,18 @@
         catalogStatus,
         selectionEpoch,
         selectionPending,
+        creationPending,
+        mandatorySetupPending: mandatorySetupBotId !== null,
+        computer: Object.freeze({
+          ...(selected?.computer ?? DEFAULT_COMPUTER),
+          ...computerPresentation(selected?.computer ?? DEFAULT_COMPUTER),
+        }),
+        computerChoices: COMPUTER_CHOICES,
+        computerSetup,
+        permissionRequest,
+        permissionRequests: activePermissionRequests(),
+        permissionDecisionPending: permissionDecisionRequestId !== null,
+        permissions,
       });
     }
 
@@ -307,13 +717,67 @@
       } catch {}
     }
 
+    function requestBotSelection(botId, force = false) {
+      try {
+        const operation = selectBot(botId, force);
+        if (operation && typeof operation.catch === "function") void operation.catch(() => {});
+      } catch {}
+    }
+
     function applyBot(value) {
       if (disposed) throw new Error("Bot controls are unavailable.");
-      const record = normalizeBot(value);
+      let record = normalizeBot(value);
+      const existing = bots.get(record.botId);
+      const previousTarget = computerPermissionTarget(existing?.computer);
+      if (existing && existing.computer.generation > record.computer.generation) {
+        record = Object.freeze({ ...record, computer: existing.computer });
+      }
       bots.set(record.botId, record);
-      if (activeBotId == null) void selectBot(record.botId).catch(() => {});
+      const nextTarget = computerPermissionTarget(record.computer);
+      if (previousTarget !== nextTarget) {
+        const ingress = (computerIngress.get(record.botId) ?? 0) + 1;
+        computerIngress.set(record.botId, ingress);
+        invalidatePermissionReads(record.botId);
+        if (record.botId === activeBotId) {
+          permissions = Object.freeze([]);
+          if (nextTarget !== null) void refreshPermissionsForTarget(record.botId, nextTarget, ingress);
+        }
+      }
+      prunePermissionRequests(record.botId);
+      if (activeBotId == null) requestBotSelection(record.botId);
       else publish();
       return record;
+    }
+
+    function applyComputer(value, {
+      shouldPublish = true,
+      expectedIngress = null,
+      expectedBotId = null,
+    } = {}) {
+      if (disposed) return false;
+      const normalized = normalizeComputerEnvelope(value, expectedBotId);
+      if (!bots.has(normalized.botId)) return false;
+      if (expectedIngress !== null
+        && (computerIngress.get(normalized.botId) ?? 0) !== expectedIngress) return false;
+      const record = bots.get(normalized.botId);
+      if (record.computer.generation > normalized.computer.generation) return false;
+      const previousTarget = computerPermissionTarget(record.computer);
+      bots.set(normalized.botId, Object.freeze({ ...record, computer: normalized.computer }));
+      const nextTarget = computerPermissionTarget(normalized.computer);
+      if (previousTarget !== nextTarget) {
+        invalidatePermissionReads(normalized.botId);
+        if (normalized.botId === activeBotId) permissions = Object.freeze([]);
+      }
+      prunePermissionRequests(normalized.botId);
+      if (shouldPublish) publish();
+      if (shouldPublish && normalized.botId === activeBotId && nextTarget !== null) {
+        void refreshPermissionsForTarget(
+          normalized.botId,
+          nextTarget,
+          computerIngress.get(normalized.botId) ?? 0,
+        );
+      }
+      return true;
     }
 
     function applyCatalog(value, { refreshSelection = true } = {}) {
@@ -351,7 +815,7 @@
       publish();
       if (refreshSelection && nextStatus === "ready" && activeBotId
         && (selectionInvalidated || modelSelection === null)) {
-        void selectBot(activeBotId, true).catch(() => {});
+        requestBotSelection(activeBotId, true);
       }
       return true;
     }
@@ -360,13 +824,29 @@
       if (disposed || typeof botId !== "string" || !bots.has(botId)) {
         throw new Error("Bot selection is unavailable.");
       }
-      if (activeBotId === botId && !force) {
+      if (selectionFlight?.botId === botId
+        && (creationPending || mandatorySetupBotId === botId)) {
+        return selectionFlight.promise;
+      }
+      if ((creationPending && creationBotId !== botId)
+        || (mandatorySetupBotId !== null && mandatorySetupBotId !== botId)
+        || (computerSetup.open && !computerSetup.dismissible
+          && (computerSetupBotId !== botId || force))) {
+        throw new Error("Bot selection is unavailable while setup is pending.");
+      }
+      const mandatoryRecovery = mandatorySetupBotId === botId && !computerSetup.open;
+      if (activeBotId === botId && !force && !mandatoryRecovery) {
         return selectionFlight?.botId === botId
           ? selectionFlight.promise
           : Promise.resolve(snapshot());
       }
       const previousBotId = activeBotId;
       const previousModelSelection = modelSelection;
+      const previousPermissions = permissions;
+      const previousPermissionTarget = previousBotId === null ? null : currentPermissionTarget(previousBotId);
+      const previousPermissionCommit = previousBotId === null
+        ? 0
+        : permissionCommitEpochs.get(previousBotId) ?? 0;
       const epoch = ++selectionEpoch;
       try {
         onSelectionChanged(null);
@@ -374,7 +854,12 @@
       activeBotId = botId;
       modelSelection = null;
       selectionPending = true;
+      permissions = Object.freeze([]);
+      computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
+      computerSetupBotId = null;
+      refreshPermissionRequest();
       publish();
+      const computerMarker = computerIngress.get(botId) ?? 0;
       const operation = (async () => {
         try {
           let selectedResult = null;
@@ -384,6 +869,13 @@
           const stored = runtimeFacade && typeof runtimeFacade.readModel === "function"
             ? await runtimeFacade.readModel(botId)
             : selectedResult;
+          const computerResult = computerFacade && typeof computerFacade.read === "function"
+            ? normalizeComputerEnvelope(await computerFacade.read(botId), botId)
+            : null;
+          const permissionMarker = permissionIngress;
+          const requestResult = computerFacade && typeof computerFacade.listPermissionRequests === "function"
+            ? await computerFacade.listPermissionRequests(botId)
+            : { botId, requests: [] };
           if (disposed || epoch !== selectionEpoch || activeBotId !== botId) {
             throw new Error("Bot selection changed.");
           }
@@ -395,7 +887,40 @@
               modelSelection = null;
             }
           }
+          if (computerResult) {
+            applyComputer(computerResult, {
+              shouldPublish: false,
+              expectedIngress: computerMarker,
+              expectedBotId: botId,
+            });
+          }
+          reconcilePermissionRequests(botId, requestResult, permissionMarker, { shouldPublish: false });
+          const permissionReadEpoch = beginPermissionRead(botId);
+          const permissionResult = computerFacade && typeof computerFacade.listPermissions === "function"
+            ? await computerFacade.listPermissions(botId)
+            : { botId, permissions: [] };
+          if (disposed || epoch !== selectionEpoch || activeBotId !== botId) {
+            throw new Error("Bot selection changed.");
+          }
+          const nextPermissions = normalizePermissions(permissionResult, botId);
+          const permissionTarget = computerResult === null
+            ? null
+            : computerPermissionTarget(computerResult.computer);
+          if ((computerIngress.get(botId) ?? 0) === computerMarker
+            && currentPermissionTarget(botId) === permissionTarget
+            && commitPermissionRead(botId, permissionReadEpoch)) {
+            permissions = permissionTarget === null ? Object.freeze([]) : nextPermissions;
+          }
           selectionPending = false;
+          if (computerFacade && mandatorySetupBotId === botId) {
+            computerSetupBotId = botId;
+            computerSetup = Object.freeze({
+              open: true,
+              pending: false,
+              selectedMode: null,
+              dismissible: false,
+            });
+          }
           try { onSelectionChanged(botId); } catch {}
           publish();
           return snapshot();
@@ -403,9 +928,25 @@
           if (!disposed && epoch === selectionEpoch && activeBotId === botId) {
             activeBotId = previousBotId;
             modelSelection = previousModelSelection;
+            const repairTarget = previousBotId === null ? null : currentPermissionTarget(previousBotId);
+            const permissionCommittedSinceSelection = previousBotId !== null
+              && (permissionCommitEpochs.get(previousBotId) ?? 0) > previousPermissionCommit;
+            if (!(previousBotId === botId && permissionCommittedSinceSelection)) {
+              permissions = repairTarget !== previousPermissionTarget
+                ? Object.freeze([])
+                : previousPermissions;
+            }
             selectionPending = false;
+            refreshPermissionRequest();
             try { onSelectionChanged(previousBotId); } catch {}
             publish();
+            if (previousBotId !== null && repairTarget !== null) {
+              void refreshPermissionsForTarget(
+                previousBotId,
+                repairTarget,
+                computerIngress.get(previousBotId) ?? 0,
+              );
+            }
           }
           throw error;
         }
@@ -420,6 +961,31 @@
 
     async function initialize() {
       if (disposed) throw new Error("Bot controls are unavailable.");
+      if (computerFacade && typeof computerFacade.onChanged === "function" && !computerSubscribed) {
+        computerSubscribed = true;
+        const candidateComputer = computerFacade.onChanged((value) => {
+          try {
+            const normalized = normalizeComputerEnvelope(value);
+            computerIngress.set(normalized.botId, (computerIngress.get(normalized.botId) ?? 0) + 1);
+            if (!bots.has(normalized.botId)) {
+              const previous = computerBacklog.get(normalized.botId);
+              if (!previous || previous.computer.generation <= normalized.computer.generation) {
+                computerBacklog.set(normalized.botId, normalized);
+              }
+              return;
+            }
+            applyComputer(normalized);
+          } catch {}
+        });
+        computerUnsubscribe = typeof candidateComputer === "function" ? candidateComputer : null;
+      }
+      if (computerFacade && typeof computerFacade.onPermissionRequested === "function" && !permissionSubscribed) {
+        permissionSubscribed = true;
+        const candidatePermission = computerFacade.onPermissionRequested((value) => {
+          try { enqueuePermission(value); } catch {}
+        });
+        permissionUnsubscribe = typeof candidatePermission === "function" ? candidatePermission : null;
+      }
       if (accountFacade && typeof accountFacade.onCatalogChanged === "function") {
         const candidateCatalog = accountFacade.onCatalogChanged((value) => {
           applyCatalog(value);
@@ -447,6 +1013,12 @@
         const record = normalizeBot(value);
         bots.set(record.botId, record);
       }
+      for (const [botId, value] of computerBacklog) {
+        if (!bots.has(botId)) continue;
+        applyComputer(value, { shouldPublish: false });
+        computerBacklog.delete(botId);
+      }
+      refreshPermissionRequest();
       if (bots.size > 0) {
         try { await selectBot(bots.keys().next().value); }
         catch (error) {
@@ -488,15 +1060,198 @@
     }
 
     async function createBot() {
-      if (disposed || typeof facade.create !== "function") {
+      if (disposed || creationPending || mandatorySetupBotId !== null || computerSetup.open
+        || typeof facade.create !== "function") {
         throw new Error("Bot creation is unavailable.");
       }
-      const created = await facade.create();
-      if (disposed) throw new Error("Bot creation is unavailable.");
-      const record = normalizeBot(created);
-      bots.set(record.botId, record);
-      await selectBot(record.botId);
-      return record;
+      creationPending = true;
+      creationBotId = null;
+      publish();
+      try {
+        const created = await facade.create();
+        if (disposed) throw new Error("Bot creation is unavailable.");
+        const record = normalizeBot(created);
+        bots.set(record.botId, record);
+        creationBotId = record.botId;
+        if (computerFacade) mandatorySetupBotId = record.botId;
+        await selectBot(record.botId);
+        creationPending = false;
+        creationBotId = null;
+        publish();
+        return record;
+      } catch (error) {
+        creationPending = false;
+        creationBotId = null;
+        if (!disposed) publish();
+        throw error;
+      }
+    }
+
+    function openComputerSetup() {
+      if (disposed || !activeBot() || selectionPending || mandatorySetupBotId !== null
+        || computerSetup.open || !computerFacade) {
+        throw new Error("Computer setup is unavailable.");
+      }
+      computerSetup = Object.freeze({ open: true, pending: false, selectedMode: null, dismissible: true });
+      computerSetupBotId = activeBotId;
+      publish();
+      return snapshot();
+    }
+
+    function dismissComputerSetup() {
+      if (disposed || !computerSetup.open || computerSetup.pending || !computerSetup.dismissible) {
+        throw new Error("Computer setup cannot be dismissed.");
+      }
+      computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
+      computerSetupBotId = null;
+      publish();
+      return snapshot();
+    }
+
+    function chooseComputerMode(mode) {
+      if (disposed || !computerSetup.open || computerSetup.pending || computerSetupBotId !== activeBotId
+        || !COMPUTER_MODES.has(mode)) {
+        throw new Error("Computer setup is unavailable.");
+      }
+      computerSetup = Object.freeze({ ...computerSetup, selectedMode: mode });
+      publish();
+      return snapshot();
+    }
+
+    async function confirmComputerMode() {
+      const bot = activeBot();
+      const mode = computerSetup.selectedMode;
+      if (disposed || !bot || !computerSetup.open || computerSetup.pending || computerSetupBotId !== bot.botId
+        || !COMPUTER_MODES.has(mode)
+        || !computerFacade || typeof computerFacade.selectMode !== "function") {
+        throw new Error("Computer setup is unavailable.");
+      }
+      const epoch = selectionEpoch;
+      const computerMarker = computerIngress.get(bot.botId) ?? 0;
+      computerSetup = Object.freeze({ ...computerSetup, pending: true });
+      publish();
+      try {
+        const result = await computerFacade.selectMode({ botId: bot.botId, mode });
+        if (disposed || epoch !== selectionEpoch || activeBotId !== bot.botId) {
+          throw new Error("Computer setup changed.");
+        }
+        const normalizedResult = normalizeComputerEnvelope(result, bot.botId);
+        const applied = applyComputer(normalizedResult, {
+          shouldPublish: false,
+          expectedIngress: computerMarker,
+          expectedBotId: bot.botId,
+        });
+        if (!applied && !sameComputerIdentity(bots.get(bot.botId)?.computer, normalizedResult.computer)) {
+          throw new Error("Computer setup changed.");
+        }
+        const permissionReadEpoch = beginPermissionRead(bot.botId);
+        const nextPermissions = normalizePermissions(
+          await computerFacade.listPermissions(bot.botId),
+          bot.botId,
+        );
+        if (disposed || epoch !== selectionEpoch || activeBotId !== bot.botId) {
+          throw new Error("Computer setup changed.");
+        }
+        const permissionTarget = computerPermissionTarget(normalizedResult.computer);
+        const computerChanged = !sameComputerIdentity(bots.get(bot.botId)?.computer, normalizedResult.computer)
+          || currentPermissionTarget(bot.botId) !== permissionTarget;
+        if (computerChanged) throw new Error("Computer setup changed.");
+        if (commitPermissionRead(bot.botId, permissionReadEpoch)) {
+          permissions = permissionTarget === null ? Object.freeze([]) : nextPermissions;
+        }
+        computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
+        computerSetupBotId = null;
+        if (mandatorySetupBotId === bot.botId) mandatorySetupBotId = null;
+        publish();
+        return snapshot();
+      } catch (error) {
+        if (!disposed && epoch === selectionEpoch && activeBotId === bot.botId) {
+          computerSetup = Object.freeze({ ...computerSetup, pending: false });
+          publish();
+        }
+        throw error;
+      }
+    }
+
+    async function decideComputerPermission(decision) {
+      const prompt = permissionRequest;
+      const bot = activeBot();
+      if (disposed || !prompt || !bot || prompt.botId !== bot.botId
+        || permissionDecisionRequestId !== null
+        || !PERMISSION_DECISIONS.has(decision) || !computerFacade
+        || typeof computerFacade.decidePermission !== "function") {
+        throw new Error("Computer permission is unavailable or changed.");
+      }
+      const permissionTarget = currentPermissionTarget(bot.botId);
+      permissionDecisionRequestId = prompt.requestId;
+      publish();
+      let result;
+      let failure = null;
+      let decisionCommitted = false;
+      try {
+        result = await computerFacade.decidePermission({
+          requestId: prompt.requestId,
+          botId: prompt.botId,
+          targetId: prompt.targetId,
+          targetGeneration: prompt.targetGeneration,
+          decision,
+        });
+        if (disposed || activeBotId !== prompt.botId) {
+          throw new Error("Computer permission changed.");
+        }
+        const nextPermissions = normalizePermissions(result, prompt.botId);
+        if (permissionTarget === null || currentPermissionTarget(bot.botId) !== permissionTarget) {
+          throw new Error("Computer permission changed.");
+        }
+        commitPermissionRead(bot.botId, beginPermissionRead(bot.botId));
+        permissions = nextPermissions;
+        decisionCommitted = true;
+      } catch (error) {
+        failure = error;
+      } finally {
+        if (!disposed) {
+          if (decisionCommitted) permissionQueue.delete(prompt.requestId);
+          if (computerFacade && typeof computerFacade.listPermissionRequests === "function") {
+            const marker = permissionIngress;
+            try {
+              const pending = await computerFacade.listPermissionRequests(prompt.botId);
+              if (!disposed) {
+                reconcilePermissionRequests(prompt.botId, pending, marker, { shouldPublish: false });
+              }
+            } catch {}
+          }
+          if (!disposed) {
+            if (permissionDecisionRequestId === prompt.requestId) permissionDecisionRequestId = null;
+            refreshPermissionRequest();
+            publish();
+          }
+        }
+      }
+      if (failure) throw failure;
+      if (disposed || activeBotId !== prompt.botId
+        || currentPermissionTarget(prompt.botId) !== permissionTarget) {
+        throw new Error("Computer permission changed.");
+      }
+      return snapshot();
+    }
+
+    async function revokeComputerPermission(grantId) {
+      const bot = activeBot();
+      if (disposed || !bot || typeof grantId !== "string" || !computerFacade
+        || typeof computerFacade.revokePermission !== "function") {
+        throw new Error("Computer permission is unavailable.");
+      }
+      const permissionTarget = currentPermissionTarget(bot.botId);
+      const result = await computerFacade.revokePermission({ botId: bot.botId, grantId });
+      if (disposed || activeBotId !== bot.botId || permissionTarget === null
+        || currentPermissionTarget(bot.botId) !== permissionTarget) {
+        throw new Error("Computer permission changed.");
+      }
+      const nextPermissions = normalizePermissions(result, bot.botId);
+      commitPermissionRead(bot.botId, beginPermissionRead(bot.botId));
+      permissions = nextPermissions;
+      publish();
+      return snapshot();
     }
 
     async function connectProvider(provider) {
@@ -588,23 +1343,48 @@
       if (unsubscribe) unsubscribe();
       if (runtimeUnsubscribe) runtimeUnsubscribe();
       if (catalogUnsubscribe) catalogUnsubscribe();
+      if (computerUnsubscribe) computerUnsubscribe();
+      if (permissionUnsubscribe) permissionUnsubscribe();
       unsubscribe = null;
       runtimeUnsubscribe = null;
       catalogUnsubscribe = null;
+      computerUnsubscribe = null;
+      permissionUnsubscribe = null;
       bots.clear();
       activeBotId = null;
       modelSelection = null;
       selectionPending = false;
+      creationPending = false;
+      creationBotId = null;
+      mandatorySetupBotId = null;
+      permissionRequest = null;
+      permissionQueue.clear();
+      permissionRefreshes.clear();
+      permissionRefreshDirty.clear();
+      permissionReadEpochs.clear();
+      permissionCommitEpochs.clear();
+      computerBacklog.clear();
+      computerIngress.clear();
+      permissionDecisionRequestId = null;
+      permissions = Object.freeze([]);
+      computerSetup = Object.freeze({ open: false, pending: false, selectedMode: null, dismissible: false });
+      computerSetupBotId = null;
     }
 
     return Object.freeze({
       applyBot,
+      chooseComputerMode,
+      confirmComputerMode,
       connectProvider,
       createBot,
+      decideComputerPermission,
+      dismissComputerSetup,
       dispose,
       initialize,
+      openComputerSetup,
       renameActive,
       retryActive,
+      revokeComputerPermission,
       selectBot,
       selectModel,
       snapshot,
@@ -803,6 +1583,96 @@
     const retry = element(documentRef, "button", "codex-runtime-retry", "Retry");
     retry.type = "button";
     statusRow.append(status, retry);
+    const computerRow = element(documentRef, "div", "codex-computer-row");
+    const computerStatus = element(documentRef, "span", "codex-computer-status", "Computer not configured");
+    computerStatus.setAttribute("role", "status");
+    computerStatus.setAttribute("aria-live", "polite");
+    const computerChange = element(documentRef, "button", "codex-computer-change", "Change");
+    computerChange.type = "button";
+    computerRow.append(computerStatus, computerChange);
+    const computerGrants = element(documentRef, "section", "codex-computer-grants");
+    computerGrants.setAttribute("aria-labelledby", "codex-computer-grants-title");
+    computerGrants.hidden = true;
+    const computerGrantsTitle = element(
+      documentRef,
+      "h3",
+      "codex-computer-grants-title",
+      "Always allowed for this bot",
+    );
+    computerGrantsTitle.id = "codex-computer-grants-title";
+    const computerGrantsList = element(documentRef, "div", "codex-computer-grants-list");
+    computerGrants.append(computerGrantsTitle, computerGrantsList);
+    const computerSetup = element(documentRef, "dialog", "codex-computer-setup");
+    computerSetup.setAttribute("role", "dialog");
+    computerSetup.setAttribute("aria-modal", "true");
+    computerSetup.setAttribute("aria-labelledby", "codex-computer-setup-title");
+    computerSetup.setAttribute("aria-describedby", "codex-computer-setup-copy");
+    computerSetup.hidden = true;
+    const computerSetupTitle = element(documentRef, "h2", "codex-computer-setup-title", "Choose this bot’s Computer");
+    computerSetupTitle.id = "codex-computer-setup-title";
+    const computerSetupCopy = element(
+      documentRef,
+      "p",
+      "codex-computer-setup-copy",
+      "Models and Computer are separate. You can change this later.",
+    );
+    computerSetupCopy.id = "codex-computer-setup-copy";
+    const computerChoices = element(documentRef, "div", "codex-computer-choices");
+    computerChoices.setAttribute("role", "radiogroup");
+    computerChoices.setAttribute("aria-label", "Computer mode");
+    const computerChoiceInputs = new Map();
+    for (const choice of COMPUTER_CHOICES) {
+      const label = element(documentRef, "label", "codex-computer-choice");
+      const input = element(documentRef, "input", "codex-computer-choice-input");
+      input.type = "radio";
+      input.name = "codex-computer-mode";
+      input.value = choice.value;
+      const copy = element(documentRef, "span", "codex-computer-choice-copy");
+      copy.append(
+        element(documentRef, "strong", "codex-computer-choice-label", choice.label),
+        element(
+          documentRef,
+          "span",
+          "codex-computer-choice-detail",
+          choice.value === "local"
+            ? "A private browser and workspace on this Mac"
+            : choice.value === "cursor"
+              ? "Uses Cursor’s remote Computer when your account allows it"
+              : "Chat and models still work without a Computer",
+        ),
+      );
+      label.append(input, copy);
+      computerChoices.append(label);
+      computerChoiceInputs.set(choice.value, input);
+    }
+    const computerSetupActions = element(documentRef, "div", "codex-computer-setup-actions");
+    const computerCancel = element(documentRef, "button", "codex-computer-cancel", "Cancel");
+    computerCancel.type = "button";
+    computerCancel.hidden = true;
+    const computerContinue = element(documentRef, "button", "codex-computer-continue", "Continue");
+    computerContinue.type = "button";
+    computerContinue.disabled = true;
+    computerSetupActions.append(computerCancel, computerContinue);
+    computerSetup.append(computerSetupTitle, computerSetupCopy, computerChoices, computerSetupActions);
+    const permissionSheet = element(documentRef, "dialog", "codex-permission-sheet");
+    permissionSheet.setAttribute("role", "dialog");
+    permissionSheet.setAttribute("aria-modal", "true");
+    permissionSheet.setAttribute("aria-labelledby", "codex-permission-title");
+    permissionSheet.setAttribute("aria-describedby", "codex-permission-reason codex-permission-capability");
+    permissionSheet.hidden = true;
+    const permissionTitle = element(documentRef, "h2", "codex-permission-title", "Computer permission");
+    permissionTitle.id = "codex-permission-title";
+    const permissionReason = element(documentRef, "p", "codex-permission-reason");
+    permissionReason.id = "codex-permission-reason";
+    const permissionCapability = element(documentRef, "p", "codex-permission-capability");
+    permissionCapability.id = "codex-permission-capability";
+    const permissionActions = element(documentRef, "div", "codex-permission-actions");
+    const permissionDeny = element(documentRef, "button", "codex-permission-deny", "Deny");
+    const permissionOnce = element(documentRef, "button", "codex-permission-once", "Allow Once");
+    const permissionAlways = element(documentRef, "button", "codex-permission-always", "Always Allow for This Bot");
+    for (const button of [permissionDeny, permissionOnce, permissionAlways]) button.type = "button";
+    permissionActions.append(permissionDeny, permissionOnce, permissionAlways);
+    permissionSheet.append(permissionTitle, permissionReason, permissionCapability, permissionActions);
     const modelDock = element(documentRef, "section", "codex-model-dock");
     modelDock.id = "codex-model-dock";
     modelDock.dataset.codexMountState = "pending";
@@ -868,12 +1738,23 @@
     advanced.append(advancedModelLabel, advancedEffortLabel, advancedSpeedLabel);
     const panelStack = element(documentRef, "div", "codex-power-panel-stack");
     panelStack.append(powerShell, advanced);
-    panel.append(header, renameRow, providerRow, statusRow);
+    panel.append(
+      header,
+      renameRow,
+      providerRow,
+      statusRow,
+      computerRow,
+      computerGrants,
+      computerSetup,
+      permissionSheet,
+    );
     popover.append(panelStack, compactControls, reasoningView.label, reasoningView.instructions);
     modelDock.append(modelTrigger, popover);
     documentRef.body.append(panel, modelDock);
 
+    let mountDisposed = false;
     function attachToProductHosts() {
+      if (mountDisposed) return;
       const { sidebarHost, composerHost } = findUiMounts(documentRef);
       if (sidebarHost) {
         if (panel.parentElement !== sidebarHost) sidebarHost.append(panel);
@@ -905,8 +1786,24 @@
     let holdTimer = null;
     let activeFastTier = null;
     let compactProjectionPending = false;
+    let setupReturnFocus = null;
+    let permissionReturnFocus = null;
     const powerState = new POWER_CONTROL.PowerControlState([], null, { ownerKey: "unselected" });
     let controller;
+
+    function setDialogOpen(dialog, open) {
+      if (open) {
+        dialog.hidden = false;
+        if (typeof dialog.showModal === "function" && dialog.open !== true) {
+          try { dialog.showModal(); } catch {}
+        }
+        return;
+      }
+      if (typeof dialog.close === "function" && dialog.open === true) {
+        try { dialog.close(); } catch {}
+      }
+      dialog.hidden = true;
+    }
 
     function paintPower(snapshot, { enteredUltra = snapshot.enteredUltra } = {}) {
       if (!snapshot.stops.length) return;
@@ -985,6 +1882,8 @@
     }
 
     function render(next) {
+      if (mountDisposed) return;
+      const previousSnapshot = lastSnapshot;
       lastSnapshot = next;
       const selected = next.activeBot;
       botSelect.replaceChildren();
@@ -994,11 +1893,99 @@
         option.selected = record.botId === next.activeBotId;
         botSelect.append(option);
       }
+      botSelect.disabled = next.creationPending
+        || (next.computerSetup.open && !next.computerSetup.dismissible);
+      newButton.disabled = next.creationPending || next.mandatorySetupPending || next.computerSetup.open;
       rename.value = selected?.name ?? "";
       status.textContent = next.runtime.label;
       status.dataset.tone = next.runtime.tone;
       retry.hidden = !next.runtime.retryVisible;
       retry.disabled = !next.runtime.retryVisible;
+      computerStatus.textContent = next.computer.label;
+      computerStatus.dataset.tone = next.computer.tone;
+      computerChange.disabled = selected == null || next.selectionPending
+        || next.mandatorySetupPending || next.computerSetup.open;
+      computerGrants.hidden = selected == null || next.permissions.length === 0;
+      computerGrantsList.replaceChildren(...next.permissions.map((grant) => {
+        const row = element(documentRef, "div", "codex-computer-grant");
+        const copy = element(documentRef, "div", "codex-computer-grant-copy");
+        copy.append(
+          element(documentRef, "strong", "codex-computer-grant-label", grant.resourceLabel),
+          element(
+            documentRef,
+            "span",
+            "codex-computer-grant-capability",
+            grant.capability.replaceAll(".", " "),
+          ),
+        );
+        const revoke = element(documentRef, "button", "codex-computer-grant-revoke", "Revoke");
+        revoke.type = "button";
+        revoke.setAttribute(
+          "aria-label",
+          `Revoke ${grant.capability.replaceAll(".", " ")} access to ${grant.resourceLabel}`,
+        );
+        revoke.addEventListener("click", () => {
+          revoke.disabled = true;
+          void controller.revokeComputerPermission(grant.grantId)
+            .catch(() => render(controller.snapshot()));
+        });
+        row.append(copy, revoke);
+        return row;
+      }));
+      const setupOpening = next.computerSetup.open && !previousSnapshot?.computerSetup?.open;
+      const setupClosing = !next.computerSetup.open && previousSnapshot?.computerSetup?.open;
+      if (setupOpening) setupReturnFocus = documentRef.activeElement ?? newButton;
+      setDialogOpen(computerSetup, next.computerSetup.open);
+      computerSetup.setAttribute("aria-busy", String(next.computerSetup.pending));
+      for (const [mode, input] of computerChoiceInputs) {
+        input.checked = next.computerSetup.selectedMode === mode;
+        input.disabled = next.computerSetup.pending;
+      }
+      computerContinue.disabled = next.computerSetup.pending || next.computerSetup.selectedMode == null;
+      computerContinue.textContent = next.computerSetup.pending ? "Setting up…" : "Continue";
+      computerCancel.hidden = !next.computerSetup.dismissible;
+      computerCancel.disabled = next.computerSetup.pending;
+      if (setupOpening) {
+        computerChoiceInputs.values().next().value?.focus?.();
+      }
+      const prompt = next.permissionRequest;
+      const permissionOpening = prompt != null && previousSnapshot?.permissionRequest?.requestId !== prompt.requestId;
+      const permissionDecisionSettled = prompt != null
+        && previousSnapshot?.permissionRequest?.requestId === prompt.requestId
+        && previousSnapshot.permissionDecisionPending
+        && !next.permissionDecisionPending;
+      const permissionClosing = prompt == null && previousSnapshot?.permissionRequest != null;
+      if (prompt != null && previousSnapshot?.permissionRequest == null) {
+        permissionReturnFocus = documentRef.activeElement ?? computerStatus;
+      }
+      setDialogOpen(permissionSheet, prompt != null);
+      permissionSheet.setAttribute("aria-busy", String(next.permissionDecisionPending));
+      for (const button of [permissionDeny, permissionOnce, permissionAlways]) {
+        button.disabled = next.permissionDecisionPending;
+      }
+      if (prompt) {
+        permissionTitle.textContent = `Allow ${selected?.name ?? "this bot"} to use ${prompt.resourceLabel}?`;
+        permissionReason.textContent = prompt.reason;
+        permissionCapability.textContent = prompt.capability.replaceAll(".", " ");
+      } else {
+        permissionTitle.textContent = "Computer permission";
+        permissionReason.textContent = "";
+        permissionCapability.textContent = "";
+      }
+      if ((permissionOpening || permissionDecisionSettled) && !next.permissionDecisionPending) {
+        permissionDeny.focus?.();
+      } else if (permissionClosing) {
+        const target = setupClosing ? (setupReturnFocus ?? permissionReturnFocus) : permissionReturnFocus;
+        target?.focus?.();
+        permissionReturnFocus = null;
+        if (setupClosing) setupReturnFocus = null;
+      } else if (setupClosing && prompt != null) {
+        permissionReturnFocus = setupReturnFocus ?? permissionReturnFocus;
+        setupReturnFocus = null;
+      } else if (setupClosing) {
+        setupReturnFocus?.focus?.();
+        setupReturnFocus = null;
+      }
       const enabled = selected != null && !next.selectionPending && next.modelCatalog.length > 0;
       const selectedTuple = next.modelSelection ? {
         provider: next.modelSelection.provider,
@@ -1072,6 +2059,7 @@
       facade,
       runtimeFacade: windowRef.codexRuntime,
       accountFacade: windowRef.codexAccount,
+      computerFacade: windowRef.openbotComputer,
       onStateChanged: render,
       onSelectionChanged(botId) {
         panel.dataset.activeBotId = botId ?? "";
@@ -1081,7 +2069,16 @@
         windowRef.dispatchEvent?.(new windowRef.CustomEvent("codex-bot-runtime-event", { detail: event }));
       },
     });
-    botSelect.addEventListener("change", () => controller.selectBot(botSelect.value));
+    botSelect.addEventListener("change", () => {
+      try {
+        const operation = controller.selectBot(botSelect.value);
+        if (operation && typeof operation.catch === "function") {
+          void operation.catch(() => render(controller.snapshot()));
+        }
+      } catch {
+        render(controller.snapshot());
+      }
+    });
     newButton.addEventListener("click", () => void controller.createBot().catch(() => {}));
     const submitRename = () => void controller.renameActive(rename.value).catch(() => render(lastSnapshot));
     renameButton.addEventListener("click", submitRename);
@@ -1092,10 +2089,42 @@
       }
     });
     retry.addEventListener("click", () => void controller.retryActive().catch(() => {}));
+    computerChange.addEventListener("click", () => {
+      try { controller.openComputerSetup(); } catch {}
+    });
+    for (const [mode, input] of computerChoiceInputs) {
+      input.addEventListener("change", () => {
+        if (!input.checked) return;
+        try { controller.chooseComputerMode(mode); } catch {}
+      });
+    }
+    computerContinue.addEventListener("click", () => {
+      void controller.confirmComputerMode().catch(() => render(controller.snapshot()));
+    });
+    computerCancel.addEventListener("click", () => {
+      try { controller.dismissComputerSetup(); } catch {}
+    });
+    const decidePermission = (decision) => {
+      void controller.decideComputerPermission(decision).catch(() => render(controller.snapshot()));
+    };
+    permissionDeny.addEventListener("click", () => decidePermission("deny"));
+    permissionOnce.addEventListener("click", () => decidePermission("once"));
+    permissionAlways.addEventListener("click", () => decidePermission("always"));
+    computerSetup.addEventListener("cancel", (event) => {
+      event.preventDefault?.();
+      if (lastSnapshot?.computerSetup?.pending || !lastSnapshot?.computerSetup?.dismissible) return;
+      try { controller.dismissComputerSetup(); } catch {}
+    });
+    permissionSheet.addEventListener("cancel", (event) => {
+      if (permissionSheet.hidden) return;
+      event.preventDefault?.();
+      if (lastSnapshot?.permissionDecisionPending) return;
+      decidePermission("deny");
+    });
     connectProvider.addEventListener("click", () => {
       connectProvider.disabled = true;
       void controller.connectProvider(providerSelect.value).catch(() => {}).finally(() => {
-        connectProvider.disabled = false;
+        if (!mountDisposed) connectProvider.disabled = false;
       });
     });
 
@@ -1212,6 +2241,7 @@
     advancedEffort.addEventListener("change", submitAdvanced);
     advancedSpeed.addEventListener("change", submitAdvanced);
     void controller.initialize().catch(() => {
+      if (mountDisposed) return;
       status.textContent = "Remote computer unavailable";
       reasoning.disabled = true;
       advancedToggle.disabled = true;
@@ -1224,6 +2254,8 @@
       modelDock,
       panel,
       dispose() {
+        if (mountDisposed) return;
+        mountDisposed = true;
         mountObserver?.disconnect();
         documentRef.removeEventListener?.("pointerdown", dismissPopover);
         if (holdTimer != null) (windowRef.clearTimeout || clearTimeout)(holdTimer);
