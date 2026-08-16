@@ -9,7 +9,7 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8317/v1";
 const DEFAULT_API_KEY = "codex-bot-local";
 const DEFAULT_MODEL = "gpt-5.6-terra";
 const DEFAULT_REASONING_EFFORT = "high";
-const COWORKER_POLICY_VERSION = "2026-08-16.1";
+const COWORKER_POLICY_VERSION = "2026-08-16.2";
 
 const DIGITAL_COWORKER_POLICY = `
 <digital_coworker_compatibility version="${COWORKER_POLICY_VERSION}">
@@ -644,13 +644,17 @@ The widget is the entire visible response. Do not emit assistant prose, a separa
 const ACTIVE_GROUP_CHAT_INSTRUCTION = `<active_group_chat>
 This is a host-managed group-room update turn. The room is a shared work stream for the person, not a private agent-to-agent roleplay.
 
-Add exactly one short SendMessage only when it contributes one of these: a completed result, a concrete next move, a factual correction, a blocker or decision, or a direct useful response to the person's latest request. Write for the whole room. Mention a teammate only when ownership or a handoff would otherwise be unclear.
+If the person assigned concrete work, do that work now before sending anything visible. Use the available foreground work tools as needed, then make exactly one short SendMessage with the completed result, evidence, or a concrete blocker. Never post a plan, promise, status-only update, or avoidable follow-up question first. Infer a reasonable scope from the request and proceed; for example, "research the weather ... go" means choose a distinct city and return useful current/forecast findings without asking whether the person wants today or multiple days.
+
+Do not launch background tasks from a group turn. A background completion no longer carries the room-delivery context and can leak the result into a private conversation. Keep work in the foreground until you can post the final room update. If a tool or source is unavailable, report that blocker in this room rather than in a direct chat. Never continue room work through a private SendMessage.
+
+When the person assigns parallel work to multiple room members, own one non-overlapping piece, do it independently, and return your result to the room. Write for the whole room. Mention a teammate only when ownership or a handoff would otherwise be unclear.
 
 Never send generic readiness, greetings, acknowledgements, or prompts that merely keep the agents talking. Do not ask a teammate to invent a task, choose between brainstorm/debate/handoff, provide an arbitrary example, or acknowledge your acknowledgement. Do not repeat a point already visible in the room.
 
 If the person is only testing the group without giving substantive work, demonstrate collaboration with one small, self-contained useful contribution grounded in the visible room or agent profiles. Do not ask another question just to manufacture a conversation; a later teammate may improve the artifact with a distinct addition or pass.
 
-Use one text SendMessage and stop. If you have nothing meaningfully additive, emit exactly "(pass)" as assistant text and call no tool. Do not emit prose alongside SendMessage.
+After any foreground work, use one text SendMessage and stop. If you have nothing meaningfully additive and no assigned work remains, emit exactly "(pass)" as assistant text and call no tool. Do not emit prose alongside SendMessage.
 </active_group_chat>`;
 
 function sourceMessageText(content) {
@@ -913,49 +917,48 @@ function constrainRoleOrientationTools(openAITools) {
 }
 
 function constrainGroupChatTools(openAITools) {
-  const tool = openAITools.find(
-    (candidate) => candidate?.function?.name === SEND_MESSAGE_TOOL_NAME,
-  );
-  if (!tool) return [];
-  const originalParameters = tool.function.parameters || {};
-  const originalProperties = originalParameters.properties || {};
-  return [
-    {
-      ...tool,
-      function: {
-        ...tool.function,
-        description:
-          `${tool.function.description || ""}\n\nFor this group-room turn, send at most one concise text update that materially advances the shared work. Never use it for readiness, acknowledgement ping-pong, or an invented task. If nothing is additive, call no tool and emit exactly \"(pass)\".`.trim(),
-        parameters: {
-          ...originalParameters,
-          type: "object",
-          properties: {
-            ...originalProperties,
-            type: {
-              ...(originalProperties.type || {}),
-              type: "string",
-              enum: ["text"],
+  return openAITools
+    .filter((tool) => tool?.function?.name !== "Task")
+    .map((tool) => {
+      if (tool?.function?.name !== SEND_MESSAGE_TOOL_NAME) return tool;
+      const originalParameters = tool.function.parameters || {};
+      const originalProperties = originalParameters.properties || {};
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description:
+            `${tool.function.description || ""}\n\nFor this group-room turn, call this only after foreground work is complete, and at most once. Send the completed result, evidence, decision, or concrete blocker to the shared room. Never send a plan or status-only promise first, and never continue the work in a private chat. If nothing is additive and no assigned work remains, call no tool and emit exactly \"(pass)\".`.trim(),
+          parameters: {
+            ...originalParameters,
+            type: "object",
+            properties: {
+              ...originalProperties,
+              type: {
+                ...(originalProperties.type || {}),
+                type: "string",
+                enum: ["text"],
+              },
+              content: {
+                ...(originalProperties.content || {}),
+                type: "string",
+                minLength: 1,
+                maxLength: 1_200,
+              },
             },
-            content: {
-              ...(originalProperties.content || {}),
-              type: "string",
-              minLength: 1,
-              maxLength: 1_200,
-            },
+            required: [
+              ...new Set([
+                ...(Array.isArray(originalParameters.required)
+                  ? originalParameters.required
+                  : []),
+                "type",
+                "content",
+              ]),
+            ],
           },
-          required: [
-            ...new Set([
-              ...(Array.isArray(originalParameters.required)
-                ? originalParameters.required
-                : []),
-              "type",
-              "content",
-            ]),
-          ],
         },
-      },
-    },
-  ];
+      };
+    });
 }
 
 const POST_SEND_MESSAGE_INSTRUCTION = `<post_send_message_step>
