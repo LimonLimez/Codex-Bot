@@ -170,7 +170,7 @@ globalThis.__onboardingUi = (() => {
     }),
   );
   const rendered = context.__onboardingUi;
-  assert.match(rendered.providers, /Sign in to providers/);
+  assert.match(rendered.providers, /Connect an AI provider/);
   for (const provider of [
     "OpenAI Codex",
     "Anthropic Claude",

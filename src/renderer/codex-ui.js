@@ -1106,8 +1106,8 @@ function onboardingProviderStepHtml(status) {
   return `<section class="codex-onboarding-panel" aria-labelledby="codex-connect-title">
     <div class="codex-onboarding-heading">
       <span class="codex-step-count">1 of 3</span>
-      <h2 id="codex-connect-title">Sign in to providers</h2>
-      <p>Choose the AI account you want Open Bot to use. You can connect more providers later in Settings.</p>
+      <h2 id="codex-connect-title">Connect an AI provider</h2>
+      <p>Choose an AI account or a local model server for Open Bot. You can connect more providers later in Settings.</p>
     </div>
     <div class="codex-provider-grid" role="group" aria-label="AI providers">${tiles}</div>
     <select class="codex-visually-hidden" data-codex-provider aria-label="Selected AI provider">${options}</select>
@@ -1241,6 +1241,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         ];
   const usage = status.usage || {};
   const apiKeyActive = connection.mode === "api-key";
+  const localActive = connection.mode === "local";
   const connectedProviderId =
     connection.provider === "openai-api-key"
       ? account.provider || "codex"
@@ -1277,9 +1278,11 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
       : "Not connected";
   const accountDetail = apiKeyActive
     ? "Stored securely for this Windows user"
-    : account.signedIn
-      ? account.email || `${connectedProvider.label} account`
-      : "Choose a provider or use an OpenAI API key";
+    : localActive
+      ? connectedProvider.baseUrl || "Loopback model endpoint"
+      : account.signedIn
+        ? account.email || `${connectedProvider.label} account`
+        : "Choose a provider or use an OpenAI API key";
   const connectionDetail =
     apiKeyActive && !account.signedIn
       ? "Direct OpenAI API"
@@ -1288,7 +1291,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
     !apiKeyActive && account.avatarUrl
       ? `<img class="codex-avatar" src="${escapeHtml(account.avatarUrl)}" alt="" />`
       : `<span class="codex-avatar codex-initials">${escapeHtml(apiKeyActive ? "OA" : initials(account.name))}</span>`;
-  const activeOAuth = !apiKeyActive;
+  const activeOAuth = !apiKeyActive && !localActive;
   const providerActionLabel = selectedProvider.signedIn
     ? activeOAuth
       ? connectedProvider.id === selectedProvider.id
@@ -1300,11 +1303,11 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
   const firstRunIntroduction = firstRun
     ? `<div class="codex-first-run-copy">
         <h2 id="codex-connect-title">Connect an AI provider to start</h2>
-        <p>Choose which account and model family your employees will use. CLIProxyAPI keeps the connection local and routes only to your selection.</p>
+        <p>Choose which account or local model family your employees will use. Open Bot stores the connection locally and routes only to your selection.</p>
       </div>`
     : "";
   const firstRunAssurance = firstRun
-    ? `<p class="codex-connection-assurance">Each sign-in opens only that provider's reviewed official authorization page. API keys and imported credentials are stored only for this Windows user.</p>`
+    ? `<p class="codex-connection-assurance">Hosted-provider sign-ins open only reviewed official authorization pages. API keys, imported credentials, and local-server settings are stored only for this Windows user.</p>`
     : "";
   return `
     <section class="codex-card${firstRun ? " codex-first-run-card" : ""}" aria-label="AI provider connection">

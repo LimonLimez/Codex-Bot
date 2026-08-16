@@ -39,7 +39,7 @@ The app never asks for a provider password. OAuth and device flows open only rev
 | OpenAI API key     | Direct key verification             | Sol, Terra, Luna                       | OpenAI Fast service tier; premium pricing may apply |
 | Local models       | Loopback OpenAI-compatible endpoint | Models discovered from `/v1/models`    | Not exposed; reasoning fields are omitted           |
 
-The provider list is pinned to the reviewed CLIProxyAPI version bundled with the release. Account, plan, region, and provider-side availability can still limit which models actually run. Requests fail closed if the selected route is unavailable; there is no silent fallback to another model provider.
+The hosted-provider list is pinned to the reviewed CLIProxyAPI version bundled with the release. Account, plan, region, provider-side availability, and local model capabilities can still limit which models actually run. Requests fail closed if the selected route is unavailable; there is no silent fallback to another model provider.
 
 Provider choices keep independent workspace and per-employee model preferences. Switching from Claude to Kimi and back, for example, restores the saved Claude model instead of forcing one provider's model ID onto another.
 
