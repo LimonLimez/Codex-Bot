@@ -165,9 +165,9 @@ function harness(t, { children = [new FakeChild()], clock, environment } = {}) {
   const resourcesPath = path.join(root, "OpenBot.app", "Contents", "Resources");
   const binaryPath = path.join(resourcesPath, "codex", "runtime", "codex");
   const stateRoot = path.join(root, "Library", "Application Support", "OpenBot", "direct-codex");
-  const homeDirectory = path.join(root, "person-home");
+  const personalHomeDirectory = path.join(root, "person-home");
   fs.mkdirSync(path.dirname(binaryPath), { recursive: true });
-  fs.mkdirSync(homeDirectory, { recursive: true });
+  fs.mkdirSync(personalHomeDirectory, { recursive: true });
   fs.writeFileSync(binaryPath, "verified fixture");
   fs.chmodSync(binaryPath, 0o755);
   const spawns = [];
@@ -176,9 +176,9 @@ function harness(t, { children = [new FakeChild()], clock, environment } = {}) {
   const manager = new CodexAppServerManager({
     resourcesPath,
     stateRoot,
-    homeDirectory,
     environment: environment || {
-      HOME: homeDirectory,
+      HOME: personalHomeDirectory,
+      CODEX_HOME: path.join(personalHomeDirectory, ".codex-private-history"),
       LANG: "en_US.UTF-8",
       PATH: "/private/provider/bin:/usr/bin:/bin",
       TMPDIR: path.join(root, "private-tmp"),
@@ -199,7 +199,7 @@ function harness(t, { children = [new FakeChild()], clock, environment } = {}) {
     },
     ...(clock ? { setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout } : {}),
   });
-  return { manager, children, spawns, binaryPath, resourcesPath, stateRoot, homeDirectory, get loadCalls() { return loadCalls; } };
+  return { manager, children, spawns, binaryPath, resourcesPath, stateRoot, personalHomeDirectory, get loadCalls() { return loadCalls; } };
 }
 
 async function startReady(manager, child) {
@@ -212,7 +212,7 @@ async function startReady(manager, child) {
   assert.deepEqual(child.writes.at(-1), { method: "initialized" });
 }
 
-test("starts one verified packaged Codex flight with an empty cwd minimal account environment and every local tool feature disabled", async (t) => {
+test("starts one verified packaged Codex flight with private OpenBot state, an empty cwd, a minimal account environment, and every local tool feature disabled", async (t) => {
   const fixture = harness(t);
   const { manager, children: [child], spawns } = fixture;
   const first = manager.start();
@@ -232,14 +232,17 @@ test("starts one verified packaged Codex flight with an empty cwd minimal accoun
   assert.equal(spawns[0].options.cwd, path.join(fixture.stateRoot, "empty-workspace"));
   assert.deepEqual(spawns[0].options.stdio, ["pipe", "pipe", "pipe"]);
   assert.deepEqual(spawns[0].options.env, {
-    CODEX_HOME: path.join(fixture.homeDirectory, ".codex"),
-    HOME: fixture.homeDirectory,
+    CODEX_HOME: path.join(fixture.stateRoot, "codex-home"),
+    HOME: path.join(fixture.stateRoot, "home"),
     LANG: "en_US.UTF-8",
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
     TMPDIR: path.join(fixture.stateRoot, "tmp"),
   });
   assert.doesNotMatch(JSON.stringify(spawns[0]), /ChatGPT\.app|CLIPROXY|OPENAI_API_KEY|must-not-cross|private\/provider/);
+  assert.doesNotMatch(JSON.stringify(spawns[0]), /person-home|codex-private-history/);
   assert.equal(fs.statSync(spawns[0].options.cwd).mode & 0o077, 0);
+  assert.equal(fs.statSync(spawns[0].options.env.CODEX_HOME).mode & 0o077, 0);
+  assert.equal(fs.statSync(spawns[0].options.env.HOME).mode & 0o077, 0);
   assert.equal(fs.statSync(spawns[0].options.env.TMPDIR).mode & 0o077, 0);
   const initialize = child.writes[0];
   assert.deepEqual(initialize, {
@@ -255,6 +258,20 @@ test("starts one verified packaged Codex flight with an empty cwd minimal accoun
   assert.equal(manager.state, "ready");
   assert.equal(manager.initialized, true);
   assert.deepEqual(child.writes[1], { method: "initialized" });
+});
+
+test("rejects symlinked private HOME and CODEX_HOME roots before starting the packaged runtime", async (t) => {
+  for (const name of ["home", "codex-home"]) {
+    await t.test(name, async (subtest) => {
+      const fixture = harness(subtest);
+      const outside = path.join(path.dirname(fixture.stateRoot), `outside-${name}`);
+      fs.mkdirSync(fixture.stateRoot, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(outside, { recursive: true, mode: 0o700 });
+      fs.symlinkSync(outside, path.join(fixture.stateRoot, name));
+      await assert.rejects(fixture.manager.start(), { code: "CODEX_PROCESS_ERROR" });
+      assert.equal(fixture.spawns.length, 0);
+    });
+  }
 });
 
 test("terminates a spawned child that does not expose the required private stdio contract", async (t) => {
@@ -418,14 +435,26 @@ test("bounds stderr and sanitizes child errors exits and request timeouts", asyn
 
   await t.test("request timeout", async (subtest) => {
     const clock = new FakeClock();
-    const { manager, children: [child] } = harness(subtest, { clock });
+    const firstChild = new FakeChild();
+    const secondChild = new FakeChild();
+    const { manager } = harness(subtest, { clock, children: [firstChild, secondChild] });
     const starting = manager.start();
     await tick();
-    child.receive({ id: 1, result: {} });
+    firstChild.receive({ id: 1, result: {} });
     await starting;
     const pending = manager.request("account/read", undefined, { timeoutMs: 4567 });
     clock.fire(4567);
     await assert.rejects(pending, { code: "CODEX_REQUEST_TIMEOUT" });
+    assert.equal(manager.state, "offline");
+    assert.equal(firstChild.killed, true);
+
+    const restarted = manager.start();
+    await tick();
+    const initialize = secondChild.writes.find((message) => message.method === "initialize");
+    secondChild.receive({ id: initialize.id, result: {} });
+    await restarted;
+    assert.equal(manager.state, "ready");
+    firstChild.receive({ id: 2, result: { private: "stale response" } });
     assert.equal(manager.state, "ready");
   });
 });

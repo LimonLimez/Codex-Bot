@@ -178,7 +178,7 @@ test("desktop production startup selects the migrated OpenBot path before depend
   assert.equal(fs.readFileSync(path.join(target, "Preferences"), "utf8"), "legacy-preferences");
 });
 
-test("an exact acceptance flag isolates app data while preserving the real account home", (t) => {
+test("an exact acceptance flag isolates app data without mutating the parent process environment", (t) => {
   const appDataPath = fs.realpathSync(fixture(t));
   fs.chmodSync(appDataPath, 0o700);
   const calls = [];

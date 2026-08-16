@@ -25,7 +25,9 @@ behalf.
 Official Codex conversations use the verified, unmodified Codex 0.147.0 macOS
 arm64 runtime and its authenticated private loopback bridge. The official Codex
 account and live model catalog work without ChatGPT.app being open and without
-CLIProxyAPI. There is no xAI/Cursor inference fallback.
+CLIProxyAPI. OpenBot owns a private Codex home and its own official account
+sign-in; it does not import a user's Codex CLI conversations, configuration, or
+rollout history. There is no xAI/Cursor inference fallback.
 
 CLIProxyAPI 7.2.132 is bundled only for reviewed optional providers. Its
 catalog can expose Claude Fable 5, Claude Opus 5, Claude Sonnet 5, and other

@@ -96,7 +96,6 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   const direct = createDirectCodexManager({
     resourcesPath,
     stateRoot,
-    homeDirectory,
     environment: { HOME: homeDirectory, OPENAI_API_KEY: "must-not-forward" },
     ManagerClass: DirectFixture,
   });
@@ -104,7 +103,6 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   assert.deepEqual(directCalls, [{
     resourcesPath,
     stateRoot: path.join(stateRoot, "direct-codex"),
-    homeDirectory,
     environment: { HOME: homeDirectory, OPENAI_API_KEY: "must-not-forward" },
     clientVersion: "0.2.0-macos.1",
   }]);
@@ -224,7 +222,6 @@ test("production direct Codex snapshots the host environment into a plain launch
   const manager = createDirectCodexManager({
     resourcesPath: path.join(root, "OpenBot.app", "Contents", "Resources"),
     stateRoot: path.join(root, "state"),
-    homeDirectory: path.join(root, "home"),
   });
   assert.equal(manager instanceof CodexAppServerManager, true);
   manager.stop();

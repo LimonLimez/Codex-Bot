@@ -5,14 +5,19 @@ private `OpenBot` Electron user-data directory, under the legacy-compatible
 `codex-bot` subdirectory. That
 state can include bot records, conversation bindings, selected models, official
 Codex account status, and optional CLIProxyAPI provider authorization. The
-embedded official Codex runtime uses the current user's standard `~/.codex`
-directory for Codex account authorization. Do not upload or share either
-location.
+embedded official Codex runtime uses a private `CODEX_HOME` inside that OpenBot
+state directory for account authorization. OpenBot does not read or import the
+user's standard Codex profile, conversations, configuration, or rollout
+history. The account credential is scoped to OpenBot's private Codex home,
+whether the packaged runtime stores it in a file or a namespaced macOS
+credential entry. Do not upload or share the OpenBot state directory.
 
 The official Codex account uses the verified OpenAI Codex runtime and a private
 authenticated loopback channel; its prompts and model requests are processed by
 OpenAI under the user's account and OpenAI's terms and privacy policy. It does
-not require ChatGPT.app or CLIProxyAPI to be running.
+not require ChatGPT.app or CLIProxyAPI to be running. A user signs in to the
+official Codex account through OpenBot itself; signing in to another Codex app
+does not silently authorize OpenBot.
 
 The bundled CLIProxyAPI sidecar is optional and is used only for separately
 configured providers. It listens only on `127.0.0.1`, uses a fresh random local

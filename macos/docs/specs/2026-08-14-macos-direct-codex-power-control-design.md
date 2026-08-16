@@ -17,12 +17,13 @@ dropdown plus effort-only slider with the native compact Codex Power control,
 and it replaces the mandatory CLIProxyAPI dependency for OpenAI models with a
 pinned official Codex app-server process.
 
-The default OpenAI path reuses the user's official Codex login in `~/.codex`.
-If that login is absent, OpenBot starts the official ChatGPT browser or device
-login flow through app-server. The ChatGPT desktop application is not a runtime
-or packaging dependency. CLIProxyAPI remains an optional, explicitly connected
-provider for reviewed non-Codex models such as Claude Fable 5. It is not started
-for a Codex-only session.
+The default OpenAI path uses a private OpenBot-owned `CODEX_HOME`. OpenBot never
+imports the user's Codex CLI profile, conversations, configuration, or rollout
+history. If OpenBot has no official account credential, it starts the ChatGPT
+browser or device login flow through app-server. The ChatGPT desktop
+application is not a runtime or packaging dependency. CLIProxyAPI remains an
+optional, explicitly connected provider for reviewed non-Codex models such as
+Claude Fable 5. It is not started for a Codex-only session.
 
 This document supersedes the older design wherever that document describes
 CLIProxyAPI as the mandatory Codex transport or describes the current slider as
@@ -154,10 +155,12 @@ OpenBot launches:
 
 `<packaged-codex> app-server --stdio`
 
-The process inherits the standard official Codex home so it can use the user's
-existing ChatGPT-plan login. It never reads, copies, logs, serializes, displays,
-or packages token files. Only sanitized account mode, plan type, and login state
-may cross IPC.
+The process receives private OpenBot-owned `HOME` and `CODEX_HOME` directories
+inside the direct-Codex state root. It never consults or imports another Codex
+installation's account, configuration, conversations, or rollout history. The
+user authorizes the same ChatGPT-plan account through OpenBot's official login
+flow. OpenBot never reads, copies, logs, serializes, displays, or packages token
+files. Only sanitized account mode, plan type, and login state may cross IPC.
 
 Startup performs the required `initialize` / `initialized` handshake, then
 `account/read` and paginated `model/list`. If no account is present, the UI

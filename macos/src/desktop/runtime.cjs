@@ -515,20 +515,17 @@ function loadSidecarReceipt(resourcesPath) {
 function createDirectCodexManager({
   resourcesPath,
   stateRoot,
-  homeDirectory,
   environment,
   ManagerClass = CodexAppServerManager,
 } = {}) {
   if (typeof resourcesPath !== "string" || !path.isAbsolute(resourcesPath)
     || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
-    || typeof homeDirectory !== "string" || !path.isAbsolute(homeDirectory)
     || typeof ManagerClass !== "function") {
     throw sanitizedFailure();
   }
   return new ManagerClass({
     resourcesPath,
     stateRoot: path.join(stateRoot, "direct-codex"),
-    homeDirectory,
     environment: environment === undefined
       ? Object.fromEntries(Object.entries(process.env))
       : environment,
@@ -735,7 +732,6 @@ function productionDependencies(electron) {
   const codexManager = createDirectCodexManager({
     resourcesPath: process.resourcesPath,
     stateRoot,
-    homeDirectory: electron.app.getPath("home"),
   });
   const accountController = new CodexAccountController({ manager: codexManager });
   const sidecarManager = createLazySidecarManager({

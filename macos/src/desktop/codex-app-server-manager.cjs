@@ -212,14 +212,14 @@ function freezeIncoming(value) {
   return deepFreeze(cloneJson(value, { sanitize: true }));
 }
 
-function launchEnvironment({ environment, homeDirectory, stateRoot }) {
+function launchEnvironment({ environment, stateRoot }) {
   const lang = typeof environment.LANG === "string"
     && /^[A-Za-z0-9._@-]{1,64}$/.test(environment.LANG)
     ? environment.LANG
     : "C.UTF-8";
   return Object.freeze({
-    CODEX_HOME: path.join(homeDirectory, ".codex"),
-    HOME: homeDirectory,
+    CODEX_HOME: path.join(stateRoot, "codex-home"),
+    HOME: path.join(stateRoot, "home"),
     LANG: lang,
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
     TMPDIR: path.join(stateRoot, "tmp"),
@@ -259,7 +259,6 @@ function validateChild(child) {
 class CodexAppServerManager extends EventEmitter {
   #resourcesPath;
   #stateRoot;
-  #homeDirectory;
   #environment;
   #clientVersion;
   #loadRuntime;
@@ -282,7 +281,6 @@ class CodexAppServerManager extends EventEmitter {
     exactKeys(options, [
       "resourcesPath",
       "stateRoot",
-      "homeDirectory",
       "environment",
       "clientVersion",
       "loadRuntime",
@@ -293,7 +291,6 @@ class CodexAppServerManager extends EventEmitter {
     const environment = options.environment === undefined ? process.env : plainOptions(options.environment);
     if (!absolutePath(options.resourcesPath)
       || !absolutePath(options.stateRoot)
-      || !absolutePath(options.homeDirectory)
       || !validClientVersion(options.clientVersion || "0.2.0-macos.1")
       || (options.loadRuntime !== undefined && typeof options.loadRuntime !== "function")
       || (options.spawnImpl !== undefined && typeof options.spawnImpl !== "function")
@@ -303,7 +300,6 @@ class CodexAppServerManager extends EventEmitter {
     }
     this.#resourcesPath = options.resourcesPath;
     this.#stateRoot = options.stateRoot;
-    this.#homeDirectory = options.homeDirectory;
     this.#environment = environment;
     this.#clientVersion = options.clientVersion || "0.2.0-macos.1";
     this.#loadRuntime = options.loadRuntime || loadPackagedCodexRuntime;
@@ -372,17 +368,20 @@ class CodexAppServerManager extends EventEmitter {
 
     const workspace = path.join(this.#stateRoot, "empty-workspace");
     const temporary = path.join(this.#stateRoot, "tmp");
+    const home = path.join(this.#stateRoot, "home");
+    const codexHome = path.join(this.#stateRoot, "codex-home");
     let child;
     let spawnedChild;
     try {
       prepareDirectory(this.#stateRoot);
       prepareDirectory(workspace);
       prepareDirectory(temporary);
+      prepareDirectory(home);
+      prepareDirectory(codexHome);
       spawnedChild = this.#spawn(runtime.binaryPath, [...launchArguments()], {
         cwd: workspace,
         env: launchEnvironment({
           environment: this.#environment,
-          homeDirectory: this.#homeDirectory,
           stateRoot: this.#stateRoot,
         }),
         stdio: ["pipe", "pipe", "pipe"],
@@ -512,7 +511,9 @@ class CodexAppServerManager extends EventEmitter {
         if (this.#pending.get(id) !== entry) return;
         this.#pending.delete(id);
         this.#rememberTimedOutId(id);
-        entry.reject(codexError("CODEX_REQUEST_TIMEOUT", "Codex request timed out."));
+        const error = codexError("CODEX_REQUEST_TIMEOUT", "Codex request timed out.");
+        entry.reject(error);
+        this.#terminal(active, error);
       }, timeoutMs);
       entry.timer?.unref?.();
     } catch {

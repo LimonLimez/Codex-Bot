@@ -235,6 +235,55 @@ test("browser login keeps its credential-bearing URL private while device login 
   assert.doesNotMatch(JSON.stringify(device), /loginId|22222222|accessToken|email/);
 });
 
+test("a fresh private Codex home can sign in from signed-out state and refresh the official catalog", async () => {
+  const loginId = "33333333-3333-4333-8333-333333333333";
+  let accountReads = 0;
+  const manager = readyManager({
+    "account/read": () => {
+      accountReads += 1;
+      return accountReads === 1
+        ? { account: null, requiresOpenaiAuth: true }
+        : {
+            account: { type: "chatgpt", planType: "pro" },
+            requiresOpenaiAuth: true,
+          };
+    },
+    "account/login/start": () => ({
+      type: "chatgpt",
+      loginId,
+      authUrl: "https://chatgpt.com/auth/codex?state=private-state",
+    }),
+  });
+  const controller = new CodexAccountController({ manager });
+  await controller.start();
+  assert.equal(controller.accountState().status, "signed-out");
+  assert.equal(controller.accountState().authMode, null);
+  assert.equal(controller.catalogState().status, "ready");
+
+  const login = await controller.login("browser");
+  assert.equal(login.state.status, "signing-in");
+  assert.equal(login.state.login.mode, "browser");
+  manager.emit("notification", {
+    method: "account/login/completed",
+    params: { loginId, success: true, error: null },
+  });
+  for (let attempt = 0; attempt < 10 && controller.accountState().status !== "ready"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(controller.accountState().status, "ready");
+  assert.equal(controller.accountState().authMode, "chatgpt");
+  assert.equal(controller.accountState().planType, "pro");
+  assert.equal(controller.accountState().login, null);
+  assert.equal(controller.catalogState().status, "ready");
+  assert.equal(controller.catalogState().generation, 2);
+  assert.equal(accountReads, 2);
+  assert.equal(manager.starts, 1);
+  assert.doesNotMatch(JSON.stringify({
+    account: controller.accountState(),
+    catalog: controller.catalogState(),
+  }), /private-state|loginId|accessToken|email/);
+});
+
 test("login completion cancel and replacement are generation scoped so stale notifications cannot overwrite the current ceremony", async () => {
   const loginResults = [
     {
