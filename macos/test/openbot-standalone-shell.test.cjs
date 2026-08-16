@@ -200,6 +200,27 @@ test("logged-out Cursor plus healthy direct Codex selects one stable standalone 
   assert.equal(documentRef.root.getAttribute("aria-hidden"), null);
 });
 
+test("fresh signed-out direct Codex account still mounts the standalone sign-in host", async () => {
+  const { createHostController } = require(shellPath);
+  const documentRef = documentFixture();
+  const windowRef = windowFixture();
+  windowRef.codexAccount.read = async () => ({
+    generation: 2,
+    status: "signed-out",
+    authMode: null,
+    planType: null,
+    requiresOpenaiAuth: true,
+    login: null,
+    rateLimits: null,
+  });
+  const mounted = createHostController({ windowRef, documentRef });
+  assert.equal(await mounted.start(), "standalone");
+  assert.equal(mounted.snapshot().host, "standalone");
+  assert.equal(documentRef.body.children[0].attributes.id, "openbot-standalone-shell");
+  assert.equal(byClass(documentRef.body.children[0], "openbot-standalone-status")[0].textContent, "OpenAI Codex");
+  mounted.dispose();
+});
+
 test("pending account work cannot mount after disposal and does not self-mount on Cursor login", async () => {
   const { createHostController } = require(shellPath);
   const waiting = deferred();

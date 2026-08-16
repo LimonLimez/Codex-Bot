@@ -53,7 +53,8 @@
   }
 
   function healthyAccount(account, catalog) {
-    return account?.status === "ready" && catalog?.status === "ready"
+    return (account?.status === "ready" || account?.status === "signed-out")
+      && catalog?.status === "ready"
       && Array.isArray(catalog.models) && catalog.models.length > 0;
   }
 
@@ -80,7 +81,7 @@
       element(documentRef, "strong", "", "OpenBot"),
       element(documentRef, "span", "", "Free Local Desktop"),
     );
-    const status = element(documentRef, "span", "openbot-standalone-status", "Direct Codex ready");
+    const status = element(documentRef, "span", "openbot-standalone-status", "OpenAI Codex");
     header.append(title, status);
     const transcript = element(documentRef, "section", "openbot-standalone-transcript");
     transcript.setAttribute("aria-label", "Conversation transcript");
