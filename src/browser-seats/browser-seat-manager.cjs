@@ -45,6 +45,8 @@ const CHROME_CANDIDATES = [
   "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
 ].filter(Boolean);
 const LOG_PATH = path.join(DATA_ROOT, "browser-seats.log");
+const PERMISSION_PATH = path.join(DATA_ROOT, "permissions.json");
+const PRIVATE_PERMISSION_PROVIDER = "private-browser";
 const DEFAULT_START_URL =
   process.env.GROK_BOT_BROWSER_START_URL || "https://www.google.com/";
 const SESSION_STATE_VERSION = 1;
@@ -102,6 +104,66 @@ function log(event, detail = {}) {
       `${JSON.stringify({ time: new Date().toISOString(), event, ...redactLogDetails(detail) })}\n`,
     );
   } catch {}
+}
+
+function computerPermissions() {
+  try {
+    const value = JSON.parse(fs.readFileSync(PERMISSION_PATH, "utf8"));
+    return Object.freeze({
+      provider: PRIVATE_PERMISSION_PROVIDER,
+      alwaysAllowComputerActions:
+        value?.version === 1 &&
+        value?.provider === PRIVATE_PERMISSION_PROVIDER &&
+        value?.alwaysAllowComputerActions === true,
+    });
+  } catch {
+    return Object.freeze({
+      provider: PRIVATE_PERMISSION_PROVIDER,
+      alwaysAllowComputerActions: false,
+    });
+  }
+}
+
+function setComputerPermissions(
+  alwaysAllowComputerActions,
+  acknowledged,
+  provider,
+) {
+  if (
+    typeof alwaysAllowComputerActions !== "boolean" ||
+    typeof acknowledged !== "boolean" ||
+    provider !== PRIVATE_PERMISSION_PROVIDER
+  )
+    throw new TypeError("The private browser permission request is invalid.");
+  if (alwaysAllowComputerActions && !acknowledged)
+    throw new Error(
+      "Always allow requires acknowledgement of the private browser warning.",
+    );
+  if (!alwaysAllowComputerActions) {
+    fs.rmSync(PERMISSION_PATH, { force: true });
+    return computerPermissions();
+  }
+  fs.mkdirSync(path.dirname(PERMISSION_PATH), { recursive: true });
+  const temporary = `${PERMISSION_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(
+      temporary,
+      `${JSON.stringify(
+        {
+          version: 1,
+          provider: PRIVATE_PERMISSION_PROVIDER,
+          alwaysAllowComputerActions: true,
+        },
+        null,
+        2,
+      )}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    fs.renameSync(temporary, PERMISSION_PATH);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+  return computerPermissions();
 }
 
 function hostnameAddress(value) {
@@ -1166,6 +1228,14 @@ async function executeSeatActions(key, actions, options = {}) {
           continue;
         }
 
+        if (computerPermissions().alwaysAllowComputerActions) {
+          browserControls.assertAgentAllowed(seat.key);
+          page = await currentPage(seat);
+          browserControls.assertAgentAllowed(seat.key);
+          await executeAction(seat, page, action);
+          continue;
+        }
+
         let stable = false;
         let validatedPage = null;
         for (let attempt = 0; attempt < 4 && !stable; attempt += 1) {
@@ -1427,6 +1497,8 @@ module.exports = {
   pendingApprovalForSeat,
   pendingApprovals,
   decidePendingApproval,
+  computerPermissions,
+  setComputerPermissions,
   acquireUserControl,
   heartbeatUserControl,
   releaseUserControl,

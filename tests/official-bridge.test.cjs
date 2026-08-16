@@ -113,6 +113,8 @@ test.before(async () => {
     captureSeat: privateManager.captureSeat,
     executeSeatActions: privateManager.executeSeatActions,
     pendingApprovals: privateManager.pendingApprovals,
+    computerPermissions: privateManager.computerPermissions,
+    setComputerPermissions: privateManager.setComputerPermissions,
   };
   official.status = async () => safeStatus("private");
   server = bridge.startViewServer({
@@ -310,6 +312,83 @@ test("vendor permission updates require an exact provider-scoped acknowledgement
     false,
   );
   assert.equal(updates.length, 2);
+});
+
+test("Private browser permission updates are exact, scoped, and exposed in status", async () => {
+  const updates = [];
+  let alwaysAllow = false;
+  privateManager.computerPermissions = () => ({
+    provider: "private-browser",
+    alwaysAllowComputerActions: alwaysAllow,
+    injectedSecret: SECRET_SENTINEL,
+  });
+  privateManager.setComputerPermissions = (next, acknowledged, provider) => {
+    updates.push({ next, acknowledged, provider });
+    alwaysAllow = next;
+    return privateManager.computerPermissions();
+  };
+  const enabled = await request("/api/private-computer", {
+    body: {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+    },
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.text.includes(SECRET_SENTINEL), false);
+  assert.deepEqual(enabled.value.result, {
+    provider: "private-browser",
+    alwaysAllowComputerActions: true,
+  });
+  assert.deepEqual(enabled.value.status, {
+    provider: "private-browser",
+    available: true,
+    permissions: {
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+    },
+  });
+  assert.deepEqual(updates, [
+    {
+      next: true,
+      acknowledged: true,
+      provider: "private-browser",
+    },
+  ]);
+
+  const status = await request("/api/codex/status");
+  assert.equal(
+    status.value.privateComputer.permissions.alwaysAllowComputerActions,
+    true,
+  );
+
+  for (const body of [
+    {
+      action: "permissions",
+      provider: "official-grok-cloud",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+    },
+    {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: "true",
+      acknowledged: true,
+    },
+    {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+      unexpected: true,
+    },
+  ])
+    assert.equal(
+      (await request("/api/private-computer", { body })).status,
+      400,
+    );
+  assert.equal(updates.length, 1);
 });
 
 test("helper results are allowlisted before anything reaches the renderer", async () => {

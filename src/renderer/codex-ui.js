@@ -23,6 +23,7 @@ let officialConnectionPollTimer = null;
 let officialApprovalPollTimer = null;
 let officialComputerOperationInFlight = false;
 let officialPermissionOperationInFlight = false;
+let privatePermissionOperationInFlight = false;
 let officialEnableAfterCursorLogin = false;
 let officialEnableContinuationInFlight = false;
 let providerActivationInFlight = false;
@@ -30,6 +31,7 @@ let providerConnectionNotice = { message: "", tone: "info" };
 let selectedProviderId = null;
 let officialComputerNotice = { message: "", tone: "info" };
 let officialPermissionNotice = { message: "", tone: "info" };
+let privatePermissionNotice = { message: "", tone: "info" };
 let pendingOAuthDevice = null;
 let activeModelPicker = null;
 let onboardingStep = "providers";
@@ -392,6 +394,17 @@ function setVendorPermissionNotice(message, tone = "info", root = document) {
   notice.dataset.tone = officialPermissionNotice.tone;
 }
 
+function setPrivatePermissionNotice(message, tone = "info", root = document) {
+  privatePermissionNotice = {
+    message: String(message || ""),
+    tone: tone === "error" ? "error" : "info",
+  };
+  const notice = root.querySelector?.("[data-codex-private-permission-notice]");
+  if (!notice) return;
+  notice.textContent = privatePermissionNotice.message;
+  notice.dataset.tone = privatePermissionNotice.tone;
+}
+
 function clearOfficialEnableIntent() {
   officialEnableAfterCursorLogin = false;
 }
@@ -431,6 +444,20 @@ function officialComputerState(status) {
       provider: "official-grok-cloud",
       alwaysAllowComputerActions:
         value.permissions?.provider === "official-grok-cloud" &&
+        value.permissions?.alwaysAllowComputerActions === true,
+    },
+  };
+}
+
+function privateComputerState(status) {
+  const value = status?.privateComputer || {};
+  return {
+    provider: "private-browser",
+    available: value.available !== false,
+    permissions: {
+      provider: "private-browser",
+      alwaysAllowComputerActions:
+        value.permissions?.provider === "private-browser" &&
         value.permissions?.alwaysAllowComputerActions === true,
     },
   };
@@ -577,41 +604,74 @@ function officialComputerHtml(status) {
 
 function vendorComputerPermissionsHtml(status) {
   const computer = officialComputerState(status);
-  const enabled = computer.permissions.alwaysAllowComputerActions;
+  const privateComputer = privateComputerState(status);
+  const privateEnabled = privateComputer.permissions.alwaysAllowComputerActions;
+  const vendorEnabled = computer.permissions.alwaysAllowComputerActions;
   const unavailable = computer.mode === "unknown";
-  const permissionLocked = unavailable || (!computer.connected && !enabled);
-  const busy = officialPermissionOperationInFlight;
-  const disabled = permissionLocked || busy || !enabled;
-  const enabledDescription =
+  const vendorLocked = unavailable || (!computer.connected && !vendorEnabled);
+  const privateBusy = privatePermissionOperationInFlight;
+  const vendorBusy = officialPermissionOperationInFlight;
+  const privateDisabled =
+    !privateComputer.available || privateBusy || !privateEnabled;
+  const vendorDisabled = vendorLocked || vendorBusy || !vendorEnabled;
+  const vendorEnabledDescription =
     computer.mode === "official" && computer.connected
       ? "On for this connected official vendor account. Signing out or starting another sign-in turns it off; you can also turn it off here to restore Allow once or Deny cards."
       : "Stored for this official vendor account on this Windows user. It is not active while the vendor computer is disconnected; you can turn it off here to restore Allow once or Deny cards.";
   return `
-    <section class="codex-card codex-permissions-card" aria-labelledby="codex-permissions-title" aria-busy="${busy ? "true" : "false"}">
+    <section class="codex-card codex-permissions-card" aria-labelledby="codex-permissions-title" aria-busy="${privateBusy || vendorBusy ? "true" : "false"}">
       <div class="codex-card-heading">
         <div>
-          <h2 id="codex-permissions-title">Permissions</h2>
-          <p>Controls for the shared official vendor computer only.</p>
+          <h2 id="codex-permissions-title">Computer permissions</h2>
+          <p>Choose separately for the Private browser and the vendor cloud computer.</p>
         </div>
-        <span class="codex-route-badge${enabled ? " is-vendor" : ""}">${enabled ? "Always allow is on" : "Ask for each action"}</span>
+        <span class="codex-route-badge">Provider-specific</span>
       </div>
-      <div class="codex-permission-warning" id="codex-vendor-permission-warning" role="note">
-        <strong>Turning this on gives employees broad control of the shared vendor computer.</strong>
-        <span>They may click, drag, type, press keys, submit forms, and navigate without showing an approval card for each action. This does not grant access to the Private browser or any other tool.</span>
-        <span>Take control, session and screen-generation changes, action deadlines, and safety stops still interrupt work. The provider-scoped choice is protected for this Windows user with Windows DPAPI.</span>
+      <div class="codex-permission-scope" data-provider="private-browser">
+        <div class="codex-permission-scope-heading">
+          <div><strong>Private browser</strong><small>Each employee's isolated local browser</small></div>
+          <span class="codex-route-badge${privateEnabled ? " is-active" : ""}">${privateEnabled ? "Always allow" : "Ask each time"}</span>
+        </div>
+        <div class="codex-permission-warning" id="codex-private-permission-warning" role="note">
+          <strong>Always allow lets employees control their Private browsers without asking for every action.</strong>
+          <span>Clicks, typing, key presses, form submissions, and navigation will run without an approval card. Take control, session changes, deadlines, and browser safety limits still stop work when needed.</span>
+        </div>
+        ${
+          privateEnabled
+            ? ""
+            : `<label class="codex-computer-ack"><input type="checkbox" data-codex-private-permission-ack aria-describedby="codex-private-permission-warning"${!privateComputer.available || privateBusy ? " disabled" : ""} /><span>I understand that employees can act in their Private browsers without asking each time.</span></label>`
+        }
+        <button class="codex-switch-row" type="button" role="switch" aria-checked="${privateEnabled ? "true" : "false"}" aria-describedby="codex-private-permission-warning" data-codex-private-always-allow${privateDisabled ? " disabled" : ""}>
+          <span class="codex-switch-icon" aria-hidden="true">${boltIcon({ size: 15 })}</span>
+          <span><strong>Always allow Private browser actions</strong><small>${privateEnabled ? "On. Private browser actions run without approval cards; turn this off to ask in chat again." : "Off. Non-automatic Private browser actions ask in the chat."}</small></span>
+          <span class="codex-switch-track" aria-hidden="true"><span></span></span>
+        </button>
+        ${!privateComputer.available ? '<p class="codex-official-error" role="alert">The Private browser service is unavailable, so this permission cannot be changed.</p>' : ""}
+        <p class="codex-settings-notice" data-codex-private-permission-notice data-tone="${privatePermissionNotice.tone}" aria-live="polite">${escapeHtml(privatePermissionNotice.message)}</p>
       </div>
-      ${
-        enabled
-          ? ""
-          : `<label class="codex-computer-ack"><input type="checkbox" data-codex-vendor-permission-ack aria-describedby="codex-vendor-permission-warning"${permissionLocked || busy ? " disabled" : ""} /><span>I understand that employees can act on the shared vendor computer without asking each time.</span></label>`
-      }
-      <button class="codex-switch-row" type="button" role="switch" aria-checked="${enabled ? "true" : "false"}" aria-describedby="codex-vendor-permission-warning" data-codex-vendor-always-allow${disabled ? " disabled" : ""}>
-        <span class="codex-switch-icon" aria-hidden="true">${boltIcon({ size: 15 })}</span>
-          <span><strong>Always allow computer actions</strong><small>${enabled ? enabledDescription : "Off. Each non-automatic vendor action asks in the chat."}</small></span>
-        <span class="codex-switch-track" aria-hidden="true"><span></span></span>
-      </button>
-      ${permissionLocked ? `<p class="codex-official-error" role="alert">${unavailable ? (enabled ? "The official provider helper is unavailable. Always allow remains stored and cannot be changed until the helper returns." : "The official provider helper is unavailable, so Always allow cannot be enabled.") : "Connect the official vendor account before enabling this permission."}</p>` : !computer.connected && enabled ? '<p class="codex-official-error" role="alert">The vendor computer is disconnected, but Always allow is still stored locally. Turn it off here or reconnect the account.</p>' : ""}
-      <p class="codex-settings-notice" data-codex-permission-notice data-tone="${officialPermissionNotice.tone}" aria-live="polite">${escapeHtml(officialPermissionNotice.message)}</p>
+      <div class="codex-permission-scope" data-provider="official-grok-cloud">
+        <div class="codex-permission-scope-heading">
+          <div><strong>Vendor cloud computer</strong><small>One shared remote computer for every employee</small></div>
+          <span class="codex-route-badge${vendorEnabled ? " is-vendor" : ""}">${vendorEnabled ? "Always allow" : "Ask each time"}</span>
+        </div>
+        <div class="codex-permission-warning" id="codex-vendor-permission-warning" role="note">
+          <strong>Always allow gives employees broad control of the shared vendor computer.</strong>
+          <span>They may click, drag, type, press keys, submit forms, and navigate without showing an approval card for each action. This never changes the Private browser permission above.</span>
+          <span>Take control, session and screen-generation changes, action deadlines, and safety stops still interrupt work. This choice is protected for this Windows user with Windows DPAPI.</span>
+        </div>
+        ${
+          vendorEnabled
+            ? ""
+            : `<label class="codex-computer-ack"><input type="checkbox" data-codex-vendor-permission-ack aria-describedby="codex-vendor-permission-warning"${vendorLocked || vendorBusy ? " disabled" : ""} /><span>I understand that employees can act on the shared vendor computer without asking each time.</span></label>`
+        }
+        <button class="codex-switch-row" type="button" role="switch" aria-checked="${vendorEnabled ? "true" : "false"}" aria-describedby="codex-vendor-permission-warning" data-codex-vendor-always-allow${vendorDisabled ? " disabled" : ""}>
+          <span class="codex-switch-icon" aria-hidden="true">${boltIcon({ size: 15 })}</span>
+          <span><strong>Always allow vendor computer actions</strong><small>${vendorEnabled ? vendorEnabledDescription : "Off. Non-automatic vendor actions ask in the chat."}</small></span>
+          <span class="codex-switch-track" aria-hidden="true"><span></span></span>
+        </button>
+        ${vendorLocked ? `<p class="codex-official-error" role="alert">${unavailable ? (vendorEnabled ? "The official provider helper is unavailable. Always allow remains stored and cannot be changed until the helper returns." : "The official provider helper is unavailable, so Always allow cannot be enabled.") : "Connect the official vendor account before enabling this permission."}</p>` : !computer.connected && vendorEnabled ? '<p class="codex-official-error" role="alert">The vendor computer is disconnected, but Always allow is still stored locally. Turn it off here or reconnect the account.</p>' : ""}
+        <p class="codex-settings-notice" data-codex-permission-notice data-tone="${officialPermissionNotice.tone}" aria-live="polite">${escapeHtml(officialPermissionNotice.message)}</p>
+      </div>
     </section>`;
 }
 
@@ -1714,6 +1774,77 @@ function wireConnectionPanel(panel) {
       rememberOnboardingCompleted();
       if (lastStatus) installCodexOnboarding(lastStatus);
     });
+  const privatePermissionAcknowledgement = panel.querySelector(
+    "[data-codex-private-permission-ack]",
+  );
+  const privatePermissionControl = panel.querySelector(
+    "[data-codex-private-always-allow]",
+  );
+  privatePermissionAcknowledgement?.addEventListener("change", () => {
+    privatePermissionAcknowledgement.removeAttribute("aria-invalid");
+    if (privatePermissionControl)
+      privatePermissionControl.disabled =
+        !privatePermissionAcknowledgement.checked;
+    if (privatePermissionAcknowledgement.checked)
+      setPrivatePermissionNotice("", "info", panel);
+  });
+  privatePermissionControl?.addEventListener("click", async () => {
+    const enabled =
+      privatePermissionControl.getAttribute("aria-checked") === "true";
+    const next = !enabled;
+    if (next && !privatePermissionAcknowledgement?.checked) {
+      privatePermissionAcknowledgement?.setAttribute("aria-invalid", "true");
+      privatePermissionAcknowledgement?.focus();
+      setPrivatePermissionNotice(
+        "Read the Private browser warning and check the acknowledgement before enabling Always allow.",
+        "error",
+        panel,
+      );
+      return;
+    }
+    if (privatePermissionOperationInFlight) return;
+    privatePermissionOperationInFlight = true;
+    privatePermissionControl.disabled = true;
+    if (privatePermissionAcknowledgement)
+      privatePermissionAcknowledgement.disabled = true;
+    setPrivatePermissionNotice(
+      next
+        ? "Saving the Private browser permission..."
+        : "Restoring Private browser approval cards...",
+      "info",
+      panel,
+    );
+    try {
+      const response = await request("/api/private-computer", {
+        action: "permissions",
+        provider: "private-browser",
+        alwaysAllowComputerActions: next,
+        acknowledged: next,
+      });
+      if (!response?.status?.permissions)
+        throw new Error(
+          "The Private browser did not confirm the permission change.",
+        );
+      lastStatus = {
+        ...lastStatus,
+        privateComputer: response.status,
+      };
+      setPrivatePermissionNotice(
+        next
+          ? "Always allow is on for Private browsers. New actions will run without approval cards."
+          : "Always allow is off for Private browsers. New actions will ask in the chat.",
+      );
+    } catch (error) {
+      setPrivatePermissionNotice(
+        error?.message || "The Private browser permission was not changed.",
+        "error",
+      );
+      await loadStatus();
+    } finally {
+      privatePermissionOperationInFlight = false;
+      if (lastStatus) installConnectionPanel(lastStatus);
+    }
+  });
   const permissionAcknowledgement = panel.querySelector(
     "[data-codex-vendor-permission-ack]",
   );
@@ -1768,7 +1899,7 @@ function wireConnectionPanel(panel) {
       };
       setVendorPermissionNotice(
         next
-          ? "Always allow is on for the official vendor computer only."
+          ? "Always allow is on for the vendor cloud computer. The Private browser setting is unchanged."
           : "Always allow is off. Vendor actions will ask in the chat again.",
       );
     } catch (error) {
@@ -2133,8 +2264,10 @@ function installConnectionPanel(status) {
       providerConnectionNotice,
       officialComputerOperationInFlight,
       officialPermissionOperationInFlight,
+      privatePermissionOperationInFlight,
       officialComputerNotice,
       officialPermissionNotice,
+      privatePermissionNotice,
     });
     if (panel.dataset.signature !== signature) {
       panel.dataset.signature = signature;
@@ -2972,6 +3105,12 @@ style.textContent = `
   .codex-computer-disclosure strong { color:#f4ddb2; }
   .codex-permission-warning { display:grid; gap:4px; padding:11px 12px; border:1px solid rgba(235,179,87,.4); border-radius:9px; color:#decba9; background:rgba(125,82,21,.15); font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
   .codex-permission-warning strong { color:#f4ddb2; }
+  .codex-permission-scope { display:grid; gap:10px; padding-block:14px; border-top:1px solid rgba(255,255,255,.1); }
+  .codex-card-heading + .codex-permission-scope { padding-top:4px; border-top:0; }
+  .codex-permission-scope-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+  .codex-permission-scope-heading>div { min-width:0; display:grid; gap:2px; }
+  .codex-permission-scope-heading strong { color:var(--sand-text-primary,#eee); font-size:13px; }
+  .codex-permission-scope-heading small { color:var(--sand-text-secondary,#aaa); font-size:11px; line-height:1.4; }
   .codex-official-login-domain { color:var(--sand-text-tertiary,#aaa); font-size:11px; line-height:1.45; overflow-wrap:anywhere; }
   .codex-official-login-domain strong { color:var(--sand-text-secondary,#ccc); }
   .codex-official-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }

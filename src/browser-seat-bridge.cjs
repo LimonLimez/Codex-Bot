@@ -488,6 +488,23 @@ function normalizeOfficialPermissions(value) {
   });
 }
 
+function normalizePrivatePermissions(value) {
+  return Object.freeze({
+    provider: "private-browser",
+    alwaysAllowComputerActions:
+      value?.provider === "private-browser" &&
+      value?.alwaysAllowComputerActions === true,
+  });
+}
+
+function publicPrivateComputerStatus() {
+  return Object.freeze({
+    provider: "private-browser",
+    available: true,
+    permissions: normalizePrivatePermissions(manager.computerPermissions()),
+  });
+}
+
 function normalizeOfficialStatus(value) {
   const mode = value?.mode;
   if (mode !== "private" && mode !== "official") {
@@ -692,6 +709,7 @@ function startViewServer({
           ...connectionManager.publicStatus(
             agentIds.length ? agentIds[0] : null,
           ),
+          privateComputer: publicPrivateComputerStatus(),
           officialComputer: await publicOfficialStatus(),
         });
         return;
@@ -788,6 +806,51 @@ function startViewServer({
           return;
         }
         throw new Error("Unknown Codex connection action.");
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/private-computer"
+      ) {
+        requireNoQuery(url);
+        if (
+          !/^application\/json(?:\s*;|$)/i.test(
+            String(request.headers["content-type"] || ""),
+          )
+        )
+          throw requestError(
+            "Private browser permission requests require application/json.",
+            400,
+          );
+        const body = await readJson(request);
+        requireExactBodyKeys(body, [
+          "acknowledged",
+          "action",
+          "alwaysAllowComputerActions",
+          "provider",
+        ]);
+        if (
+          body.action !== "permissions" ||
+          typeof body.alwaysAllowComputerActions !== "boolean" ||
+          body.provider !== "private-browser" ||
+          typeof body.acknowledged !== "boolean"
+        )
+          throw requestError(
+            "The private browser permission request is invalid.",
+            400,
+          );
+        const permissions = normalizePrivatePermissions(
+          manager.setComputerPermissions(
+            body.alwaysAllowComputerActions,
+            body.acknowledged,
+            body.provider,
+          ),
+        );
+        sendJson(response, 200, {
+          ok: true,
+          result: permissions,
+          status: publicPrivateComputerStatus(),
+        });
+        return;
       }
       if (
         request.method === "POST" &&
@@ -1034,6 +1097,7 @@ function startViewServer({
         sendJson(response, 200, {
           seats: manager.status(),
           maxActive: manager.MAX_ACTIVE,
+          privateComputer: publicPrivateComputerStatus(),
           officialComputer: await publicOfficialStatus(),
         });
         return;

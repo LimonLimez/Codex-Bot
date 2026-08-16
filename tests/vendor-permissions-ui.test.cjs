@@ -32,7 +32,9 @@ const approvalHelpers = Function(
 const vendorComputerPermissionsHtml = Function(
   `"use strict";
    let officialPermissionOperationInFlight = false;
+   let privatePermissionOperationInFlight = false;
    let officialPermissionNotice = { message: "", tone: "info" };
+   let privatePermissionNotice = { message: "", tone: "info" };
    ${sourceBetween(ui, "function boltIcon", "function closeIcon")}
    ${sourceBetween(ui, "function escapeHtml", "function initials")}
    ${sourceBetween(
@@ -48,8 +50,15 @@ const vendorComputerPermissionsHtml = Function(
    return vendorComputerPermissionsHtml;`,
 )();
 
-test("Settings has a dedicated, warned, provider-scoped Permissions section", () => {
+test("Settings separates Private browser and vendor Always allow permissions", () => {
   const disabled = vendorComputerPermissionsHtml({
+    privateComputer: {
+      available: true,
+      permissions: {
+        provider: "private-browser",
+        alwaysAllowComputerActions: false,
+      },
+    },
     officialComputer: {
       mode: "private",
       permissions: {
@@ -58,16 +67,57 @@ test("Settings has a dedicated, warned, provider-scoped Permissions section", ()
       },
     },
   });
-  assert.match(disabled, /<h2 id="codex-permissions-title">Permissions<\/h2>/);
-  assert.match(disabled, /Always allow computer actions/);
+  assert.match(
+    disabled,
+    /<h2 id="codex-permissions-title">Computer permissions<\/h2>/,
+  );
+  assert.match(disabled, /Choose separately for the Private browser/);
+  assert.match(disabled, /Always allow Private browser actions/);
+  assert.match(disabled, /Always allow vendor computer actions/);
+  assert.match(disabled, /data-codex-private-permission-ack/);
+  assert.match(disabled, /data-codex-private-always-allow disabled/);
   assert.match(disabled, /broad control of the shared vendor computer/);
-  assert.match(disabled, /does not grant access to the Private browser/);
+  assert.match(disabled, /never changes the Private browser permission above/);
   assert.match(disabled, /session and screen-generation changes/);
   assert.match(disabled, /Windows DPAPI/);
   assert.match(disabled, /data-codex-vendor-permission-ack/);
   assert.match(disabled, /data-codex-vendor-always-allow disabled/);
 
+  const privateEnabled = vendorComputerPermissionsHtml({
+    privateComputer: {
+      available: true,
+      permissions: {
+        provider: "private-browser",
+        alwaysAllowComputerActions: true,
+      },
+    },
+    officialComputer: {
+      mode: "private",
+      permissions: {
+        provider: "official-grok-cloud",
+        alwaysAllowComputerActions: false,
+      },
+    },
+  });
+  assert.match(privateEnabled, /Always allow Private browser actions/);
+  assert.match(
+    privateEnabled,
+    /Private browser actions run without approval cards/,
+  );
+  assert.match(
+    privateEnabled,
+    /data-codex-private-always-allow[^>]*aria-checked="true"|aria-checked="true"[^>]*data-codex-private-always-allow/,
+  );
+  assert.doesNotMatch(privateEnabled, /data-codex-private-permission-ack/);
+
   const enabled = vendorComputerPermissionsHtml({
+    privateComputer: {
+      available: true,
+      permissions: {
+        provider: "private-browser",
+        alwaysAllowComputerActions: false,
+      },
+    },
     officialComputer: {
       mode: "official",
       connected: true,
@@ -77,14 +127,24 @@ test("Settings has a dedicated, warned, provider-scoped Permissions section", ()
       },
     },
   });
-  assert.match(enabled, /Always allow is on/);
-  assert.match(enabled, /role="switch" aria-checked="true"/);
+  assert.match(enabled, /data-provider="official-grok-cloud"/);
+  assert.match(
+    enabled,
+    /aria-checked="true"[^>]*data-codex-vendor-always-allow/,
+  );
   assert.match(enabled, /On for this connected official vendor account/);
   assert.match(enabled, /restore Allow once or Deny cards/);
   assert.match(enabled, /Signing out or starting another sign-in turns it off/);
   assert.doesNotMatch(enabled, /data-codex-vendor-permission-ack/);
 
   const enabledWhileDisconnected = vendorComputerPermissionsHtml({
+    privateComputer: {
+      available: true,
+      permissions: {
+        provider: "private-browser",
+        alwaysAllowComputerActions: false,
+      },
+    },
     officialComputer: {
       mode: "private",
       connected: false,
@@ -110,6 +170,13 @@ test("Settings has a dedicated, warned, provider-scoped Permissions section", ()
   assert.doesNotMatch(enabledWhileDisconnected, /signed-in official vendor/);
 
   const enabledWhileHelperUnavailable = vendorComputerPermissionsHtml({
+    privateComputer: {
+      available: true,
+      permissions: {
+        provider: "private-browser",
+        alwaysAllowComputerActions: false,
+      },
+    },
     officialComputer: {
       mode: "unknown",
       connected: false,
@@ -389,7 +456,7 @@ test("a transient approval send failure restores only actions safe for the still
   assert.equal(privateApproval.allow.disabled, false);
 });
 
-test("renderer polls one approval list in both computer modes and saves an exact vendor policy", () => {
+test("renderer polls one approval list and saves exact provider-scoped policies", () => {
   const polling = sourceBetween(
     ui,
     "async function refreshOfficialApprovalForForm",
@@ -409,6 +476,8 @@ test("renderer polls one approval list in both computer modes and saves an exact
     "function installConnectionPanel",
   );
   assert.match(wiring, /action: "permissions"/);
+  assert.match(wiring, /request\("\/api\/private-computer"/);
+  assert.match(wiring, /provider: "private-browser"/);
   assert.match(wiring, /provider: "official-grok-cloud"/);
   assert.match(wiring, /alwaysAllowComputerActions: next/);
   assert.match(wiring, /acknowledged: next/);

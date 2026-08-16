@@ -116,6 +116,84 @@ test("agent browser input is approval-gated while direct takeover is a trusted u
   assert.match(manager, /acquireUserControl/);
 });
 
+test("Private browser Always allow persists, bypasses only action prompts, and fails closed", async (t) => {
+  const dataRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "open-bot-private-permission-"),
+  );
+  t.after(() => fs.rmSync(dataRoot, { force: true, recursive: true }));
+  const manager = loadIsolatedSeatManager(dataRoot);
+  assert.deepEqual(manager.computerPermissions(), {
+    provider: "private-browser",
+    alwaysAllowComputerActions: false,
+  });
+  assert.throws(
+    () => manager.setComputerPermissions(true, false, "private-browser"),
+    /requires acknowledgement/,
+  );
+  assert.deepEqual(
+    manager.setComputerPermissions(true, true, "private-browser"),
+    {
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+    },
+  );
+  assert.equal(
+    loadIsolatedSeatManager(dataRoot).computerPermissions()
+      .alwaysAllowComputerActions,
+    true,
+  );
+
+  const sinkCalls = [];
+  const page = {
+    isClosed: () => false,
+    url: () => "https://example.com/work",
+    mouse: {
+      click: async () => sinkCalls.push("mouse.click"),
+    },
+    keyboard: {},
+    locator: () => ({ innerText: async () => "ready" }),
+    screenshot: async () => Buffer.from("frame"),
+    title: async () => "Example",
+    waitForTimeout: async () => {},
+  };
+  const seatKey = "always-allow-seat";
+  manager.__activeSeatsForTest.set(seatKey, {
+    key: seatKey,
+    profileId: "always-allow-profile",
+    profileDir: dataRoot,
+    downloadsDir: dataRoot,
+    sessionStatePath: path.join(dataRoot, "session-state.json"),
+    context: { pages: () => [page], newPage: async () => page },
+    publicWebProxy: null,
+    page,
+    cursor: { x: 640, y: 400 },
+    address: null,
+    navigationEpoch: 0,
+    queue: Promise.resolve(),
+    pending: 0,
+    lastUsed: Date.now(),
+    lastPageInfo: { state: "loaded", title: "Example", bodyPreview: "ready" },
+    restoringSession: false,
+    closing: false,
+    closePromise: null,
+  });
+  await manager.executeSeatActions(seatKey, [
+    { kind: "click", coordinate: { x: 12, y: 34 }, button: "left" },
+  ]);
+  assert.deepEqual(sinkCalls, ["mouse.click"]);
+  assert.equal(manager.pendingApprovalForSeat(seatKey), null);
+
+  fs.writeFileSync(path.join(dataRoot, "permissions.json"), "corrupt");
+  assert.equal(manager.computerPermissions().alwaysAllowComputerActions, false);
+  assert.deepEqual(
+    manager.setComputerPermissions(false, false, "private-browser"),
+    {
+      provider: "private-browser",
+      alwaysAllowComputerActions: false,
+    },
+  );
+});
+
 test("takeover during the final validated page lookup stops the approved agent action", async (t) => {
   const dataRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "codex-seat-takeover-"),
