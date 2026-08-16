@@ -177,6 +177,11 @@ it. The user completes any macOS system prompt or System Settings step. OpenBot
 cannot self-grant TCC permissions, install privileged helpers, request root, or
 turn Full Disk Access into an implicit per-bot grant.
 
+A macOS TCC approval applies to the signed OpenBot application, not to an
+individual bot. Therefore TCC approval alone never authorizes an action. The
+OpenBot permission broker must still prove an Allow Once or Always Allow for
+This Bot decision for the exact bot, resource, capability, and current action.
+
 File and folder access uses explicit user selection and scoped persisted
 bookmarks where macOS supports them. App control uses documented macOS
 Automation or Accessibility paths and is restricted to the app named in the
@@ -227,7 +232,7 @@ subagent cannot:
 - access another bot's box, local desktop profile, grants, or workspace;
 - replace, reset, hand back, retire, or change the parent's Computer target;
 - publish Computer frames as another bot;
-- persist its task directory outside the parent bot's native lifecycle policy.
+- persist its task directory outside the parent target's lifecycle policy.
 
 Concurrent subagent operations rely on target-specific task/workspace isolation
 and OpenBot's bot/generation fence. If the selected target cannot prove safe
