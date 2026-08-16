@@ -136,6 +136,8 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/desktop/model-selection-store.cjs",
         "dist/codex/desktop/openbot-user-data.cjs",
         "dist/codex/desktop/runtime.cjs",
+        "dist/codex/local/local-desktop-manager.cjs",
+        "dist/codex/local/local-helper-protocol.cjs",
         "dist/codex/local/local-permission-broker.cjs",
         "dist/codex/local/local-permission-store.cjs",
         "dist/codex/node_modules/ws/LICENSE",

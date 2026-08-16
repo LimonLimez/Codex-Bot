@@ -28,6 +28,8 @@ const DESKTOP_FILES = Object.freeze([
   "bots/remote-app-server-client.cjs",
   "bots/runtime-controller.cjs",
   "bots/runtime-provider.cjs",
+  "local/local-desktop-manager.cjs",
+  "local/local-helper-protocol.cjs",
   "local/local-permission-broker.cjs",
   "local/local-permission-store.cjs",
 ]);
