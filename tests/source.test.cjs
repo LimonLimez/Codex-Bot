@@ -515,7 +515,7 @@ test("fresh installs enter the genuine workspace behind the local Codex connecti
   assert.match(ui, /installCodexOnboarding\(lastStatus\)/);
   assert.match(
     ui,
-    /status\?\.account\?\.signedIn \|\| status\?\.connection\?\.mode === "api-key"/,
+    /status\?\.account\?\.signedIn[\s\S]{0,140}status\?\.connection\?\.mode === "local"/,
   );
   assert.match(ui, /document\.body\.append\(onboarding\)/);
 });
@@ -551,10 +551,19 @@ test("the first-run provider gate blocks the workspace and offers every reviewed
     }),
     true,
   );
+  assert.equal(
+    hasCodexConnection({
+      account: { signedIn: false },
+      connection: { mode: "local" },
+    }),
+    true,
+  );
   assert.match(ui, /Connect an AI provider to start/);
   assert.match(ui, /data-codex-provider/);
   assert.match(ui, /data-login-kind/);
   assert.match(ui, /data-codex-vertex-form/);
+  assert.match(ui, /data-codex-local-form/);
+  assert.match(ui, /action: "local-connect"/);
   assert.match(ui, /Use OpenAI API key/);
   assert.match(ui, /child\.inert = true/);
   assert.match(ui, /data-codex-connection-required/);
@@ -565,6 +574,37 @@ test("the first-run provider gate blocks the workspace and offers every reviewed
   assert.match(ui, /onboarding\?\.remove\(\)/);
   assert.match(ui, /Manage AI provider/);
   assert.doesNotMatch(ui, /\u00c2|\u00c3|\u00e2[\u0080-\u00bf]|\uFFFD/);
+});
+
+test("local model support is documented as loopback-only and capability-dependent", () => {
+  const readme = read("README.md");
+  const security = read("SECURITY.md");
+  const privacy = read("PRIVACY.md");
+  const connection = read("src/codex-connection.cjs");
+  const bridge = read("src/bridge.cjs");
+
+  assert.match(readme, /Ollama, LM Studio, or vLLM/);
+  assert.match(
+    readme,
+    /OpenAI-compatible streaming chat completions and tool calling/,
+  );
+  assert.match(
+    readme,
+    /may itself download models, contact a remote backend, or retain data/,
+  );
+  assert.match(security, /literal `http:\/\/127\.0\.0\.1:<port>`/);
+  assert.match(
+    security,
+    /timeout, streaming response-size cap, bounded model count/,
+  );
+  assert.match(privacy, /configured local OpenAI-compatible server/);
+  assert.match(
+    privacy,
+    /independently installed local server may download models, relay requests/,
+  );
+  assert.match(connection, /LOCAL_MODELS_RESPONSE_LIMIT = 1024 \* 1024/);
+  assert.match(connection, /redirect: "error"/);
+  assert.match(bridge, /connection\.reasoningSupported !== false/);
 });
 
 test("the stock desktop coordinator uses only the configured local gateway identity", () => {
