@@ -343,6 +343,19 @@ test(
       );
       assert.match(groupInstruction.content, /Do not launch background tasks/i);
       assert.match(groupInstruction.content, /rather than in a direct chat/i);
+      assert.match(
+        groupInstruction.content,
+        /use Computer when it is available/i,
+      );
+      assert.match(
+        groupInstruction.content,
+        /Shell approval denial as a browser-permission failure/i,
+      );
+      const policy = requestPayload.messages.find((message) =>
+        String(message.content).includes("<digital_coworker_compatibility"),
+      );
+      assert.match(policy.content, /Permissions are capability-specific/i);
+      assert.match(policy.content, /denied Shell call is not evidence/i);
       assert.match(groupInstruction.content, /without asking whether/i);
       assert.match(groupInstruction.content, /Never send generic readiness/i);
       assert.match(
@@ -411,6 +424,7 @@ test(
       const payload = JSON.parse(options.body);
       requestPayloads.push(payload);
       const firstStep = requestPayloads.length === 1;
+      const postRoomStep = requestPayloads.length === 3;
       const toolCall = firstStep
         ? {
             index: 0,
@@ -422,18 +436,27 @@ test(
               }),
             },
           }
-        : {
-            index: 0,
-            id: "weather-room-result",
-            function: {
-              name: "SendMessage",
-              arguments: JSON.stringify({
-                type: "text",
-                content:
-                  "Indianapolis: 78°F and partly cloudy now; the next three days stay warm with scattered storms possible Tuesday.",
-              }),
-            },
-          };
+        : postRoomStep
+          ? {
+              index: 0,
+              id: "forbidden-background-work",
+              function: {
+                name: "Task",
+                arguments: JSON.stringify({ task: "continue in background" }),
+              },
+            }
+          : {
+              index: 0,
+              id: "weather-room-result",
+              function: {
+                name: "SendMessage",
+                arguments: JSON.stringify({
+                  type: "text",
+                  content:
+                    "Indianapolis: 78°F and partly cloudy now; the next three days stay warm with scattered storms possible Tuesday.",
+                }),
+              },
+            };
       const body = [
         {
           id: firstStep ? "group-work" : "group-result",
@@ -539,6 +562,48 @@ test(
           },
         },
       ]);
+
+      const postRoomHistory = [
+        ...continuedHistory,
+        secondResponse.messages[0],
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "weather-room-result",
+              toolName: "SendMessage",
+              result: { type: "text", content: "Delivered to room." },
+            },
+          ],
+        },
+      ];
+      const third = bridge
+        .createPromptSession({ agentId: "group-research-bot" })
+        .getExecutor(postRoomHistory)
+        .stream({}, "group-post-message-invocation", workTools, {});
+      const thirdEvents = [];
+      for await (const event of third.fullStream) thirdEvents.push(event);
+      const thirdResponse = await third.response;
+
+      assert.equal(requestPayloads.length, 3);
+      assert.equal(requestPayloads[2].tools, undefined);
+      assert.equal(requestPayloads[2].tool_choice, "none");
+      assert.equal(requestPayloads[2].parallel_tool_calls, false);
+      assert.equal(
+        requestPayloads[2].messages.some((message) =>
+          String(message.content).includes("<post_group_message>"),
+        ),
+        true,
+      );
+      assert.equal(
+        thirdEvents.some(
+          (event) =>
+            event.type === "text-delta" || event.type.startsWith("tool-call"),
+        ),
+        false,
+      );
+      assert.deepEqual(thirdResponse.messages[0].content, []);
     } finally {
       connectionManager.getConnection = originalGetConnection;
       globalThis.fetch = originalFetch;

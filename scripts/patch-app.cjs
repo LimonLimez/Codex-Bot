@@ -397,6 +397,16 @@ function verifyHostComputerSeatRoutingSource(hostSource) {
     ],
     "turn tool assembly",
   ).source;
+  const localMainRegistration = tools.indexOf(
+    'if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {',
+  );
+  const computerRegistration = tools.indexOf(
+    "createComputerTool(remoteBoxResourceAccessor, {",
+  );
+  assertPatchInvariant(
+    localMainRegistration >= 0 && computerRegistration > localMainRegistration,
+    "local private and same-user group turns receive the direct employee-scoped Computer tool",
+  );
   const computer = sourceRegion(
     tools,
     "createComputerTool(remoteBoxResourceAccessor, {",
@@ -430,6 +440,17 @@ function verifyHostComputerSeatRoutingSource(hostSource) {
     tools.split("seatKey: host.resolveBoxId(),").length - 1 === 2,
     "only the Computer and Screenshot registrations receive employee browser-seat keys",
   );
+  for (const marker of [
+    'const directLocalComputerOffered = process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1" && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable();',
+    "Use Computer directly for browser and desktop work",
+    "A denied Shell call does not mean browser access is blocked",
+    "real Computer approval card",
+  ]) {
+    assertPatchInvariant(
+      hostSource.includes(marker),
+      `local direct-computer guidance retains ${marker}`,
+    );
+  }
 }
 
 function verifyLocalExecComputerIsolationSource(localExecSource) {
@@ -1657,6 +1678,26 @@ try {
     "        getPersistImage: () => host.persistImage,\n        seatKey: host.resolveBoxId(),\n      })",
     1,
     "stable employee Screenshot seat key",
+  );
+  text = replaceOnce(
+    text,
+    "  if (host.isComputerUseSubagent && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {",
+    '  if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {',
+    "direct local Computer availability",
+  );
+  text = replaceOnce(
+    text,
+    '    const browserUseOffered = host.isBrowserUseSubagentEnabled?.() === true;\n    return [\n      "## The box desktop",\n      ...browserUseOffered ? [',
+    `    const browserUseOffered = host.isBrowserUseSubagentEnabled?.() === true;
+    const directLocalComputerOffered = process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1" && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable();
+    return [
+      "## The box desktop",
+      ...directLocalComputerOffered ? [
+        "You have Computer and the read-only Screenshot on your own employee browser seat. Use Computer directly for browser and desktop work, including public web research; do not substitute Shell curl, Python networking, or a background computerUse task when Computer is listed.",
+        "Computer follows the app's real per-action computer policy. If an action needs approval, the app presents the real Computer approval card. Do not invent an approval, ask only in prose, or tell the user to change Agent execution, Shell, vendor-computer, or another unrelated permission.",
+        "A denied Shell call does not mean browser access is blocked. Continue through Computer, inspect the returned screenshot after each material action, and verify the destination or result before reporting success."
+      ] : browserUseOffered ? [`,
+    "direct local Computer guidance",
   );
   text = replaceOnce(
     text,
