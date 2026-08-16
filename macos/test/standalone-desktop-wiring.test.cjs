@@ -247,7 +247,7 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   assert.equal(targetDisposed, 1);
 });
 
-test("desktop runtime teardown waits for standalone and Local Desktop cancellation before closing routers", async () => {
+test("desktop runtime starts every owner before awaiting standalone and Local Desktop cancellation", async () => {
   const { installDesktopRuntime } = require(runtimePath);
   const handlers = new Map();
   const order = [];
@@ -300,17 +300,22 @@ test("desktop runtime teardown waits for standalone and Local Desktop cancellati
   assert.equal(first, second);
   assert.equal(settled, false);
   assert.equal(handlers.size, 0);
-  assert.deepEqual(order, ["conversations-start"]);
+  assert.deepEqual(order, [
+    "conversations-start", "boundary-start", "target-router", "account", "codex", "sidecar", "controller",
+  ]);
 
   conversationsGate.resolve();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(order, ["conversations-start", "conversations-done", "boundary-start"]);
+  assert.deepEqual(order, [
+    "conversations-start", "boundary-start", "target-router", "account", "codex", "sidecar", "controller",
+    "conversations-done",
+  ]);
   assert.equal(settled, false);
   boundaryGate.resolve();
   await first;
   assert.deepEqual(order, [
-    "conversations-start", "conversations-done", "boundary-start", "boundary-done",
-    "target-router", "account", "codex", "sidecar", "controller",
+    "conversations-start", "boundary-start", "target-router", "account", "codex", "sidecar", "controller",
+    "conversations-done", "boundary-done",
   ]);
 });
 
@@ -413,6 +418,7 @@ test("top-level runtime disposal releases an adopted Computer source while merge
   });
   let runtimeSettled = false;
   const runtimeDisposal = installed.dispose().then(() => { runtimeSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
   for (let attempt = 0; attempt < 20 && !cleanupClock.pending(); attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
@@ -480,6 +486,105 @@ test("every repeated before-quit is prevented until one disposal acknowledgement
   assert.equal(quits, 1);
   assert.equal(prevented, 3);
   assert.equal(beforeQuitListeners.size, 0);
+});
+
+test("quit deadline hands off once after every owned disposer starts without falsifying acknowledgement", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const boundaryGate = deferred();
+  const beforeQuitListeners = new Set();
+  const disposalCalls = new Map();
+  let deadline = null;
+  let prevented = 0;
+  let quits = 0;
+  let vendorQuitEvents = 0;
+  const vendorListener = () => { vendorQuitEvents += 1; };
+  beforeQuitListeners.add(vendorListener);
+  const noteDisposal = (name, effect = () => undefined) => () => {
+    disposalCalls.set(name, (disposalCalls.get(name) || 0) + 1);
+    return effect();
+  };
+  const electron = {
+    app: {
+      on(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.add(listener); },
+      off(event, listener) { assert.equal(event, "before-quit"); beforeQuitListeners.delete(listener); },
+      quit() {
+        quits += 1;
+        for (const listener of [...beforeQuitListeners]) listener({ preventDefault() { prevented += 1; } });
+      },
+      exit() { assert.fail("OpenBot must hand shutdown back through app.quit()."); },
+    },
+    ipcMain: { handle() {}, removeHandler() {} },
+    BrowserWindow: { fromWebContents() { return null; }, getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: {
+      on() {}, off() {},
+      dispose: noteDisposal("controller"),
+    },
+    selectionStore: {},
+    computerBoundary: {
+      on() {}, off() {},
+      dispose: noteDisposal("computer-boundary", () => boundaryGate.promise),
+    },
+    computerTargetRouter: { dispose: noteDisposal("computer-router") },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose: noteDisposal("account"),
+    },
+    inferenceBridge: { dispose: noteDisposal("inference-bridge") },
+    codexManager: { stop: noteDisposal("codex") },
+    sidecarManager: { stop: noteDisposal("sidecar") },
+    setQuitTimeout(callback, milliseconds) {
+      assert.equal(deadline, null);
+      assert.equal(typeof callback, "function");
+      assert.equal(Number.isFinite(milliseconds) && milliseconds > 0, true);
+      deadline = { callback, cleared: false };
+      return deadline;
+    },
+    clearQuitTimeout(value) {
+      assert.equal(value, deadline);
+      value.cleared = true;
+    },
+  });
+  const requestQuit = () => {
+    for (const listener of [...beforeQuitListeners]) listener({ preventDefault() { prevented += 1; } });
+  };
+
+  requestQuit();
+  requestQuit();
+  requestQuit();
+  assert.equal(prevented, 3);
+  assert.equal(vendorQuitEvents, 3);
+  assert.deepEqual(Object.fromEntries(disposalCalls), {
+    "computer-boundary": 1,
+    "computer-router": 1,
+    account: 1,
+    "inference-bridge": 1,
+    codex: 1,
+    sidecar: 1,
+    controller: 1,
+  });
+  assert.equal(quits, 0);
+  assert.equal(Boolean(deadline && !deadline.cleared), true);
+  let disposalSettled = false;
+  const disposal = installed.dispose().then(() => { disposalSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposalSettled, false);
+
+  deadline.cleared = true;
+  deadline.callback();
+  assert.equal(quits, 1);
+  assert.equal(prevented, 3);
+  assert.equal(vendorQuitEvents, 4);
+  assert.equal(beforeQuitListeners.size, 1);
+  assert.equal(beforeQuitListeners.has(vendorListener), true);
+
+  boundaryGate.resolve();
+  await disposal;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposalSettled, true);
+  assert.equal(quits, 1);
+  assert.deepEqual([...disposalCalls.values()], [1, 1, 1, 1, 1, 1, 1]);
 });
 
 test("reentrant before-quit during synchronous handler removal shares one cleanup and one final quit", async () => {
@@ -597,7 +702,7 @@ test("a synchronous teardown exception cannot orphan repeated before-quit cleanu
   assert.equal(prevented, 2);
   assert.deepEqual(listenerErrors, []);
   assert.equal(boundaryDisposals, 1);
-  assert.equal(controllerDisposals, 0);
+  assert.equal(controllerDisposals, 1);
   assert.equal(quits, 0);
 
   boundaryGate.resolve();

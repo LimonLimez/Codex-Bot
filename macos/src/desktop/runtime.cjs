@@ -64,6 +64,7 @@ const CATALOG_CHANGE_CHANNEL = "codex-catalog:changed";
 const COMPUTER_CHANGE_CHANNEL = "openbot-computer:changed";
 const COMPUTER_PERMISSION_CHANNEL = "openbot-computer:permission-requested";
 const INSTALLED = Symbol.for("codex.bot.macos.desktop-runtime");
+const QUIT_HANDOFF_TIMEOUT_MS = 5_000;
 const OPTIONAL_MODEL_EFFORTS = Object.freeze({
   "claude-fable-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
   "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
@@ -802,6 +803,12 @@ function installDesktopRuntime(electron, injected = {}) {
     async connectProvider() { throw sanitizedFailure(); },
     stop() {},
   });
+  const setQuitTimeout = typeof dependencies.setQuitTimeout === "function"
+    ? dependencies.setQuitTimeout
+    : setTimeout;
+  const clearQuitTimeout = typeof dependencies.clearQuitTimeout === "function"
+    ? dependencies.clearQuitTimeout
+    : clearTimeout;
   const inferenceBridge = dependencies.inferenceBridge || null;
   const standaloneConversations = dependencies.standaloneConversations
     || inferenceBridge?.conversations
@@ -824,6 +831,9 @@ function installDesktopRuntime(electron, injected = {}) {
   let disposeComplete = false;
   let quitRequested = false;
   let finalQuitIssued = false;
+  let quitHandoffStarted = false;
+  let quitHandoffSettled = false;
+  let quitDeadlineHandle = null;
   let disposed = false;
   const standaloneIpc = standaloneConversations
     ? installStandaloneConversationIpc({ electron, controller: standaloneConversations })
@@ -1208,48 +1218,46 @@ function installDesktopRuntime(electron, injected = {}) {
       let settleDispose;
       disposePromise = new Promise((resolve) => { settleDispose = resolve; });
       disposed = true;
-      const settle = async (effect) => {
-        try { await effect(); } catch {}
+      const acknowledgements = [];
+      const capture = (effect) => {
+        try { acknowledgements.push(Promise.resolve(effect()).catch(() => {})); } catch {}
       };
-      const teardown = Promise.resolve().then(async () => {
+      capture(() => profileSetupReceipts.clear());
+      capture(() => computerSetupReceipts.clear());
+      for (const channel of registered) {
+        capture(() => electron.ipcMain.removeHandler(channel));
+      }
+      capture(() => controller.off?.("bot-changed", onBotChanged));
+      capture(() => controller.off?.("runtime-changed", onRuntimeChanged));
+      capture(() => controller.off?.("runtime-event", onRuntimeEvent));
+      capture(() => accountController.off?.("account-changed", onAccountChanged));
+      capture(() => accountController.off?.("catalog-changed", onCatalogChanged));
+      capture(() => computerBoundary.off?.("changed", onComputerChanged));
+      capture(() => computerBoundary.off?.("permission-requested", onComputerPermission));
+      capture(() => localFrameIpc?.dispose());
+      capture(() => { delete process.env.CODEX_BOT_CLIPROXY_URL; });
+      capture(() => { delete process.env.CODEX_BOT_CLIPROXY_TOKEN; });
+      capture(() => { delete process.env.CODEX_BOT_INFERENCE_ENDPOINT; });
+      capture(() => { delete process.env.CODEX_BOT_INFERENCE_CAPABILITY; });
+      capture(() => standaloneIpc?.dispose?.());
+      capture(() => standaloneConversations?.dispose?.());
+      capture(() => computerBoundary.dispose?.());
+      capture(() => computerTargetRouter?.dispose?.());
+      capture(() => accountController.dispose());
+      capture(() => inferenceBridge?.dispose?.());
+      capture(() => codexManager.stop());
+      capture(() => sidecarManager.stop());
+      capture(() => controller.dispose());
+      const finishDispose = () => {
         try {
-          await settle(() => profileSetupReceipts.clear());
-          await settle(() => computerSetupReceipts.clear());
-          for (const channel of registered) {
-            await settle(() => electron.ipcMain.removeHandler(channel));
-          }
-          await settle(() => controller.off?.("bot-changed", onBotChanged));
-          await settle(() => controller.off?.("runtime-changed", onRuntimeChanged));
-          await settle(() => controller.off?.("runtime-event", onRuntimeEvent));
-          await settle(() => accountController.off?.("account-changed", onAccountChanged));
-          await settle(() => accountController.off?.("catalog-changed", onCatalogChanged));
-          await settle(() => computerBoundary.off?.("changed", onComputerChanged));
-          await settle(() => computerBoundary.off?.("permission-requested", onComputerPermission));
-          await settle(() => localFrameIpc?.dispose());
-          await settle(() => { delete process.env.CODEX_BOT_CLIPROXY_URL; });
-          await settle(() => { delete process.env.CODEX_BOT_CLIPROXY_TOKEN; });
-          await settle(() => { delete process.env.CODEX_BOT_INFERENCE_ENDPOINT; });
-          await settle(() => { delete process.env.CODEX_BOT_INFERENCE_CAPABILITY; });
-          let standaloneIpcTeardown;
-          let standaloneConversationTeardown;
-          try { standaloneIpcTeardown = standaloneIpc?.dispose?.(); } catch {}
-          try { standaloneConversationTeardown = standaloneConversations?.dispose?.(); } catch {}
-          await settle(() => standaloneIpcTeardown);
-          await settle(() => standaloneConversationTeardown);
-          await settle(() => computerBoundary.dispose?.());
-          await settle(() => computerTargetRouter?.dispose?.());
-          await settle(() => accountController.dispose());
-          await settle(() => inferenceBridge?.dispose?.());
-          await settle(() => codexManager.stop());
-          await settle(() => sidecarManager.stop());
-          await settle(() => controller.dispose());
-        } finally {
           disposeComplete = true;
           try { delete electron.app[INSTALLED]; } catch {}
           if (!quitRequested) removeBeforeQuitListener();
+        } finally {
+          settleDispose();
         }
-      });
-      void teardown.then(settleDispose, settleDispose);
+      };
+      void Promise.all(acknowledgements).then(finishDispose, finishDispose);
       return disposePromise;
     },
   });
@@ -1261,16 +1269,41 @@ function installDesktopRuntime(electron, injected = {}) {
     } catch {}
   };
   const issueFinalQuit = () => {
-    if (!quitRequested || !disposeComplete || finalQuitIssued) return;
+    if (!quitRequested || finalQuitIssued) return;
     finalQuitIssued = true;
     removeBeforeQuitListener();
     try { electron.app.quit?.(); } catch {}
+  };
+  const settleQuitHandoff = () => {
+    if (quitHandoffSettled) return;
+    quitHandoffSettled = true;
+    if (quitDeadlineHandle !== null) {
+      const handle = quitDeadlineHandle;
+      quitDeadlineHandle = null;
+      try { clearQuitTimeout(handle); } catch {}
+    }
+    issueFinalQuit();
+  };
+  const startQuitHandoff = () => {
+    if (quitHandoffStarted) return;
+    quitHandoffStarted = true;
+    const disposal = api.dispose();
+    try {
+      quitDeadlineHandle = setQuitTimeout(() => {
+        quitDeadlineHandle = null;
+        settleQuitHandoff();
+      }, QUIT_HANDOFF_TIMEOUT_MS);
+      try { quitDeadlineHandle?.unref?.(); } catch {}
+    } catch {
+      settleQuitHandoff();
+    }
+    void disposal.then(settleQuitHandoff);
   };
   const onBeforeQuit = (event) => {
     if (disposeComplete || finalQuitIssued) return;
     try { event?.preventDefault?.(); } catch {}
     quitRequested = true;
-    void api.dispose().then(issueFinalQuit);
+    startQuitHandoff();
   };
   electron.app.on?.("before-quit", onBeforeQuit);
   return api;
