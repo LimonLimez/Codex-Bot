@@ -45,6 +45,7 @@ globalThis.__providerUi = (() => {
     ["kimi", "Moonshot Kimi", "device", false],
     ["xai", "xAI", "device", false],
     ["vertex", "Google Vertex AI", "service-account", false],
+    ["local", "Local models", "local", false],
   ].map(([id, label, loginKind, signedIn]) => ({
     id,
     label,
@@ -105,11 +106,16 @@ globalThis.__providerUi = (() => {
     "Moonshot Kimi",
     "xAI",
     "Google Vertex AI",
+    "Local models",
   ])
     assert.match(result.settings, new RegExp(provider));
   assert.match(result.settings, /<select[^>]+data-codex-provider/);
   assert.match(result.settings, /data-codex-provider-connect/);
   assert.match(result.settings, /data-codex-vertex-form/);
+  assert.match(result.settings, /data-codex-local-form/);
+  assert.match(result.settings, /http:\/\/127\.0\.0\.1:11434\/v1/);
+  assert.match(result.settings, /Connect & discover models/);
+  assert.match(result.settings, /tool calling and streaming are required/);
   assert.match(
     result.settings,
     /type="file" accept="application\/json,\.json"/,
@@ -141,6 +147,7 @@ globalThis.__onboardingUi = (() => {
     ["kimi", "Moonshot Kimi", "device"],
     ["xai", "xAI", "device"],
     ["vertex", "Google Vertex AI", "service-account"],
+    ["local", "Local models", "local"],
   ].map(([id, label, loginKind]) => ({ id, label, loginKind, description: label + " account", signedIn: id === "codex" }));
   const status = {
     connection: { mode: "cliproxy-oauth", route: "cliproxyapi-codex-oauth", provider: "codex", providerLabel: "OpenAI Codex" },
@@ -171,14 +178,15 @@ globalThis.__onboardingUi = (() => {
     "Moonshot Kimi",
     "xAI",
     "Google Vertex AI",
+    "Local models",
   ])
     assert.match(rendered.providers, new RegExp(provider));
   assert.equal(
     (rendered.providers.match(/data-codex-onboarding-provider=/g) || []).length,
-    6,
+    7,
   );
   assert.equal((rendered.providers.match(/<img/g) || []).length, 5);
-  assert.equal((rendered.providers.match(/<svg/g) || []).length, 1);
+  assert.equal((rendered.providers.match(/<svg/g) || []).length, 2);
   assert.match(rendered.computer, /Choose where employees browse/);
   assert.match(rendered.computer, /Private browser/);
   assert.match(rendered.computer, /Vendor cloud computer/);
@@ -191,9 +199,20 @@ globalThis.__onboardingUi = (() => {
   assert.match(ui, /rememberOnboardingCompleted\(\)/);
   assert.match(
     ui,
-    /\.codex-vertex-form\[hidden\],\.codex-key-form\[hidden\] \{ display:none !important; \}/,
+    /\.codex-vertex-form\[hidden\],\.codex-local-form\[hidden\],\.codex-key-form\[hidden\] \{ display:none !important; \}/,
   );
   assert.doesNotMatch(read("scripts/patch-app.cjs"), /Codex Bot User/);
+});
+
+test("local model setup posts only endpoint and optional key then refreshes the catalog", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  assert.match(ui, /action: "local-connect"/);
+  assert.match(ui, /baseUrl: endpoint\.value/);
+  assert.match(ui, /apiKey: key\.value/);
+  assert.match(ui, /key\.value = ""/);
+  assert.match(ui, /acceptAuthoritativeStatus\(result\.status\)/);
+  assert.match(ui, /Only a literal 127\.0\.0\.1 address is accepted/);
+  assert.match(ui, /provider\.loginKind === "local"/);
 });
 
 test("first-run onboarding never calls an unsigned provider ready merely because its route is selected", () => {

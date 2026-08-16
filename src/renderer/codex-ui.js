@@ -170,7 +170,9 @@ function updateReasoningSlider(control) {
 
 function hasCodexConnection(status) {
   return Boolean(
-    status?.account?.signedIn || status?.connection?.mode === "api-key",
+    status?.account?.signedIn ||
+    status?.connection?.mode === "api-key" ||
+    status?.connection?.mode === "local",
   );
 }
 
@@ -256,6 +258,8 @@ function providerLogo(providerId) {
   const common = 'aria-hidden="true" viewBox="0 0 40 40"';
   if (providerId === "antigravity")
     return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#fff"/><path d="M31.8 20.3c0-1-.1-1.8-.3-2.7H20v4.8h6.7a5.8 5.8 0 0 1-2.5 3.7v3.2h4.1c2.4-2.2 3.5-5.4 3.5-9Z" fill="#4285F4"/><path d="M20 32c3.3 0 6.1-1.1 8.2-2.9l-4.1-3.1a7.5 7.5 0 0 1-11.2-3.9H8.7v3.3A12 12 0 0 0 20 32Z" fill="#34A853"/><path d="M12.9 22.2a7.3 7.3 0 0 1 0-4.5v-3.3H8.7a12 12 0 0 0 0 11l4.2-3.2Z" fill="#FBBC05"/><path d="M20 12.5c1.9 0 3.6.7 4.9 1.9l3.6-3.5A12 12 0 0 0 8.7 14.5l4.2 3.3a7.4 7.4 0 0 1 7.1-5.3Z" fill="#EA4335"/></svg>`;
+  if (providerId === "local")
+    return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#2f7d68"/><rect x="9" y="10" width="22" height="15" rx="3" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M14 30h12M20 25v5" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="14" cy="17.5" r="1.5" fill="#fff"/><path d="M19 17.5h7" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>`;
   return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#7357ff"/><path d="m20 8 10.5 12L20 32 9.5 20 20 8Zm0 6.4L15.1 20l4.9 5.6 4.9-5.6-4.9-5.6Z" fill="#fff"/></svg>`;
 }
 
@@ -1071,7 +1075,7 @@ function onboardingProviderStepHtml(status) {
   const options = providers
     .map(
       (provider) =>
-        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selected.id ? " selected" : ""}>${escapeHtml(provider.label)}</option>`,
+        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-local-base-url="${escapeHtml(provider.baseUrl || "")}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selected.id ? " selected" : ""}>${escapeHtml(provider.label)}</option>`,
     )
     .join("");
   const tiles = providers
@@ -1089,7 +1093,9 @@ function onboardingProviderStepHtml(status) {
             ? "Connected"
             : provider.loginKind === "service-account"
               ? "Import key"
-              : "Sign in";
+              : provider.loginKind === "local"
+                ? "Configure server"
+                : "Sign in";
       return `<button class="codex-provider-tile${active ? " is-active" : ""}" type="button" data-codex-onboarding-provider="${escapeHtml(provider.id)}" aria-pressed="${active ? "true" : "false"}"${pending ? " disabled" : ""}>
         <span class="codex-provider-logo">${providerLogo(provider.id)}</span>
         <span class="codex-provider-tile-copy"><strong>${escapeHtml(provider.label)}</strong><small>${escapeHtml(state)}</small></span>
@@ -1115,6 +1121,14 @@ function onboardingProviderStepHtml(status) {
       <input id="codex-onboarding-vertex-key" type="file" accept="application/json,.json" required />
       <button type="submit">Verify & import for Vertex AI</button>
       <small>The key is handed only to the bundled local importer and the temporary upload is deleted.</small>
+    </form>
+    <form class="codex-local-form" data-codex-local-form${selected?.loginKind === "local" ? "" : " hidden"}>
+      <label for="codex-onboarding-local-url">Local OpenAI-compatible endpoint</label>
+      <input id="codex-onboarding-local-url" data-codex-local-url type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="codex-onboarding-local-help" value="${escapeHtml(selected?.baseUrl || "http://127.0.0.1:11434/v1")}" required />
+      <label for="codex-onboarding-local-key">API key <span>(optional)</span></label>
+      <input id="codex-onboarding-local-key" data-codex-local-key type="password" autocomplete="off" spellcheck="false" maxlength="4096" aria-describedby="codex-onboarding-local-help" />
+      <button type="submit">Connect & discover models</button>
+      <small id="codex-onboarding-local-help">Only a literal 127.0.0.1 address is accepted. Your server and selected model must support OpenAI-compatible streaming and tool calling.</small>
     </form>
     <form class="codex-key-form" data-codex-key-form hidden>
       <label for="codex-onboarding-api-key">OpenAI API key</label>
@@ -1250,7 +1264,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
   const providerOptions = providers
     .map(
       (provider) =>
-        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selectedProvider.id ? " selected" : ""}>${escapeHtml(provider.label)}${provider.signedIn ? " — connected" : ""}</option>`,
+        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-local-base-url="${escapeHtml(provider.baseUrl || "")}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selectedProvider.id ? " selected" : ""}>${escapeHtml(provider.label)}${provider.signedIn ? " — connected" : ""}</option>`,
     )
     .join("");
   const plan = account.plan
@@ -1310,7 +1324,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         <p data-codex-provider-description>${escapeHtml(selectedProvider.description)}</p>
       </div>
       <div class="codex-actions">
-        <button type="button" data-codex-provider-connect${selectedProvider.loginKind === "service-account" ? " hidden" : ""}>${escapeHtml(providerActionLabel)}</button>
+        <button type="button" data-codex-provider-connect${["service-account", "local"].includes(selectedProvider.loginKind) ? " hidden" : ""}>${escapeHtml(providerActionLabel)}</button>
         <button type="button" data-codex-key-toggle>Use OpenAI API key</button>
       </div>
       <form class="codex-vertex-form" data-codex-vertex-form${selectedProvider.loginKind === "service-account" ? "" : " hidden"}>
@@ -1318,6 +1332,14 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         <input id="codex-vertex-key" type="file" accept="application/json,.json" required />
         <button type="submit">Verify & import for Vertex AI</button>
         <small>The key is handed only to the bundled local CLIProxyAPI importer, then the temporary upload is deleted. It is never written to logs.</small>
+      </form>
+      <form class="codex-local-form" data-codex-local-form${selectedProvider.loginKind === "local" ? "" : " hidden"}>
+        <label for="codex-local-url">Local OpenAI-compatible endpoint</label>
+        <input id="codex-local-url" data-codex-local-url type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="codex-local-help" value="${escapeHtml(selectedProvider.baseUrl || "http://127.0.0.1:11434/v1")}" required />
+        <label for="codex-local-key">API key <span>(optional)</span></label>
+        <input id="codex-local-key" data-codex-local-key type="password" autocomplete="off" spellcheck="false" maxlength="4096" aria-describedby="codex-local-help" placeholder="Leave blank when your server needs no key" />
+        <button type="submit">Connect & discover models</button>
+        <small id="codex-local-help">Works with Ollama, LM Studio, vLLM, and other OpenAI-compatible servers on this PC. Only literal 127.0.0.1 endpoints are allowed; tool calling and streaming are required for employee workflows.</small>
       </form>
       <form class="codex-key-form" data-codex-key-form hidden>
         <label for="codex-api-key">OpenAI API key</label>
@@ -1567,6 +1589,7 @@ function syncProviderControls(panel) {
     description: selected.dataset.description || "",
     loginKind: selected.dataset.loginKind || "oauth",
     signedIn: selected.dataset.signedIn === "true",
+    baseUrl: selected.dataset.localBaseUrl || "",
     credentialRevision: selected.dataset.credentialRevision
       ? Number(selected.dataset.credentialRevision)
       : null,
@@ -1577,10 +1600,12 @@ function syncProviderControls(panel) {
   if (description) description.textContent = provider.description;
   const connect = panel.querySelector("[data-codex-provider-connect]");
   const vertexForm = panel.querySelector("[data-codex-vertex-form]");
+  const localForm = panel.querySelector("[data-codex-local-form]");
   const vertex = provider.loginKind === "service-account";
+  const local = provider.loginKind === "local";
   const pending = pendingOAuthDevice?.provider === provider.id;
   if (connect) {
-    connect.hidden = vertex;
+    connect.hidden = vertex || local;
     connect.disabled = pending;
     connect.textContent = pending
       ? `Waiting for ${provider.label}`
@@ -1591,6 +1616,17 @@ function syncProviderControls(panel) {
         : `Connect ${provider.label}`;
   }
   if (vertexForm) vertexForm.hidden = !vertex;
+  if (localForm) {
+    localForm.hidden = !local;
+    const endpoint = localForm.querySelector("[data-codex-local-url]");
+    if (
+      local &&
+      endpoint &&
+      provider.baseUrl &&
+      endpoint !== document.activeElement
+    )
+      endpoint.value = provider.baseUrl;
+  }
   return provider;
 }
 
@@ -1632,8 +1668,10 @@ function wireConnectionPanel(panel) {
         });
       providerConnectionNotice = { message: "", tone: "info" };
       const provider = syncProviderControls(panel);
-      if (provider?.loginKind !== "service-account")
+      if (!["service-account", "local"].includes(provider?.loginKind))
         panel.querySelector("[data-codex-provider-connect]")?.click();
+      else if (provider?.loginKind === "local")
+        panel.querySelector("[data-codex-local-url]")?.focus();
       else panel.querySelector("[data-codex-vertex-form] input")?.focus();
     });
   }
@@ -1821,7 +1859,11 @@ function wireConnectionPanel(panel) {
       const connectControl = event.currentTarget;
       const notice = panel.querySelector("[data-codex-notice]");
       const provider = syncProviderControls(panel);
-      if (!provider || provider.loginKind === "service-account") return;
+      if (
+        !provider ||
+        ["service-account", "local"].includes(provider.loginKind)
+      )
+        return;
       connectControl.disabled = true;
       const canReuseProvider = Boolean(
         provider.signedIn &&
@@ -1871,6 +1913,48 @@ function wireConnectionPanel(panel) {
         providerConnectionNotice = { message: error.message, tone: "error" };
       } finally {
         if (connectControl.isConnected) syncProviderControls(panel);
+      }
+    });
+  panel
+    .querySelector("[data-codex-local-form]")
+    ?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const provider = syncProviderControls(panel);
+      if (provider?.id !== "local") return;
+      const form = event.currentTarget;
+      const endpoint = form.querySelector("[data-codex-local-url]");
+      const key = form.querySelector("[data-codex-local-key]");
+      const submit = form.querySelector("button[type='submit']");
+      const notice = panel.querySelector("[data-codex-notice]");
+      submit.disabled = true;
+      notice.textContent = "Connecting and discovering local models...";
+      notice.dataset.tone = "info";
+      try {
+        const result = await request("/api/codex/auth", {
+          action: "local-connect",
+          baseUrl: endpoint.value,
+          apiKey: key.value,
+        });
+        key.value = "";
+        selectedProviderId = "local";
+        if (result.status) {
+          acceptAuthoritativeStatus(result.status);
+          const count = result.status.preferences?.catalog?.models?.length || 0;
+          providerConnectionNotice = {
+            message: `${count} local model${count === 1 ? "" : "s"} discovered. New requests will stay on this PC.`,
+            tone: "info",
+          };
+          applyUi();
+        } else {
+          notice.textContent = "Local models connected.";
+          await loadStatus();
+        }
+      } catch (error) {
+        notice.textContent = error.message;
+        notice.dataset.tone = "error";
+        providerConnectionNotice = { message: error.message, tone: "error" };
+      } finally {
+        if (submit.isConnected) submit.disabled = false;
       }
     });
   panel
@@ -2779,13 +2863,15 @@ style.textContent = `
   .codex-initials { display:grid; place-items:center; background:#202020; border:1px solid rgba(255,255,255,.16); font-weight:650; }
   .codex-account-copy { display:grid; gap:2px; min-width:0; }
   .codex-actions,.codex-key-form>div { display:flex; flex-wrap:wrap; gap:8px; }
-  .codex-provider-picker,.codex-vertex-form { display:grid; gap:7px; }
-  .codex-provider-picker>label,.codex-vertex-form>label { color:var(--sand-text-secondary,#d5d5d5); font-size:12px; font-weight:600; }
+  .codex-provider-picker,.codex-vertex-form,.codex-local-form { display:grid; gap:7px; }
+  .codex-provider-picker>label,.codex-vertex-form>label,.codex-local-form>label { color:var(--sand-text-secondary,#d5d5d5); font-size:12px; font-weight:600; }
   .codex-provider-picker>select { width:100%; min-height:40px; border:1px solid rgba(127,127,127,.38); border-radius:10px; padding:0 11px; color:inherit; background:#1d1d1d; color-scheme:dark; }
   .codex-provider-picker>p { color:var(--sand-text-tertiary,#aaa); font-size:12px; line-height:1.45; }
-  .codex-vertex-form { padding:11px; border:1px solid rgba(127,127,127,.28); border-radius:10px; background:rgba(127,127,127,.055); }
+  .codex-vertex-form,.codex-local-form { padding:11px; border:1px solid rgba(127,127,127,.28); border-radius:10px; background:rgba(127,127,127,.055); }
   .codex-vertex-form input[type="file"] { width:100%; min-height:38px; color:var(--sand-text-secondary,#d5d5d5); font-size:12px; }
   .codex-vertex-form input[type="file"]::file-selector-button { margin-inline-end:9px; border:1px solid rgba(127,127,127,.35); border-radius:8px; padding:7px 10px; color:inherit; background:rgba(127,127,127,.14); cursor:pointer; }
+  .codex-local-form input { width:100%; min-height:38px; border:1px solid rgba(127,127,127,.35); border-radius:8px; padding:8px 10px; color:inherit; background:rgba(127,127,127,.08); }
+  .codex-local-form label span { color:var(--sand-text-tertiary,#9a9a9a); font-weight:400; }
   .codex-card button { border:1px solid rgba(127,127,127,.35); border-radius:999px; color:inherit; background:rgba(127,127,127,.14); padding:7px 12px; cursor:pointer; }
   .codex-card button:hover { background:rgba(127,127,127,.23); }
   .codex-card button:disabled { opacity:.55; cursor:wait; }
@@ -2925,7 +3011,7 @@ style.textContent = `
   .codex-first-run-card [data-codex-provider-connect] { border-color:#f2f2f2; background:#f2f2f2; color:#111; font-weight:650; }
   .codex-first-run-card [data-codex-provider-connect]:hover { background:#fff; }
   .codex-visually-hidden { position:absolute !important; width:1px !important; height:1px !important; overflow:hidden !important; clip:rect(0 0 0 0) !important; clip-path:inset(50%) !important; white-space:nowrap !important; }
-  .codex-vertex-form[hidden],.codex-key-form[hidden] { display:none !important; }
+  .codex-vertex-form[hidden],.codex-local-form[hidden],.codex-key-form[hidden] { display:none !important; }
   .codex-onboarding-panel { display:grid; gap:20px; padding:clamp(20px,4vw,30px); border:1px solid rgba(255,255,255,.15); border-radius:18px; background:#171717; box-shadow:0 24px 70px rgba(0,0,0,.32); }
   .codex-onboarding-heading { display:grid; gap:7px; }
   .codex-onboarding-heading h2 { margin:0; max-width:28ch; font-size:clamp(24px,4vw,32px); line-height:1.08; letter-spacing:-.035em; text-wrap:balance; }
