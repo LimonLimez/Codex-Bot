@@ -1243,10 +1243,23 @@ async function configureLocalProvider({ baseUrl, apiKey = "" } = {}) {
     throw new SettingsValidationError("The optional local API key is invalid.");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
+  const previous = safeJson(CONFIG_PATH, {});
+  const config = plainObject(previous) ? previous : {};
+  const existingLocal = localServerConfig(config);
+  let effectiveApiKey = normalizedApiKey;
+  let protectedApiKey = null;
+  if (
+    !effectiveApiKey &&
+    existingLocal?.baseUrl === normalizedBaseUrl &&
+    existingLocal.protectedApiKey
+  ) {
+    effectiveApiKey = unprotectSecret(existingLocal.protectedApiKey);
+    protectedApiKey = existingLocal.protectedApiKey;
+  }
   let response;
   try {
     const headers = { Accept: "application/json" };
-    if (normalizedApiKey) headers.Authorization = `Bearer ${normalizedApiKey}`;
+    if (effectiveApiKey) headers.Authorization = `Bearer ${effectiveApiKey}`;
     response = await fetch(`${normalizedBaseUrl}/models`, {
       headers,
       redirect: "error",
@@ -1277,14 +1290,11 @@ async function configureLocalProvider({ baseUrl, apiKey = "" } = {}) {
     );
   }
   const models = normalizeDiscoveredModels(parsed);
-  const previous = safeJson(CONFIG_PATH, {});
-  const config = plainObject(previous) ? previous : {};
+  if (normalizedApiKey) protectedApiKey = protectSecret(normalizedApiKey);
   const localServer = {
     baseUrl: normalizedBaseUrl,
     models,
-    ...(normalizedApiKey
-      ? { protectedApiKey: protectSecret(normalizedApiKey) }
-      : {}),
+    ...(protectedApiKey ? { protectedApiKey } : {}),
   };
   const nextConfig = {
     ...config,
@@ -1445,6 +1455,10 @@ function cliProxyConfiguration() {
 function beginProviderLogin(value) {
   const providerId = normalizeProviderId(value);
   const provider = providerFor(providerId);
+  if (!provider.loginFlag)
+    throw new SettingsValidationError(
+      "Local models use endpoint discovery instead of provider sign-in.",
+    );
   if (provider.loginKind === "service-account")
     throw new SettingsValidationError(
       "Google Vertex AI requires a service-account JSON import.",

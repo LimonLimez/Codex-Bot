@@ -1337,7 +1337,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         <label for="codex-local-url">Local OpenAI-compatible endpoint</label>
         <input id="codex-local-url" data-codex-local-url type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="codex-local-help" value="${escapeHtml(selectedProvider.baseUrl || "http://127.0.0.1:11434/v1")}" required />
         <label for="codex-local-key">API key <span>(optional)</span></label>
-        <input id="codex-local-key" data-codex-local-key type="password" autocomplete="off" spellcheck="false" maxlength="4096" aria-describedby="codex-local-help" placeholder="Leave blank when your server needs no key" />
+        <input id="codex-local-key" data-codex-local-key type="password" autocomplete="off" spellcheck="false" maxlength="4096" aria-describedby="codex-local-help" placeholder="Leave blank to keep the saved key" />
         <button type="submit">Connect & discover models</button>
         <small id="codex-local-help">Works with Ollama, LM Studio, vLLM, and other OpenAI-compatible servers on this PC. Only literal 127.0.0.1 endpoints are allowed; tool calling and streaming are required for employee workflows.</small>
       </form>

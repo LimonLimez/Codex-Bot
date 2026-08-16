@@ -154,4 +154,40 @@ test("local provider cannot be selected before a successful discovery", (t) => {
     () => connection.useProvider("local"),
     /Connect and discover a local model server/,
   );
+  assert.throws(
+    () => connection.beginProviderLogin("local"),
+    /endpoint discovery instead of provider sign-in/,
+  );
+});
+
+test("an optional local key is DPAPI-protected, hidden, and reusable only for the same endpoint", async (t) => {
+  const { stateRoot, connection } = environment(t);
+  const testKey = ["local", "test", "secret", "value"].join("-");
+  const authorization = [];
+  global.fetch = async (_url, options) => {
+    authorization.push(options.headers.Authorization || null);
+    return new Response(JSON.stringify({ data: [{ id: "secure-local" }] }), {
+      status: 200,
+    });
+  };
+
+  await connection.configureLocalProvider({
+    baseUrl: "http://127.0.0.1:11434/v1",
+    apiKey: testKey,
+  });
+  await connection.configureLocalProvider({
+    baseUrl: "http://127.0.0.1:11434/v1",
+    apiKey: "",
+  });
+
+  assert.deepEqual(authorization, [`Bearer ${testKey}`, `Bearer ${testKey}`]);
+  const stored = fs.readFileSync(
+    path.join(stateRoot, "connection.json"),
+    "utf8",
+  );
+  assert.equal(stored.includes(testKey), false);
+  assert.match(stored, /"protectedApiKey"/);
+  const statusText = JSON.stringify(connection.publicStatus());
+  assert.doesNotMatch(statusText, /protectedApiKey/);
+  assert.equal(statusText.includes(testKey), false);
 });
