@@ -9,7 +9,7 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8317/v1";
 const DEFAULT_API_KEY = "codex-bot-local";
 const DEFAULT_MODEL = "gpt-5.6-terra";
 const DEFAULT_REASONING_EFFORT = "high";
-const COWORKER_POLICY_VERSION = "2026-08-14.2";
+const COWORKER_POLICY_VERSION = "2026-08-16.1";
 
 const DIGITAL_COWORKER_POLICY = `
 <digital_coworker_compatibility version="${COWORKER_POLICY_VERSION}">
@@ -37,6 +37,7 @@ Tools and connected apps
 - Inspect the per-turn available-tool inventory before acting. Every listed tool is real for that turn; tools and connectors not listed are unavailable and must never be claimed or simulated.
 - When the user's judgment is truly required, use SendMessage's selectable widget format rather than a vague plain-text question; SendMessage also owns secure secret-request cards. Use ReactToMessage only when it is listed. Use connector discovery/call tools only for connected apps they actually report. If Dropbox or another named app is absent, say it is not connected and use an available browser fallback only when that is within the assignment.
 - When coordination is part of the assignment, use the real teammate id with SendToAgent. Do not claim that you briefed, synced, or handed work to a teammate until the tool succeeds, and do not create acknowledgement ping-pong between agents.
+- Treat a host-managed group chat as a shared work stream, not an open-ended roleplay. Speak only to add a completed result, concrete next move, correction, blocker, decision, or direct answer that advances the room. Do not manufacture tasks for teammates, ask them for arbitrary examples, or keep the room alive with readiness and acknowledgement messages. If another teammate already covered the point, pass instead of paraphrasing it.
 - When a routine-creation tool or UI is available, create a real saved routine and verify its schedule and persisted state instead of merely drafting instructions in chat.
 
 Execution and verification
@@ -640,6 +641,18 @@ Make exactly one SendMessage call with type "widget". The widget prompt must beg
 The widget is the entire visible response. Do not emit assistant prose, a separate text SendMessage, a bulleted menu, a second tool call, or a trailing follow-up. Stop after the widget so its selection becomes the next user turn.
 </active_role_orientation>`;
 
+const ACTIVE_GROUP_CHAT_INSTRUCTION = `<active_group_chat>
+This is a host-managed group-room update turn. The room is a shared work stream for the person, not a private agent-to-agent roleplay.
+
+Add exactly one short SendMessage only when it contributes one of these: a completed result, a concrete next move, a factual correction, a blocker or decision, or a direct useful response to the person's latest request. Write for the whole room. Mention a teammate only when ownership or a handoff would otherwise be unclear.
+
+Never send generic readiness, greetings, acknowledgements, or prompts that merely keep the agents talking. Do not ask a teammate to invent a task, choose between brainstorm/debate/handoff, provide an arbitrary example, or acknowledge your acknowledgement. Do not repeat a point already visible in the room.
+
+If the person is only testing the group without giving substantive work, demonstrate collaboration with one small, self-contained useful contribution grounded in the visible room or agent profiles. Do not ask another question just to manufacture a conversation; a later teammate may improve the artifact with a distinct addition or pass.
+
+Use one text SendMessage and stop. If you have nothing meaningfully additive, emit exactly "(pass)" as assistant text and call no tool. Do not emit prose alongside SendMessage.
+</active_group_chat>`;
+
 function sourceMessageText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -802,6 +815,19 @@ function isRoleOrientationTurn(messages) {
   return definesRelationship && asksForOrientation;
 }
 
+function isGroupChatTurn(messages) {
+  const text = latestVisibleUserQuery(messages);
+  if (!text) return false;
+  const roomHeader =
+    /^\[Group chat:\s*"[^"\r\n]{1,200}"\s*-\s*with\s+[^\]\r\n]{1,200}\]\s*$/im;
+  const messageHeader = /^New messages in the room \(oldest first\):\s*$/im;
+  const turnContract =
+    /^It's your turn,\s*[^.\r\n]{1,120}\.\s*Reply in character with a single SendMessage if you have something worth adding, or send "\(pass\)" if you don't\.\s*$/im;
+  return (
+    roomHeader.test(text) && messageHeader.test(text) && turnContract.test(text)
+  );
+}
+
 function roleOrientationCanUseSendMessage(openAITools, toolChoice) {
   if (
     !openAITools.some((tool) => tool?.function?.name === SEND_MESSAGE_TOOL_NAME)
@@ -884,6 +910,52 @@ function constrainRoleOrientationTools(openAITools) {
       },
     };
   });
+}
+
+function constrainGroupChatTools(openAITools) {
+  const tool = openAITools.find(
+    (candidate) => candidate?.function?.name === SEND_MESSAGE_TOOL_NAME,
+  );
+  if (!tool) return [];
+  const originalParameters = tool.function.parameters || {};
+  const originalProperties = originalParameters.properties || {};
+  return [
+    {
+      ...tool,
+      function: {
+        ...tool.function,
+        description:
+          `${tool.function.description || ""}\n\nFor this group-room turn, send at most one concise text update that materially advances the shared work. Never use it for readiness, acknowledgement ping-pong, or an invented task. If nothing is additive, call no tool and emit exactly \"(pass)\".`.trim(),
+        parameters: {
+          ...originalParameters,
+          type: "object",
+          properties: {
+            ...originalProperties,
+            type: {
+              ...(originalProperties.type || {}),
+              type: "string",
+              enum: ["text"],
+            },
+            content: {
+              ...(originalProperties.content || {}),
+              type: "string",
+              minLength: 1,
+              maxLength: 1_200,
+            },
+          },
+          required: [
+            ...new Set([
+              ...(Array.isArray(originalParameters.required)
+                ? originalParameters.required
+                : []),
+              "type",
+              "content",
+            ]),
+          ],
+        },
+      },
+    },
+  ];
 }
 
 const POST_SEND_MESSAGE_INSTRUCTION = `<post_send_message_step>
@@ -1133,11 +1205,18 @@ class CLIProxyExecutor {
       !nameAssignmentStep &&
       isRoleOrientationTurn(this.messages) &&
       roleOrientationCanUseSendMessage(baseOpenAITools, options.toolChoice);
+    const groupChatStep =
+      !nameAssignmentStep &&
+      !roleOrientationStep &&
+      isGroupChatTurn(this.messages) &&
+      roleOrientationCanUseSendMessage(baseOpenAITools, options.toolChoice);
     const policyOpenAITools = nameAssignmentStep
       ? constrainNameAssignmentTools(baseOpenAITools, assignedName)
       : roleOrientationStep
         ? constrainRoleOrientationTools(baseOpenAITools)
-        : baseOpenAITools;
+        : groupChatStep
+          ? constrainGroupChatTools(baseOpenAITools)
+          : baseOpenAITools;
     const openAITools = normalizeToolsForProvider(
       policyOpenAITools,
       connection.provider,
@@ -1167,6 +1246,11 @@ class CLIProxyExecutor {
         role: "system",
         content: ACTIVE_ROLE_ORIENTATION_INSTRUCTION,
       });
+    } else if (groupChatStep) {
+      messages.splice(stepInstructionIndex, 0, {
+        role: "system",
+        content: ACTIVE_GROUP_CHAT_INSTRUCTION,
+      });
     } else if (postSendMessageStep) {
       messages.splice(stepInstructionIndex, 0, {
         role: "system",
@@ -1194,6 +1278,7 @@ class CLIProxyExecutor {
       completedMessageBatchMode,
       nameAssignmentStep,
       roleOrientationStep,
+      groupChatStep,
       computerToolCompatibility: computerGuidance != null,
     });
 
@@ -1216,7 +1301,8 @@ class CLIProxyExecutor {
                 ? { toolName: SEND_MESSAGE_TOOL_NAME }
                 : options.toolChoice,
           ),
-          parallel_tool_calls: !nameAssignmentStep && !roleOrientationStep,
+          parallel_tool_calls:
+            !nameAssignmentStep && !roleOrientationStep && !groupChatStep,
         };
         if (fastRequest.serviceTier)
           payload.service_tier = fastRequest.serviceTier;
@@ -1257,12 +1343,13 @@ class CLIProxyExecutor {
           if (typeof delta.content === "string" && delta.content) {
             if (!nameAssignmentStep && !roleOrientationStep) {
               textParts.push(delta.content);
-              yield { type: "text-delta", textDelta: delta.content };
+              if (!groupChatStep)
+                yield { type: "text-delta", textDelta: delta.content };
             }
           }
           for (const tc of delta.tool_calls || []) {
             const index = tc.index ?? 0;
-            if (nameAssignmentStep || roleOrientationStep) {
+            if (nameAssignmentStep || roleOrientationStep || groupChatStep) {
               if (constrainedCallIndex == null) constrainedCallIndex = index;
               if (index !== constrainedCallIndex) continue;
             }
@@ -1333,6 +1420,31 @@ class CLIProxyExecutor {
         }
 
         const assistantContent = [];
+        if (groupChatStep && calls.size === 0 && textParts.length) {
+          const groupText = textParts.join("").trim();
+          if (/^\(?pass\)?[.!]?$/i.test(groupText)) {
+            textParts.length = 0;
+            textParts.push("(pass)");
+            yield { type: "text-delta", textDelta: "(pass)" };
+          } else if (groupText) {
+            textParts.length = 0;
+            const call = {
+              id: `call_${crypto.randomUUID()}`,
+              name: SEND_MESSAGE_TOOL_NAME,
+              args: JSON.stringify({ type: "text", content: groupText }),
+              bufferToolArgs: true,
+              bufferedArgDeltas: [],
+              emittedArgDelta: false,
+            };
+            calls.set(0, call);
+            yield {
+              type: "tool-call-streaming-start",
+              toolCallId: call.id,
+              toolName: call.name,
+            };
+          }
+        }
+        if (groupChatStep && calls.size > 0) textParts.length = 0;
         if (textParts.length)
           assistantContent.push({ type: "text", text: textParts.join("") });
         for (const call of calls.values()) {
@@ -1489,7 +1601,9 @@ module.exports = {
   convertTools,
   convertToolsForStep,
   computerToolUseMessage,
+  constrainGroupChatTools,
   constrainRoleOrientationTools,
+  isGroupChatTurn,
   isRoleOrientationTurn,
   normalizeComputerToolCallArgs,
   normalizeSendMessageToolCallArgs,

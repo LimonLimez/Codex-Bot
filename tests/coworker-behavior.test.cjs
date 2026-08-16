@@ -179,6 +179,273 @@ test("team messaging and question-widget schemas pass through the local tool bri
   assert.deepEqual(converted[0].function.parameters, widgetParameters);
 });
 
+const LIVE_GROUP_TURN = `<timestamp>Sunday, Aug 16, 2026, 2:31 PM (UTC-4)</timestamp>
+<user_query>
+[Group chat: "New Bot, yo" - with yo]
+New messages in the room (oldest first):
+yo: wsp — ready when you are.
+User: talk to each other rq to test
+
+It's your turn, New Bot. Reply in character with a single SendMessage if you have something worth adding, or send "(pass)" if you don't.
+</user_query>`;
+
+function sendMessageTool() {
+  return {
+    name: "SendMessage",
+    description: "Send one visible message to the room.",
+    parameters: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["text", "widget"] },
+        content: { type: "string" },
+        widget: { type: "object" },
+      },
+      required: ["type"],
+    },
+  };
+}
+
+test("host-managed group turns are detected without treating ordinary chat as a room turn", () => {
+  assert.equal(
+    bridge.isGroupChatTurn([{ role: "user", content: LIVE_GROUP_TURN }]),
+    true,
+  );
+  assert.equal(
+    bridge.isGroupChatTurn([
+      { role: "user", content: "Make a group chat and talk to each other." },
+    ]),
+    false,
+  );
+  assert.equal(
+    bridge.isGroupChatTurn([
+      {
+        role: "user",
+        content:
+          '[Group chat: "demo" - with Pat]\nNew messages in the room (oldest first):\nUser: hello',
+      },
+    ]),
+    false,
+  );
+});
+
+test(
+  "group turns expose one text message tool and suppress duplicate provider chatter",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    let requestPayload;
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async (_url, options) => {
+      requestPayload = JSON.parse(options.body);
+      const usefulArgs = JSON.stringify({
+        type: "text",
+        content:
+          "Quick collaboration test: I drafted the room rule—share results, decisions, or blockers; skip status-only replies.",
+      });
+      const fillerArgs = JSON.stringify({
+        type: "text",
+        content: "Ready when you are.",
+      });
+      const body = [
+        {
+          id: "group-response",
+          choices: [
+            {
+              delta: {
+                content: "Here is the same answer outside the room message.",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "group-useful",
+                    function: {
+                      name: "SendMessage",
+                      arguments: usefulArgs,
+                    },
+                  },
+                  {
+                    index: 1,
+                    id: "group-filler",
+                    function: {
+                      name: "SendMessage",
+                      arguments: fillerArgs,
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [],
+          usage: { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42 },
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${body}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+
+    try {
+      const tools = [
+        sendMessageTool(),
+        {
+          name: "SendToAgent",
+          description: "Message a teammate.",
+          parameters: { type: "object" },
+        },
+        computerTool(),
+      ];
+      const result = bridge
+        .createPromptSession({ agentId: "group-bot" })
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-invocation", tools, {});
+      const events = [];
+      for await (const event of result.fullStream) events.push(event);
+      const response = await result.response;
+
+      assert.deepEqual(
+        requestPayload.tools.map((tool) => tool.function.name),
+        ["SendMessage"],
+      );
+      assert.equal(requestPayload.parallel_tool_calls, false);
+      assert.equal(requestPayload.tool_choice, "auto");
+      const groupInstruction = requestPayload.messages.find((message) =>
+        String(message.content).includes("<active_group_chat>"),
+      );
+      assert.ok(groupInstruction);
+      assert.match(groupInstruction.content, /shared work stream/i);
+      assert.match(groupInstruction.content, /Never send generic readiness/i);
+      assert.match(
+        groupInstruction.content,
+        /one small, self-contained useful contribution/i,
+      );
+      const parameters = requestPayload.tools[0].function.parameters;
+      assert.deepEqual(parameters.properties.type.enum, ["text"]);
+      assert.ok(parameters.required.includes("content"));
+      assert.equal(parameters.properties.content.maxLength, 1_200);
+      assert.equal(
+        events.filter((event) => event.type === "tool-call").length,
+        1,
+      );
+      assert.equal(
+        events.some((event) => event.type === "text-delta"),
+        false,
+      );
+      assert.deepEqual(response.messages[0].content, [
+        {
+          type: "tool-call",
+          toolCallId: "group-useful",
+          toolName: "SendMessage",
+          args: {
+            type: "text",
+            content:
+              "Quick collaboration test: I drafted the room rule—share results, decisions, or blockers; skip status-only replies.",
+          },
+        },
+      ]);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+test(
+  "group turns convert useful plain provider text into SendMessage and normalize pass",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    const responses = ["A useful self-contained result for the room.", "pass."];
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async () => {
+      const content = responses.shift();
+      const body = [
+        {
+          id: "group-text-response",
+          choices: [{ delta: { content } }],
+        },
+        {
+          choices: [],
+          usage: { prompt_tokens: 10, completion_tokens: 6, total_tokens: 16 },
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${body}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+
+    try {
+      const session = bridge.createPromptSession({ agentId: "group-bot" });
+      const first = session
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-text-invocation", [sendMessageTool()], {});
+      const firstEvents = [];
+      for await (const event of first.fullStream) firstEvents.push(event);
+      const firstResponse = await first.response;
+      assert.equal(
+        firstEvents.filter((event) => event.type === "tool-call").length,
+        1,
+      );
+      assert.deepEqual(firstResponse.messages[0].content[0].args, {
+        type: "text",
+        content: "A useful self-contained result for the room.",
+      });
+      assert.equal(
+        firstEvents.some((event) => event.type === "text-delta"),
+        false,
+      );
+
+      const second = session
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-pass-invocation", [sendMessageTool()], {});
+      const secondEvents = [];
+      for await (const event of second.fullStream) secondEvents.push(event);
+      const secondResponse = await second.response;
+      assert.equal(
+        secondEvents.some(
+          (event) =>
+            event.type === "text-delta" && event.textDelta === "(pass)",
+        ),
+        true,
+      );
+      assert.equal(
+        secondEvents.some((event) => event.type === "tool-call"),
+        false,
+      );
+      assert.deepEqual(secondResponse.messages[0].content, [
+        { type: "text", text: "(pass)" },
+      ]);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
 test("SendMessage normalization removes provider-filled fields from other message types", () => {
   const generated = {
     type: "text",
