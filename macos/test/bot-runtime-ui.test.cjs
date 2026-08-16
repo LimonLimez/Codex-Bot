@@ -577,6 +577,79 @@ test("restart resumes the persisted setup stage without creating or inferring fr
   existingController.dispose();
 });
 
+test("restart retries a persisted profile setup when the live catalog becomes ready", async () => {
+  const { createBotUiController } = require(uiPath);
+  const persisted = pendingBotWithComputer(BOT_B);
+  const readyCatalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+      isDefault: true,
+    })]),
+  });
+  const selected = Object.freeze({
+    botId: BOT_B,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 0,
+  });
+  let catalogReady = false;
+  let catalogListener;
+  let selectionCalls = 0;
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [persisted]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() {
+        selectionCalls += 1;
+        if (!catalogReady) throw new Error("catalog is still loading");
+        return selected;
+      },
+      async readModel() { return selected; },
+    },
+    accountFacade: {
+      async catalog() {
+        return Object.freeze({ generation: 0, status: "loading", models: Object.freeze([]) });
+      },
+      onCatalogChanged(listener) { catalogListener = listener; return () => {}; },
+    },
+    computerFacade: {
+      async read(botId) { return { botId, computer: persisted.computer }; },
+      async listPermissions(botId) { return { botId, permissions: [] }; },
+      async listPermissionRequests(botId) { return { botId, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+  });
+
+  await controller.initialize();
+  assert.equal(selectionCalls, 1);
+  assert.equal(controller.snapshot().activeBotId, null);
+  assert.equal(controller.snapshot().profileSetup.open, false);
+  assert.equal(controller.snapshot().mandatorySetupPending, true);
+
+  catalogReady = true;
+  catalogListener(readyCatalog);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(selectionCalls, 2);
+  assert.equal(controller.snapshot().activeBotId, BOT_B);
+  assert.equal(controller.snapshot().profileSetup.open, true);
+  assert.equal(controller.snapshot().profileSetup.name, "New Bot");
+  assert.equal(controller.snapshot().computerSetup.open, false);
+  controller.dispose();
+});
+
 test("failed profile setup preserves the same bot and sanitized draft for retry", async () => {
   const { createBotUiController } = require(uiPath);
   const created = pendingBotWithComputer(BOT_B);

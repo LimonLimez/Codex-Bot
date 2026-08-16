@@ -1070,6 +1070,9 @@
       if (refreshSelection && nextStatus === "ready" && activeBotId
         && (selectionInvalidated || modelSelection === null)) {
         requestBotSelection(activeBotId, true);
+      } else if (refreshSelection && nextStatus === "ready" && activeBotId === null && computerFacade) {
+        const pending = [...bots.values()].find((record) => record.setupStage !== "complete");
+        if (pending) requestBotSelection(pending.botId);
       }
       return true;
     }
