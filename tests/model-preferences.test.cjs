@@ -90,12 +90,14 @@ test("legacy preferences migrate, persisted defaults beat bootstrap environment,
       model: "gpt-5.6-luna",
       reasoningEffort: "xhigh",
       fastMode: true,
+      responseMode: "chat",
     },
     override: null,
     effective: {
       model: "gpt-5.6-luna",
       reasoningEffort: "xhigh",
       fastMode: true,
+      responseMode: "chat",
     },
   });
 
@@ -111,6 +113,7 @@ test("legacy preferences migrate, persisted defaults beat bootstrap environment,
     model: "gpt-5.6-luna",
     reasoningEffort: "max",
     fastMode: false,
+    responseMode: "chat",
   });
   assert.equal(persisted.model, "gpt-5.6-luna");
   assert.equal(persisted.reasoningEffort, "max");
@@ -129,6 +132,7 @@ test("legacy preferences migrate, persisted defaults beat bootstrap environment,
     model: "gpt-5.6-luna",
     reasoningEffort: "max",
     fastMode: false,
+    responseMode: "chat",
   });
 });
 
@@ -152,12 +156,14 @@ test("agent overrides are partial, inherit updated defaults, and can be cleared"
       model: "gpt-5.6-terra",
       reasoningEffort: "medium",
       fastMode: false,
+      responseMode: "chat",
     },
     override: { model: "gpt-5.6-sol", fastMode: true },
     effective: {
       model: "gpt-5.6-sol",
       reasoningEffort: "medium",
       fastMode: true,
+      responseMode: "chat",
     },
   });
 
@@ -180,6 +186,7 @@ test("agent overrides are partial, inherit updated defaults, and can be cleared"
     model: "gpt-5.6-sol",
     reasoningEffort: "xhigh",
     fastMode: true,
+    responseMode: "chat",
   });
 
   connection.clearAgentPreferences("agent-123");
@@ -190,12 +197,14 @@ test("agent overrides are partial, inherit updated defaults, and can be cleared"
       model: "gpt-5.6-terra",
       reasoningEffort: "xhigh",
       fastMode: false,
+      responseMode: "chat",
     },
     override: null,
     effective: {
       model: "gpt-5.6-terra",
       reasoningEffort: "xhigh",
       fastMode: false,
+      responseMode: "chat",
     },
   });
 });
@@ -332,6 +341,7 @@ test("authenticated Codex settings HTTP API updates defaults and per-agent inher
     model: "gpt-5.6-luna",
     reasoningEffort: "low",
     fastMode: false,
+    responseMode: "chat",
   });
 
   response = await request("/api/codex/settings", {
@@ -360,6 +370,7 @@ test("authenticated Codex settings HTTP API updates defaults and per-agent inher
     model: "gpt-5.6-sol",
     reasoningEffort: "max",
     fastMode: true,
+    responseMode: "chat",
   });
   assert.deepEqual(payload.connection, {
     mode: "cliproxy-oauth",
@@ -369,6 +380,7 @@ test("authenticated Codex settings HTTP API updates defaults and per-agent inher
     model: "gpt-5.6-sol",
     reasoningEffort: "max",
     fastMode: true,
+    responseMode: "chat",
   });
 
   response = await request("/api/codex/settings", {

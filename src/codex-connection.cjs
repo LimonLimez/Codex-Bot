@@ -14,6 +14,8 @@ const BRIDGE_LOG_PATH = path.join(STATE_ROOT, "logs", "bridge.jsonl");
 const DEFAULT_MODEL = "gpt-5.6-terra";
 const DEFAULT_REASONING = "high";
 const DEFAULT_FAST_MODE = false;
+const DEFAULT_RESPONSE_MODE = "chat";
+const RESPONSE_MODES = Object.freeze(["chat", "search", "research"]);
 const MODEL_CATALOG = Object.freeze([
   Object.freeze({
     id: "gpt-5.6-sol",
@@ -43,6 +45,11 @@ const LOCAL_PROVIDER_ID = "local";
 const LOCAL_REASONING_EFFORTS = Object.freeze(["none"]);
 const LOCAL_MODEL_LIMIT = 200;
 const LOCAL_MODELS_RESPONSE_LIMIT = 1024 * 1024;
+const IMAGE_MODEL = "gpt-image-2";
+const IMAGE_RESPONSE_LIMIT = 24 * 1024 * 1024;
+const IMAGE_PROMPT_LIMIT = 4_000;
+const IMAGE_SIZES = Object.freeze(["1024x1024", "1536x1024", "1024x1536"]);
+const IMAGE_QUALITIES = Object.freeze(["low", "medium", "high"]);
 const CLIPROXY_PROVIDERS = Object.freeze([
   Object.freeze({
     id: "codex",
@@ -474,6 +481,15 @@ function validateFastMode(value) {
   return value;
 }
 
+function validateResponseMode(value) {
+  if (typeof value !== "string" || !RESPONSE_MODES.includes(value)) {
+    throw new SettingsValidationError(
+      `responseMode must be one of: ${RESPONSE_MODES.join(", ")}.`,
+    );
+  }
+  return value;
+}
+
 class SettingsValidationError extends Error {
   constructor(message) {
     super(message);
@@ -527,6 +543,9 @@ function storedDefaults(config = {}, providerId = activeProviderId(config)) {
   const storedFastMode = hasOwn(nested, "fastMode")
     ? nested.fastMode
     : config.fastMode;
+  const storedResponseMode = hasOwn(nested, "responseMode")
+    ? nested.responseMode
+    : config.responseMode;
   const modelIds = modelIdsFor(provider.id, config);
   return {
     model: modelIds.has(storedModel)
@@ -541,6 +560,9 @@ function storedDefaults(config = {}, providerId = activeProviderId(config)) {
         : provider.fastModeSupported
           ? bootstrapFastMode()
           : false,
+    responseMode: RESPONSE_MODES.includes(storedResponseMode)
+      ? storedResponseMode
+      : DEFAULT_RESPONSE_MODE,
   };
 }
 
@@ -573,6 +595,8 @@ function storedAgentOverride(
     override.reasoningEffort = candidate.reasoningEffort;
   if (provider.fastModeSupported && typeof candidate.fastMode === "boolean")
     override.fastMode = candidate.fastMode;
+  if (RESPONSE_MODES.includes(candidate.responseMode))
+    override.responseMode = candidate.responseMode;
   return Object.keys(override).length ? override : null;
 }
 
@@ -598,9 +622,11 @@ function preferencePatch(
       );
     patch.fastMode = validateFastMode(value.fastMode);
   }
+  if (hasOwn(value, "responseMode"))
+    patch.responseMode = validateResponseMode(value.responseMode);
   if (requireOne && Object.keys(patch).length === 0) {
     throw new SettingsValidationError(
-      "At least one of model, reasoningEffort, or fastMode is required.",
+      "At least one of model, reasoningEffort, fastMode, or responseMode is required.",
     );
   }
   return patch;
@@ -863,6 +889,7 @@ function writePreferences(
     model: defaults.model,
     reasoningEffort: defaults.reasoningEffort,
     fastMode: defaults.fastMode,
+    responseMode: defaults.responseMode,
     defaults: { ...defaults },
     providerPreferences,
   });
@@ -946,6 +973,7 @@ function applySettingsUpdate(body) {
     "model",
     "reasoningEffort",
     "fastMode",
+    "responseMode",
     "inherit",
     "clear",
   ]);
@@ -1352,6 +1380,140 @@ async function verifyApiKey(apiKey) {
     );
   }
   return true;
+}
+
+async function readBoundedResponseText(response, limit = IMAGE_RESPONSE_LIMIT) {
+  const declared = Number(response.headers?.get?.("content-length"));
+  if (Number.isFinite(declared) && declared > limit)
+    throw new Error("OpenAI returned an image response larger than allowed.");
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > limit)
+      throw new Error("OpenAI returned an image response larger than allowed.");
+    return text;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => {});
+        throw new Error(
+          "OpenAI returned an image response larger than allowed.",
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
+function imageCapability() {
+  const config = state().config || {};
+  const available =
+    config.mode === "api-key" && Boolean(config.protectedApiKey);
+  return {
+    available,
+    model: IMAGE_MODEL,
+    sizes: [...IMAGE_SIZES],
+    qualities: [...IMAGE_QUALITIES],
+    reason: available
+      ? null
+      : "GPT Image 2 requires a direct OpenAI API key. A Codex subscription login does not grant Images API access.",
+  };
+}
+
+async function generateImage(request, fetchImpl = fetch) {
+  if (!plainObject(request))
+    throw new SettingsValidationError("Image request must be a JSON object.");
+  const allowed = new Set(["prompt", "size", "quality"]);
+  const unknown = Object.keys(request).filter((key) => !allowed.has(key));
+  if (unknown.length)
+    throw new SettingsValidationError(`Unknown image field: ${unknown[0]}.`);
+  const prompt = String(request.prompt || "").trim();
+  if (!prompt || prompt.length > IMAGE_PROMPT_LIMIT)
+    throw new SettingsValidationError(
+      `prompt must be between 1 and ${IMAGE_PROMPT_LIMIT} characters.`,
+    );
+  const size = request.size || "1024x1024";
+  const quality = request.quality || "medium";
+  if (!IMAGE_SIZES.includes(size))
+    throw new SettingsValidationError(
+      `size must be one of: ${IMAGE_SIZES.join(", ")}.`,
+    );
+  if (!IMAGE_QUALITIES.includes(quality))
+    throw new SettingsValidationError(
+      `quality must be one of: ${IMAGE_QUALITIES.join(", ")}.`,
+    );
+  const connection = getConnection();
+  if (connection.route !== "openai-api-key")
+    throw new SettingsValidationError(imageCapability().reason);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180_000);
+  let response;
+  let raw;
+  try {
+    response = await fetchImpl("https://api.openai.com/v1/images/generations", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${connection.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model: IMAGE_MODEL, prompt, size, quality }),
+      signal: controller.signal,
+    });
+    raw = await readBoundedResponseText(response);
+  } catch (error) {
+    if (error?.name === "AbortError")
+      throw new Error("GPT Image 2 timed out. Try again.");
+    if (/^OpenAI returned an image response larger/.test(error?.message || ""))
+      throw error;
+    throw new Error("GPT Image 2 could not be reached. Try again.");
+  } finally {
+    clearTimeout(timeout);
+  }
+  let payload;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    throw new Error("OpenAI returned an unreadable image response.");
+  }
+  if (!response.ok) {
+    const detail = redactSensitiveText(
+      String(
+        payload?.error?.message ||
+          `OpenAI image request failed (${response.status}).`,
+      ),
+    );
+    throw new Error(detail.slice(0, 500));
+  }
+  const base64 = payload?.data?.[0]?.b64_json;
+  if (
+    typeof base64 !== "string" ||
+    base64.length < 16 ||
+    base64.length > IMAGE_RESPONSE_LIMIT * 2 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)
+  )
+    throw new Error("OpenAI did not return a valid image.");
+  const imageBytes = Buffer.from(base64, "base64");
+  if (
+    imageBytes.length < 16 ||
+    imageBytes.length > IMAGE_RESPONSE_LIMIT ||
+    !imageBytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))
+  )
+    throw new Error("OpenAI did not return a valid PNG image.");
+  return {
+    model: IMAGE_MODEL,
+    size,
+    quality,
+    dataUrl: `data:image/png;base64,${base64}`,
+  };
 }
 
 function normalizeCodexDeviceUrl(value) {
@@ -1891,6 +2053,7 @@ function publicStatus(agentId = null) {
       model: connection.model,
       reasoningEffort: connection.reasoningEffort,
       fastMode: connection.fastMode,
+      responseMode: connection.responseMode,
     },
     account: activeAccount,
     owner: {
@@ -1904,7 +2067,13 @@ function publicStatus(agentId = null) {
     settings: {
       automaticUpdates: false,
       maxBrowserSeats: Number(process.env.GROK_BOT_BROWSER_SEAT_LIMIT || 3),
+      alwaysOn: {
+        workerActive: process.env.GROK_BOT_LOCAL_ROUTINES === "1",
+        catchupHours: 24,
+        restartAttempts: 10,
+      },
     },
+    images: imageCapability(),
     preferences: {
       catalog: {
         models: modelsFor(provider.id).map((model) => ({ ...model })),
@@ -1913,6 +2082,7 @@ function publicStatus(agentId = null) {
           supported: provider.fastModeSupported,
           default: provider.fastModeSupported ? DEFAULT_FAST_MODE : false,
         },
+        responseModes: [...RESPONSE_MODES],
       },
       agentId: preferences.agentId,
       defaults: { ...preferences.defaults },
@@ -1927,6 +2097,7 @@ module.exports = {
   CLIPROXY_PROVIDERS,
   MODEL_CATALOG,
   REASONING_EFFORTS,
+  RESPONSE_MODES,
   SettingsValidationError,
   account,
   applySettingsUpdate,
@@ -1937,6 +2108,8 @@ module.exports = {
   clearAgentPreferences,
   getConnection,
   getPreferences,
+  generateImage,
+  imageCapability,
   publicStatus,
   importVertexServiceAccount,
   setAgentPreferences,

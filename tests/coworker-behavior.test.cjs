@@ -2026,3 +2026,66 @@ test("the vendor patch preserves stock onboarding and acknowledgement safeguards
     /applySendMessageReminder\(diskPressureExecutor\);",\s*"coworker acknowledgement behavior/,
   );
 });
+
+test("Search and Research modes inject browser-first source requirements into live requests", async () => {
+  const originalFetch = globalThis.fetch;
+  const payloads = [];
+  connectionManager.setDefaultPreferences({ responseMode: "research" });
+  globalThis.fetch = async (_url, init) => {
+    payloads.push(JSON.parse(init.body));
+    const stream = `data: ${JSON.stringify({ id: "research-response", choices: [{ delta: { content: "Verified answer" } }] })}\n\ndata: [DONE]\n\n`;
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+  try {
+    const execution = bridge
+      .createPromptSession({ agentId: "research-mode-agent" })
+      .getExecutor([{ role: "user", content: "Compare two current sources." }])
+      .stream({}, "research-mode-invocation", [computerTool()], {});
+    for await (const _event of execution.fullStream) {
+      // Drain the stream so the complete request can be inspected.
+    }
+    await execution.response;
+    const instruction = payloads[0].messages.find(
+      (message) =>
+        message.role === "system" &&
+        /Research mode is active/.test(message.content || ""),
+    );
+    assert.ok(instruction);
+    assert.match(
+      instruction.content,
+      /at least two independent, relevant sources/,
+    );
+    assert.match(instruction.content, /compact \*\*Sources\*\* section/);
+    assert.match(
+      instruction.content,
+      /Never invent a title, URL, quote, date, or citation/,
+    );
+
+    connectionManager.setDefaultPreferences({ responseMode: "search" });
+    const searchExecution = bridge
+      .createPromptSession({ agentId: "search-mode-agent" })
+      .getExecutor([
+        { role: "user", content: "Find the current official page." },
+      ])
+      .stream({}, "search-mode-invocation", [computerTool()], {});
+    for await (const _event of searchExecution.fullStream) {
+      // Drain the second live stream before inspecting its payload.
+    }
+    await searchExecution.response;
+    const searchInstruction = payloads[1].messages.find(
+      (message) =>
+        message.role === "system" &&
+        /Search mode is active/.test(message.content || ""),
+    );
+    assert.ok(searchInstruction);
+    assert.match(searchInstruction.content, /one authoritative primary source/);
+    assert.match(searchInstruction.content, /actual result page/);
+    assert.match(searchInstruction.content, /compact \*\*Sources\*\* list/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    connectionManager.setDefaultPreferences({ responseMode: "chat" });
+  }
+});

@@ -111,6 +111,7 @@ test("every interactive CLIProxy provider is selectable with independent models 
     model: "claude-opus-5",
     reasoningEffort: "xhigh",
     fastMode: false,
+    responseMode: "chat",
   });
   connection.setProvider("kimi");
   assert.equal(connection.getPreferences().defaults.model, "kimi-k3-256k");
@@ -180,6 +181,7 @@ test("provider sign-in is transactional, cancellable, and activates only after a
     model: "gpt-5.6-sol",
     reasoningEffort: "max",
     fastMode: false,
+    responseMode: "chat",
   });
   assert.throws(
     () => connection.useProvider("claude"),

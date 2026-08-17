@@ -1715,25 +1715,55 @@ try {
 
   const automationRegion = "var automationsExtension = defineHostExtension";
   const scheduler = `    let localRoutineWakesSuspended = false;
+    let localRoutineScanInFlight = false;
+    const localRoutineRunsInFlight = new Set();
+    const localRoutineRecentlyCompleted = new Map();
     const localRoutineIntervalMs = 15e3;
-    const localRoutineTick = async () => {
-      if (process.env.GROK_BOT_LOCAL_ROUTINES !== "1" || localRoutineWakesSuspended) return;
-      const nowMs = Date.now();
-      const timeZone = context2.deps.settings.getUserTimeZone();
-      const entries = await transcript.listAllAutomationDefinitions();
-      for (const { agentId, automation } of entries) {
-        if (!automation.isEnabled) continue;
-        const anchor = automation.lastRunAt ?? automation.createdAt;
-        let scheduledForMs = null;
-        for (const schedule of triggerCronSchedules(automation.trigger)) {
-          const nextRunAt = computeNextRunAt(schedule, anchor, timeZone);
-          if (nextRunAt != null && (scheduledForMs == null || nextRunAt < scheduledForMs)) scheduledForMs = nextRunAt;
+    const localRoutineCatchupWindowMs = 24 * 60 * 60 * 1e3;
+    const localRoutineCompletionGuardMs = 5 * 60 * 1e3;
+    const latestDueRoutineTime = (automation, nowMs, timeZone) => {
+      const originalAnchor = Number(automation.lastRunAt ?? automation.createdAt);
+      const anchor = Number.isFinite(originalAnchor) ? Math.max(originalAnchor, nowMs - localRoutineCatchupWindowMs) : nowMs - localRoutineCatchupWindowMs;
+      let latest = null;
+      for (const schedule of triggerCronSchedules(automation.trigger)) {
+        let cursor = anchor;
+        for (let step = 0; step < 2048; step += 1) {
+          const nextRunAt = computeNextRunAt(schedule, cursor, timeZone);
+          if (nextRunAt == null || nextRunAt > nowMs || nextRunAt <= cursor) break;
+          latest = latest == null || nextRunAt > latest ? nextRunAt : latest;
+          cursor = nextRunAt;
         }
-        if (scheduledForMs == null || scheduledForMs > nowMs) continue;
-        const runUuid = \`local-\${agentId}-\${automation.id}-\${scheduledForMs}\`;
-        void transcript.runServerScheduledAutomation({ agentId, automation, runUuid, scheduledForMs }).catch((error4) => {
-          console.error(\`[codex-bot:automation] local scheduled fire failed for \${agentId}/\${automation.id}: \${errorMessage(error4)}\`);
-        });
+      }
+      return latest;
+    };
+    const localRoutineTick = async () => {
+      if (process.env.GROK_BOT_LOCAL_ROUTINES !== "1" || localRoutineWakesSuspended || localRoutineScanInFlight) return;
+      localRoutineScanInFlight = true;
+      try {
+        const nowMs = Date.now();
+        for (const [runUuid, completedAt] of localRoutineRecentlyCompleted) {
+          if (nowMs - completedAt > localRoutineCompletionGuardMs) localRoutineRecentlyCompleted.delete(runUuid);
+        }
+        const timeZone = context2.deps.settings.getUserTimeZone();
+        const entries = await transcript.listAllAutomationDefinitions();
+        for (const { agentId, automation } of entries) {
+          if (!automation.isEnabled) continue;
+          const scheduledForMs = latestDueRoutineTime(automation, nowMs, timeZone);
+          if (scheduledForMs == null) continue;
+          const runUuid = \`local-\${agentId}-\${automation.id}-\${scheduledForMs}\`;
+          if (localRoutineRunsInFlight.has(runUuid) || localRoutineRecentlyCompleted.has(runUuid)) continue;
+          localRoutineRunsInFlight.add(runUuid);
+          void transcript.runServerScheduledAutomation({ agentId, automation, runUuid, scheduledForMs }).then(() => {
+            localRoutineRecentlyCompleted.set(runUuid, Date.now());
+            console.info(\`[codex-bot:automation] local scheduled run completed for \${agentId}/\${automation.id}\`);
+          }).catch((error4) => {
+            console.error(\`[codex-bot:automation] local scheduled fire failed for \${agentId}/\${automation.id}: \${errorMessage(error4)}\`);
+          }).finally(() => {
+            localRoutineRunsInFlight.delete(runUuid);
+          });
+        }
+      } finally {
+        localRoutineScanInFlight = false;
       }
     };
     const requestLocalRoutineTick = () => void localRoutineTick().catch((error4) => {

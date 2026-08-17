@@ -10,7 +10,9 @@ This is an independent community project. It is not affiliated with, endorsed by
 - Keep a direct OpenAI API key as an optional route; it is protected with Windows DPAPI for the current Windows user.
 - Connect a local OpenAI-compatible server such as **Ollama, LM Studio, or vLLM** through a loopback-only endpoint and discover its models automatically.
 - Pick a workspace model and reasoning level, then override either choice for an individual employee.
+- Switch each employee between **Chat**, quick cited **Search**, and deeper multi-source **Research** modes.
 - Set reasoning with a real stepped slider from the employee composer or Settings.
+- Generate images with **GPT Image 2** when a direct OpenAI API key is connected.
 - Give every employee a persistent, isolated Chrome or Edge browser profile.
 - Use the local Private browser by default, or explicitly opt into the Experimental vendor cloud computer.
 - Approve vendor-computer actions in chat, enable provider-scoped **Always allow**, or take over in a full-window control surface.
@@ -49,7 +51,11 @@ Local model setup accepts only a literal `http://127.0.0.1:<port>` endpoint, nor
 
 ## Models and reasoning
 
-Settings contains the workspace default model, a stepped reasoning slider, and Fast mode when the selected route supports it. Each employee composer has the same model and reasoning controls immediately beside the stock action cluster.
+Settings contains the workspace default model, response mode, a stepped reasoning slider, and Fast mode when the selected route supports it. Each employee composer has the same controls immediately beside the stock action cluster.
+
+**Search** performs a focused browser lookup and returns links. **Research** browses more broadly, prefers primary sources, checks freshness, compares independent sources when useful, and ends with a concise source list. Both modes use the employee's isolated Computer browser rather than inventing citations; if the browser cannot verify a claim, the answer says so.
+
+The **Create images** card uses OpenAI's `gpt-image-2` Images API with selectable canvas and quality. It is available only on the direct OpenAI API-key route. A ChatGPT/Codex subscription login does not itself grant Images API access, so OAuth-only sessions show that limitation instead of pretending image generation is ready.
 
 Per-employee overrides are partial. An employee can keep a custom model while inheriting future workspace reasoning changes, or return to all workspace defaults with one action.
 
@@ -128,7 +134,9 @@ The interactive uninstaller asks whether to preserve state for a future reinstal
 
 ## Always-on behavior
 
-Schedules continue after the window closes only while that Windows user is signed in and the PC is running, awake, and online. They do not run while the PC is powered off, sleeping, or signed out. True 24/7 operation requires an always-on Windows PC or VM with an interactive desktop session.
+Schedules continue after the window closes only while that Windows user is signed in and the PC is running, awake, and online. The current-user task starts missed work when Windows becomes available, ignores duplicate worker launches, retries a crashed worker up to ten times, and coalesces missed occurrences to the newest run due within the last 24 hours. In-flight and just-completed run IDs are suppressed so overlapping scans cannot launch the same occurrence twice.
+
+They do not run while the PC is powered off, sleeping, or signed out. True 24/7 operation requires an always-on Windows PC or VM with an interactive desktop session. Open Bot does not install a machine-wide service or cross into another Windows account.
 
 Websites may still require login, CAPTCHA, approval, or human judgment. The app preserves state and asks for takeover instead of bypassing those checks.
 

@@ -9,7 +9,25 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8317/v1";
 const DEFAULT_API_KEY = "codex-bot-local";
 const DEFAULT_MODEL = "gpt-5.6-terra";
 const DEFAULT_REASONING_EFFORT = "high";
-const COWORKER_POLICY_VERSION = "2026-08-16.4";
+const COWORKER_POLICY_VERSION = "2026-08-17.1";
+const SEARCH_MODE_INSTRUCTION = Object.freeze({
+  role: "system",
+  content: `Search mode is active for this employee. Use Computer to look up fresh public-web information whenever it is listed.
+- Search directly, open the actual result page, and read the relevant page evidence before answering.
+- Prefer one authoritative primary source; add another source when the claim is contested, consequential, or not fully resolved.
+- Give a concise answer with descriptive inline Markdown links, followed by a compact **Sources** list of only the pages actually used.
+- Never invent a title, URL, quote, date, or citation. If browser evidence is unavailable, state that clearly instead of guessing.`,
+});
+const RESEARCH_MODE_INSTRUCTION = Object.freeze({
+  role: "system",
+  content: `Research mode is active for this employee. Treat factual freshness and traceable evidence as part of the answer.
+- Use Computer for public-web research whenever it is listed. Search the web directly, open the actual result pages, and read the relevant page evidence before answering.
+- For anything that could have changed, verify it now. Do not answer from memory and do not substitute Shell networking.
+- Consult at least two independent, relevant sources unless the request is simple navigation or one authoritative primary source fully resolves it.
+- Prefer primary sources, official documentation, original data, and direct reporting. Note meaningful source disagreement.
+- Give the useful answer first. Then include a compact **Sources** section with descriptive Markdown links to every source actually used. Never invent a title, URL, quote, date, or citation.
+- If access fails or evidence is insufficient, say exactly what could not be verified instead of presenting a guess as researched fact.`,
+});
 
 const DIGITAL_COWORKER_POLICY = `
 <digital_coworker_compatibility version="${COWORKER_POLICY_VERSION}">
@@ -1269,6 +1287,16 @@ class CLIProxyExecutor {
       messages.splice(stepInstructionIndex, 0, computerGuidance);
       stepInstructionIndex += 1;
     }
+    const responseModeInstruction =
+      connection.responseMode === "research"
+        ? RESEARCH_MODE_INSTRUCTION
+        : connection.responseMode === "search"
+          ? SEARCH_MODE_INSTRUCTION
+          : null;
+    if (responseModeInstruction) {
+      messages.splice(stepInstructionIndex, 0, responseModeInstruction);
+      stepInstructionIndex += 1;
+    }
     if (nameAssignmentStep) {
       messages.splice(stepInstructionIndex, 0, {
         role: "system",
@@ -1306,6 +1334,7 @@ class CLIProxyExecutor {
       requestedModel: requestModel,
       reasoningEffort,
       fastMode: connection.fastMode === true,
+      responseMode: connection.responseMode || "chat",
       fastTransport: fastRequest.transport,
       coworkerPolicyVersion: COWORKER_POLICY_VERSION,
       route: connection.route,
@@ -1667,6 +1696,8 @@ module.exports = {
   normalizeToolsForProvider,
   providerHttpFailureMessage,
   resolveFastRequest,
+  SEARCH_MODE_INSTRUCTION,
+  RESEARCH_MODE_INSTRUCTION,
   toolInventoryMessage,
   trailingCompletedToolBatchMessageMode,
   trailingCompletedToolBatchHasSendMessage,

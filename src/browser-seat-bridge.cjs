@@ -768,6 +768,21 @@ function startViewServer({
         });
         return;
       }
+      if (request.method === "POST" && url.pathname === "/api/codex/images") {
+        if (
+          !/^application\/json(?:\s*;|$)/i.test(
+            String(request.headers["content-type"] || ""),
+          )
+        )
+          throw new connectionManager.SettingsValidationError(
+            "Image generation requires an application/json request.",
+          );
+        const result = await connectionManager.generateImage(
+          await readJson(request),
+        );
+        sendJson(response, 200, { ok: true, result });
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/codex/auth") {
         const body = await readJson(request);
         const action = String(body.action || "");

@@ -88,6 +88,7 @@ function inferenceState(status = lastStatus) {
     model: status?.connection?.model || "gpt-5.6-terra",
     reasoningEffort: status?.connection?.reasoningEffort || "high",
     fastMode: Boolean(status?.connection?.fastMode),
+    responseMode: status?.connection?.responseMode || "chat",
   };
   return {
     defaults,
@@ -104,6 +105,11 @@ function inferenceState(status = lastStatus) {
       value.reasoningEfforts ||
       REASONING_FALLBACKS,
     fastCapability: value.catalog?.fastMode || value.fastCapability || null,
+    responseModes: value.catalog?.responseModes || [
+      "chat",
+      "search",
+      "research",
+    ],
   };
 }
 
@@ -699,6 +705,11 @@ function defaultInferenceHtml(status) {
         <label>Model<select data-codex-default-model>${modelOptions}</select></label>
       </div>
       ${reasoningSliderHtml(state.reasoningEfforts, defaults.reasoningEffort, { attribute: "data-codex-default-reasoning", id: "codex-default-reasoning" })}
+      <div class="codex-mode-picker" role="radiogroup" aria-label="Default response mode">
+        <button type="button" role="radio" aria-checked="${defaults.responseMode === "chat"}" data-codex-default-mode="chat"><strong>Chat</strong><small>Fast, conversational answers.</small></button>
+        <button type="button" role="radio" aria-checked="${defaults.responseMode === "search"}" data-codex-default-mode="search"><strong>Search</strong><small>Quick web lookup with links.</small></button>
+        <button type="button" role="radio" aria-checked="${defaults.responseMode === "research"}" data-codex-default-mode="research"><strong>Research</strong><small>Browse, verify, and cite sources.</small></button>
+      </div>
       <button class="codex-switch-row" type="button" role="switch" aria-checked="${defaults.fastMode && state.fastCapability?.supported !== false ? "true" : "false"}" data-codex-default-fast${state.fastCapability?.supported === false ? " disabled" : ""}>
         <span class="codex-switch-icon">${boltIcon({ size: 15 })}</span>
         <span><strong>Fast mode</strong><small>${state.fastCapability?.supported === false ? "This provider does not expose Fast mode through CLIProxyAPI." : "Prioritizes lower latency. Direct API keys use premium per-token pricing; Codex OAuth can consume allowance faster."}</small></span>
@@ -707,7 +718,63 @@ function defaultInferenceHtml(status) {
       <p class="codex-settings-notice" data-codex-settings-notice aria-live="polite"></p>
     </section>
     ${officialComputerHtml(status)}
-    ${vendorComputerPermissionsHtml(status)}`;
+    ${vendorComputerPermissionsHtml(status)}
+    ${imageStudioHtml(status)}
+    ${alwaysOnHtml(status)}`;
+}
+
+function alwaysOnHtml(status) {
+  const alwaysOn = status?.settings?.alwaysOn || {};
+  const active = alwaysOn.workerActive === true;
+  return `
+    <section class="codex-card codex-always-on" aria-labelledby="codex-always-on-title">
+      <div class="codex-card-heading">
+        <div>
+          <h3 id="codex-always-on-title">Always On</h3>
+          <p>Keeps routines and employees available after the window closes.</p>
+        </div>
+        <span class="codex-route-badge${active ? "" : " is-unavailable"}">${active ? "Worker active" : "Worker unavailable"}</span>
+      </div>
+      <ul>
+        <li>Missed schedules recover from the last ${escapeHtml(alwaysOn.catchupHours || 24)} hours without replay storms.</li>
+        <li>Duplicate scans and duplicate in-flight runs are blocked.</li>
+        <li>Windows retries the worker up to ${escapeHtml(alwaysOn.restartAttempts || 10)} times after a crash.</li>
+      </ul>
+      <p class="codex-settings-notice" data-tone="${active ? "info" : "error"}">${active ? "Routines continue locally while this Windows account is signed in." : "Restart Open Bot to restore the local routine worker."}</p>
+    </section>`;
+}
+
+function imageStudioHtml(status) {
+  const capability = status?.images || {};
+  const available = capability.available === true;
+  return `
+    <section class="codex-card codex-image-studio" aria-labelledby="codex-image-studio-title">
+      <div class="codex-card-heading">
+        <div>
+          <h3 id="codex-image-studio-title">Create images</h3>
+          <p>Generate a new image with GPT Image 2.</p>
+        </div>
+        <span class="codex-route-badge${available ? "" : " is-unavailable"}">${available ? "Ready" : "API key needed"}</span>
+      </div>
+      ${
+        available
+          ? `<form data-codex-image-form>
+              <label for="codex-image-prompt">Describe the image</label>
+              <textarea id="codex-image-prompt" data-codex-image-prompt rows="3" maxlength="4000" placeholder="A documentary photo of..." required></textarea>
+              <div class="codex-image-options">
+                <label>Canvas<select data-codex-image-size>${(capability.sizes || ["1024x1024"]).map((size) => `<option value="${escapeHtml(size)}">${escapeHtml(size)}</option>`).join("")}</select></label>
+                <label>Quality<select data-codex-image-quality>${(capability.qualities || ["low", "medium", "high"]).map((quality) => `<option value="${escapeHtml(quality)}"${quality === "medium" ? " selected" : ""}>${escapeHtml(quality[0].toUpperCase() + quality.slice(1))}</option>`).join("")}</select></label>
+              </div>
+              <button type="submit" data-codex-image-submit>Generate image</button>
+            </form>
+            <div class="codex-image-result" data-codex-image-result hidden>
+              <img data-codex-image-output src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=" alt="Generated image" />
+              <a data-codex-image-download download="open-bot-image.png">Download PNG</a>
+            </div>`
+          : `<p class="codex-image-unavailable">${escapeHtml(capability.reason || "Connect a direct OpenAI API key to use image generation.")}</p>`
+      }
+      <p class="codex-settings-notice" data-codex-image-notice aria-live="polite"></p>
+    </section>`;
 }
 
 async function request(path, body) {
@@ -2242,6 +2309,59 @@ function wireConnectionPanel(panel) {
         loadStatus();
       }
     });
+  for (const control of panel.querySelectorAll("[data-codex-default-mode]")) {
+    control.addEventListener("click", async () => {
+      const responseMode = control.dataset.codexDefaultMode;
+      for (const option of panel.querySelectorAll("[data-codex-default-mode]"))
+        option.setAttribute(
+          "aria-checked",
+          String(option.dataset.codexDefaultMode === responseMode),
+        );
+      try {
+        await saveDefault(control, { responseMode });
+      } catch {
+        loadStatus();
+      }
+    });
+  }
+  panel
+    .querySelector("[data-codex-image-form]")
+    ?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const submit = form.querySelector("[data-codex-image-submit]");
+      const notice = panel.querySelector("[data-codex-image-notice]");
+      const result = panel.querySelector("[data-codex-image-result]");
+      const image = panel.querySelector("[data-codex-image-output]");
+      const download = panel.querySelector("[data-codex-image-download]");
+      submit.disabled = true;
+      if (notice) {
+        notice.textContent = "Creating image...";
+        notice.dataset.tone = "info";
+      }
+      if (result) result.hidden = true;
+      try {
+        const response = await request("/api/codex/images", {
+          prompt: form.querySelector("[data-codex-image-prompt]")?.value,
+          size: form.querySelector("[data-codex-image-size]")?.value,
+          quality: form.querySelector("[data-codex-image-quality]")?.value,
+        });
+        const dataUrl = response?.result?.dataUrl;
+        if (!/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/.test(dataUrl || ""))
+          throw new Error("The image response was not valid.");
+        image.src = dataUrl;
+        download.href = dataUrl;
+        result.hidden = false;
+        notice.textContent = "Image ready.";
+      } catch (error) {
+        if (notice) {
+          notice.textContent = error.message;
+          notice.dataset.tone = "error";
+        }
+      } finally {
+        if (submit.isConnected) submit.disabled = false;
+      }
+    });
 }
 
 function installConnectionPanel(status) {
@@ -2378,7 +2498,7 @@ function composerButtonContent(status) {
   const state = inferenceState(status);
   const effective = state.effective;
   const model = modelMeta(effective.model, state);
-  return `${effective.fastMode ? `<span class="codex-model-pill-bolt">${boltIcon({ size: 13 })}</span>` : ""}<span>${escapeHtml(model.label)}</span><span class="codex-model-pill-reasoning">${escapeHtml(reasoningLabel(effective.reasoningEffort))}</span>`;
+  return `${effective.responseMode !== "chat" ? `<span class="codex-research-mark" aria-hidden="true">${effective.responseMode === "research" ? "R" : "S"}</span>` : ""}${effective.fastMode ? `<span class="codex-model-pill-bolt">${boltIcon({ size: 13 })}</span>` : ""}<span>${escapeHtml(model.label)}</span><span class="codex-model-pill-reasoning">${escapeHtml(reasoningLabel(effective.reasoningEffort))}</span>`;
 }
 
 function updateModelPickerButtons(agentId, status) {
@@ -2395,7 +2515,7 @@ function updateModelPickerButtons(agentId, status) {
     button.classList.toggle("is-fast", Boolean(effective.fastMode));
     button.setAttribute(
       "aria-label",
-      `Response settings: ${model.label}, ${reasoningLabel(effective.reasoningEffort)} reasoning${effective.fastMode ? ", Fast mode" : ""}`,
+      `Response settings: ${model.label}, ${reasoningLabel(effective.reasoningEffort)} reasoning${effective.fastMode ? ", Fast mode" : ""}${effective.responseMode === "research" ? ", Research mode" : effective.responseMode === "search" ? ", Search mode" : ""}`,
     );
     button.title = button.getAttribute("aria-label");
   }
@@ -2455,6 +2575,14 @@ function modelPickerHtml(status) {
       <div class="codex-model-choices" role="radiogroup" aria-labelledby="codex-model-options-label">${modelRows}</div>
     </section>
     <section>${reasoningSliderHtml(state.reasoningEfforts, effective.reasoningEffort, { attribute: "data-codex-pick-reasoning", id: "codex-agent-reasoning", compact: true })}</section>
+    <section aria-labelledby="codex-response-mode-label">
+      <span class="codex-model-popover-label" id="codex-response-mode-label">Mode</span>
+      <div class="codex-mode-picker is-compact" role="radiogroup" aria-labelledby="codex-response-mode-label">
+        <button type="button" role="radio" aria-checked="${effective.responseMode === "chat"}" data-codex-pick-mode="chat"><strong>Chat</strong><small>Direct conversation</small></button>
+        <button type="button" role="radio" aria-checked="${effective.responseMode === "search"}" data-codex-pick-mode="search"><strong>Search</strong><small>Quick cited lookup</small></button>
+        <button type="button" role="radio" aria-checked="${effective.responseMode === "research"}" data-codex-pick-mode="research"><strong>Research</strong><small>Browse + sources</small></button>
+      </div>
+    </section>
     <button class="codex-switch-row codex-popover-fast" type="button" role="switch" aria-checked="${effective.fastMode && state.fastCapability?.supported !== false ? "true" : "false"}" data-codex-pick-fast${state.fastCapability?.supported === false ? " disabled" : ""}>
       <span class="codex-switch-icon">${boltIcon({ size: 15 })}</span>
       <span><strong>Fast mode</strong><small>${state.fastCapability?.supported === false ? "Unavailable for this provider." : "Prioritize lower latency. Direct API keys use premium per-token pricing; Codex OAuth can consume allowance faster."}</small></span>
@@ -3106,6 +3234,14 @@ document.addEventListener(
       );
       return;
     }
+    const modeControl = target.closest?.("[data-codex-pick-mode]");
+    if (modeControl) {
+      updateActiveAgentPreference(
+        { responseMode: modeControl.dataset.codexPickMode },
+        `[data-codex-pick-mode="${CSS.escape(modeControl.dataset.codexPickMode)}"]`,
+      );
+      return;
+    }
     if (target.closest?.("[data-codex-use-defaults]")) {
       const { agentId } = activeModelPicker;
       saveInferenceSettings({ scope: "agent", agentId, inherit: true })
@@ -3300,7 +3436,25 @@ style.textContent = `
   .codex-model-pill:hover,.codex-model-pill[aria-expanded="true"] { background:rgba(127,127,127,.18); border-color:rgba(157,198,255,.45); }
   .codex-model-pill:focus-visible { outline:2px solid #9dc6ff; outline-offset:2px; }
   .codex-model-pill-bolt { display:grid; color:#8fb0ff; }
+  .codex-research-mark { display:grid; place-items:center; width:16px; height:16px; border-radius:5px; background:#dbe8ff; color:#17243e; font-size:9px; font-weight:800; }
   .codex-model-pill-reasoning { color:var(--sand-text-tertiary,#999); }
+  .codex-mode-picker { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin:2px 0; }
+  .codex-mode-picker>button { min-width:0; padding:10px 12px; border:1px solid rgba(127,127,127,.28); border-radius:10px; color:var(--sand-text-primary,#eee); background:rgba(127,127,127,.055); text-align:left; cursor:pointer; }
+  .codex-mode-picker>button:hover:not(:disabled) { border-color:rgba(157,198,255,.48); background:rgba(116,151,211,.1); }
+  .codex-mode-picker>button[aria-checked="true"] { border-color:rgba(157,198,255,.72); background:rgba(116,151,211,.16); box-shadow:0 3px 12px rgba(21,42,79,.18); }
+  .codex-mode-picker strong,.codex-mode-picker small { display:block; }
+  .codex-mode-picker small { margin-top:3px; color:var(--sand-text-tertiary,#999); font-size:10px; line-height:1.35; }
+  .codex-mode-picker.is-compact>button { padding:8px 9px; }
+  .codex-image-studio form { display:grid; gap:9px; }
+  .codex-image-studio textarea { width:100%; min-height:76px; resize:vertical; }
+  .codex-image-options { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .codex-image-options label { display:grid; gap:5px; }
+  .codex-image-result { display:grid; gap:8px; }
+  .codex-image-result[hidden] { display:none; }
+  .codex-image-result img { display:block; width:min(100%,480px); height:auto; border-radius:12px; background:#111; }
+  .codex-image-result a { width:max-content; color:#9dc6ff; text-decoration-thickness:1px; text-underline-offset:3px; }
+  .codex-image-unavailable { max-width:68ch; color:var(--sand-text-secondary,#ccc); }
+  .codex-always-on ul { display:grid; gap:5px; margin:0; padding-left:19px; color:var(--sand-text-secondary,#ccc); font-size:11px; line-height:1.45; }
   .codex-model-popover { position:fixed; z-index:2147483646; width:min(356px,calc(100vw - 20px)); max-height:min(620px,calc(100vh - 20px)); overflow:auto; display:grid; gap:14px; padding:12px; border:1px solid rgba(255,255,255,.14); border-radius:14px; color:#eee; background:#171717; box-shadow:0 18px 54px rgba(0,0,0,.46); animation:codex-popover-enter 130ms cubic-bezier(.2,.8,.2,1) both; }
   .codex-model-popover-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
   .codex-model-popover-heading>div { display:grid; gap:2px; }
