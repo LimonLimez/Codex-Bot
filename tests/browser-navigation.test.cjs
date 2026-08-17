@@ -93,6 +93,25 @@ test("private live view serves the latest native screencast frame at a 30 FPS ta
   assert.equal(screenshotCalls, 0);
 });
 
+test("live frame reads do not persist session state on every frame", () => {
+  const source = fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "..",
+      "src",
+      "browser-seats",
+      "browser-seat-manager.cjs",
+    ),
+    "utf8",
+  );
+  const captureRegion = source.match(
+    /async function captureSeat\([\s\S]*?\n}\n\nasync function closeAllSeats/,
+  )?.[0];
+
+  assert.ok(captureRegion, "captureSeat source region should exist");
+  assert.doesNotMatch(captureRegion, /writeSessionState\(seat\)/);
+});
+
 test("isolated browser navigation preserves public HTTP and HTTPS destinations", () => {
   for (const target of [
     "https://www.canva.com/design/",

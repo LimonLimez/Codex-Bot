@@ -1559,7 +1559,6 @@ async function captureSeat(key) {
       .catch(() => seat.lastPageInfo?.title || "");
     assertSafePageForCapture(page);
     seat.lastUsed = Date.now();
-    writeSessionState(seat);
     return {
       ...frame,
       cursorPosition: seat.cursor,
