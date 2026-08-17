@@ -8,7 +8,7 @@ const test = require("node:test");
 
 const macRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(macRoot, "..");
-const windowsBase = "129bc098ec1a8152c11b99e205eb87220603e268";
+const windowsBase = "2ee5d18b652831029a3381862d178c812882120c";
 
 function git(...args) {
   return childProcess.execFileSync("git", args, {
