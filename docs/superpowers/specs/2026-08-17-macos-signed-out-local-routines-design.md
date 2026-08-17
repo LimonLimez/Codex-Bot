@@ -69,7 +69,7 @@ Five-field expressions support `*`, comma lists, numeric ranges, and `/step` for
 
 `src/desktop/local-automation-store.cjs` owns a private schema-v1 JSON file under the existing OpenBot private state root.
 
-The store uses the repository's established durability pattern: verified private directory, descriptor-first input validation, temporary file, file sync, atomic rename, and directory sync. Symlinked roots or non-private roots fail closed before reading or writing.
+The store uses the repository's existing signed native filesystem helper as the durability boundary. Node opens the already-existing private state directory with `O_DIRECTORY | O_NOFOLLOW`, validates the opened descriptor and the current pathname identity, and passes that exact directory descriptor to the helper as child fd 3. Every state-file lookup, read, sibling temporary-file creation, file sync, atomic replacement, and directory sync is then relative to fd 3 with `openat`/`fstatat`/`renameatx_np`; no post-validation absolute pathname is used by the helper. The helper retains its existing exclusive profile-publication invocation unchanged and adds bounded private-state read/write subcommands. Symlinked, substituted, foreign-owned, or non-private roots/files fail closed before content is returned or a replacement path can be touched.
 
 Each private record contains:
 
