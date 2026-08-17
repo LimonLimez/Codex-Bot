@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -103,6 +104,154 @@ const fakeDocument = Object.freeze({
   },
 });
 
+function createUltraWebGlHarness() {
+  const shaderSources = [];
+  const calls = [];
+  let nextObjectId = 0;
+  const gl = {
+    ARRAY_BUFFER: 1,
+    STATIC_DRAW: 2,
+    FLOAT: 3,
+    TRIANGLES: 4,
+    VERTEX_SHADER: 5,
+    FRAGMENT_SHADER: 6,
+    COMPILE_STATUS: 7,
+    LINK_STATUS: 8,
+    createShader(type) { return { kind: "shader", id: ++nextObjectId, type }; },
+    shaderSource(shader, source) { shaderSources.push(source); calls.push(["shaderSource", shader.type]); },
+    compileShader(shader) { calls.push(["compileShader", shader.id]); },
+    getShaderParameter(_shader, parameter) { return parameter === this.COMPILE_STATUS; },
+    deleteShader(shader) { calls.push(["deleteShader", shader.id]); },
+    createProgram() { return { kind: "program", id: ++nextObjectId }; },
+    attachShader(program, shader) { calls.push(["attachShader", program.id, shader.id]); },
+    linkProgram(program) { calls.push(["linkProgram", program.id]); },
+    getProgramParameter(_program, parameter) { return parameter === this.LINK_STATUS; },
+    deleteProgram(program) { calls.push(["deleteProgram", program.id]); },
+    createBuffer() { return { kind: "buffer", id: ++nextObjectId }; },
+    deleteBuffer(buffer) { calls.push(["deleteBuffer", buffer.id]); },
+    getAttribLocation(_program, name) { calls.push(["getAttribLocation", name]); return 9; },
+    getUniformLocation(_program, name) { return { name }; },
+    useProgram(program) { calls.push(["useProgram", program.id]); },
+    bindBuffer(target, buffer) { calls.push(["bindBuffer", target, buffer.id]); },
+    bufferData(target, vertices, usage) {
+      calls.push(["bufferData", target, Array.from(vertices), usage]);
+    },
+    enableVertexAttribArray(location) { calls.push(["enableVertexAttribArray", location]); },
+    vertexAttribPointer(...args) { calls.push(["vertexAttribPointer", ...args]); },
+    viewport(...args) { calls.push(["viewport", ...args]); },
+    uniform2f(location, width, height) { calls.push(["uniform2f", location.name, width, height]); },
+    uniform1f(location, time) { calls.push(["uniform1f", location.name, time]); },
+    drawArrays(...args) { calls.push(["drawArrays", ...args]); },
+  };
+  const animationFrames = new Map();
+  const cancelledFrames = [];
+  let nextFrameId = 0;
+  let resizeCallback = null;
+  let observedCanvas = null;
+  let disconnected = false;
+  let now = 100;
+  class FakeResizeObserver {
+    constructor(callback) { resizeCallback = callback; }
+    observe(canvas) { observedCanvas = canvas; }
+    disconnect() { disconnected = true; }
+  }
+  const contextOptions = [];
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext(kind, options) { contextOptions.push([kind, options]); return gl; },
+    getBoundingClientRect() { return { width: 100.4, height: 24.4 }; },
+  };
+  const windowRef = {
+    WebGLRenderingContext: class WebGLRenderingContext {},
+    ResizeObserver: FakeResizeObserver,
+    devicePixelRatio: 3,
+    performance: { now: () => now },
+    requestAnimationFrame(callback) {
+      const id = ++nextFrameId;
+      animationFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) { cancelledFrames.push(id); animationFrames.delete(id); },
+  };
+  return {
+    animationFrames,
+    calls,
+    cancelledFrames,
+    canvas,
+    contextOptions,
+    get disconnected() { return disconnected; },
+    get observedCanvas() { return observedCanvas; },
+    resize() { resizeCallback(); },
+    runAnimationFrame(id, timestamp) {
+      const callback = animationFrames.get(id);
+      animationFrames.delete(id);
+      callback(timestamp);
+    },
+    setNow(value) { now = value; },
+    shaderSources,
+    windowRef,
+  };
+}
+
+test("signed Ultra field sends the exact Codex shaders through a DPR-capped WebGL lifecycle", () => {
+  const { startUltraCanvas } = require(uiPath);
+  const harness = createUltraWebGlHarness();
+  const dispose = startUltraCanvas(harness.canvas, {
+    shouldReduceMotion: false,
+    windowRef: harness.windowRef,
+  });
+
+  assert.deepEqual(harness.contextOptions, [["webgl", {
+    alpha: true,
+    antialias: false,
+    depth: false,
+    powerPreference: "high-performance",
+    stencil: false,
+  }]]);
+  assert.deepEqual(
+    harness.shaderSources.map((source) => crypto.createHash("sha256").update(source).digest("hex")),
+    [
+      "0a18f8ebef58896e96acdcffbf49d9dd216ab0568aa0aaf6479c9ca00609a2ad",
+      "191a95923b9caeda53854502e6bb6d790f74a49fd0ea2e8d04484ed76d8e9317",
+    ],
+  );
+  assert.equal(harness.canvas.width, 200);
+  assert.equal(harness.canvas.height, 48);
+  assert.equal(harness.observedCanvas, harness.canvas);
+  assert.deepEqual(harness.calls.find((call) => call[0] === "viewport"), ["viewport", 0, 0, 200, 48]);
+  assert.deepEqual(harness.calls.find((call) => call[0] === "uniform2f"), ["uniform2f", "uResolution", 100, 24]);
+  assert.deepEqual(harness.calls.filter((call) => call[0] === "uniform1f").at(-1), ["uniform1f", "uTime", 0]);
+
+  const firstFrameId = [...harness.animationFrames.keys()][0];
+  harness.runAnimationFrame(firstFrameId, 2600);
+  assert.deepEqual(harness.calls.filter((call) => call[0] === "uniform1f").at(-1), ["uniform1f", "uTime", 2.5]);
+  const pendingFrameId = [...harness.animationFrames.keys()][0];
+  dispose();
+  assert.equal(harness.disconnected, true);
+  assert.deepEqual(harness.cancelledFrames, [pendingFrameId]);
+  assert.equal(harness.calls.filter((call) => call[0] === "deleteBuffer").length, 1);
+  assert.equal(harness.calls.filter((call) => call[0] === "deleteProgram").length, 1);
+});
+
+test("signed Ultra field stays at uTime zero under Reduced Motion while still resizing", () => {
+  const { startUltraCanvas } = require(uiPath);
+  const harness = createUltraWebGlHarness();
+  const dispose = startUltraCanvas(harness.canvas, {
+    shouldReduceMotion: true,
+    windowRef: harness.windowRef,
+  });
+  assert.equal(harness.animationFrames.size, 0);
+  harness.setNow(8_100);
+  harness.resize();
+  assert.deepEqual(
+    harness.calls.filter((call) => call[0] === "uniform1f").map((call) => call[2]),
+    [0, 0],
+  );
+  dispose();
+  assert.equal(harness.disconnected, true);
+});
+
 test("runtime presentation is truthful and never offers a local fallback", () => {
   const { runtimePresentation } = require(uiPath);
   assert.deepEqual(runtimePresentation("ready"), {
@@ -192,6 +341,14 @@ test("Power control preserves the approved compact topology exact ticks labels a
       "codex-power-ticks",
     ],
   );
+  assert.deepEqual(
+    view.ultraFill.children.map((child) => child.className),
+    ["codex-power-ultra-mask"],
+  );
+  assert.deepEqual(
+    view.ultraFill.children[0].children.map((child) => child.className),
+    ["codex-power-ultra-canvas"],
+  );
   assert.equal(view.particles.children.length, 14);
   assert.equal(view.burst.children.length, 16);
   assert.equal(view.input.value, "1");
@@ -235,6 +392,80 @@ test("Power control preserves the approved compact topology exact ticks labels a
   assert.equal(view.warning.hidden, false);
   assert.equal(view.input.attributes["aria-valuetext"], "Ultra Code");
   assert.equal(view.label.textContent, "Ultra Code");
+});
+
+test("signed Ultra particles use seeded initial positions then recurring 1.6-second randomized motion", () => {
+  const { createReasoningView, updateReasoningView } = require(uiPath);
+  const animationFrames = new Map();
+  const cancelledFrames = [];
+  const timeouts = new Map();
+  const clearedTimeouts = [];
+  const motionListeners = new Set();
+  let nextAnimationFrame = 0;
+  let nextTimeout = 0;
+  const motionQuery = {
+    matches: false,
+    addEventListener(name, listener) { if (name === "change") motionListeners.add(listener); },
+    removeEventListener(name, listener) { if (name === "change") motionListeners.delete(listener); },
+  };
+  const randomValues = [0, 1, 0.5];
+  const windowRef = {
+    matchMedia() { return motionQuery; },
+    requestAnimationFrame(callback) {
+      const id = ++nextAnimationFrame;
+      animationFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) { cancelledFrames.push(id); animationFrames.delete(id); },
+    setTimeout(callback, delay) {
+      const id = ++nextTimeout;
+      timeouts.set(id, { callback, delay });
+      return id;
+    },
+    clearTimeout(id) { clearedTimeouts.push(id); timeouts.delete(id); },
+  };
+  const view = createReasoningView(fakeDocument, {
+    random: () => randomValues.shift() ?? 0.5,
+    windowRef,
+  });
+  const first = view.particles.children[0];
+  const last = view.particles.children[13];
+  assert.equal(first.style.left, "calc(50% + 2px)");
+  assert.equal(first.style.top, "6px");
+  assert.equal(first.style["--particle-delay"], "0ms");
+  assert.ok(Math.abs(Number.parseFloat(first.style.transitionDuration) - 2.086208017394) < 1e-12);
+  assert.ok(Math.abs(Number(first.style.opacity) - 0.404960707632) < 1e-12);
+  assert.equal(last.style.left, "calc(8% + 3px)");
+  assert.equal(last.style.top, "15px");
+  assert.equal(last.style["--particle-delay"], "442ms");
+
+  const stops = [
+    { label: "Max", effort: "max", effect: "max" },
+    { label: "Ultra", effort: "ultra", effect: "ultra" },
+  ];
+  updateReasoningView(view, stops, 1);
+  assert.equal(animationFrames.size, 14);
+  const [firstFrameId, firstFrame] = animationFrames.entries().next().value;
+  animationFrames.delete(firstFrameId);
+  firstFrame();
+  assert.equal(first.style.left, "calc(50% + -4px)");
+  assert.equal(first.style.top, "19px");
+  assert.equal(first.style.transitionDuration, "2.2399999999999998s");
+  assert.deepEqual([...timeouts.values()].map(({ delay }) => delay), [2_239.9999999999995]);
+
+  motionQuery.matches = true;
+  for (const listener of motionListeners) listener({ matches: true });
+  assert.equal(animationFrames.size, 0);
+  assert.equal(timeouts.size, 0);
+  assert.equal(cancelledFrames.length, 13);
+  assert.deepEqual(clearedTimeouts, [1]);
+
+  motionQuery.matches = false;
+  for (const listener of motionListeners) listener({ matches: false });
+  assert.equal(animationFrames.size, 14);
+  view.dispose();
+  assert.equal(animationFrames.size, 0);
+  assert.equal(motionListeners.size, 0);
 });
 
 test("bot controller uses literal zero-argument New Bot and explicit rename/retry", async () => {
@@ -383,6 +614,7 @@ test("New Bot commits profile and authoritative model before opening Computer", 
     }],
     ["selectModel", {
       botId: BOT_B,
+      provider: "openai-codex",
       model: "gpt-5.6-sol",
       reasoningEffort: "ultra",
       serviceTier: null,
@@ -2616,27 +2848,85 @@ test("model selection is main-owned, exact, and independent from remote Work rea
   });
   await controller.initialize();
   assert.deepEqual(calls.shift(), { selectedBotId: BOT_A });
-  await controller.selectModel("gpt-5.6-sol", "ultra", "ultrafast");
+  await controller.selectModel("openai-codex", "gpt-5.6-sol", "ultra", "ultrafast");
   assert.deepEqual(calls, [{
     botId: BOT_A,
+    provider: "openai-codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "ultra",
     serviceTier: "ultrafast",
   }]);
   await assert.rejects(
-    () => controller.selectModel("gpt-5.6-sol", "ultra", "invented"),
+    () => controller.selectModel("openai-codex", "gpt-5.6-sol", "ultra", "invented"),
     /selection/i,
   );
-  await assert.rejects(() => controller.selectModel("gpt-5.5", "ultra"), /selection/i);
+  await assert.rejects(() => controller.selectModel("openai-codex", "gpt-5.5", "ultra"), /selection/i);
   current = bot(BOT_A, "New Bot", "unavailable");
   controller.applyBot(current);
-  await controller.selectModel("gpt-5.6-sol", "high");
+  await controller.selectModel("openai-codex", "gpt-5.6-sol", "high");
   assert.deepEqual(calls.at(-1), {
     botId: BOT_A,
+    provider: "openai-codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "high",
     serviceTier: "priority",
   });
+});
+
+test("controller model selection round-trips an exact provider when raw model ids collide", async () => {
+  const { createBotUiController } = require(uiPath);
+  const calls = [];
+  let generation = 1;
+  const direct = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 24,
+    generation,
+  });
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return direct; },
+      async readModel() { return direct; },
+      async selectModel(selection) {
+        calls.push(structuredClone(selection));
+        return Object.freeze({
+          ...selection,
+          catalogGeneration: selection.provider === "openai-codex" ? 24 : 1,
+          generation: ++generation,
+        });
+      },
+    },
+    accountFacade: {
+      async catalog() {
+        return Object.freeze({
+          generation: 24,
+          status: "ready",
+          models: Object.freeze([Object.freeze({
+            id: "claude-fable-5",
+            displayName: "Direct Claude Fable 5",
+            defaultReasoningEffort: "medium",
+            supportedReasoningEfforts: Object.freeze(["medium", "high"]),
+          })]),
+        });
+      },
+    },
+  });
+  await controller.initialize();
+  await controller.selectModel("cliproxy-anthropic", "claude-fable-5", "ultra-code", null);
+  assert.equal(controller.snapshot().modelSelection.provider, "cliproxy-anthropic");
+  await controller.selectModel("openai-codex", "claude-fable-5", "high", null);
+  assert.equal(controller.snapshot().modelSelection.provider, "openai-codex");
+  assert.deepEqual(calls.map(({ provider, model, reasoningEffort }) => [provider, model, reasoningEffort]), [
+    ["cliproxy-anthropic", "claude-fable-5", "ultra-code"],
+    ["openai-codex", "claude-fable-5", "high"],
+  ]);
 });
 
 test("newer same-bot model intent wins when selection replies resolve out of order", async () => {
@@ -2682,8 +2972,8 @@ test("newer same-bot model intent wins when selection replies resolve out of ord
     },
   });
   await controller.initialize();
-  const older = controller.selectModel("gpt-5.6-terra", "low");
-  const newer = controller.selectModel("gpt-5.6-sol", "ultra");
+  const older = controller.selectModel("openai-codex", "gpt-5.6-terra", "low");
+  const newer = controller.selectModel("openai-codex", "gpt-5.6-sol", "ultra");
   releases[1]();
   await newer;
   releases[0]();
@@ -2931,7 +3221,7 @@ test("a pending official catalog keeps the bot active so a reviewed optional mod
   await controller.initialize();
   assert.equal(controller.snapshot().activeBotId, BOT_A);
   assert.equal(controller.snapshot().modelSelection, null);
-  await controller.selectModel("claude-fable-5", "ultra-code");
+  await controller.selectModel("cliproxy-anthropic", "claude-fable-5", "ultra-code");
   assert.deepEqual(controller.snapshot().modelSelection, optional);
 });
 
@@ -3431,12 +3721,17 @@ test("mounted optional model controls stay reachable while the official catalog 
   trigger.listeners.get("click")();
   assert.equal(advancedToggle.disabled, false);
   assert.equal(advanced.hidden, true);
-  assert.equal(advancedModel.children[0].value, "claude-fable-5");
+  assert.equal(advancedModel.children[0].value,
+    JSON.stringify(["cliproxy-anthropic", "claude-fable-5"]));
   assert.equal(find(mounted.modelDock, "codex-model-select"), null);
-  power.listeners.get("keydown")({ key: "End", preventDefault() {} });
+  power.listeners.get("pointerdown")();
+  power.value = "5";
+  power.listeners.get("input")();
+  power.listeners.get("pointerup")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(selected, [{
     botId: BOT_A,
+    provider: "cliproxy-anthropic",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
@@ -3565,6 +3860,78 @@ function createMountedUiHarness({
   };
 }
 
+test("mounted model controls keep same-id official and CLIProxy rows provider-scoped", async (context) => {
+  const catalog = Object.freeze({
+    generation: 24,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "claude-fable-5",
+      displayName: "Direct Claude Fable 5",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "high"]),
+    })]),
+  });
+  let generation = 1;
+  let current = Object.freeze({
+    botId: BOT_A,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "ultra-code",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation,
+  });
+  const selected = [];
+  const runtimeFacade = {
+    async selectBot() { return current; },
+    async readModel() { return current; },
+    async selectModel(value) {
+      selected.push(structuredClone(value));
+      current = Object.freeze({
+        ...value,
+        catalogGeneration: value.provider === "openai-codex" ? catalog.generation : 1,
+        generation: ++generation,
+      });
+      return current;
+    },
+  };
+  const harness = createMountedUiHarness({ catalog, initialSelection: current, runtimeFacade });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const model = harness.find("codex-power-model-select");
+  const triggerModel = harness.find("codex-model-trigger-model");
+  const option = (label) => model.children.find((entry) => entry.textContent === label);
+  assert.equal(triggerModel.textContent, "Claude Fable 5");
+  assert.ok(option("Direct Claude Fable 5"));
+  assert.ok(option("Claude Fable 5"));
+  assert.notEqual(option("Direct Claude Fable 5").value, option("Claude Fable 5").value);
+
+  model.value = option("Direct Claude Fable 5").value;
+  model.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(selected.at(-1), {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  });
+  assert.equal(triggerModel.textContent, "Direct Claude Fable 5");
+
+  model.value = option("Claude Fable 5").value;
+  model.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(selected.at(-1), {
+    botId: BOT_A,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  });
+  assert.equal(triggerModel.textContent, "Claude Fable 5");
+});
+
 test("native protocol mode preserves the Grok shell and mounts only Power plus owned dialogs", async (context) => {
   const catalog = Object.freeze({
     generation: 12,
@@ -3601,7 +3968,12 @@ test("native protocol mode preserves the Grok shell and mounts only Power plus o
     assert.equal(dialog.parentElement, harness.documentRef.body, className);
     assert.equal(dialog.tagName, "DIALOG");
   }
-  assert.equal(harness.find("codex-provider-select").tagName, "SELECT");
+  assert.equal(harness.find("codex-provider-select"), null, "the native Grok picker owns provider selection");
+  assert.equal(harness.find("codex-provider-connect"), null);
+  assert.equal(harness.find("codex-power-advanced-toggle"), null, "the native Grok picker owns Advanced model controls");
+  assert.equal(harness.find("codex-power-model-select"), null);
+  assert.equal(harness.find("codex-power-effort-select"), null);
+  assert.equal(harness.find("codex-power-speed-select"), null);
   assert.equal(harness.find("codex-power-input").tagName, "INPUT");
 });
 
@@ -3876,6 +4248,7 @@ test("mounted New Bot requires profile and model confirmation before unselected 
     }],
     ["selectModel", {
       botId: BOT_B,
+      provider: "openai-codex",
       model: "gpt-5.6-sol",
       reasoningEffort: "ultra",
       serviceTier: null,
@@ -4373,6 +4746,7 @@ test("mounted Power keeps an authoritative noncompact tuple visible until a proj
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(harness.selected, [{
     botId: BOT_A,
+    provider: "openai-codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "xhigh",
     serviceTier: null,
@@ -4461,6 +4835,272 @@ test("mounted Fast state distinguishes priority from other authoritative service
   harness.mounted.dispose();
 });
 
+test("mounted Fast rapid double toggle preserves the second intent after a held first acknowledgement", async () => {
+  const catalog = Object.freeze({
+    generation: 7,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+      ]),
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+    })]),
+  });
+  let current = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 2,
+  });
+  const first = deferred();
+  const calls = [];
+  let serial = Promise.resolve();
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: current,
+    runtimeFacade: {
+      async selectBot() { return current; },
+      async readModel() { return current; },
+      selectModel(value) {
+        calls.push(structuredClone(value));
+        const callIndex = calls.length - 1;
+        const operation = serial.then(async () => {
+          if (callIndex === 0) await first.promise;
+          current = Object.freeze({
+            ...value,
+            provider: "openai-codex",
+            catalogGeneration: 7,
+            generation: current.generation + 1,
+          });
+          return current;
+        });
+        serial = operation.catch(() => {});
+        return operation;
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fast = harness.find("codex-power-fast-toggle");
+  fast.listeners.get("click")();
+  fast.listeners.get("click")();
+  assert.deepEqual(calls.map((value) => value.serviceTier), ["priority", null]);
+  first.resolve();
+  await serial;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.map((value) => value.serviceTier), ["priority", null]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(current.serviceTier, null);
+  assert.equal(fast.attributes["aria-pressed"], "false");
+  harness.mounted.dispose();
+});
+
+test("mounted Fast rapid double toggle from Fast restores Fast after a held first acknowledgement", async () => {
+  const catalog = Object.freeze({
+    generation: 7,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+      ]),
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
+    })]),
+  });
+  let current = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: "priority",
+    catalogGeneration: 7,
+    generation: 2,
+  });
+  const first = deferred();
+  const calls = [];
+  let serial = Promise.resolve();
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: current,
+    runtimeFacade: {
+      async selectBot() { return current; },
+      async readModel() { return current; },
+      selectModel(value) {
+        calls.push(structuredClone(value));
+        const callIndex = calls.length - 1;
+        const operation = serial.then(async () => {
+          if (callIndex === 0) await first.promise;
+          current = Object.freeze({
+            ...value,
+            provider: "openai-codex",
+            catalogGeneration: 7,
+            generation: current.generation + 1,
+          });
+          return current;
+        });
+        serial = operation.catch(() => {});
+        return operation;
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fast = harness.find("codex-power-fast-toggle");
+  fast.listeners.get("click")();
+  fast.listeners.get("click")();
+  assert.deepEqual(calls.map((value) => value.serviceTier), [null, "priority"]);
+  first.resolve();
+  await serial;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(current.serviceTier, "priority");
+  assert.equal(fast.attributes["aria-pressed"], "true");
+  harness.mounted.dispose();
+});
+
+test("mounted Fast rejection resyncs the final authoritative tier instead of retaining optimistic state", async () => {
+  const catalog = Object.freeze({
+    generation: 7,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+      ]),
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+    })]),
+  });
+  let current = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 2,
+  });
+  const first = deferred();
+  const calls = [];
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: current,
+    runtimeFacade: {
+      async selectBot() { return current; },
+      async readModel() { return current; },
+      selectModel(value) {
+        calls.push(structuredClone(value));
+        if (calls.length === 1) return first.promise.then(() => {
+          current = Object.freeze({
+            ...value,
+            provider: "openai-codex",
+            catalogGeneration: 7,
+            generation: 3,
+          });
+          return current;
+        });
+        return first.promise.then(() => { throw new Error("second write rejected"); });
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fast = harness.find("codex-power-fast-toggle");
+  fast.listeners.get("click")();
+  fast.listeners.get("click")();
+  assert.deepEqual(calls.map((value) => value.serviceTier), ["priority", null]);
+  assert.equal(fast.attributes["aria-pressed"], "false");
+  first.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(current.serviceTier, "priority");
+  assert.equal(fast.attributes["aria-pressed"], "true");
+  harness.mounted.dispose();
+});
+
+test("mounted Fast intent stays bot-scoped across a switch while its request is held", async () => {
+  const catalog = Object.freeze({
+    generation: 7,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+      ]),
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+    })]),
+  });
+  const selection = (botId, serviceTier, generation) => Object.freeze({
+    botId,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier,
+    catalogGeneration: 7,
+    generation,
+  });
+  const selections = new Map([
+    [BOT_A, selection(BOT_A, null, 2)],
+    [BOT_B, selection(BOT_B, null, 4)],
+  ]);
+  const held = deferred();
+  const calls = [];
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selections.get(BOT_A),
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot(botId) { return selections.get(botId); },
+      async readModel(botId) { return selections.get(botId); },
+      async selectModel(value) {
+        calls.push(structuredClone(value));
+        await held.promise;
+        const next = selection(value.botId, value.serviceTier, selections.get(value.botId).generation + 1);
+        selections.set(value.botId, next);
+        return next;
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const fast = harness.find("codex-power-fast-toggle");
+  fast.listeners.get("click")();
+  assert.equal(fast.attributes["aria-pressed"], "true");
+  const botSelect = harness.findPanel("codex-bot-select");
+  botSelect.value = BOT_B;
+  botSelect.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
+  assert.equal(fast.attributes["aria-pressed"], "false");
+  held.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
+  assert.equal(fast.attributes["aria-pressed"], "false");
+  botSelect.value = BOT_A;
+  botSelect.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fast.attributes["aria-pressed"], "true");
+  assert.deepEqual(calls.map((value) => [value.botId, value.serviceTier]), [[BOT_A, "priority"]]);
+  harness.mounted.dispose();
+});
+
 test("mounted Ultra entry survives an immediate authoritative reply for its full warning window", async () => {
   const timers = new Map();
   let timerId = 0;
@@ -4495,7 +5135,10 @@ test("mounted Ultra entry survives an immediate authoritative reply for its full
   await new Promise((resolve) => setImmediate(resolve));
   const power = harness.find("codex-power-input");
   const warning = harness.find("codex-power-warning");
-  power.listeners.get("keydown")({ key: "End", preventDefault() {} });
+  power.listeners.get("pointerdown")();
+  power.value = "5";
+  power.listeners.get("input")();
+  power.listeners.get("pointerup")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.selected.at(-1).reasoningEffort, "ultra");
   assert.equal(warning.hidden, false);
@@ -4509,7 +5152,7 @@ test("mounted Ultra entry survives an immediate authoritative reply for its full
   harness.mounted.dispose();
 });
 
-test("persisted Ultra mounts steady but an explicit Advanced transition enters once", async () => {
+test("persisted and Advanced-selected Ultra stay steady without replaying pointer entry", async () => {
   const timers = new Map();
   let timerId = 0;
   const windowTimers = {
@@ -4543,6 +5186,7 @@ test("persisted Ultra mounts steady but an explicit Advanced transition enters o
   await new Promise((resolve) => setImmediate(resolve));
   const warning = harness.find("codex-power-warning");
   const effort = harness.find("codex-power-effort-select");
+  assert.equal(harness.find("codex-power-fast-toggle").hidden, true);
   assert.equal(warning.hidden, true);
   assert.equal(harness.find("codex-power-control").classList.contains("is-ultra-entering"), false);
   assert.equal(timers.size, 0);
@@ -4555,10 +5199,9 @@ test("persisted Ultra mounts steady but an explicit Advanced transition enters o
   effort.value = "ultra";
   effort.listeners.get("change")();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(warning.hidden, false);
-  assert.equal(harness.mounted.modelDock.classList.contains("is-warning"), true);
-  assert.equal(timers.size, 1);
-  assert.equal([...timers.values()][0].delay, 2000);
+  assert.equal(warning.hidden, true);
+  assert.equal(harness.mounted.modelDock.classList.contains("is-warning"), false);
+  assert.equal(timers.size, 0);
   harness.mounted.dispose();
 });
 

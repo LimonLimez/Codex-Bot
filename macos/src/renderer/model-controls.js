@@ -190,6 +190,29 @@
     return result;
   }
 
+  function isFastServiceTier(entry) {
+    if (!entry || typeof entry !== "object") return false;
+    const id = typeof entry.serviceTier === "string"
+      ? entry.serviceTier
+      : typeof entry.id === "string" ? entry.id : "";
+    const label = typeof entry.label === "string"
+      ? entry.label
+      : typeof entry.name === "string" ? entry.name : "";
+    return id.toLowerCase() === "priority" || id.toLowerCase() === "fast"
+      || label.trim().toLowerCase() === "fast" || label.trim().toLowerCase() === "priority";
+  }
+
+  function findFastServiceTier(entries) {
+    const values = Array.isArray(entries) ? entries : [];
+    const idFor = (entry) => typeof entry?.serviceTier === "string"
+      ? entry.serviceTier : typeof entry?.id === "string" ? entry.id : "";
+    const match = values.find((entry) => idFor(entry).toLowerCase() === "priority")
+      ?? values.find((entry) => idFor(entry).toLowerCase() === "fast")
+      ?? values.find(isFastServiceTier);
+    if (!match) return null;
+    return typeof match.serviceTier === "string" ? match.serviceTier : tierId(match);
+  }
+
   function validPowerModel(model) {
     return model && typeof model === "object"
       && typeof model.model === "string" && model.model.length > 0
@@ -198,11 +221,30 @@
       && catalogEfforts(model).length > 0;
   }
 
-  function powerEffect(effort, serviceTier) {
+  function findCatalogModel(models, selected) {
+    const values = Array.isArray(models) ? models : [];
+    const model = typeof selected === "string" ? selected : selected?.model;
+    const provider = typeof selected === "object" && selected !== null
+      ? selected.provider
+      : undefined;
+    if (typeof model !== "string" || !model) return null;
+    if (typeof provider === "string" && provider) {
+      return values.find((entry) => entry.provider === provider && entry.model === model) ?? null;
+    }
+    const matching = values.filter((entry) => entry.model === model);
+    return matching.length === 1 ? matching[0] : null;
+  }
+
+  function modelOptionKey(provider, model) {
+    return JSON.stringify([provider, model]);
+  }
+
+  function powerEffect(effort, serviceTier, tiers = []) {
     if (effort === "ultra" || effort === "ultra-code") return "ultra";
     if (effort === "max") return "max";
-    if (typeof serviceTier === "string"
-      && (serviceTier === "priority" || serviceTier.includes("fast"))) return "fast";
+    if (typeof serviceTier === "string" && isFastServiceTier(
+      tiers.find((entry) => entry.id === serviceTier) ?? { id: serviceTier },
+    )) return "fast";
     return "ordinary";
   }
 
@@ -229,14 +271,14 @@
       serviceTier,
       catalogGeneration: model.catalogGeneration,
       label: COMPACT_LABELS[effort],
-      effect: powerEffect(effort, serviceTier),
+      effect: powerEffect(effort, serviceTier, tiers),
     });
   }
 
   function buildPowerStops(catalog, selected = {}) {
     const models = (Array.isArray(catalog) ? catalog : []).filter(validPowerModel);
     if (!models.length) return Object.freeze([]);
-    const selectedModel = models.find((entry) => entry.model === selected?.model);
+    const selectedModel = findCatalogModel(models, selected);
     if (selectedModel && selectedModel.provider !== "openai-codex") {
       return Object.freeze(COMPACT_EFFORTS
         .map((effort) => powerStop(selectedModel, effort, selected))
@@ -279,8 +321,9 @@
 
   function buildAdvancedOptions(catalog, selectedModel) {
     const models = (Array.isArray(catalog) ? catalog : []).filter(validPowerModel);
-    const current = models.find((entry) => entry.model === selectedModel) ?? models[0];
+    const current = findCatalogModel(models, selectedModel) ?? models[0];
     const modelOptions = Object.freeze(models.map((entry) => Object.freeze({
+      key: modelOptionKey(entry.provider, entry.model),
       model: entry.model,
       label: typeof entry.label === "string" && entry.label ? entry.label : entry.model,
       provider: entry.provider,
@@ -302,8 +345,8 @@
 
   function resolveAdvancedSelection(catalog, selected) {
     if (!selected || typeof selected !== "object") return null;
-    const model = (Array.isArray(catalog) ? catalog : []).find((entry) => validPowerModel(entry)
-      && entry.model === selected.model);
+    const models = (Array.isArray(catalog) ? catalog : []).filter(validPowerModel);
+    const model = findCatalogModel(models, selected);
     if (!model || !catalogEfforts(model).includes(selected.effort)) return null;
     const serviceTier = selected.serviceTier ?? null;
     if (serviceTier !== null && !catalogTiers(model).some((entry) => entry.id === serviceTier)) return null;
@@ -359,5 +402,6 @@
     buildAdvancedOptions,
     resolveAdvancedSelection,
     closestPowerStop,
+    findFastServiceTier,
   });
 });

@@ -79,6 +79,7 @@
       this.committedIndex = this.#selectionIndex(selected);
       this.previewIndex = this.committedIndex;
       this.pointerActive = false;
+      this.pointerMoved = false;
       this.holdStartedAt = null;
       this.endpointLabelsVisible = false;
       this.focused = false;
@@ -97,7 +98,7 @@
       return this.previewIndex >= 0 ? this.previewIndex : this.committedIndex;
     }
 
-    #commit(index) {
+    #commit(index, { pointerDrag = false } = {}) {
       if (this.disabled || !this.stops.length) return this.snapshot();
       const previous = this.stops[this.committedIndex] ?? null;
       const nextIndex = clampIndex(index, this.stops.length, this.committedIndex);
@@ -105,7 +106,9 @@
       const changed = nextIndex !== this.committedIndex;
       this.committedIndex = nextIndex;
       this.previewIndex = nextIndex;
-      return this.snapshot(changed, changed && previous?.effect !== "ultra" && next?.effect === "ultra");
+      const enteredUltra = pointerDrag && changed && nextIndex === this.stops.length - 1
+        && previous?.effect !== "ultra" && next?.effect === "ultra";
+      return this.snapshot(changed, enteredUltra);
     }
 
     setStops(stops, selected, { ownerKey = this.ownerKey } = {}) {
@@ -116,6 +119,7 @@
       this.committedIndex = this.#selectionIndex(selected);
       this.previewIndex = this.committedIndex;
       this.pointerActive = false;
+      this.pointerMoved = false;
       this.holdStartedAt = null;
       this.endpointLabelsVisible = false;
       const next = this.stops[this.committedIndex] ?? null;
@@ -126,6 +130,7 @@
     pointerDown(index, now = 0) {
       if (this.disabled || !this.stops.length) return this.snapshot();
       this.pointerActive = true;
+      this.pointerMoved = false;
       this.previewIndex = clampIndex(index, this.stops.length, this.committedIndex);
       this.holdStartedAt = Number.isFinite(now) ? now : 0;
       this.endpointLabelsVisible = false;
@@ -134,20 +139,25 @@
 
     pointerMove(index) {
       if (this.disabled || !this.pointerActive) return this.snapshot();
-      this.previewIndex = clampIndex(index, this.stops.length, this.previewIndex);
+      const nextIndex = clampIndex(index, this.stops.length, this.previewIndex);
+      if (nextIndex !== this.previewIndex) this.pointerMoved = true;
+      this.previewIndex = nextIndex;
       return this.snapshot();
     }
 
     pointerUp(index = this.previewIndex) {
       if (this.disabled || !this.pointerActive) return this.snapshot();
+      const pointerDrag = this.pointerMoved;
       this.pointerActive = false;
+      this.pointerMoved = false;
       this.holdStartedAt = null;
       this.endpointLabelsVisible = false;
-      return this.#commit(index);
+      return this.#commit(index, { pointerDrag });
     }
 
     pointerCancel() {
       this.pointerActive = false;
+      this.pointerMoved = false;
       this.holdStartedAt = null;
       this.endpointLabelsVisible = false;
       this.previewIndex = this.committedIndex;

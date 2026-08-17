@@ -559,7 +559,8 @@
       throw new Error("Model selection is unavailable.");
     }
     const read = (field) => descriptors[field].value;
-    const model = catalog.find((entry) => entry.model === read("model"));
+    const model = catalog.find((entry) => entry.provider === read("provider")
+      && entry.model === read("model"));
     if (read("botId") !== botId || !model || !model.efforts.includes(read("reasoningEffort"))
       || read("provider") !== model.provider
       || (read("serviceTier") !== null
@@ -1503,7 +1504,12 @@
         }
         applyBot(profileValue);
 
-        const modelValue = await selectModel(draft.model, draft.reasoningEffort, draft.serviceTier);
+        const modelValue = await selectModel(
+          draft.provider,
+          draft.model,
+          draft.reasoningEffort,
+          draft.serviceTier,
+        );
         if (!modelValue || typeof modelValue !== "object"
           || !setupTransactionIsCurrent(botId, epoch, catalogMarker, descriptor)
           || !modelSelection || modelSelection.provider !== draft.provider
@@ -1780,9 +1786,10 @@
       return applyBot(await facade.retryRuntime(bot.botId));
     }
 
-    async function selectModel(model, reasoningEffort, requestedServiceTier) {
+    async function selectModel(provider, model, reasoningEffort, requestedServiceTier) {
       const bot = activeBot();
-      const catalog = modelCatalog.find((entry) => entry.model === model);
+      const catalog = modelCatalog.find((entry) => entry.provider === provider
+        && entry.model === model);
       const serviceTier = requestedServiceTier === undefined
         ? catalog?.defaultServiceTier ?? null
         : requestedServiceTier;
@@ -1803,6 +1810,7 @@
       const requestEpoch = ++modelRequestEpoch;
       const selection = Object.freeze({
         botId: bot.botId,
+        provider,
         model,
         reasoningEffort,
         serviceTier,
@@ -1885,6 +1893,344 @@
     return node;
   }
 
+  const ULTRA_VERTEX_SHADER = `
+  attribute vec2 aPosition;
+  varying vec2 vUv;
+
+  void main() {
+    vUv = aPosition * 0.5 + 0.5;
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+  }
+`;
+  const ULTRA_FRAGMENT_SHADER = `
+  precision highp float;
+
+  varying vec2 vUv;
+
+  uniform float uTime;
+  uniform vec2 uResolution;
+
+  const vec3 COLOR_1 = vec3(0.592, 0.388, 0.945);
+  const vec3 COLOR_2 = vec3(0.831, 0.710, 0.953);
+  const vec3 COLOR_3 = vec3(0.286, 0.000, 0.404);
+  const vec3 COLOR_4 = vec3(0.145, 0.055, 0.478);
+  const vec3 COLOR_5 = vec3(0.592, 0.000, 0.996);
+  const vec3 COLOR_6 = vec3(0.780, 0.459, 0.914);
+  const vec3 COLOR_7 = vec3(0.725, 0.576, 1.000);
+  const vec3 COLOR_8 = vec3(0.400, 0.212, 0.820);
+  const vec3 COLOR_9 = vec3(0.882, 0.690, 1.000);
+  const vec3 COLOR_10 = vec3(0.498, 0.345, 0.957);
+  const vec3 COLOR_11 = vec3(0.659, 0.275, 0.910);
+  const vec3 COLOR_12 = vec3(0.212, 0.063, 0.400);
+
+  float grain(vec2 uv) {
+    vec2 grainUv = uv * uResolution * 0.5;
+    return fract(sin(dot(grainUv + uTime, vec2(12.9898, 78.233))) * 43758.5453) * 2.0 - 1.0;
+  }
+
+  float fieldWeight(vec2 point, vec2 center) {
+    return exp(-dot(point - center, point - center) * 12.0);
+  }
+
+  vec3 fieldColor(vec2 rawUv) {
+    const float speed = 1.25;
+    vec2 uv = vec2(rawUv.x, 0.40 + rawUv.y * 0.18);
+    vec2 spatialScale = vec2(1.55, 1.0);
+    vec2 point = uv * spatialScale;
+    vec2 center1 = vec2(0.18 + sin(uTime * speed * 0.42) * 0.18, 0.36 + cos(uTime * speed * 0.50) * 0.42) * spatialScale;
+    vec2 center2 = vec2(0.34 + cos(uTime * speed * 0.62) * 0.24, 0.62 + sin(uTime * speed * 0.47) * 0.38) * spatialScale;
+    vec2 center3 = vec2(0.52 + sin(uTime * speed * 0.38) * 0.28, 0.30 + cos(uTime * speed * 0.58) * 0.36) * spatialScale;
+    vec2 center4 = vec2(0.70 + cos(uTime * speed * 0.54) * 0.24, 0.68 + sin(uTime * speed * 0.41) * 0.36) * spatialScale;
+    vec2 center5 = vec2(0.88 + sin(uTime * speed * 0.74) * 0.16, 0.36 + cos(uTime * speed * 0.64) * 0.40) * spatialScale;
+    vec2 center6 = vec2(0.12 + cos(uTime * speed * 0.48) * 0.20, 0.72 + sin(uTime * speed * 0.70) * 0.30) * spatialScale;
+    vec2 center7 = vec2(0.30 + sin(uTime * speed * 0.58) * 0.22, 0.44 + cos(uTime * speed * 0.52) * 0.42) * spatialScale;
+    vec2 center8 = vec2(0.46 + cos(uTime * speed * 0.68) * 0.26, 0.72 + sin(uTime * speed * 0.56) * 0.32) * spatialScale;
+    vec2 center9 = vec2(0.60 + sin(uTime * speed * 0.44) * 0.28, 0.26 + cos(uTime * speed * 0.60) * 0.38) * spatialScale;
+    vec2 center10 = vec2(0.76 + cos(uTime * speed * 0.50) * 0.22, 0.54 + sin(uTime * speed * 0.66) * 0.40) * spatialScale;
+    vec2 center11 = vec2(0.92 + sin(uTime * speed * 0.70) * 0.15, 0.66 + cos(uTime * speed * 0.46) * 0.30) * spatialScale;
+    vec2 center12 = vec2(0.06 + cos(uTime * speed * 0.40) * 0.14, 0.32 + sin(uTime * speed * 0.60) * 0.40) * spatialScale;
+    float weight1 = fieldWeight(point, center1) * (0.7 + 0.3 * sin(uTime * 0.91));
+    float weight2 = fieldWeight(point, center2) * (0.7 + 0.3 * cos(uTime * 1.07));
+    float weight3 = fieldWeight(point, center3) * (0.7 + 0.3 * sin(uTime * 0.76));
+    float weight4 = fieldWeight(point, center4) * (0.7 + 0.3 * cos(uTime * 1.18));
+    float weight5 = fieldWeight(point, center5) * (0.7 + 0.3 * sin(uTime * 1.03));
+    float weight6 = fieldWeight(point, center6) * (0.7 + 0.3 * cos(uTime * 0.83));
+    float weight7 = fieldWeight(point, center7) * (0.7 + 0.3 * sin(uTime * 1.24));
+    float weight8 = fieldWeight(point, center8) * (0.7 + 0.3 * cos(uTime * 0.96));
+    float weight9 = fieldWeight(point, center9) * (0.7 + 0.3 * sin(uTime * 1.11));
+    float weight10 = fieldWeight(point, center10) * (0.7 + 0.3 * cos(uTime * 0.72));
+    float weight11 = fieldWeight(point, center11) * (0.7 + 0.3 * sin(uTime * 1.29));
+    float weight12 = fieldWeight(point, center12) * (0.7 + 0.3 * cos(uTime * 0.88));
+    float totalWeight = max(
+      weight1 + weight2 + weight3 + weight4 + weight5 + weight6 +
+        weight7 + weight8 + weight9 + weight10 + weight11 + weight12,
+      0.0001
+    );
+    vec3 color = (
+      COLOR_1 * weight1 + COLOR_2 * weight2 + COLOR_3 * weight3 +
+      COLOR_4 * weight4 + COLOR_5 * weight5 + COLOR_6 * weight6 +
+      COLOR_7 * weight7 + COLOR_8 * weight8 + COLOR_9 * weight9 +
+      COLOR_10 * weight10 + COLOR_11 * weight11 + COLOR_12 * weight12
+    ) / totalWeight;
+    color = mix(COLOR_4, color, 0.96);
+
+    return pow(clamp(color, vec3(0.0), vec3(1.0)), vec3(0.9));
+  }
+
+  void main() {
+    vec3 color = fieldColor(vUv);
+    color += grain(vUv) * 0.012;
+    color.r += sin(uTime * 0.5) * 0.02;
+    color.g += cos(uTime * 0.7) * 0.02;
+    color.b += sin(uTime * 0.6) * 0.02;
+    color = pow(color, vec3(0.92));
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`;
+  const ULTRA_VERTICES = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
+
+  function compileUltraShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    if (shader == null) return null;
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return shader;
+    gl.deleteShader(shader);
+    return null;
+  }
+
+  function createUltraProgram(gl) {
+    const vertex = compileUltraShader(gl, gl.VERTEX_SHADER, ULTRA_VERTEX_SHADER);
+    const fragment = compileUltraShader(gl, gl.FRAGMENT_SHADER, ULTRA_FRAGMENT_SHADER);
+    if (vertex == null || fragment == null) {
+      if (vertex != null) gl.deleteShader(vertex);
+      if (fragment != null) gl.deleteShader(fragment);
+      return null;
+    }
+    const program = gl.createProgram();
+    if (program == null) {
+      gl.deleteShader(vertex);
+      gl.deleteShader(fragment);
+      return null;
+    }
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    gl.deleteShader(vertex);
+    gl.deleteShader(fragment);
+    if (gl.getProgramParameter(program, gl.LINK_STATUS)) return program;
+    gl.deleteProgram(program);
+    return null;
+  }
+
+  function startUltraCanvas(canvas, {
+    shouldReduceMotion = false,
+    windowRef = typeof window === "object" ? window : null,
+  } = {}) {
+    const ResizeObserverClass = windowRef?.ResizeObserver;
+    if (!windowRef?.WebGLRenderingContext || typeof ResizeObserverClass !== "function"
+      || typeof canvas?.getContext !== "function") return () => {};
+    const gl = canvas.getContext("webgl", {
+      alpha: true,
+      antialias: false,
+      depth: false,
+      powerPreference: "high-performance",
+      stencil: false,
+    });
+    if (gl == null) return () => {};
+    const program = createUltraProgram(gl);
+    if (program == null) return () => {};
+    const buffer = gl.createBuffer();
+    if (buffer == null) {
+      gl.deleteProgram(program);
+      return () => {};
+    }
+    const position = gl.getAttribLocation(program, "aPosition");
+    const resolution = gl.getUniformLocation(program, "uResolution");
+    const time = gl.getUniformLocation(program, "uTime");
+    const performanceRef = windowRef.performance ?? globalThis.performance;
+    const startedAt = performanceRef.now();
+    let animationFrame = 0;
+    let disposed = false;
+    gl.useProgram(program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, ULTRA_VERTICES, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(position);
+    gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+    const draw = (elapsed) => {
+      gl.uniform1f(time, elapsed);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    };
+    const resize = () => {
+      const ratio = Math.min(windowRef.devicePixelRatio, 2);
+      const { height, width } = canvas.getBoundingClientRect();
+      const cssWidth = Math.max(Math.round(width), 1);
+      const cssHeight = Math.max(Math.round(height), 1);
+      canvas.width = Math.round(cssWidth * ratio);
+      canvas.height = Math.round(cssHeight * ratio);
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.uniform2f(resolution, cssWidth, cssHeight);
+      draw(shouldReduceMotion ? 0 : (performanceRef.now() - startedAt) / 1_000);
+    };
+    const render = (timestamp) => {
+      animationFrame = 0;
+      draw((timestamp - startedAt) / 1_000);
+      animationFrame = windowRef.requestAnimationFrame(render);
+    };
+    const resizeObserver = new ResizeObserverClass(resize);
+    resize();
+    resizeObserver.observe(canvas);
+    if (!shouldReduceMotion) animationFrame = windowRef.requestAnimationFrame(render);
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      if (animationFrame !== 0) windowRef.cancelAnimationFrame(animationFrame);
+      resizeObserver.disconnect();
+      gl.deleteBuffer(buffer);
+      gl.deleteProgram(program);
+    };
+  }
+
+  function seededUltraRandom(index, salt) {
+    const value = Math.sin((index + 1) * 12.9898 + salt * 78.233) * 43758.5453;
+    return value - Math.floor(value);
+  }
+
+  function ultraParticleMotion(random) {
+    const horizontal = random();
+    const vertical = random();
+    return Object.freeze({
+      durationScale: 0.8 + random() * 1.2,
+      horizontalOffset: Math.round((horizontal - 0.5) * 8),
+      y: Math.round(12 + (vertical - 0.5) * 14),
+    });
+  }
+
+  function initialUltraParticleMotion(index) {
+    let salt = 1;
+    return ultraParticleMotion(() => seededUltraRandom(index, salt++));
+  }
+
+  function styleUltraParticle(particle, index, motion) {
+    const position = Math.round(4 + seededUltraRandom(index, 14) * 92);
+    const opacity = 0.4 + seededUltraRandom(index, 11) * 0.6;
+    const scale = 0.5 + seededUltraRandom(index, 12) * 0.45;
+    particle.style.left = `calc(${position}% + ${motion.horizontalOffset}px)`;
+    particle.style.opacity = opacity;
+    particle.style.top = `${motion.y}px`;
+    particle.style.transform = `translate(-50%, -50%) scale(${scale})`;
+    particle.style.transitionDuration = `${1.6 * motion.durationScale}s`;
+  }
+
+  function createUltraParticleController(container, {
+    random = Math.random,
+    windowRef = typeof window === "object" ? window : null,
+  } = {}) {
+    const particles = Array.from(container?.children ?? []);
+    const animationFrames = Array(particles.length).fill(0);
+    const timeouts = Array(particles.length).fill(0);
+    let active = false;
+    let disposed = false;
+    for (const [index, particle] of particles.entries()) {
+      particle.style.setProperty?.("--particle-delay", `${index * 34}ms`);
+      styleUltraParticle(particle, index, initialUltraParticleMotion(index));
+    }
+    const stop = () => {
+      for (let index = 0; index < particles.length; index += 1) {
+        if (animationFrames[index] !== 0) {
+          windowRef?.cancelAnimationFrame?.(animationFrames[index]);
+          animationFrames[index] = 0;
+        }
+        if (timeouts[index] !== 0) {
+          windowRef?.clearTimeout?.(timeouts[index]);
+          timeouts[index] = 0;
+        }
+      }
+    };
+    const start = () => {
+      if (typeof windowRef?.requestAnimationFrame !== "function"
+        || typeof windowRef?.setTimeout !== "function") return;
+      for (const [index, particle] of particles.entries()) {
+        const cycle = () => {
+          if (!active || disposed) return;
+          const motion = ultraParticleMotion(random);
+          styleUltraParticle(particle, index, motion);
+          timeouts[index] = windowRef.setTimeout(() => {
+            timeouts[index] = 0;
+            cycle();
+          }, 1.6 * motion.durationScale * 1_000);
+        };
+        animationFrames[index] = windowRef.requestAnimationFrame(() => {
+          animationFrames[index] = 0;
+          cycle();
+        });
+      }
+    };
+    return Object.freeze({
+      setActive(nextActive) {
+        if (disposed || active === Boolean(nextActive)) return;
+        active = Boolean(nextActive);
+        stop();
+        if (active) start();
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        active = false;
+        stop();
+      },
+    });
+  }
+
+  function createUltraEffects(canvas, particles, {
+    random = Math.random,
+    windowRef = typeof window === "object" ? window : null,
+  } = {}) {
+    const motionQuery = windowRef?.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
+    const particleController = createUltraParticleController(particles, { random, windowRef });
+    let active = false;
+    let reducedMotion = motionQuery?.matches === true;
+    let canvasCleanup = null;
+    let disposed = false;
+    const stopCanvas = () => {
+      canvasCleanup?.();
+      canvasCleanup = null;
+    };
+    const startCanvas = () => {
+      stopCanvas();
+      if (active) canvasCleanup = startUltraCanvas(canvas, {
+        shouldReduceMotion: reducedMotion,
+        windowRef,
+      });
+    };
+    const onMotionChange = (event) => {
+      const nextReducedMotion = event?.matches === true;
+      if (disposed || nextReducedMotion === reducedMotion) return;
+      reducedMotion = nextReducedMotion;
+      particleController.setActive(active && !reducedMotion);
+      startCanvas();
+    };
+    motionQuery?.addEventListener?.("change", onMotionChange);
+    if (!motionQuery?.addEventListener) motionQuery?.addListener?.(onMotionChange);
+    return Object.freeze({
+      setActive(nextActive) {
+        if (disposed || active === Boolean(nextActive)) return;
+        active = Boolean(nextActive);
+        particleController.setActive(active && !reducedMotion);
+        startCanvas();
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        stopCanvas();
+        particleController.dispose();
+        motionQuery?.removeEventListener?.("change", onMotionChange);
+        if (!motionQuery?.removeEventListener) motionQuery?.removeListener?.(onMotionChange);
+      },
+    });
+  }
+
   function findUiMounts(documentRef) {
     if (!documentRef || typeof documentRef.querySelector !== "function") {
       return Object.freeze({ sidebarHost: null, composerHost: null });
@@ -1926,7 +2272,10 @@
     return Object.freeze({ sidebarHost, composerHost });
   }
 
-  function createReasoningView(documentRef) {
+  function createReasoningView(documentRef, {
+    random = Math.random,
+    windowRef = documentRef?.defaultView ?? (typeof window === "object" ? window : null),
+  } = {}) {
     if (!documentRef || typeof documentRef.createElement !== "function") {
       throw new Error("Power control is unavailable.");
     }
@@ -1940,9 +2289,13 @@
     track.setAttribute("aria-hidden", "true");
     const fill = element(documentRef, "div", "codex-power-fill");
     const ultraFill = element(documentRef, "div", "codex-power-ultra-field");
+    const ultraMask = element(documentRef, "span", "codex-power-ultra-mask");
+    const ultraCanvas = element(documentRef, "canvas", "codex-power-ultra-canvas");
+    ultraMask.append(ultraCanvas);
+    ultraFill.append(ultraMask);
     const particles = element(documentRef, "div", "codex-power-particles");
     for (let index = 0; index < 14; index += 1) {
-      particles.append(element(documentRef, "i", "codex-power-particle"));
+      particles.append(element(documentRef, "span", "codex-power-particle"));
     }
     const ticks = element(documentRef, "div", "codex-power-ticks");
     track.append(fill, ultraFill, particles, ticks);
@@ -1978,9 +2331,11 @@
     warning.setAttribute("aria-live", "polite");
     warning.hidden = true;
     control.append(endpoints, track, thumbRail, input);
+    const ultraEffects = createUltraEffects(ultraCanvas, particles, { random, windowRef });
     return Object.freeze({
       burst,
       control,
+      dispose() { ultraEffects.dispose(); },
       endpoints,
       fill,
       firstLabel,
@@ -1992,7 +2347,10 @@
       thumb,
       ticks,
       track,
+      ultraCanvas,
+      ultraEffects,
       ultraFill,
+      ultraMask,
       warning,
     });
   }
@@ -2040,6 +2398,7 @@
     view.control.classList.toggle("is-ultra-code", stop.effort === "ultra-code");
     view.control.classList.toggle("is-ultra-entering", stop.effect === "ultra" && enteredUltra);
     view.warning.hidden = stop.effect !== "ultra" || !enteredUltra;
+    view.ultraEffects?.setActive(stop.effect === "ultra");
     return Object.freeze({ stop, index });
   }
 
@@ -2313,7 +2672,7 @@
     const connectProvider = element(documentRef, "button", "codex-provider-connect", "Connect account");
     connectProvider.type = "button";
     providerRow.append(providerSelect, connectProvider);
-    const reasoningView = createReasoningView(documentRef);
+    const reasoningView = createReasoningView(documentRef, { windowRef });
     const reasoning = reasoningView.input;
     const powerShell = element(documentRef, "div", "codex-power-shell");
     const advancedToggle = element(documentRef, "button", "codex-power-advanced-toggle", "Advanced");
@@ -2324,7 +2683,7 @@
     fastToggle.setAttribute("aria-label", "Use Fast speed");
     fastToggle.setAttribute("aria-pressed", "false");
     const compactControls = element(documentRef, "div", "codex-power-compact-controls");
-    compactControls.append(advancedToggle, fastToggle, reasoningView.warning);
+    compactControls.append(...(nativeProtocolMode ? [] : [advancedToggle]), fastToggle, reasoningView.warning);
     powerShell.append(reasoningView.control);
     const advanced = element(documentRef, "div", "codex-power-advanced");
     advanced.hidden = true;
@@ -2345,12 +2704,12 @@
     advancedSpeedLabel.append(advancedSpeed);
     advanced.append(advancedModelLabel, advancedEffortLabel, advancedSpeedLabel);
     const panelStack = element(documentRef, "div", "codex-power-panel-stack");
-    panelStack.append(powerShell, advanced);
+    panelStack.append(powerShell, ...(nativeProtocolMode ? [] : [advanced]));
     panel.append(
       header,
       creationAlert,
       renameRow,
-      providerRow,
+      ...(nativeProtocolMode ? [] : [providerRow]),
       statusRow,
       computerRow,
       computerGrants,
@@ -2360,7 +2719,7 @@
     );
     const nativeControls = element(documentRef, "section", "codex-native-controls");
     if (nativeProtocolMode) {
-      nativeControls.append(providerRow, statusRow, computerRow, computerGrants);
+      nativeControls.append(statusRow, computerRow, computerGrants);
       popover.append(
         nativeControls,
         panelStack,
@@ -2409,8 +2768,10 @@
     let currentPowerScope = "unselected";
     let holdTimer = null;
     let activeFastTier = null;
+    const fastIntents = new Map();
+    let advancedModelIdentities = new Map();
+    let fastIntentSequence = 0;
     let compactProjectionPending = false;
-    let advancedUltraEntryIntent = null;
     let newBotSetupReturnFocus = null;
     let newBotPhotoError = null;
     let setupReturnFocus = null;
@@ -2470,21 +2831,44 @@
       }
     }
 
-    function populateAdvanced(next, preferredModel) {
-      const modelId = preferredModel
-        ?? next.modelSelection?.model
-        ?? powerState.snapshot().selection?.model
-        ?? next.modelCatalog[0]?.model;
-      const options = MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, modelId);
+    function paintFast(active) {
+      fastToggle.classList.toggle("is-active", active);
+      fastToggle.setAttribute("aria-pressed", String(active));
+      fastToggle.setAttribute("aria-label", active ? "Use Standard speed" : "Use Fast speed");
+      modelDock.classList.toggle("has-fast-tier", active);
+    }
+
+    function populateAdvanced(next, preferredSelection) {
+      const powerSelection = powerState.snapshot().selection;
+      const identity = preferredSelection
+        ?? (next.modelSelection && {
+          provider: next.modelSelection.provider,
+          model: next.modelSelection.model,
+        })
+        ?? (powerSelection && {
+          provider: powerSelection.provider,
+          model: powerSelection.model,
+        })
+        ?? next.modelCatalog[0];
+      const options = MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, identity);
+      const current = options.models.find((entry) => entry.provider === identity?.provider
+        && entry.model === identity?.model) ?? options.models[0];
+      advancedModelIdentities = new Map(options.models.map((entry) => [entry.key, Object.freeze({
+        provider: entry.provider,
+        model: entry.model,
+      })]));
       advancedModel.replaceChildren(...options.models.map((entry) => {
         const option = element(documentRef, "option", "", entry.label);
-        option.value = entry.model;
-        option.selected = entry.model === modelId;
+        option.value = entry.key;
+        option.selected = entry.key === current?.key;
         return option;
       }));
-      if (modelId) advancedModel.value = modelId;
-      const catalog = next.modelCatalog.find((entry) => entry.model === modelId);
-      const effort = next.modelSelection?.model === modelId
+      if (current) advancedModel.value = current.key;
+      const catalog = next.modelCatalog.find((entry) => entry.provider === current?.provider
+        && entry.model === current?.model);
+      const authoritative = next.modelSelection?.provider === current?.provider
+        && next.modelSelection?.model === current?.model;
+      const effort = authoritative
         ? next.modelSelection.reasoningEffort
         : catalog?.defaultReasoningEffort ?? options.efforts[0]?.effort;
       advancedEffort.replaceChildren(...options.efforts.map((entry) => {
@@ -2494,7 +2878,7 @@
         return option;
       }));
       if (effort) advancedEffort.value = effort;
-      const serviceTier = next.modelSelection?.model === modelId
+      const serviceTier = authoritative
         ? next.modelSelection.serviceTier
         : catalog?.defaultServiceTier ?? null;
       advancedSpeed.replaceChildren(...options.speeds.map((entry) => {
@@ -2726,7 +3110,6 @@
       )) : null;
       const ownerKey = `${next.activeBotId ?? "none"}:${next.modelSelection?.generation ?? "pending"}:${stops[0]?.catalogGeneration ?? 0}`;
       currentPowerScope = `${next.activeBotId ?? "none"}:${next.selectionEpoch}`;
-      if (advancedUltraEntryIntent?.botId !== next.activeBotId) advancedUltraEntryIntent = null;
       let power = powerState.setStops(stops, selectedIndex, { ownerKey });
       power = powerState.setDisabled(!enabled);
       compactProjectionPending = Boolean(selectedTuple && power.selection
@@ -2735,14 +3118,7 @@
           || power.selection.effort !== selectedTuple.effort
           || power.selection.serviceTier !== selectedTuple.serviceTier
           || power.selection.catalogGeneration !== selectedTuple.catalogGeneration));
-      const enteredUltra = Boolean(advancedUltraEntryIntent && selectedTuple
-        && advancedUltraEntryIntent.botId === next.activeBotId
-        && advancedUltraEntryIntent.model === selectedTuple.model
-        && advancedUltraEntryIntent.effort === selectedTuple.effort
-        && advancedUltraEntryIntent.serviceTier === selectedTuple.serviceTier
-        && advancedUltraEntryIntent.catalogGeneration === selectedTuple.catalogGeneration);
-      if (enteredUltra) advancedUltraEntryIntent = null;
-      if (power.stops.length) paintPower(power, { enteredUltra });
+      if (power.stops.length) paintPower(power, { enteredUltra: false });
       const visibleSelection = next.selectionPending
         ? null
         : next.modelSelection ? {
@@ -2760,7 +3136,8 @@
             ? "max"
             : "ordinary",
         } : power.selection;
-      const visibleModel = next.modelCatalog.find((entry) => entry.model === visibleSelection?.model);
+      const visibleModel = next.modelCatalog.find((entry) => entry.provider === visibleSelection?.provider
+        && entry.model === visibleSelection?.model);
       triggerModel.textContent = visibleModel?.label
         ?? visibleModel?.displayName
         ?? visibleSelection?.model
@@ -2771,19 +3148,22 @@
       modelTrigger.disabled = !enabled;
       if (!enabled && !popover.hidden) setPopoverOpen(false);
       const speedOptions = visibleSelection
-        ? MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, visibleSelection.model).speeds
+        ? MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, visibleSelection).speeds
         : [];
-      activeFastTier = speedOptions.find((entry) => entry.serviceTier === "priority")?.serviceTier
-        ?? speedOptions.find((entry) => entry.serviceTier && /fast/i.test(entry.label))?.serviceTier
-        ?? null;
+      activeFastTier = MODEL_CONTROLS.findFastServiceTier(speedOptions);
+      const fastIntent = fastIntents.get(next.activeBotId);
+      const desiredServiceTier = fastIntent
+        && fastIntent.provider === visibleSelection?.provider
+        && fastIntent.model === visibleSelection?.model
+        && fastIntent.effort === visibleSelection?.effort
+        && fastIntent.fastTier === activeFastTier
+        ? fastIntent.desiredServiceTier
+        : visibleSelection?.serviceTier;
       const fastActive = Boolean(activeFastTier
-        && visibleSelection?.serviceTier === activeFastTier);
+        && desiredServiceTier === activeFastTier);
       fastToggle.hidden = !activeFastTier;
       fastToggle.disabled = !enabled || !activeFastTier;
-      fastToggle.classList.toggle("is-active", fastActive);
-      fastToggle.setAttribute("aria-pressed", String(fastActive));
-      fastToggle.setAttribute("aria-label", fastActive ? "Use Standard speed" : "Use Fast speed");
-      modelDock.classList.toggle("has-fast-tier", fastActive);
+      paintFast(fastActive);
       advancedToggle.disabled = !enabled;
       advancedModel.disabled = !enabled;
       advancedEffort.disabled = !enabled;
@@ -2933,6 +3313,7 @@
       const selection = snapshot.selection;
       compactProjectionPending = false;
       void controller.selectModel(
+        selection.provider,
         selection.model,
         selection.effort,
         selection.serviceTier,
@@ -2987,38 +3368,77 @@
     fastToggle.addEventListener("click", () => {
       if (!lastSnapshot || !activeFastTier) return;
       const selection = lastSnapshot.modelSelection ? {
+        provider: lastSnapshot.modelSelection.provider,
         model: lastSnapshot.modelSelection.model,
         effort: lastSnapshot.modelSelection.reasoningEffort,
         serviceTier: lastSnapshot.modelSelection.serviceTier,
       } : powerState.snapshot().selection;
       if (!selection) return;
-      const serviceTier = selection.serviceTier === activeFastTier ? null : activeFastTier;
-      void controller.selectModel(selection.model, selection.effort, serviceTier)
-        .catch(() => render(controller.snapshot()));
+      const botId = lastSnapshot.activeBotId;
+      if (typeof botId !== "string") return;
+      const previousIntent = fastIntents.get(botId);
+      const currentTier = previousIntent
+        && previousIntent.provider === selection.provider
+        && previousIntent.model === selection.model
+        && previousIntent.effort === selection.effort
+        && previousIntent.fastTier === activeFastTier
+        ? previousIntent.desiredServiceTier
+        : selection.serviceTier;
+      const desiredServiceTier = currentTier === activeFastTier ? null : activeFastTier;
+      const intent = Object.freeze({
+        sequence: ++fastIntentSequence,
+        botId,
+        provider: selection.provider,
+        model: selection.model,
+        effort: selection.effort,
+        fastTier: activeFastTier,
+        desiredServiceTier,
+      });
+      fastIntents.set(botId, intent);
+      paintFast(desiredServiceTier === activeFastTier);
+      void controller.selectModel(
+        selection.provider,
+        selection.model,
+        selection.effort,
+        desiredServiceTier,
+      )
+        .then(() => {
+          if (fastIntents.get(botId) !== intent) return;
+          fastIntents.delete(botId);
+          render(controller.snapshot());
+        })
+        .catch(() => {
+          if (fastIntents.get(botId) !== intent) return;
+          fastIntents.delete(botId);
+          if (lastSnapshot?.activeBotId === botId) {
+            void controller.selectBot(botId, true).catch(() => render(controller.snapshot()));
+          }
+        });
     });
     const submitAdvanced = () => {
       if (!lastSnapshot) return;
+      const identity = advancedModelIdentities.get(advancedModel.value);
+      if (!identity) return;
       const selection = MODEL_CONTROLS.resolveAdvancedSelection(lastSnapshot.modelCatalog, {
-        model: advancedModel.value,
+        provider: identity.provider,
+        model: identity.model,
         effort: advancedEffort.value,
         serviceTier: advancedSpeed.value === "__standard__" ? null : advancedSpeed.value,
       });
       if (!selection) return;
-      const previousEffort = lastSnapshot.modelSelection?.reasoningEffort
-        ?? powerState.snapshot().selection?.effort;
-      const intent = !isUltraEffect(previousEffort) && isUltraEffect(selection.effort)
-        ? Object.freeze({ botId: lastSnapshot.activeBotId, ...selection })
-        : null;
-      advancedUltraEntryIntent = intent;
-      void controller.selectModel(selection.model, selection.effort, selection.serviceTier)
-        .catch(() => render(controller.snapshot()))
-        .finally(() => {
-          if (advancedUltraEntryIntent === intent) advancedUltraEntryIntent = null;
-        });
+      void controller.selectModel(
+        selection.provider,
+        selection.model,
+        selection.effort,
+        selection.serviceTier,
+      )
+        .catch(() => render(controller.snapshot()));
     };
     advancedModel.addEventListener("change", () => {
       if (!lastSnapshot) return;
-      populateAdvanced(lastSnapshot, advancedModel.value);
+      const identity = advancedModelIdentities.get(advancedModel.value);
+      if (!identity) return;
+      populateAdvanced(lastSnapshot, identity);
       submitAdvanced();
     });
     advancedEffort.addEventListener("change", submitAdvanced);
@@ -3045,6 +3465,8 @@
         if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
         warningScope = null;
+        fastIntents.clear();
+        reasoningView.dispose();
         controller.dispose();
         newBotSetup.remove?.();
         computerSetup.remove?.();
@@ -3069,6 +3491,7 @@
     normalizeLocalPngAvatar,
     readLocalPngFile,
     runtimePresentation,
+    startUltraCanvas,
     updateReasoningView,
   });
 });

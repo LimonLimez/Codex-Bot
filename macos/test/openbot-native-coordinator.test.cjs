@@ -387,6 +387,127 @@ function loadCoordinator() {
   }
 }
 
+test("native model RPCs delegate through the exact Grok desktop contract", async (t) => {
+  const OpenBotNativeCoordinator = loadCoordinator();
+  const bots = new BotControllerHarness();
+  const conversations = new ConversationHarness();
+  const selection = Object.freeze({
+    modelId: "gpt-5.6-sol",
+    maxMode: true,
+    parameters: Object.freeze([
+      Object.freeze({ id: "effort", value: "medium" }),
+      Object.freeze({ id: "speed", value: "standard" }),
+    ]),
+  });
+  const available = Object.freeze({
+    models: Object.freeze([Object.freeze({ name: "gpt-5.6-sol", defaultOn: true })]),
+    modelNames: Object.freeze(["gpt-5.6-sol"]),
+    useModelParameters: true,
+  });
+  const calls = [];
+  const modelController = {
+    async getAvailableModels() { calls.push(["getAvailableModels"]); return available; },
+    async getAgentDefaultModel() { calls.push(["getAgentDefaultModel"]); return selection; },
+    async setAgentDefaultModel(model) {
+      if (model.modelId === "gpt-invalid-variant") {
+        const error = new Error("private native validation detail");
+        error.code = "CODEX_BOT_INVALID_NATIVE_MODEL_SELECTION";
+        throw error;
+      }
+      if (model.modelId === "gpt-controller-offline") throw new Error("private persistence endpoint");
+      calls.push(["setAgentDefaultModel", structuredClone(model)]);
+      return model;
+    },
+    async getComputerUseModel() { calls.push(["getComputerUseModel"]); return selection; },
+    async setComputerUseModel(model) { calls.push(["setComputerUseModel", structuredClone(model)]); return model; },
+  };
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: conversations,
+    modelController,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.kind === "lifecycle" && frame.phase === "ready"));
+
+  assert.deepEqual((await request(port, "model-catalog", "getAvailableModels", {})).outcome, {
+    status: "ok", value: available,
+  });
+  assert.deepEqual((await request(port, "model-default", "getAgentDefaultModel", {})).outcome, {
+    status: "ok", value: selection,
+  });
+  assert.deepEqual((await request(port, "model-set", "setAgentDefaultModel", { model: selection })).outcome, {
+    status: "ok", value: selection,
+  });
+  assert.deepEqual((await request(port, "computer-model", "getComputerUseModel", {})).outcome, {
+    status: "ok", value: selection,
+  });
+  assert.deepEqual((await request(port, "computer-model-set", "setComputerUseModel", { model: selection })).outcome, {
+    status: "ok", value: selection,
+  });
+  assert.deepEqual(calls, [
+    ["getAvailableModels"],
+    ["getAgentDefaultModel"],
+    ["setAgentDefaultModel", selection],
+    ["getComputerUseModel"],
+    ["setComputerUseModel", selection],
+  ]);
+
+  const malformed = await request(port, "model-malformed", "setAgentDefaultModel", {
+    model: selection,
+    provider: "raw-provider-select-is-forbidden",
+  });
+  assert.equal(malformed.outcome.status, "failed");
+  assert.equal(malformed.outcome.failure.code, "source/malformed-request");
+  const callsBeforeNestedRejections = calls.length;
+  for (const [requestId, model] of [
+    ["model-false-max", { ...selection, maxMode: false }],
+    ["model-fast-alias", {
+      ...selection,
+      parameters: [{ id: "effort", value: "medium" }, { id: "fast", value: "true" }],
+    }],
+    ["model-service-tier-alias", {
+      ...selection,
+      parameters: [{ id: "effort", value: "medium" }, { id: "serviceTier", value: "priority" }],
+    }],
+    ["model-nested-extra", {
+      ...selection,
+      parameters: [{ id: "effort", value: "medium", authToken: "private" }],
+    }],
+  ]) {
+    const rejected = await request(port, requestId, "setAgentDefaultModel", { model });
+    assert.equal(rejected.outcome.status, "failed");
+    assert.equal(rejected.outcome.failure.code, "source/malformed-request");
+    assert.doesNotMatch(JSON.stringify(rejected), /authToken|private/);
+  }
+  assert.equal(calls.length, callsBeforeNestedRejections, "malformed nested models must not reach persistence");
+
+  const invalidVariant = await request(port, "model-invalid-variant", "setAgentDefaultModel", {
+    model: {
+      modelId: "gpt-invalid-variant",
+      maxMode: true,
+      parameters: [{ id: "effort", value: "medium" }],
+    },
+  });
+  assert.equal(invalidVariant.outcome.status, "failed");
+  assert.equal(invalidVariant.outcome.failure.code, "source/malformed-request");
+  assert.doesNotMatch(JSON.stringify(invalidVariant), /private|validation/);
+
+  const controllerFailure = await request(port, "model-controller-failure", "setAgentDefaultModel", {
+    model: {
+      modelId: "gpt-controller-offline",
+      maxMode: true,
+      parameters: [{ id: "effort", value: "medium" }],
+    },
+  });
+  assert.equal(controllerFailure.outcome.status, "failed");
+  assert.equal(controllerFailure.outcome.failure.code, "source/transport-failure");
+  assert.doesNotMatch(JSON.stringify(controllerFailure), /private|persistence|endpoint/);
+  assert.equal(calls.length, callsBeforeNestedRejections, "failed validation and persistence must not commit");
+});
+
 test("protocol v1 hello becomes ready and proactively publishes exact native agent rows", async (t) => {
   const OpenBotNativeCoordinator = loadCoordinator();
   assert.equal(typeof OpenBotNativeCoordinator, "function", "OpenBot native coordinator must exist");

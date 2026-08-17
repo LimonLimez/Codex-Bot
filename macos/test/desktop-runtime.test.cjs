@@ -1797,3 +1797,219 @@ test("model selection policy persists the complete live-catalog routing tuple an
     generation: 5,
   }), /selection/i);
 });
+
+test("native Grok model projection carries the Codex and CLIProxy catalogs through the existing picker schema", () => {
+  const {
+    nativeAvailableModels,
+    nativeModelSelection,
+    resolveModelSelection,
+    resolveNativeModelSelection,
+  } = require(runtimePath);
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-live-sol",
+      displayName: "GPT Live Sol",
+      defaultReasoningEffort: "high",
+      defaultServiceTier: "priority",
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+        Object.freeze({ id: "ultrafast", name: "Ultra fast", description: "Fastest" }),
+      ]),
+      supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
+      inputModalities: Object.freeze(["text", "image"]),
+      isDefault: true,
+    })]),
+  });
+  assert.equal(typeof nativeAvailableModels, "function");
+  const response = nativeAvailableModels(catalog);
+  assert.equal(response.useModelParameters, true);
+  assert.deepEqual(response.modelNames, response.models.map((model) => model.name));
+  assert.deepEqual(response.models.map((model) => model.name), [
+    "gpt-live-sol",
+    "cliproxy-anthropic--claude-fable-5",
+    "cliproxy-anthropic--claude-opus-5",
+    "cliproxy-anthropic--claude-sonnet-5",
+  ]);
+  assert.deepEqual(response.models.map((model) => model.vendor.id), [
+    "MODEL_VENDOR_ID_OPENAI",
+    "MODEL_VENDOR_ID_ANTHROPIC",
+    "MODEL_VENDOR_ID_ANTHROPIC",
+    "MODEL_VENDOR_ID_ANTHROPIC",
+  ]);
+  const direct = response.models[0];
+  assert.equal(direct.defaultOn, true);
+  assert.deepEqual(direct.parameterDefinitions.map(({ id }) => id), ["effort", "speed"]);
+  assert.deepEqual(
+    direct.parameterDefinitions[0].parameterType.enumParameter.values.map(({ value }) => value),
+    ["medium", "high", "ultra"],
+  );
+  assert.deepEqual(
+    direct.parameterDefinitions[1].parameterType.enumParameter.values.map(({ value }) => value),
+    ["standard", "priority", "ultrafast"],
+  );
+  assert.equal(direct.variants.length, 9);
+  assert.equal(Object.isFrozen(response), true);
+
+  const native = nativeModelSelection({
+    provider: "openai-codex",
+    model: "gpt-live-sol",
+    reasoningEffort: "ultra",
+    serviceTier: "priority",
+  });
+  assert.deepEqual(native, {
+    modelId: "gpt-live-sol",
+    maxMode: true,
+    parameters: [
+      { id: "effort", value: "ultra" },
+      { id: "speed", value: "priority" },
+    ],
+  });
+  assert.deepEqual(resolveNativeModelSelection(native, BOT_A, catalog), {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-live-sol",
+    reasoningEffort: "ultra",
+    serviceTier: "priority",
+    catalogGeneration: 12,
+  });
+  assert.deepEqual(nativeModelSelection({
+    provider: "openai-codex",
+    model: "gpt-effort-only",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  }), {
+    modelId: "gpt-effort-only",
+    maxMode: true,
+    parameters: [{ id: "effort", value: "medium" }],
+  });
+  assert.deepEqual(nativeModelSelection({
+    provider: "openai-codex",
+    model: "gpt-live-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  }, catalog).parameters, [
+    { id: "effort", value: "medium" },
+    { id: "speed", value: "standard" },
+  ]);
+
+  const optionalNative = nativeModelSelection({
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "ultra-code",
+    serviceTier: null,
+  });
+  assert.equal(optionalNative.modelId, "cliproxy-anthropic--claude-fable-5");
+  assert.deepEqual(resolveNativeModelSelection(optionalNative, BOT_A, catalog), {
+    botId: BOT_A,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "ultra-code",
+    serviceTier: null,
+    catalogGeneration: 1,
+  });
+
+  const withoutMaxMode = structuredClone(native);
+  delete withoutMaxMode.maxMode;
+  assert.deepEqual(resolveNativeModelSelection(withoutMaxMode, BOT_A, catalog), {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-live-sol",
+    reasoningEffort: "ultra",
+    serviceTier: "priority",
+    catalogGeneration: 12,
+  });
+  for (const malformed of [
+    { ...native, maxMode: false },
+    { ...native, parameters: [{ id: "effort", value: "ultra" }, { id: "fast", value: "true" }] },
+    { ...native, parameters: [{ id: "effort", value: "ultra" }, { id: "serviceTier", value: "priority" }] },
+    { ...native, parameters: [{ id: "speed", value: "priority" }, { id: "effort", value: "ultra" }] },
+    { ...native, parameters: [{ id: "effort", value: "ultra" }] },
+    { ...native, parameters: [{ id: "effort", value: "ultra", privateToken: "forbidden" }, { id: "speed", value: "priority" }] },
+  ]) assert.throws(() => resolveNativeModelSelection(malformed, BOT_A, catalog), {
+    code: "CODEX_BOT_INVALID_NATIVE_MODEL_SELECTION",
+  });
+
+  const collisionCatalog = Object.freeze({
+    generation: 13,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "claude-fable-5",
+      displayName: "Direct Claude Fable 5",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+      inputModalities: Object.freeze(["text"]),
+      isDefault: true,
+    })]),
+  });
+  const collisionResponse = nativeAvailableModels(collisionCatalog);
+  assert.equal(new Set(collisionResponse.modelNames).size, collisionResponse.modelNames.length);
+  assert.deepEqual(collisionResponse.modelNames, [
+    "claude-fable-5",
+    "cliproxy-anthropic--claude-fable-5",
+    "cliproxy-anthropic--claude-opus-5",
+    "cliproxy-anthropic--claude-sonnet-5",
+  ]);
+  assert.equal(nativeModelSelection({
+    provider: "openai-codex",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  }, collisionCatalog).modelId, "claude-fable-5");
+  assert.equal(nativeModelSelection({
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  }, collisionCatalog).modelId, "cliproxy-anthropic--claude-fable-5");
+  assert.equal(resolveNativeModelSelection({
+    modelId: "claude-fable-5",
+    maxMode: true,
+    parameters: [{ id: "effort", value: "medium" }],
+  }, BOT_A, collisionCatalog).provider, "openai-codex");
+  assert.equal(resolveNativeModelSelection({
+    modelId: "cliproxy-anthropic--claude-fable-5",
+    maxMode: true,
+    parameters: [{ id: "effort", value: "medium" }],
+  }, BOT_A, collisionCatalog).provider, "cliproxy-anthropic");
+  assert.equal(resolveModelSelection({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  }, collisionCatalog).provider, "openai-codex");
+  assert.equal(resolveModelSelection({
+    botId: BOT_A,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  }, collisionCatalog).provider, "cliproxy-anthropic");
+  assert.throws(() => resolveModelSelection({
+    botId: BOT_A,
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  }, collisionCatalog), { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.throws(() => nativeAvailableModels(Object.freeze({
+    ...collisionCatalog,
+    models: Object.freeze([Object.freeze({
+      ...collisionCatalog.models[0],
+      id: "cliproxy-anthropic--claude-fable-5",
+    })]),
+  })), { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.throws(() => nativeAvailableModels(Object.freeze({
+    ...catalog,
+    models: Object.freeze([Object.freeze({
+      ...catalog.models[0],
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "standard", name: "Provider Standard" }),
+      ]),
+    })]),
+  })), { code: "CODEX_BOT_OPERATION_FAILED" });
+});

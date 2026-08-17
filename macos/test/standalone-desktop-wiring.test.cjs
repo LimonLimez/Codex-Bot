@@ -283,12 +283,13 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   assert.equal(targetDisposed, 1);
 });
 
-test("native Grok bot selection switches the shared OpenBot bot and publishes one runtime event", async () => {
+test("signed-out native Grok bot selection and local models remain available while remote Work is absent", async () => {
   const { installDesktopRuntime } = require(runtimePath);
   const handlers = new Map();
   const sent = [];
   const selected = [];
   const ensured = [];
+  let storedSelection = null;
   let factoryOptions = null;
   const nativeCoordinator = {
     bindPort() { return () => {}; },
@@ -314,12 +315,14 @@ test("native Grok bot selection switches the shared OpenBot bot and publishes on
       async readBot(botId) { return botId === BOT_A ? { botId } : null; },
     },
     selectionStore: {
-      async read() { return null; },
+      async read() { return storedSelection; },
       async ensure(botId, selection) {
         ensured.push([botId, selection]);
-        return Object.freeze({ ...selection, generation: 1 });
+        storedSelection = Object.freeze({ ...selection, generation: 1 });
+        return storedSelection;
       },
       async selectBot(botId) { selected.push(botId); },
+      async readActiveBotId() { return BOT_A; },
     },
     nativeCoordinatorFactory(options) {
       factoryOptions = options;
@@ -351,6 +354,18 @@ test("native Grok bot selection switches the shared OpenBot bot and publishes on
     catalogGeneration: 1,
   });
   assert.deepEqual(selected, [BOT_A]);
+  assert.equal(typeof factoryOptions.modelController?.getAvailableModels, "function");
+  const nativeCatalog = await factoryOptions.modelController.getAvailableModels();
+  assert.deepEqual(nativeCatalog.modelNames, [
+    "cliproxy-anthropic--claude-fable-5",
+    "cliproxy-anthropic--claude-opus-5",
+    "cliproxy-anthropic--claude-sonnet-5",
+  ]);
+  assert.deepEqual(await factoryOptions.modelController.getAgentDefaultModel(), {
+    modelId: "cliproxy-anthropic--claude-fable-5",
+    maxMode: true,
+    parameters: [{ id: "effort", value: "medium" }],
+  });
   assert.deepEqual(sent, [["codex-runtime:event", {
     type: "active-bot-changed",
     botId: BOT_A,

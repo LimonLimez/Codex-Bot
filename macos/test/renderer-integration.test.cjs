@@ -317,16 +317,20 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(css, /\.codex-power-tick\s*\{[^}]*width:\s*4px[^}]*height:\s*4px/s);
   assert.match(css, /\.codex-power-control\.is-max[^}]*#2383ff/s);
   assert.match(css, /\.codex-power-control\.is-disabled\s*\{[^}]*opacity:\s*0\.5[0-9]/s);
-  assert.match(css, /\.codex-power-ultra-field\s*\{[^}]*overflow:\s*hidden[^}]*isolation:\s*isolate[^}]*linear-gradient\([^)]*#2383ff[^)]*(?:#7c3aed|#8b5cf6)/s);
-  assert.match(css, /\.codex-power-ultra-field::before\s*\{[^}]*radial-gradient[^}]*mix-blend-mode:\s*screen/s);
-  assert.match(css, /\.codex-power-ultra-field::after\s*\{[^}]*radial-gradient[^}]*repeating-linear-gradient[^}]*mix-blend-mode:\s*soft-light/s);
-  assert.match(css, /\.codex-power-control\.is-ultra\s+\.codex-power-particles,[^}]*\.codex-power-control\.is-ultra\s+\.codex-power-burst\s*\{[^}]*display:\s*none/s);
-  assert.match(css, /\.codex-power-control\.is-ultra-entering\s+\.codex-power-thumb::after\s*\{[^}]*radial-gradient[^}]*codex-power-ultra-thumb-flare/s);
-  assert.match(css, /@keyframes\s+codex-power-ultra-reveal/);
-  assert.match(css, /@keyframes\s+codex-power-ultra-field-a/);
-  assert.match(css, /@keyframes\s+codex-power-ultra-field-b/);
-  assert.match(css, /@keyframes\s+codex-power-ultra-thumb-flare/);
-  assert.match(css, /\.codex-power-compact-controls\s*\{[^}]*position:\s*relative[^}]*height:\s*40px/s);
+  assert.match(css, /\.codex-power-ultra-field\s*\{[^}]*z-index:\s*2[^}]*pointer-events:\s*none[^}]*position:\s*absolute[^}]*inset:\s*-1px/s);
+  assert.match(css, /\.codex-power-ultra-mask\s*\{[^}]*--codex-power-ultra-mask-position:\s*0%[^}]*contain:\s*paint[^}]*isolation:\s*isolate[^}]*linear-gradient\(\s*90deg[^}]*color-mix\([^)]*var\(--codex-blue\)[^)]*var\(--codex-purple\)[^}]*mask-image:/s);
+  assert.match(css, /\.codex-power-ultra-canvas\s*\{[^}]*mix-blend-mode:\s*luminosity[^}]*width:\s*100%[^}]*height:\s*100%[^}]*display:\s*block/s);
+  assert.doesNotMatch(css, /\.codex-power-ultra-field::(?:before|after)/);
+  assert.doesNotMatch(css, /\.codex-power-control\.is-ultra\s+\.codex-power-particles,[^}]*\.codex-power-control\.is-ultra\s+\.codex-power-burst\s*\{[^}]*display:\s*none/s);
+  assert.match(css, /\.codex-power-control\.is-ultra\s+\.codex-power-particles\s*\{[^}]*opacity:\s*1/s);
+  assert.match(css, /\.codex-power-particles\s*\{[^}]*height:\s*24px[^}]*top:\s*50%[^}]*transform:\s*translateY\(-50%\)/s);
+  assert.match(css, /\.codex-power-particle\s*\{[^}]*transition-property:\s*left,\s*top[^}]*cubic-bezier\(0\.45,\s*0,\s*0\.55,\s*1\)/s);
+  assert.doesNotMatch(css, /codex-power-ultra-particle-drift|codex-power-track-particle/);
+  assert.match(css, /\.codex-power-control\.is-ultra-entering\s+\.codex-power-ultra-mask\s*\{[^}]*animation:\s*2s\s+both\s+codex-power-ultra-reveal/s);
+  assert.match(css, /@keyframes\s+codex-power-ultra-reveal\s*\{[^}]*--codex-power-ultra-mask-position:\s*100%[^}]*\}[^}]*--codex-power-ultra-mask-position:\s*0%/s);
+  assert.match(css, /@property\s+--codex-power-ultra-mask-position\s*\{[^}]*syntax:\s*"<percentage>"[^}]*inherits:\s*false[^}]*initial-value:\s*0%/s);
+  assert.match(css, /\.codex-power-compact-controls\s*\{[^}]*position:\s*relative[^}]*height:\s*36px/s);
+  assert.match(css, /\.codex-power-fast-toggle\s*\{[^}]*margin-left:\s*auto/s);
   assert.match(css, /\.codex-power-endpoints\s*\{[^}]*font-size:\s*14px[^}]*line-height:\s*20px/s);
   assert.match(
     css,
@@ -342,6 +346,10 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(
     css,
     /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-power-particles,[\s\S]*\.codex-power-burst\s*\{[^}]*display:\s*none\s*!important/s,
+  );
+  assert.doesNotMatch(
+    css,
+    /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-power-ultra-(?:field|mask|canvas)\s*\{[^}]*display:\s*none/s,
   );
   assert.match(
     css,
@@ -362,8 +370,43 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(botUi, /modelTrigger\.setAttribute\("aria-haspopup",\s*"dialog"\)/);
   assert.match(botUi, /composerHost\.append\?\.\(modelDock\)/);
   assert.match(botUi, /reasoningView\.control\.classList\.toggle\("is-disabled",\s*snapshot\.disabled\)/s);
-  assert.match(botUi, /compactControls\.append\(advancedToggle,\s*fastToggle,\s*reasoningView\.warning\)/s);
+  assert.match(botUi, /compactControls\.append\(\.\.\.\(nativeProtocolMode\s*\?\s*\[\]\s*:\s*\[advancedToggle\]\),\s*fastToggle,\s*reasoningView\.warning\)/s);
+  assert.match(botUi, /nativeControls\.append\(statusRow,\s*computerRow,\s*computerGrants\)/s);
+  assert.doesNotMatch(botUi, /nativeControls\.append\(providerRow/s);
   assert.doesNotMatch(botUi, /popover\.append\([^;]*reasoningView\.warning/s);
+});
+
+test("signed Ultra burst keeps all sixteen Codex vectors and the exact 76px 620ms burst", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  assert.match(
+    css,
+    /\.codex-power-burst\s*\{[^}]*width:\s*76px[^}]*height:\s*76px[^}]*top:\s*50%[^}]*transform:\s*translate\(-50%,\s*-50%\)/s,
+  );
+  assert.match(
+    css,
+    /\.codex-power-burst\s*>\s*i\s*\{[^}]*width:\s*5px[^}]*height:\s*5px[^}]*translate\(-50%,\s*-50%\)\s*scale\(0\.2\)/s,
+  );
+  assert.match(
+    css,
+    /\.codex-power-control\.is-ultra-entering\s+\.codex-power-burst\s*>\s*i\s*\{[^}]*animation:\s*0\.62s\s+cubic-bezier\(0\.25,\s*1,\s*0\.5,\s*1\)\s+both\s+codex-power-burst-particle/s,
+  );
+  const vectors = [
+    [-3, -34], [15, -29], [30, -19], [34, -2],
+    [26, 20], [12, 31], [-6, 34], [-22, 26],
+    [-32, 9], [-32, -10], [-21, -26], [7, -24],
+    [24, -9], [20, 10], [-9, 21], [-25, -5],
+  ];
+  for (const [offset, [x, y]] of vectors.entries()) {
+    const selector = offset === 0 ? "first-child" : `nth-child\\(${offset + 1}\\)`;
+    assert.match(
+      css,
+      new RegExp(`\\.codex-power-burst\\s*>\\s*i:${selector}\\s*\\{[^}]*--burst-x:\\s*${x}px[^}]*--burst-y:\\s*${y}px`, "s"),
+    );
+  }
+  assert.match(
+    css,
+    /@keyframes\s+codex-power-burst-particle\s*\{\s*0%\s*\{[^}]*opacity:\s*0[^}]*translate\(-50%,\s*-50%\)\s*scale\(0\.25\)[^}]*\}\s*22%\s*\{[^}]*opacity:\s*1[^}]*scale\(1\.28\)[^}]*\}\s*(?:to|100%)\s*\{[^}]*opacity:\s*0[^}]*calc\(-50%\s*\+\s*var\(--burst-x\)\)[^}]*calc\(-50%\s*\+\s*var\(--burst-y\)\)[^}]*scale\(0\.55\)/s,
+  );
 });
 
 test("Computer status and actions remain legible in the dark compact panel", () => {
@@ -398,7 +441,7 @@ test("visual disabled and later-Ultra evidence comes from production state inste
   assert.match(runtime, /phase === "later"[\s\S]*3300/s);
   assert.match(
     runtime,
-    /phase === "entry"[\s\S]*KeyboardEvent\("keydown",\s*\{[^}]*key:\s*"Home"[^}]*\}\)[\s\S]*KeyboardEvent\("keydown",\s*\{[^}]*key:\s*"End"[^}]*\}\)[\s\S]*is-ultra-entering[\s\S]*codex-power-warning/s,
+    /phase === "entry"[\s\S]*KeyboardEvent\("keydown",\s*\{[^}]*key:\s*"End"[^}]*\}\)[\s\S]*Keyboard Ultra must remain steady[\s\S]*PointerEvent\("pointerdown"[\s\S]*slider\.value\s*=\s*slider\.max[\s\S]*Event\("input"[\s\S]*PointerEvent\("pointerup"[\s\S]*is-ultra-entering[\s\S]*codex-power-warning/s,
   );
   assert.doesNotMatch(runtime, /slider\.disabled\s*=|classList\.add\("is-disabled"\)/);
   assert.match(fixture, /params\.get\("disabled"\) === "true"/);

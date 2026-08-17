@@ -635,49 +635,52 @@ body.light {
 }
 
 .codex-power-ultra-field {
+  z-index: 2;
+  pointer-events: none;
   position: absolute;
   inset: -1px;
-  z-index: 1;
-  overflow: hidden;
   opacity: 0;
+}
+
+.codex-power-ultra-mask {
+  --codex-power-ultra-mask-position: 0%;
+  contain: paint;
   isolation: isolate;
-  background: linear-gradient(100deg, #2383ff 0%, #584fe7 30%, #7c3aed 55%, #a986ff 76%, #385fe8 100%);
-  background-size: 190% 100%;
-}
-
-.codex-power-ultra-field::before,
-.codex-power-ultra-field::after {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--codex-blue) 60%, var(--codex-purple)),
+    var(--codex-purple) 55%,
+    color-mix(in srgb, var(--codex-purple) 72%, var(--codex-blue))
+  );
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent calc(var(--codex-power-ultra-mask-position) - 120px),
+    #000 var(--codex-power-ultra-mask-position),
+    #000 100%
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent calc(var(--codex-power-ultra-mask-position) - 120px),
+    #000 var(--codex-power-ultra-mask-position),
+    #000 100%
+  );
   position: absolute;
-  inset: -72% -38%;
-  content: "";
-  pointer-events: none;
+  inset: 0;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
 }
 
-.codex-power-ultra-field::before {
-  background:
-    radial-gradient(52% 80% at 14% 38%, rgb(163 198 255 / 78%) 0 18%, transparent 62%),
-    radial-gradient(48% 88% at 44% 68%, rgb(132 74 235 / 92%) 0 22%, transparent 64%),
-    radial-gradient(46% 82% at 72% 32%, rgb(218 178 255 / 76%) 0 18%, transparent 60%),
-    radial-gradient(50% 90% at 94% 66%, rgb(87 72 225 / 88%) 0 20%, transparent 62%);
-  opacity: 0.82;
-  filter: blur(5px) saturate(1.2);
-  mix-blend-mode: screen;
-}
-
-.codex-power-ultra-field::after {
-  opacity: 0.78;
-  background:
-    radial-gradient(64% 96% at 28% 58%, rgb(78 37 170 / 72%) 0 24%, transparent 68%),
-    radial-gradient(58% 92% at 68% 42%, rgb(196 135 255 / 68%) 0 18%, transparent 66%),
-    repeating-linear-gradient(105deg, transparent 0 5px, rgb(255 255 255 / 11%) 5px 6px, transparent 6px 11px);
-  filter: blur(4px);
-  mix-blend-mode: soft-light;
+.codex-power-ultra-canvas {
+  mix-blend-mode: luminosity;
+  width: 100%;
+  height: 100%;
+  display: block;
 }
 
 .codex-power-ticks,
-.codex-power-thumb-rail,
-.codex-power-particles,
-.codex-power-burst {
+.codex-power-thumb-rail {
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -685,7 +688,17 @@ body.light {
 
 .codex-power-ticks { z-index: 3; }
 .codex-power-thumb-rail { z-index: 4; }
-.codex-power-particles { z-index: 2; overflow: hidden; opacity: 0; }
+.codex-power-particles {
+  z-index: 3;
+  inset-inline: 0;
+  pointer-events: none;
+  height: 24px;
+  position: absolute;
+  top: 50%;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-50%);
+}
 
 .codex-power-tick {
   position: absolute;
@@ -773,54 +786,66 @@ body.light {
 .codex-power-endpoint.is-last { float: right; }
 
 .codex-power-particle {
+  will-change: left, top;
+  transition-property: left, top;
+  transition-timing-function: cubic-bezier(0.45, 0, 0.55, 1);
   position: absolute;
-  top: var(--particle-y);
-  left: var(--particle-x);
   width: 3px;
   height: 3px;
-  border-radius: 50%;
-  opacity: 0;
-  background: #d9eeff;
-  box-shadow: 0 0 5px #a8d4ff;
+  border-radius: 999px;
+  background: #ffffffb8;
+  box-shadow: 0 0 5px #ffffff57;
 }
 
-.codex-power-particle:nth-child(1) { --particle-x: 10%; --particle-y: 22%; --particle-delay: 0ms; }
-.codex-power-particle:nth-child(2) { --particle-x: 17%; --particle-y: 74%; --particle-delay: 34ms; }
-.codex-power-particle:nth-child(3) { --particle-x: 25%; --particle-y: 35%; --particle-delay: 68ms; }
-.codex-power-particle:nth-child(4) { --particle-x: 33%; --particle-y: 66%; --particle-delay: 102ms; }
-.codex-power-particle:nth-child(5) { --particle-x: 41%; --particle-y: 16%; --particle-delay: 136ms; }
-.codex-power-particle:nth-child(6) { --particle-x: 49%; --particle-y: 82%; --particle-delay: 170ms; }
-.codex-power-particle:nth-child(7) { --particle-x: 56%; --particle-y: 27%; --particle-delay: 204ms; }
-.codex-power-particle:nth-child(8) { --particle-x: 63%; --particle-y: 70%; --particle-delay: 238ms; }
-.codex-power-particle:nth-child(9) { --particle-x: 70%; --particle-y: 18%; --particle-delay: 272ms; }
-.codex-power-particle:nth-child(10) { --particle-x: 76%; --particle-y: 76%; --particle-delay: 306ms; }
-.codex-power-particle:nth-child(11) { --particle-x: 82%; --particle-y: 33%; --particle-delay: 340ms; }
-.codex-power-particle:nth-child(12) { --particle-x: 87%; --particle-y: 63%; --particle-delay: 374ms; }
-.codex-power-particle:nth-child(13) { --particle-x: 92%; --particle-y: 21%; --particle-delay: 408ms; }
-.codex-power-particle:nth-child(14) { --particle-x: 96%; --particle-y: 71%; --particle-delay: 442ms; }
-
 .codex-power-burst {
+  z-index: 2;
+  pointer-events: none;
+  width: 76px;
+  height: 76px;
+  position: absolute;
   top: 50%;
   right: auto;
   bottom: auto;
   left: var(--codex-power-thumb-position);
-  width: 0;
-  height: 0;
+  transform: translate(-50%, -50%);
 }
 
-.codex-power-burst i {
+.codex-power-burst > i {
+  --particle-color: var(--codex-purple);
+  --burst-x: 0px;
+  --burst-y: -36px;
+  background: var(--particle-color);
+  border-radius: 999px;
+  width: 5px;
+  height: 5px;
   position: absolute;
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  opacity: 0;
-  background: #c5a7ff;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.2);
 }
 
-.codex-power-burst i:nth-child(4n + 1) { --burst-x: -24px; --burst-y: -13px; }
-.codex-power-burst i:nth-child(4n + 2) { --burst-x: 22px; --burst-y: -15px; }
-.codex-power-burst i:nth-child(4n + 3) { --burst-x: 18px; --burst-y: 18px; }
-.codex-power-burst i:nth-child(4n) { --burst-x: -20px; --burst-y: 17px; }
+.codex-power-burst > i:nth-child(4n + 3) {
+  --particle-color: color-mix(in srgb, var(--codex-purple) 82%, var(--codex-blue));
+}
+.codex-power-burst > i:nth-child(4n + 1):not(:first-child) {
+  --particle-color: color-mix(in srgb, var(--codex-purple) 68%, var(--codex-blue));
+}
+.codex-power-burst > i:first-child { --burst-x: -3px; --burst-y: -34px; }
+.codex-power-burst > i:nth-child(2) { --burst-x: 15px; --burst-y: -29px; animation-delay: 8ms; }
+.codex-power-burst > i:nth-child(3) { --burst-x: 30px; --burst-y: -19px; }
+.codex-power-burst > i:nth-child(4) { --burst-x: 34px; --burst-y: -2px; animation-delay: 12ms; }
+.codex-power-burst > i:nth-child(5) { --burst-x: 26px; --burst-y: 20px; }
+.codex-power-burst > i:nth-child(6) { --burst-x: 12px; --burst-y: 31px; animation-delay: 10ms; }
+.codex-power-burst > i:nth-child(7) { --burst-x: -6px; --burst-y: 34px; }
+.codex-power-burst > i:nth-child(8) { --burst-x: -22px; --burst-y: 26px; animation-delay: 14ms; }
+.codex-power-burst > i:nth-child(9) { --burst-x: -32px; --burst-y: 9px; }
+.codex-power-burst > i:nth-child(10) { --burst-x: -32px; --burst-y: -10px; animation-delay: 8ms; }
+.codex-power-burst > i:nth-child(11) { --burst-x: -21px; --burst-y: -26px; }
+.codex-power-burst > i:nth-child(12) { --burst-x: 7px; --burst-y: -24px; animation-delay: 6ms; }
+.codex-power-burst > i:nth-child(13) { --burst-x: 24px; --burst-y: -9px; }
+.codex-power-burst > i:nth-child(14) { --burst-x: 20px; --burst-y: 10px; animation-delay: 10ms; }
+.codex-power-burst > i:nth-child(15) { --burst-x: -9px; --burst-y: 21px; }
+.codex-power-burst > i:nth-child(16) { --burst-x: -25px; --burst-y: -5px; animation-delay: 12ms; }
 
 .codex-power-control.is-fast .codex-power-fill {
   filter: saturate(1.2) brightness(1.08);
@@ -836,28 +861,13 @@ body.light {
 }
 
 .codex-power-control.is-ultra .codex-power-fill { opacity: 0; }
-.codex-power-control.is-ultra .codex-power-particles,
-.codex-power-control.is-ultra .codex-power-burst { display: none; }
-.codex-power-control.is-ultra .codex-power-ultra-field::before {
-  will-change: transform;
-  animation: codex-power-ultra-field-a 4.6s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate;
-}
-.codex-power-control.is-ultra .codex-power-ultra-field::after {
-  will-change: transform;
-  animation: codex-power-ultra-field-b 5.4s cubic-bezier(0.45, 0, 0.55, 1) infinite alternate-reverse;
-}
+.codex-power-control.is-ultra .codex-power-particles { opacity: 1; }
 .codex-power-control.is-ultra .codex-power-tick { opacity: 0; transform: translate(-50%, -50%) scale(0.75); }
-.codex-power-control.is-ultra-entering .codex-power-ultra-field {
-  animation: codex-power-ultra-reveal 2s ease both;
+.codex-power-control.is-ultra-entering .codex-power-ultra-mask {
+  animation: 2s both codex-power-ultra-reveal;
 }
-.codex-power-control.is-ultra-entering .codex-power-thumb::after {
-  position: absolute;
-  inset: -12px;
-  border-radius: 50%;
-  background: radial-gradient(circle, transparent 0 30%, rgb(215 194 255 / 64%) 31% 42%, rgb(169 134 255 / 26%) 43% 57%, transparent 70%);
-  content: "";
-  pointer-events: none;
-  animation: codex-power-ultra-thumb-flare 620ms cubic-bezier(0.25, 1, 0.5, 1) both;
+.codex-power-control.is-ultra-entering .codex-power-burst > i {
+  animation: 0.62s cubic-bezier(0.25, 1, 0.5, 1) both codex-power-burst-particle;
 }
 
 .codex-power-compact-controls {
@@ -865,7 +875,7 @@ body.light {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 40px;
+  height: 36px;
   padding: 0 8px;
   border-top: 1px solid color-mix(in srgb, var(--codex-border) 70%, transparent);
 }
@@ -885,6 +895,7 @@ body.light {
 
 .codex-power-fast-toggle {
   width: 28px;
+  margin-left: auto;
   padding: 0;
   color: var(--codex-muted) !important;
 }
@@ -969,24 +980,39 @@ body.light {
   white-space: nowrap;
 }
 
-@keyframes codex-power-ultra-reveal { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0); } }
-@keyframes codex-power-ultra-field-a {
-  from { transform: translate3d(-5%, -2%, 0) scale(1.02) rotate(-0.4deg); }
-  to { transform: translate3d(7%, 3%, 0) scale(1.08) rotate(0.5deg); }
+@keyframes codex-power-ultra-reveal {
+  0% { --codex-power-ultra-mask-position: 100%; }
+  to { --codex-power-ultra-mask-position: 0%; }
 }
-@keyframes codex-power-ultra-field-b {
-  from { transform: translate3d(6%, 2%, 0) scale(1.07); }
-  to { transform: translate3d(-6%, -3%, 0) scale(1.01); }
-}
-@keyframes codex-power-ultra-thumb-flare { 0% { opacity: 0; transform: scale(0.35); } 28% { opacity: 1; transform: scale(0.9); } 100% { opacity: 0; transform: scale(1.55); } }
 @keyframes codex-power-fast-particle { 0%, 100% { opacity: 0; transform: translateX(-5px); } 45% { opacity: 0.75; } 70% { transform: translateX(7px); } }
-@keyframes codex-power-track-particle { 0% { opacity: 0; transform: translateY(5px) scale(0.4); } 45% { opacity: 0.9; } 100% { opacity: 0; transform: translateY(-7px); } }
-@keyframes codex-power-burst-particle { 0% { opacity: 0; transform: scale(0.2); } 32% { opacity: 1; } 100% { opacity: 0; transform: translate(var(--burst-x), var(--burst-y)); } }
+@keyframes codex-power-burst-particle {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.25);
+  }
+  22% {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.28);
+  }
+  to {
+    opacity: 0;
+    transform: translate(
+      calc(-50% + var(--burst-x)),
+      calc(-50% + var(--burst-y))
+    ) scale(0.55);
+  }
+}
 @keyframes codex-power-warning-shimmer {
   from { background-position: 100% 0; }
   to { background-position: 0 0; }
 }
 @keyframes codex-power-popover-enter { from { opacity: 0; transform: translateY(5px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+@property --codex-power-ultra-mask-position {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
 
 @media (max-width: 1100px) {
   .codex-bot-controls {
@@ -1040,20 +1066,6 @@ body.light {
     scroll-behavior: auto !important;
     transition: none !important;
   }
-
-  .codex-power-control.is-ultra .codex-power-ultra-field::before,
-  .codex-power-control.is-ultra .codex-power-ultra-field::after {
-    animation: none !important;
-    transform: none !important;
-    will-change: auto;
-  }
-
-  .codex-power-control.is-ultra-entering .codex-power-ultra-field {
-    animation: none !important;
-    clip-path: none !important;
-  }
-
-  .codex-power-control.is-ultra-entering .codex-power-thumb::after { content: none; }
 
   .codex-power-warning:not([hidden]) {
     color: #b28aff;

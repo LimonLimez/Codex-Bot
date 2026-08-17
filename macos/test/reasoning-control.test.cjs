@@ -100,7 +100,9 @@ test("Power wheel and keyboard operations snap exact stops with native Home End 
   assert.equal(control.wheel(7).committedIndex, 2);
   assert.equal(control.keyDown("ArrowLeft").committedIndex, 1);
   assert.equal(control.keyDown("ArrowUp").committedIndex, 2);
-  assert.equal(control.keyDown("End").committedIndex, 3);
+  const keyboardUltra = control.keyDown("End");
+  assert.equal(keyboardUltra.committedIndex, 3);
+  assert.equal(keyboardUltra.enteredUltra, false, "keyboard selection must not replay the pointer-only Ultra burst");
   assert.equal(control.keyDown("Home").committedIndex, 0);
   assert.equal(control.keyDown("PageDown").changed, false);
   assert.match(control.snapshot().liveText, /Light.*Terra/i);
@@ -140,7 +142,20 @@ test("Power preserves provider-specific Ultra Code in live text and transition i
     { provider: "cliproxy-anthropic", model: "claude-fable-5", effort: "ultra-code", serviceTier: null, catalogGeneration: 1, label: "Ultra Code", effect: "ultra" }];
   const control = new PowerControlState(stops, stops[0], { ownerKey: "bot-fable:1" });
   const result = control.keyDown("End");
-  assert.equal(result.enteredUltra, true);
+  assert.equal(result.enteredUltra, false);
   assert.equal(result.selection.effort, "ultra-code");
   assert.match(result.liveText, /Ultra Code.*Claude Fable 5/i);
+});
+
+test("Power Ultra entry requires a genuine pointer drag to the maximum stop", () => {
+  const stops = powerStops();
+  const click = new PowerControlState(stops, stops[1], { ownerKey: "bot-a:4" });
+  click.pointerDown(3, 0);
+  assert.equal(click.pointerUp(3).enteredUltra, false, "a pointer click at max is not a drag entry");
+
+  const drag = new PowerControlState(stops, stops[1], { ownerKey: "bot-a:4" });
+  drag.pointerDown(1, 0);
+  drag.pointerMove(3);
+  assert.equal(drag.pointerUp(3).enteredUltra, true);
+  assert.equal(drag.pointerUp(3).enteredUltra, false, "a stale release cannot replay entry");
 });

@@ -211,6 +211,22 @@ test("Power preserves the selected advertised speed across compatible effort sto
   assert.notDeepEqual(standard, fast);
 });
 
+test("Fast classification matches native priority and fast aliases without treating ultrafast as Fast", () => {
+  const candidates = [
+    { serviceTier: "ultrafast", label: "Ultra fast" },
+    { serviceTier: "flex", label: "Flexible" },
+    { serviceTier: "custom", label: "Priority" },
+    { serviceTier: "fast", label: "Anything" },
+    { serviceTier: "priority", label: "Fast" },
+  ];
+  assert.equal(controls.findFastServiceTier(candidates), "priority");
+  assert.equal(controls.findFastServiceTier([{ serviceTier: "custom", label: "Priority" }]), "custom");
+  assert.equal(controls.findFastServiceTier([{ serviceTier: "fast", label: "Priority" }]), "fast");
+  assert.equal(controls.findFastServiceTier([{ serviceTier: "priority", label: "Other" }]), "priority");
+  assert.equal(controls.findFastServiceTier([{ serviceTier: "ultrafast", label: "Ultra fast" }]), null);
+  assert.equal(controls.findFastServiceTier([{ serviceTier: "flex", label: "Flex" }]), null);
+});
+
 test("Power stop fallback never invents a missing preferred model or unsupported capability", () => {
   const catalog = [{
     model: "gpt-live-luna",
@@ -268,8 +284,16 @@ test("Advanced controls expose exact Model Effort and Speed tuples and round-tri
     catalogGeneration: 3,
     isDefault: true,
   }];
-  const advanced = controls.buildAdvancedOptions(catalog, "gpt-live-sol");
-  assert.deepEqual(advanced.models, [{ model: "gpt-live-sol", label: "GPT Live Sol", provider: "openai-codex" }]);
+  const advanced = controls.buildAdvancedOptions(catalog, {
+    provider: "openai-codex",
+    model: "gpt-live-sol",
+  });
+  assert.deepEqual(advanced.models, [{
+    key: JSON.stringify(["openai-codex", "gpt-live-sol"]),
+    model: "gpt-live-sol",
+    label: "GPT Live Sol",
+    provider: "openai-codex",
+  }]);
   assert.deepEqual(advanced.efforts, [
     { effort: "low", label: "Light" },
     { effort: "medium", label: "Medium" },
@@ -281,6 +305,7 @@ test("Advanced controls expose exact Model Effort and Speed tuples and round-tri
     { serviceTier: "ultrafast", label: "Ultra fast", description: "Fastest" },
   ]);
   const exact = controls.resolveAdvancedSelection(catalog, {
+    provider: "openai-codex",
     model: "gpt-live-sol",
     effort: "ultra",
     serviceTier: "ultrafast",
@@ -294,8 +319,81 @@ test("Advanced controls expose exact Model Effort and Speed tuples and round-tri
   });
   assert.equal(controls.closestPowerStop(controls.buildPowerStops(catalog), exact), 2);
   assert.equal(controls.resolveAdvancedSelection(catalog, {
+    provider: "openai-codex",
     model: "gpt-live-sol",
     effort: "max",
     serviceTier: null,
   }), null);
+});
+
+test("Power and Advanced preserve provider identity when official and CLIProxy models share one raw id", () => {
+  const catalog = [
+    {
+      model: "claude-fable-5",
+      label: "Direct Claude Fable 5",
+      provider: "openai-codex",
+      efforts: ["medium", "high"],
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: [],
+      catalogGeneration: 23,
+      isDefault: true,
+    },
+    {
+      model: "claude-fable-5",
+      label: "Claude Fable 5",
+      provider: "cliproxy-anthropic",
+      efforts: ["medium", "ultra-code"],
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: [],
+      catalogGeneration: 1,
+      isDefault: false,
+    },
+  ];
+  const optional = {
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    effort: "ultra-code",
+    serviceTier: null,
+    catalogGeneration: 1,
+  };
+  const stops = controls.buildPowerStops(catalog, optional);
+  assert.equal(stops.every((stop) => stop.provider === "cliproxy-anthropic"), true);
+  assert.equal(stops.at(-1).effort, "ultra-code");
+
+  const advanced = controls.buildAdvancedOptions(catalog, optional);
+  assert.deepEqual(advanced.models, [
+    {
+      key: JSON.stringify(["openai-codex", "claude-fable-5"]),
+      model: "claude-fable-5",
+      label: "Direct Claude Fable 5",
+      provider: "openai-codex",
+    },
+    {
+      key: JSON.stringify(["cliproxy-anthropic", "claude-fable-5"]),
+      model: "claude-fable-5",
+      label: "Claude Fable 5",
+      provider: "cliproxy-anthropic",
+    },
+  ]);
+  assert.deepEqual(advanced.efforts.map(({ effort }) => effort), ["medium", "ultra-code"]);
+  assert.deepEqual(controls.resolveAdvancedSelection(catalog, optional), optional);
+  assert.deepEqual(controls.resolveAdvancedSelection(catalog, {
+    provider: "openai-codex",
+    model: "claude-fable-5",
+    effort: "high",
+    serviceTier: null,
+  }), {
+    provider: "openai-codex",
+    model: "claude-fable-5",
+    effort: "high",
+    serviceTier: null,
+    catalogGeneration: 23,
+  });
+  assert.equal(controls.resolveAdvancedSelection(catalog, {
+    model: "claude-fable-5",
+    effort: "medium",
+    serviceTier: null,
+  }), null, "an ambiguous raw model id cannot silently choose a provider");
 });

@@ -77,6 +77,7 @@ const OPTIONAL_MODEL_EFFORTS = Object.freeze({
   "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
   "claude-sonnet-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
 });
+const OPTIONAL_NATIVE_MODEL_PREFIX = "cliproxy-anthropic--";
 const LOCAL_AUTOMATION_METHODS = Object.freeze([
   "getAgentAutomations",
   "listAllAutomations",
@@ -90,6 +91,12 @@ const LOCAL_AUTOMATION_METHODS = Object.freeze([
 function sanitizedFailure() {
   const error = new Error("Codex bot operation failed.");
   error.code = "CODEX_BOT_OPERATION_FAILED";
+  return error;
+}
+
+function invalidNativeModelSelection() {
+  const error = new Error("Codex bot operation failed.");
+  error.code = "CODEX_BOT_INVALID_NATIVE_MODEL_SELECTION";
   return error;
 }
 
@@ -395,7 +402,7 @@ function selectionRequest(value) {
     descriptors = Object.getOwnPropertyDescriptors(value);
     prototype = Object.getPrototypeOf(value);
   } catch { throw sanitizedFailure(); }
-  const fields = ["botId", "model", "reasoningEffort", "serviceTier"];
+  const fields = ["botId", "provider", "model", "reasoningEffort", "serviceTier"];
   const required = ["botId", "model", "reasoningEffort"];
   if ((prototype !== Object.prototype && prototype !== null)
     || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
@@ -405,6 +412,8 @@ function selectionRequest(value) {
     .filter((field) => descriptors[field])
     .map((field) => [field, descriptors[field].value]));
   if (typeof result.botId !== "string" || !BOT_ID.test(result.botId)
+    || !(result.provider === undefined || result.provider === "openai-codex"
+      || result.provider === "cliproxy-anthropic")
     || !(result.serviceTier === undefined || result.serviceTier === null
       || (typeof result.serviceTier === "string"
         && /^[a-z][a-z0-9_-]{0,31}$/.test(result.serviceTier)))) throw sanitizedFailure();
@@ -421,8 +430,12 @@ function catalogModels(catalog) {
 function resolveModelSelection(rawSelection, catalog) {
   const requested = selectionRequest(rawSelection);
   const optionalEfforts = OPTIONAL_MODEL_EFFORTS[requested.model];
-  if (optionalEfforts) {
-    if (!optionalEfforts.includes(requested.reasoningEffort)
+  const officialModels = catalog?.status === "ready" ? catalogModels(catalog) : null;
+  const officialModel = officialModels?.find((entry) => entry?.id === requested.model) ?? null;
+  const choosesOptional = requested.provider === "cliproxy-anthropic"
+    || (requested.provider === undefined && optionalEfforts && !officialModel);
+  if (choosesOptional) {
+    if (!optionalEfforts || !optionalEfforts.includes(requested.reasoningEffort)
       || (requested.serviceTier !== undefined && requested.serviceTier !== null)) throw sanitizedFailure();
     return Object.freeze({
       botId: requested.botId,
@@ -433,8 +446,12 @@ function resolveModelSelection(rawSelection, catalog) {
       catalogGeneration: 1,
     });
   }
-  const models = catalogModels(catalog);
-  const model = models.find((entry) => entry?.id === requested.model);
+  if (requested.provider === undefined && optionalEfforts && officialModel) throw sanitizedFailure();
+  if (requested.provider === "cliproxy-anthropic"
+    || (requested.provider === "openai-codex" && !officialModel)) {
+    throw sanitizedFailure();
+  }
+  const model = officialModel;
   if (!model || !Array.isArray(model.supportedReasoningEfforts)
     || !model.supportedReasoningEfforts.includes(requested.reasoningEffort)) throw sanitizedFailure();
   const serviceTier = requested.serviceTier === undefined
@@ -457,6 +474,7 @@ function selectionMatchesCatalog(value, catalog) {
     if (!value || !Number.isSafeInteger(value.generation) || value.generation < 0) return false;
     const current = resolveModelSelection({
       botId: value.botId,
+      provider: value.provider,
       model: value.model,
       reasoningEffort: value.reasoningEffort,
       serviceTier: value.serviceTier,
@@ -472,6 +490,7 @@ function defaultModelSelection(botId, catalog) {
   if (catalog?.status !== "ready") {
     return resolveModelSelection({
       botId,
+      provider: "cliproxy-anthropic",
       model: "claude-fable-5",
       reasoningEffort: "medium",
       serviceTier: null,
@@ -481,6 +500,7 @@ function defaultModelSelection(botId, catalog) {
   const model = models.find((entry) => entry?.isDefault === true) ?? models[0];
   return resolveModelSelection({
     botId,
+    provider: "openai-codex",
     model: model.id,
     reasoningEffort: model.defaultReasoningEffort,
     serviceTier: model.defaultServiceTier ?? null,
@@ -554,6 +574,313 @@ function createDirectCodexManager({
       ? Object.fromEntries(Object.entries(process.env))
       : environment,
     clientVersion: "0.2.0-macos.1",
+  });
+}
+
+function freezeNativeModelValue(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) freezeNativeModelValue(nested);
+  return Object.freeze(value);
+}
+
+function nativeEffortLabel(value) {
+  const labels = {
+    low: "Light",
+    medium: "Medium",
+    high: "High",
+    xhigh: "Extra High",
+    max: "Max",
+    ultra: "Ultra",
+    "ultra-code": "Ultra Code",
+  };
+  return labels[value] ?? String(value).replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function optionalNativeModelId(model) {
+  if (typeof model !== "string" || !Object.hasOwn(OPTIONAL_MODEL_EFFORTS, model)) {
+    throw sanitizedFailure();
+  }
+  return `${OPTIONAL_NATIVE_MODEL_PREFIX}${model}`;
+}
+
+function optionalModelFromNativeId(modelId) {
+  if (typeof modelId !== "string" || !modelId.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)) return null;
+  const model = modelId.slice(OPTIONAL_NATIVE_MODEL_PREFIX.length);
+  return Object.hasOwn(OPTIONAL_MODEL_EFFORTS, model) && optionalNativeModelId(model) === modelId
+    ? model
+    : null;
+}
+
+function nativeCatalogModel({
+  id,
+  displayName,
+  efforts,
+  serviceTiers = [],
+  defaultEffort,
+  defaultServiceTier = null,
+  defaultOn = false,
+  provider,
+  supportsImages = false,
+}) {
+  if (typeof id !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(id)
+    || typeof displayName !== "string" || displayName.length < 1 || displayName.length > 160
+    || !Array.isArray(efforts) || efforts.length < 1 || efforts.length > 16
+    || efforts.some((effort) => typeof effort !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))
+    || new Set(efforts).size !== efforts.length
+    || !efforts.includes(defaultEffort)
+    || !Array.isArray(serviceTiers) || serviceTiers.length > 16) throw sanitizedFailure();
+  const tiers = serviceTiers.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)
+      || typeof entry.id !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(entry.id)
+      || entry.id === "standard"
+      || typeof entry.name !== "string" || entry.name.length < 1 || entry.name.length > 160) {
+      throw sanitizedFailure();
+    }
+    return { id: entry.id, name: entry.name };
+  });
+  if (new Set(tiers.map((entry) => entry.id)).size !== tiers.length
+    || (defaultServiceTier !== null && !tiers.some((entry) => entry.id === defaultServiceTier))) {
+    throw sanitizedFailure();
+  }
+  const speedValues = [
+    { value: "standard", displayName: "Standard" },
+    ...tiers.map((entry) => ({ value: entry.id, displayName: entry.name })),
+  ];
+  const parameterDefinitions = [{
+    id: "effort",
+    name: "Effort",
+    parameterType: {
+      enumParameter: {
+        values: efforts.map((effort) => ({ value: effort, displayName: nativeEffortLabel(effort) })),
+      },
+    },
+  }];
+  if (tiers.length) parameterDefinitions.push({
+    id: "speed",
+    name: "Speed",
+    parameterType: { enumParameter: { values: speedValues } },
+  });
+  const speeds = tiers.length ? [null, ...tiers.map((entry) => entry.id)] : [null];
+  const variants = efforts.flatMap((effort) => speeds.map((serviceTier) => {
+    const speedName = serviceTier === null
+      ? "Standard" : tiers.find((entry) => entry.id === serviceTier)?.name ?? serviceTier;
+    const isDefault = effort === defaultEffort && serviceTier === defaultServiceTier;
+    return {
+      parameterValues: [
+        { id: "effort", value: effort },
+        ...(tiers.length ? [{ id: "speed", value: serviceTier ?? "standard" }] : []),
+      ],
+      displayName: tiers.length ? `${nativeEffortLabel(effort)} · ${speedName}` : nativeEffortLabel(effort),
+      displayNameOutsidePicker: displayName,
+      isMaxMode: true,
+      isDefaultMaxConfig: isDefault,
+      isDefaultNonMaxConfig: isDefault,
+    };
+  }));
+  const anthropic = provider === "cliproxy-anthropic";
+  return {
+    name: id,
+    defaultOn: defaultOn === true,
+    supportsAgent: true,
+    supportsThinking: true,
+    supportsImages: supportsImages === true,
+    supportsMaxMode: true,
+    supportsNonMaxMode: false,
+    clientDisplayName: displayName,
+    inputboxShortModelName: displayName,
+    vendorName: anthropic ? "CLIProxyAPI · Anthropic" : "OpenAI Codex",
+    vendor: {
+      id: anthropic ? "MODEL_VENDOR_ID_ANTHROPIC" : "MODEL_VENDOR_ID_OPENAI",
+      displayName: anthropic ? "CLIProxyAPI · Anthropic" : "OpenAI Codex",
+    },
+    parameterDefinitions,
+    variants,
+  };
+}
+
+function nativeAvailableModels(catalog) {
+  const official = catalog?.status === "ready" ? catalogModels(catalog) : [];
+  if (official.some((entry) => typeof entry?.id === "string"
+    && entry.id.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX))) throw sanitizedFailure();
+  const models = official.map((entry, index) => nativeCatalogModel({
+    id: entry?.id,
+    displayName: entry?.displayName,
+    efforts: entry?.supportedReasoningEfforts,
+    serviceTiers: entry?.serviceTiers ?? [],
+    defaultEffort: entry?.defaultReasoningEffort,
+    defaultServiceTier: entry?.defaultServiceTier ?? null,
+    defaultOn: entry?.isDefault === true || (!official.some((model) => model?.isDefault === true) && index === 0),
+    provider: "openai-codex",
+    supportsImages: entry?.inputModalities?.includes?.("image") === true,
+  }));
+  for (const [id, efforts] of Object.entries(OPTIONAL_MODEL_EFFORTS)) {
+    models.push(nativeCatalogModel({
+      id: optionalNativeModelId(id),
+      displayName: id.replace(/[-_.]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
+      efforts,
+      defaultEffort: efforts.includes("medium") ? "medium" : efforts[0],
+      provider: "cliproxy-anthropic",
+    }));
+  }
+  if (models.length < 1 || new Set(models.map((model) => model.name)).size !== models.length) {
+    throw sanitizedFailure();
+  }
+  return freezeNativeModelValue({
+    models,
+    modelNames: models.map((model) => model.name),
+    useModelParameters: true,
+  });
+}
+
+function nativeModelSelection(selection, catalog = null) {
+  if (!selection || typeof selection !== "object"
+    || !new Set(["openai-codex", "cliproxy-anthropic"]).has(selection.provider)
+    || typeof selection.model !== "string"
+    || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(selection.model)
+    || typeof selection.reasoningEffort !== "string"
+    || !/^[a-z][a-z0-9_-]{0,31}$/.test(selection.reasoningEffort)
+    || !(selection.serviceTier === null || typeof selection.serviceTier === "string")) {
+    throw sanitizedFailure();
+  }
+  const optional = selection.provider === "cliproxy-anthropic";
+  if (optional && (!Object.hasOwn(OPTIONAL_MODEL_EFFORTS, selection.model)
+    || !OPTIONAL_MODEL_EFFORTS[selection.model].includes(selection.reasoningEffort)
+    || selection.serviceTier !== null)) throw sanitizedFailure();
+  if (!optional && selection.model.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)) throw sanitizedFailure();
+  const official = !optional && catalog?.status === "ready"
+    ? catalogModels(catalog).find((entry) => entry?.id === selection.model)
+    : null;
+  if (!optional && catalog?.status === "ready") {
+    if (!official || !Array.isArray(official.supportedReasoningEfforts)
+      || !official.supportedReasoningEfforts.includes(selection.reasoningEffort)
+      || !Array.isArray(official.serviceTiers)
+      || official.serviceTiers.some((entry) => entry?.id === "standard")
+      || new Set(official.serviceTiers.map((entry) => entry?.id)).size !== official.serviceTiers.length
+      || (selection.serviceTier !== null && (!Array.isArray(official.serviceTiers)
+        || !official.serviceTiers.some((entry) => entry?.id === selection.serviceTier)))) {
+      throw sanitizedFailure();
+    }
+  }
+  const hasSpeedParameter = !optional && (selection.serviceTier !== null
+    || (Array.isArray(official?.serviceTiers) && official.serviceTiers.length > 0));
+  return freezeNativeModelValue({
+    modelId: optional ? optionalNativeModelId(selection.model) : selection.model,
+    maxMode: true,
+    parameters: [
+      { id: "effort", value: selection.reasoningEffort },
+      ...(hasSpeedParameter ? [{ id: "speed", value: selection.serviceTier ?? "standard" }] : []),
+    ],
+  });
+}
+
+function exactNativeModelParameters(value) {
+  if (!Array.isArray(value)) throw invalidNativeModelSelection();
+  let descriptors;
+  let prototype;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    prototype = Object.getPrototypeOf(value);
+  } catch { throw invalidNativeModelSelection(); }
+  const length = descriptors.length?.value;
+  const keys = Reflect.ownKeys(descriptors);
+  if (prototype !== Array.prototype || !Number.isSafeInteger(length) || length < 1 || length > 2
+    || keys.length !== length + 1 || keys.some((key) => key === "length"
+      ? !("value" in descriptors[key])
+      : typeof key !== "string" || !/^(?:0|1)$/.test(key) || Number(key) >= length
+        || !("value" in descriptors[key]))) throw invalidNativeModelSelection();
+  return Array.from({ length }, (_, index) => {
+    const entry = descriptors[String(index)].value;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw invalidNativeModelSelection();
+    }
+    let entryDescriptors;
+    let entryPrototype;
+    try {
+      entryDescriptors = Object.getOwnPropertyDescriptors(entry);
+      entryPrototype = Object.getPrototypeOf(entry);
+    } catch { throw invalidNativeModelSelection(); }
+    const entryKeys = Reflect.ownKeys(entryDescriptors);
+    const expectedId = index === 0 ? "effort" : "speed";
+    if ((entryPrototype !== Object.prototype && entryPrototype !== null)
+      || entryKeys.length !== 2
+      || entryKeys.some((key) => typeof key !== "string" || !new Set(["id", "value"]).has(key)
+        || !("value" in entryDescriptors[key]))
+      || !entryDescriptors.id || !entryDescriptors.value
+      || entryDescriptors.id.value !== expectedId
+      || typeof entryDescriptors.value.value !== "string"
+      || !/^[a-z][a-z0-9_-]{0,63}$/.test(entryDescriptors.value.value)) {
+      throw invalidNativeModelSelection();
+    }
+    return Object.freeze({ id: expectedId, value: entryDescriptors.value.value });
+  });
+}
+
+function resolveNativeModelSelection(value, botId, catalog) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || typeof botId !== "string" || !BOT_ID.test(botId)) throw invalidNativeModelSelection();
+  let descriptors;
+  let prototype;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    prototype = Object.getPrototypeOf(value);
+  } catch { throw invalidNativeModelSelection(); }
+  const fields = new Set(["modelId", "maxMode", "parameters"]);
+  if ((prototype !== Object.prototype && prototype !== null)
+    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !fields.has(key)
+      || !("value" in descriptors[key]))
+    || !descriptors.modelId || !descriptors.parameters
+    || typeof descriptors.modelId.value !== "string"
+    || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(descriptors.modelId.value)
+    || (descriptors.maxMode && descriptors.maxMode.value !== true)) {
+    throw invalidNativeModelSelection();
+  }
+  const modelId = descriptors.modelId.value;
+  const parameters = exactNativeModelParameters(descriptors.parameters.value);
+  const effort = parameters[0].value;
+  const readyModels = catalog?.status === "ready" ? catalogModels(catalog) : null;
+  if (readyModels && (new Set(readyModels.map((entry) => entry?.id)).size !== readyModels.length
+    || readyModels.some((entry) => typeof entry?.id === "string"
+      && entry.id.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)))) throw sanitizedFailure();
+  if (modelId.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)) {
+    const model = optionalModelFromNativeId(modelId);
+    if (model === null || parameters.length !== 1
+      || !OPTIONAL_MODEL_EFFORTS[model].includes(effort)) throw invalidNativeModelSelection();
+    return Object.freeze({
+      botId,
+      provider: "cliproxy-anthropic",
+      model,
+      reasoningEffort: effort,
+      serviceTier: null,
+      catalogGeneration: 1,
+    });
+  }
+  const models = readyModels ?? catalogModels(catalog);
+  const model = models.find((entry) => entry?.id === modelId);
+  if (!model) throw invalidNativeModelSelection();
+  if (!Array.isArray(model.supportedReasoningEfforts) || !Array.isArray(model.serviceTiers)) {
+    throw sanitizedFailure();
+  }
+  if (model.serviceTiers.some((entry) => entry?.id === "standard")
+    || new Set(model.serviceTiers.map((entry) => entry?.id)).size !== model.serviceTiers.length) {
+    throw sanitizedFailure();
+  }
+  if (!model.supportedReasoningEfforts.includes(effort)) throw invalidNativeModelSelection();
+  let serviceTier = null;
+  if (model.serviceTiers.length > 0) {
+    if (parameters.length !== 2) throw invalidNativeModelSelection();
+    const speed = parameters[1].value;
+    serviceTier = speed === "standard" ? null : speed;
+    if (serviceTier !== null && !model.serviceTiers.some((entry) => entry?.id === serviceTier)) {
+      throw invalidNativeModelSelection();
+    }
+  } else if (parameters.length !== 1) throw invalidNativeModelSelection();
+  return Object.freeze({
+    botId,
+    provider: "openai-codex",
+    model: modelId,
+    reasoningEffort: effort,
+    serviceTier,
+    catalogGeneration: catalog.generation,
   });
 }
 
@@ -876,11 +1203,12 @@ function productionDependencies(electron) {
     conversationBindingsPath,
   });
   const nativeCoordinatorFactory = ({
-    onSelectAgent, deleteBots, readActiveAgentId, automationController,
+    onSelectAgent, deleteBots, readActiveAgentId, automationController, modelController,
   }) => new OpenBotNativeCoordinator({
     botRuntimeController: controller,
     conversationController: inferenceBridge.conversations,
     automationController,
+    modelController,
     deleteBots,
     onSelectAgent,
     readActiveAgentId,
@@ -1000,12 +1328,20 @@ function installDesktopRuntime(electron, injected = {}) {
   const nativeAutomationController = localAutomationController === null
     ? null
     : readyLocalAutomationController(localAutomationController, automationReady);
+  const nativeModelController = Object.freeze({
+    getAvailableModels: () => Promise.resolve(nativeAvailableModels(accountController.catalogState())),
+    getAgentDefaultModel: () => readNativeModel(),
+    setAgentDefaultModel: (model) => writeNativeModel(model),
+    getComputerUseModel: () => readNativeModel(),
+    setComputerUseModel: (model) => writeNativeModel(model),
+  });
   const nativeCoordinator = dependencies.nativeCoordinator
     || (typeof dependencies.nativeCoordinatorFactory === "function"
       ? dependencies.nativeCoordinatorFactory({
         onSelectAgent: selectNativeAgent,
         deleteBots: botDeletionCoordinator === null ? null : deleteNativeBots,
         automationController: nativeAutomationController,
+        modelController: nativeModelController,
         readActiveAgentId: typeof selectionStore.readActiveBotId === "function"
           ? () => selectionStore.readActiveBotId()
           : null,
@@ -1203,6 +1539,7 @@ function installDesktopRuntime(electron, injected = {}) {
       try {
         requested = resolveModelSelection({
           botId,
+          provider: current.provider,
           model: current.model,
           reasoningEffort: current.reasoningEffort,
           serviceTier: current.serviceTier,
@@ -1225,6 +1562,59 @@ function installDesktopRuntime(electron, injected = {}) {
       && left.serviceTier === right.serviceTier
       && left.catalogGeneration === right.catalogGeneration
       && left.generation === right.generation);
+  }
+
+  async function activeNativeModelBot() {
+    const activeBotId = typeof selectionStore.readActiveBotId === "function"
+      ? await selectionStore.readActiveBotId()
+      : null;
+    if (typeof activeBotId === "string") {
+      const active = await controller.readBot(activeBotId);
+      if (active?.botId === activeBotId) return active;
+    }
+    const bots = await controller.listBots();
+    const fallback = Array.isArray(bots) ? bots[0] : null;
+    if (!fallback || typeof fallback.botId !== "string") return null;
+    const current = await controller.readBot(fallback.botId);
+    return current?.botId === fallback.botId ? current : null;
+  }
+
+  function readNativeModel() {
+    return serializeActiveIdentityMutation(async () => {
+      const bot = await activeNativeModelBot();
+      if (!bot) return null;
+      const selected = await currentModelSelection(bot.botId);
+      return nativeModelSelection(selected, accountController.catalogState());
+    });
+  }
+
+  function writeNativeModel(model) {
+    return serializeActiveIdentityMutation(async () => {
+      const bot = await activeNativeModelBot();
+      if (!bot) throw sanitizedFailure();
+      const catalog = accountController.catalogState();
+      const requested = resolveNativeModelSelection(model, bot.botId, catalog);
+      const selectWithinBarrier = async () => {
+        const previousReceipt = profileSetupReceipts.get(bot.botId);
+        const pendingReceipt = Object.freeze({
+          renamed: previousReceipt?.renamed === true,
+          profiled: previousReceipt?.profiled === true,
+          model: null,
+          catalogGeneration: null,
+        });
+        profileSetupReceipts.set(bot.botId, pendingReceipt);
+        const currentBot = await controller.readBot(bot.botId);
+        if (!currentBot || currentBot.botId !== bot.botId) throw sanitizedFailure();
+        const selected = await selectionStore.writeNext(requested);
+        await markModelForSetup(currentBot, selected, catalog, pendingReceipt);
+        return selected;
+      };
+      const selected = typeof standaloneConversations?.withModelSelectionMutation === "function"
+        ? await standaloneConversations.withModelSelectionMutation(bot.botId, selectWithinBarrier)
+        : await selectWithinBarrier();
+      broadcastRuntimeEvent(Object.freeze({ type: "active-bot-changed", botId: bot.botId }));
+      return nativeModelSelection(selected, catalog);
+    });
   }
 
   function computerIdentityMatches(left, right) {
@@ -1631,8 +2021,11 @@ module.exports = {
   installDesktopRuntime,
   loadConfiguredProvider,
   loadSidecarReceipt,
+  nativeAvailableModels,
+  nativeModelSelection,
   prepareProductionUserData,
   resolveModelSelection,
+  resolveNativeModelSelection,
   selectionMatchesCatalog,
   setInferenceBridgeEnvironment,
 };

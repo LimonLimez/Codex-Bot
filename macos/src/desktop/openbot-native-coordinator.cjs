@@ -86,6 +86,15 @@ const FALSE_NONE_READ_METHODS = new Set([
   "isGlobalSearchEnabled",
   "isEgressTunnelAvailable",
 ]);
+const MODEL_METHODS = new Set([
+  "getAvailableModels",
+  "getAgentDefaultModel",
+  "setAgentDefaultModel",
+  "getComputerUseModel",
+  "setComputerUseModel",
+]);
+const MODEL_SELECTION_FIELDS = new Set(["modelId", "maxMode", "parameters"]);
+const MODEL_PARAMETER_FIELDS = new Set(["id", "value"]);
 const SUPPORTED_METHODS = new Set([
   "listAgents",
   "countAgents",
@@ -105,6 +114,7 @@ const SUPPORTED_METHODS = new Set([
   "getAgentChannels",
   "getBoxSecretsStatus",
   ...FALSE_NONE_READ_METHODS,
+  ...MODEL_METHODS,
   "getSharingState",
   "openAgentTail",
   "getAgentTranscriptTail",
@@ -251,6 +261,31 @@ function exactRecord(value, allowed, required = allowed) {
   }
   return Object.fromEntries(Object.entries(descriptors)
     .map(([key, descriptor]) => [key, descriptor.value]));
+}
+
+function nativeModelArgument(value) {
+  const model = exactRecord(value, MODEL_SELECTION_FIELDS, new Set(["modelId", "parameters"]));
+  if (typeof model.modelId !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(model.modelId)
+    || (model.maxMode !== undefined && model.maxMode !== true)
+    || !Array.isArray(model.parameters) || types.isProxy(model.parameters)
+    || Object.getPrototypeOf(model.parameters) !== Array.prototype
+    || model.parameters.length < 1 || model.parameters.length > 2) {
+    throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  const parameters = model.parameters.map((entry, index) => {
+    const parameter = exactRecord(entry, MODEL_PARAMETER_FIELDS);
+    const expectedId = index === 0 ? "effort" : "speed";
+    if (parameter.id !== expectedId || typeof parameter.value !== "string"
+      || !/^[a-z][a-z0-9_-]{0,63}$/.test(parameter.value)) {
+      throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+    }
+    return Object.freeze({ id: parameter.id, value: parameter.value });
+  });
+  return Object.freeze({
+    modelId: model.modelId,
+    ...(model.maxMode === true ? { maxMode: true } : {}),
+    parameters: Object.freeze(parameters),
+  });
 }
 
 function outputRecord(value, allowed, required = allowed) {
@@ -720,6 +755,22 @@ function automationControllerFailure(error, method) {
   return new TypeError("OpenBot native automation controller failed");
 }
 
+function modelControllerFailure(error) {
+  let code = null;
+  if (error && typeof error === "object" && !types.isProxy(error)) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+      if (descriptor && "value" in descriptor && typeof descriptor.value === "string") {
+        code = descriptor.value;
+      }
+    } catch {}
+  }
+  if (code === "CODEX_BOT_INVALID_NATIVE_MODEL_SELECTION") {
+    return coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  return new TypeError("OpenBot native model controller failed");
+}
+
 function validateBot(bot) {
   if (!bot || typeof bot !== "object" || Array.isArray(bot) || !BOT_ID.test(bot.botId)
     || typeof bot.name !== "string" || bot.name.trim().length === 0 || utf8Bytes(bot.name) > 160
@@ -798,6 +849,7 @@ class OpenBotNativeCoordinator {
   #bots;
   #conversations;
   #automations;
+  #models;
   #deleteBots;
   #onSelectAgent;
   #readActiveAgentId;
@@ -833,6 +885,7 @@ class OpenBotNativeCoordinator {
     botRuntimeController,
     conversationController,
     automationController = null,
+    modelController = null,
     deleteBots = null,
     onSelectAgent = null,
     readActiveAgentId = null,
@@ -861,6 +914,11 @@ class OpenBotNativeCoordinator {
         && typeof automationController.removeListener !== "function"))) {
       throw new TypeError("OpenBot native coordinator automationController must be controller-like.");
     }
+    if (modelController !== null && (!modelController
+      || typeof modelController !== "object" || types.isProxy(modelController)
+      || [...MODEL_METHODS].some((name) => typeof modelController[name] !== "function"))) {
+      throw new TypeError("OpenBot native coordinator modelController must implement the Grok desktop model contract.");
+    }
     if (deleteBots !== null && typeof deleteBots !== "function") {
       throw new TypeError("OpenBot native coordinator deleteBots must be a function.");
     }
@@ -874,6 +932,7 @@ class OpenBotNativeCoordinator {
     this.#bots = botRuntimeController;
     this.#conversations = conversationController;
     this.#automations = automationController;
+    this.#models = modelController;
     this.#deleteBots = deleteBots;
     this.#onSelectAgent = onSelectAgent;
     this.#readActiveAgentId = readActiveAgentId;
@@ -1043,6 +1102,7 @@ class OpenBotNativeCoordinator {
       throw capabilityUnavailable(method);
     }
     if (AUTOMATION_METHODS.has(method)) return this.#dispatchAutomation(method, args);
+    if (MODEL_METHODS.has(method)) return this.#dispatchModel(method, args);
     if (method === "listAgents") {
       this.#noneArgs(args);
       return this.#agentRows();
@@ -1106,6 +1166,19 @@ class OpenBotNativeCoordinator {
 
   #noneArgs(args) {
     exactRecord(args, new Set(), new Set());
+  }
+
+  async #dispatchModel(method, rawArgs) {
+    if (this.#models === null) throw capabilityUnavailable(method);
+    if (method === "getAvailableModels" || method === "getAgentDefaultModel"
+      || method === "getComputerUseModel") {
+      this.#noneArgs(rawArgs);
+      return this.#models[method]();
+    }
+    const args = exactRecord(rawArgs, new Set(["model"]));
+    const model = nativeModelArgument(args.model);
+    try { return await this.#models[method](model); }
+    catch (error) { throw modelControllerFailure(error); }
   }
 
   #automationRequest(method, rawArgs) {
