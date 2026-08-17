@@ -130,6 +130,8 @@ git push origin macos/codex-bot
 ### Task 2: Private atomic automation store
 
 **Files:**
+- Create: `macos/src/desktop/local-automation-native-io.cjs`
+- Create: `macos/test/local-automation-native-io.test.cjs`
 - Create: `macos/src/desktop/local-automation-store.cjs`
 - Create: `macos/test/local-automation-store.test.cjs`
 - Modify: `macos/native/openbot-profile-publish.c`
@@ -138,7 +140,8 @@ git push origin macos/codex-bot
 **Interfaces:**
 - Consumes: normalized cron strings from Task 1.
 - Produces: `LocalAutomationStore` and `LocalAutomationStoreError`.
-- Constructor: `new LocalAutomationStore({filePath, helperPath, fs?, spawn?, randomUUID?, now?})` with absolute `filePath` and signed native-helper paths.
+- Native adapter: `new LocalAutomationNativeIO({filePath, helperPath, fs?, spawn?, timeoutMs?})` captures and enforces the existing private directory identity and exposes only `read()` / `write(source)`.
+- Store constructor: `new LocalAutomationStore({stateIO, randomUUID?, now?})`; it has no pathname-I/O fallback.
 - Read methods: `list(botId)`, `listAll()`.
 - Config mutations: `create({botId, automation})`, `replace({botId, automationId, expectedRevision, automation})`, `delete({botId, automationId, expectedRevision})`.
 - Run mutations: `claimRun({botId, automationId, expectedRevision, run, nextRunAt})`, `acceptRun({botId, automationId, runId, invocationId, conversationId})`, `finishRun({botId, automationId, runId, finishedAt, status, detail, errorKind})`.
@@ -174,7 +177,7 @@ Expected: FAIL because `local-automation-store.cjs` does not exist.
 
 - [ ] **Step 3: Add atomicity, recovery, deletion, and hostile DTO REDs**
 
-Cover inherited-directory-fd read/write, temporary-file write, file sync, atomic rename, directory sync, committed-uncertain read-back, restart recovery of `running` to terminal `error`, exact bot deletion retry/idempotency, symlink/private-directory refusal, parent/file substitution after validation, oversized descriptors before traversal, proxies, accessors, cycles, unknown keys, sparse arrays, and cross-bot isolation. Compile the real native helper in the focused test and prove that a deterministic spawn-time parent replacement cannot redirect either a read or write.
+In `local-automation-native-io.test.cjs`, cover inherited-directory-fd read/write, temporary-file write, file sync, atomic rename, directory sync, committed-uncertain read-back, symlink/private-directory refusal, parent/file substitution after validation, bounded helper output, timeout/signal failure, and temp cleanup. Compile the real native helper and prove that a deterministic spawn-time parent replacement cannot redirect either a read or write. In the store test, inject a bounded `stateIO` fake to cover exact read/write uncertainty, restart recovery of `running` to terminal `error`, exact bot deletion retry/idempotency, oversized descriptors before traversal, proxies, accessors, cycles, unknown keys, sparse arrays, and cross-bot isolation.
 
 ```js
 const recovered = await restarted.recoverRunning({ finishedAt: NOW_2 });
@@ -200,18 +203,18 @@ Persist exactly:
 }
 ```
 
-Use descriptor-first validation and frozen clones at every public boundary. Require the existing private state directory rather than creating or chmod-repairing it. Open it with `O_DIRECTORY | O_NOFOLLOW`, validate the descriptor and current pathname identity, and keep the handle alive while passing it as child fd 3 to the signed helper. Extend `openbot-profile-publish.c` without changing its existing two-absolute-path profile-publication behavior: bounded, versioned `--state-read-v1` and `--state-write-v1` commands must validate fd 3 against the passed identity, use only `openat`/`fstatat`/`unlinkat`/`renameatx_np` operations relative to it, reject symlinks and non-private modes, sync the file and directory, and expose no private path or content in errors. Node must recheck that the pathname still names the opened directory after the helper settles. On a post-replacement uncertainty, re-read through the same descriptor-relative helper and accept only the exact expected state. Keep all mutations on one private promise queue.
+Use descriptor-first validation and frozen clones at every public boundary. Keep the JSON store free of path operations and require a `stateIO` boundary. The adapter requires the existing private state directory rather than creating or chmod-repairing it, opens it with `O_DIRECTORY | O_NOFOLLOW`, validates the descriptor against its captured identity and current pathname, and keeps the handle alive while passing it as child fd 3 to the signed helper. Extend `openbot-profile-publish.c` without changing its existing two-absolute-path profile-publication behavior: bounded, versioned `--state-read-v1` and `--state-write-v1` commands must validate fd 3 against the passed identity, use only `openat`/`fstatat`/`unlinkat`/`renameatx_np` operations relative to it, reject symlinks and non-private modes, sync the file and directory, and expose no private path or content in errors. The adapter must recheck that the pathname still names the opened directory after the helper settles. On a post-replacement uncertainty, it exact-reads back through the same descriptor-relative helper and accepts only matching bytes. Keep all store mutations on one private promise queue.
 
 - [ ] **Step 5: Run focused and adjacent GREEN**
 
-Run: `cd macos && node --test test/local-automation-store.test.cjs test/standalone-conversation-store.test.cjs test/model-selection-store.test.cjs`
+Run: `cd macos && node --test test/local-automation-native-io.test.cjs test/local-automation-store.test.cjs test/standalone-conversation-store.test.cjs test/model-selection-store.test.cjs`
 
-Run: `node --check macos/src/desktop/local-automation-store.cjs && node --check macos/test/local-automation-store.test.cjs && node --test macos/test/openbot-user-data.test.cjs && git diff --check`
+Run: `node --check macos/src/desktop/local-automation-native-io.cjs && node --check macos/src/desktop/local-automation-store.cjs && node --check macos/test/local-automation-native-io.test.cjs && node --check macos/test/local-automation-store.test.cjs && node --test macos/test/openbot-user-data.test.cjs && git diff --check`
 
 - [ ] **Step 6: Commit the durable store slice**
 
 ```bash
-git add macos/src/desktop/local-automation-store.cjs macos/test/local-automation-store.test.cjs macos/native/openbot-profile-publish.c macos/test/openbot-user-data.test.cjs
+git add macos/src/desktop/local-automation-native-io.cjs macos/test/local-automation-native-io.test.cjs macos/src/desktop/local-automation-store.cjs macos/test/local-automation-store.test.cjs macos/native/openbot-profile-publish.c macos/test/openbot-user-data.test.cjs
 git commit -m "feat(macOS): persist local bot routines"
 git push origin macos/codex-bot
 ```
@@ -444,7 +447,7 @@ git push origin macos/codex-bot
 - Modify: `macos/test/installer-bundle.test.cjs`
 
 **Interfaces:**
-- Adds the three new production modules to `DESKTOP_FILES`, `ALLOWED_MUTATIONS`, exact patch fixture lists, and installer source closure.
+- Adds the four new production modules to `DESKTOP_FILES`, `ALLOWED_MUTATIONS`, exact patch fixture lists, and installer source closure.
 - Does not add renderer/CSS mutations.
 
 - [ ] **Step 1: Write package-closure REDs**
@@ -453,6 +456,7 @@ Require all three new paths:
 
 ```js
 "desktop/local-cron-schedule.cjs"
+"desktop/local-automation-native-io.cjs"
 "desktop/local-automation-store.cjs"
 "desktop/local-automation-controller.cjs"
 ```
