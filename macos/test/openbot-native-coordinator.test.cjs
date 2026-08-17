@@ -8,6 +8,101 @@ const MODULE_PATH = "../src/desktop/openbot-native-coordinator.cjs";
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
 const BOT_C = "bot-33333333-3333-4333-8333-333333333333";
+const AUTOMATION_A_ID = "morning-summary";
+const AUTOMATION_B_ID = "daily-brief";
+const AUTOMATION_CREATED_AT = Date.parse("2026-08-17T12:00:00.000Z");
+const AUTOMATION_NEXT_RUN_AT = Date.parse("2026-08-18T13:00:00.000Z");
+
+const AUTOMATION_SPEC = Object.freeze({
+  name: "Morning summary",
+  prompt: "Summarize the current project status.",
+  trigger: Object.freeze({
+    type: "cron",
+    schedule: "TZ=America/Indiana/Indianapolis 0 9 * * 1-5",
+  }),
+  isEnabled: true,
+});
+
+function automation(botId = BOT_A, overrides = {}) {
+  const id = botId === BOT_A ? AUTOMATION_A_ID : AUTOMATION_B_ID;
+  const name = botId === BOT_A ? "Morning summary" : "Daily brief";
+  const prompt = botId === BOT_A
+    ? "Summarize the current project status."
+    : "Summarize Bot B without waiting for Bot A.";
+  return Object.freeze({
+    id,
+    name,
+    prompt,
+    trigger: Object.freeze({
+      type: "cron",
+      schedule: "TZ=America/Indiana/Indianapolis 0 9 * * 1-5",
+    }),
+    schedule: "TZ=America/Indiana/Indianapolis 0 9 * * 1-5",
+    triggerDescription: "Weekdays at 9:00 AM (America/Indiana/Indianapolis)",
+    isEnabled: true,
+    provenance: "local",
+    createdAt: AUTOMATION_CREATED_AT,
+    lastRunAt: AUTOMATION_CREATED_AT,
+    nextRunAt: AUTOMATION_NEXT_RUN_AT,
+    runs: Object.freeze([Object.freeze({
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      trigger: "manual",
+      startedAt: AUTOMATION_CREATED_AT,
+      finishedAt: AUTOMATION_CREATED_AT + 1_000,
+      status: "error",
+      detail: "OpenBot local Routine run failed.",
+      errorKind: "opaque_wire_failure",
+      event: "manual",
+      coalescedRunIds: Object.freeze(["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]),
+    })]),
+    filePath: `openbot-local-routine:${botId}:${id}`,
+    ...overrides,
+  });
+}
+
+function workflow(botId = BOT_A, overrides = {}) {
+  const routine = automation(botId);
+  return Object.freeze({
+    id: routine.id,
+    name: routine.name,
+    description: "",
+    body: routine.prompt,
+    trigger: Object.freeze({
+      schedule: routine.schedule,
+      isEnabled: routine.isEnabled,
+    }),
+    source: "automation",
+    sourceRef: null,
+    pluginId: null,
+    publishedByCurrentUser: false,
+    isEnabledForAgent: true,
+    scheduleDescription: routine.triggerDescription,
+    createdAt: routine.createdAt,
+    lastRunAt: routine.lastRunAt,
+    nextRunAt: routine.nextRunAt,
+    helperScripts: Object.freeze([]),
+    runs: routine.runs,
+    filePath: routine.filePath,
+    ...overrides,
+  });
+}
+
+function workflowForAutomation(row) {
+  const separator = row.filePath.indexOf(":", "openbot-local-routine:".length);
+  const botId = row.filePath.slice("openbot-local-routine:".length, separator);
+  return workflow(botId, {
+    id: row.id,
+    name: row.name,
+    body: row.prompt,
+    trigger: Object.freeze({ schedule: row.schedule, isEnabled: row.isEnabled }),
+    scheduleDescription: row.triggerDescription,
+    createdAt: row.createdAt,
+    lastRunAt: row.lastRunAt,
+    nextRunAt: row.nextRunAt,
+    runs: row.runs,
+    filePath: row.filePath,
+  });
+}
 
 function bot(botId = BOT_A, overrides = {}) {
   return Object.freeze({
@@ -217,6 +312,65 @@ function deferred() {
   let resolve;
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
+}
+
+class AutomationControllerHarness extends EventEmitter {
+  constructor() {
+    super();
+    this.calls = [];
+    this.responses = new Map([
+      ["getAgentAutomations", ({ id }) => [automation(id)]],
+      ["listAllAutomations", () => [
+        { agentId: BOT_B, automation: automation(BOT_B) },
+        { agentId: BOT_A, automation: automation(BOT_A) },
+      ]],
+      ["createAgentAutomation", ({ id }) => [automation(id)]],
+      ["updateAgentAutomation", ({ id }) => [automation(id, { name: "Updated summary" })]],
+      ["setAgentAutomationEnabled", ({ id }) => [automation(id, { isEnabled: false, nextRunAt: null })]],
+      ["deleteAgentAutomation", () => []],
+      ["runAgentAutomationNow", () => undefined],
+    ]);
+    this.gates = new Map();
+  }
+
+  hold(method, id = "*") {
+    const key = `${method}\0${id}`;
+    assert.equal(this.gates.has(key), false);
+    const entered = deferred();
+    const release = deferred();
+    this.gates.set(key, { entered, release });
+    return Object.freeze({ entered: entered.promise, release: release.resolve });
+  }
+
+  setResponse(method, response) {
+    this.responses.set(method, response);
+  }
+
+  setFailure(method, error) {
+    this.responses.set(method, () => { throw error; });
+  }
+
+  async #perform(method, args) {
+    this.calls.push([method, structuredClone(args)]);
+    const key = `${method}\0${args?.id ?? "*"}`;
+    const gate = this.gates.get(key) ?? this.gates.get(`${method}\0*`);
+    if (gate) {
+      this.gates.delete(key);
+      this.gates.delete(`${method}\0*`);
+      gate.entered.resolve();
+      await gate.release.promise;
+    }
+    const response = this.responses.get(method);
+    return typeof response === "function" ? response(args) : response;
+  }
+
+  getAgentAutomations(args) { return this.#perform("getAgentAutomations", args); }
+  listAllAutomations(args) { return this.#perform("listAllAutomations", args); }
+  createAgentAutomation(args) { return this.#perform("createAgentAutomation", args); }
+  updateAgentAutomation(args) { return this.#perform("updateAgentAutomation", args); }
+  setAgentAutomationEnabled(args) { return this.#perform("setAgentAutomationEnabled", args); }
+  deleteAgentAutomation(args) { return this.#perform("deleteAgentAutomation", args); }
+  runAgentAutomationNow(args) { return this.#perform("runAgentAutomationNow", args); }
 }
 
 async function request(port, requestId, method, args = {}) {
@@ -1351,7 +1505,6 @@ test("signed-out native local reads return exact Grok 0.20 absence shapes", asyn
     ["getForeverBoxStatus", { id: BOT_A }, null],
     ["getAgentChannels", { id: BOT_A }, { manifests: [], connections: [] }],
     ["getAgentWorkflows", { id: BOT_A }, []],
-    ["getAgentAutomations", { id: BOT_A }, []],
     ["getSubagents", { id: BOT_A }, []],
     ["getAsyncTasks", { id: BOT_A }, []],
   ];
@@ -1382,7 +1535,6 @@ test("signed-out native local reads return exact Grok 0.20 absence shapes", asyn
     }],
     ["skillsCatalog", []],
     ["syncPluginSkills", []],
-    ["listAllAutomations", []],
     ["isAgentNetworkEnabled", false],
     ["isGlobalSearchEnabled", false],
     ["isEgressTunnelAvailable", false],
@@ -1437,6 +1589,1412 @@ test("signed-out local reads reject malformed arguments while remote mutations s
       },
     });
   }
+});
+
+test("native automation delegates all seven exact Grok methods and sanitizes controller failures", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness([bot(BOT_A), bot(BOT_B)]),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const cases = [
+    ["getAgentAutomations", { id: BOT_A }, [automation(BOT_A)]],
+    ["listAllAutomations", {}, [
+      { agentId: BOT_B, automation: automation(BOT_B) },
+      { agentId: BOT_A, automation: automation(BOT_A) },
+    ]],
+    ["createAgentAutomation", { id: BOT_A, spec: AUTOMATION_SPEC }, [automation(BOT_A)]],
+    ["updateAgentAutomation", {
+      id: BOT_A,
+      automationId: AUTOMATION_A_ID,
+      spec: AUTOMATION_SPEC,
+    }, [automation(BOT_A, { name: "Updated summary" })]],
+    ["setAgentAutomationEnabled", {
+      id: BOT_A,
+      automationId: AUTOMATION_A_ID,
+      isEnabled: false,
+    }, [automation(BOT_A, { isEnabled: false, nextRunAt: null })]],
+    ["deleteAgentAutomation", {
+      id: BOT_A,
+      automationId: AUTOMATION_A_ID,
+    }, []],
+    ["runAgentAutomationNow", {
+      id: BOT_A,
+      automationId: AUTOMATION_A_ID,
+    }, undefined],
+  ];
+  for (const [index, [method, args, expectedValue]] of cases.entries()) {
+    const requestId = `native-automation-exact-${index}`;
+    assert.deepEqual(await request(port, requestId, method, args), {
+      kind: "reply",
+      requestId,
+      outcome: { status: "ok", value: expectedValue },
+    });
+  }
+  assert.deepEqual(automations.calls, cases.map(([method, args]) => [method, structuredClone(args)]));
+  assert.deepEqual(Object.keys(port.frames.find((frame) => frame.requestId === "native-automation-exact-0")
+    .outcome.value[0]).sort(), [
+    "createdAt", "filePath", "id", "isEnabled", "lastRunAt", "name", "nextRunAt",
+    "prompt", "provenance", "runs", "schedule", "trigger", "triggerDescription",
+  ]);
+
+  const privateFailure = new Error("private controller storage path: /Users/private/state.json");
+  privateFailure.code = "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED";
+  automations.setFailure("getAgentAutomations", privateFailure);
+  assert.deepEqual((await request(port, "native-automation-private-failure", "getAgentAutomations", {
+    id: BOT_A,
+  })).outcome, {
+    status: "failed",
+    failure: {
+      code: "source/transport-failure",
+      message: "OpenBot native getAgentAutomations failed.",
+    },
+  });
+  assert.equal(port.closed, 0);
+});
+
+test("native automation is explicitly unavailable without a controller instead of returning fake empty reads", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const cases = [
+    ["getAgentAutomations", { id: BOT_A }],
+    ["listAllAutomations", {}],
+    ["createAgentAutomation", { id: BOT_A, spec: AUTOMATION_SPEC }],
+    ["updateAgentAutomation", { id: BOT_A, automationId: AUTOMATION_A_ID, spec: AUTOMATION_SPEC }],
+    ["setAgentAutomationEnabled", { id: BOT_A, automationId: AUTOMATION_A_ID, isEnabled: true }],
+    ["deleteAgentAutomation", { id: BOT_A, automationId: AUTOMATION_A_ID }],
+    ["runAgentAutomationNow", { id: BOT_A, automationId: AUTOMATION_A_ID }],
+  ];
+  for (const [index, [method, args]] of cases.entries()) {
+    assert.deepEqual((await request(port, `native-automation-unavailable-${index}`, method, args)).outcome, {
+      status: "failed",
+      failure: {
+        code: "source/capability-unavailable",
+        message: `unknown gateway method: ${method}`,
+      },
+    });
+  }
+  assert.equal(port.closed, 0);
+  assert.equal((await request(port, "native-automation-unavailable-alive", "countAgents")).outcome.value, 1);
+});
+
+test("native automation rejects hostile arguments before controller access and keeps the port alive", async (t) => {
+  const cases = [];
+  cases.push(["extra", "getAgentAutomations", { id: BOT_A, privatePath: "/private" }, () => 0]);
+  cases.push(["missing", "updateAgentAutomation", {
+    id: BOT_A,
+    automationId: AUTOMATION_A_ID,
+  }, () => 0]);
+  let accessorTouches = 0;
+  const accessorSpec = {
+    name: AUTOMATION_SPEC.name,
+    prompt: AUTOMATION_SPEC.prompt,
+    trigger: { type: "cron" },
+    isEnabled: true,
+  };
+  Object.defineProperty(accessorSpec.trigger, "schedule", {
+    enumerable: true,
+    get() { accessorTouches += 1; throw new Error("must not read schedule accessor"); },
+  });
+  cases.push(["accessor", "createAgentAutomation", { id: BOT_A, spec: accessorSpec }, () => accessorTouches]);
+  let proxyTouches = 0;
+  const proxyArgs = new Proxy({ id: BOT_A }, {
+    get(target, key, receiver) {
+      proxyTouches += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  cases.push(["proxy", "getAgentAutomations", proxyArgs, () => proxyTouches]);
+  cases.push(["invalid-id", "runAgentAutomationNow", {
+    id: BOT_A,
+    automationId: "../private-state",
+  }, () => 0]);
+
+  for (const [name, method, args, touches] of cases) {
+    await t.test(name, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const automations = new AutomationControllerHarness();
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: new BotControllerHarness(),
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      const reply = await request(port, `native-automation-hostile-args-${name}`, method, args);
+      assert.deepEqual(reply.outcome, {
+        status: "failed",
+        failure: {
+          code: "source/malformed-request",
+          message: "Malformed OpenBot native request.",
+        },
+      });
+      assert.equal(touches(), 0);
+      assert.equal(automations.calls.length, 0);
+      assert.equal(port.closed, 0);
+      assert.equal((await request(port, `native-automation-hostile-args-alive-${name}`, "countAgents"))
+        .outcome.value, 1);
+    });
+  }
+});
+
+test("native automation rejects hostile controller results without leaking private fields or paths", async (t) => {
+  const privateRow = { ...automation(BOT_A), conversationId: "conversation-private" };
+  const sparseRows = [automation(BOT_A)];
+  sparseRows.length = 2;
+  let accessorTouches = 0;
+  const accessorRow = { ...automation(BOT_A) };
+  Object.defineProperty(accessorRow, "prompt", {
+    enumerable: true,
+    get() { accessorTouches += 1; throw new Error("must not read result accessor"); },
+  });
+  let proxyTouches = 0;
+  const proxyRow = new Proxy({ ...automation(BOT_A) }, {
+    get(target, key, receiver) {
+      proxyTouches += 1;
+      return Reflect.get(target, key, receiver);
+    },
+  });
+  const cases = [
+    ["private-field", [privateRow], () => 0],
+    ["filesystem-path", [automation(BOT_A, { filePath: "/Users/private/local-automations.v1.json" })], () => 0],
+    ["sparse-array", sparseRows, () => 0],
+    ["accessor", [accessorRow], () => accessorTouches],
+    ["proxy", [proxyRow], () => proxyTouches],
+  ];
+
+  for (const [name, hostile, touches] of cases) {
+    await t.test(name, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const automations = new AutomationControllerHarness();
+      automations.setResponse("getAgentAutomations", hostile);
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: new BotControllerHarness(),
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      assert.deepEqual((await request(port, `native-automation-hostile-result-${name}`,
+        "getAgentAutomations", { id: BOT_A })).outcome, {
+        status: "failed",
+        failure: {
+          code: "source/transport-failure",
+          message: "OpenBot native getAgentAutomations failed.",
+        },
+      });
+      assert.equal(touches(), 0);
+      assert.equal(port.closed, 0);
+      assert.equal((await request(port, `native-automation-hostile-result-alive-${name}`,
+        "countAgents")).outcome.value, 1);
+    });
+  }
+});
+
+test("native automation changed publishes exact automation and workflow snapshots and detaches once", async () => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  assert.equal(automations.listenerCount("changed"), 1);
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  automations.emit("changed", {
+    agentId: BOT_A,
+    automations: [automation(BOT_A)],
+    workflows: [workflow(BOT_A)],
+  });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents-workflow"));
+  assert.deepEqual(port.frames.filter((frame) => frame.family === "agents-automation"), [{
+    kind: "event",
+    family: "agents-automation",
+    payload: { agentId: BOT_A, automations: [automation(BOT_A)] },
+  }]);
+  assert.deepEqual(port.frames.filter((frame) => frame.family === "agents-workflow"), [{
+    kind: "event",
+    family: "agents-workflow",
+    payload: { agentId: BOT_A, workflows: [workflow(BOT_A)] },
+  }]);
+  coordinator.dispose();
+  assert.equal(automations.listenerCount("changed"), 0);
+});
+
+test("native automation drops hostile changed events without touching accessors or closing ports", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  let touches = 0;
+  const accessorEvent = {};
+  Object.defineProperty(accessorEvent, "agentId", {
+    enumerable: true,
+    get() { touches += 1; throw new Error("must not read event accessor"); },
+  });
+  Object.defineProperty(accessorEvent, "automations", { enumerable: true, value: [automation(BOT_A)] });
+  Object.defineProperty(accessorEvent, "workflows", { enumerable: true, value: [workflow(BOT_A)] });
+  const sparse = [automation(BOT_A)];
+  sparse.length = 2;
+  for (const event of [
+    accessorEvent,
+    new Proxy({ agentId: BOT_A, automations: [automation(BOT_A)], workflows: [workflow(BOT_A)] }, {}),
+    { agentId: BOT_A, automations: sparse, workflows: [workflow(BOT_A)] },
+    {
+      agentId: BOT_A,
+      automations: [{ ...automation(BOT_A), updatedAt: AUTOMATION_CREATED_AT }],
+      workflows: [workflow(BOT_A)],
+    },
+    {
+      agentId: BOT_A,
+      automations: [automation(BOT_A)],
+      workflows: [workflow(BOT_A, { filePath: "/private/routine.md" })],
+    },
+  ]) automations.emit("changed", event);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(touches, 0);
+  assert.equal(port.frames.some((frame) => frame.family === "agents-automation"), false);
+  assert.equal(port.frames.some((frame) => frame.family === "agents-workflow"), false);
+  assert.equal(port.closed, 0);
+});
+
+test("native automation fences held same-bot reads mutations and run-now across deletion", async (t) => {
+  const cases = [
+    ["getAgentAutomations", { id: BOT_A }],
+    ["createAgentAutomation", { id: BOT_A, spec: AUTOMATION_SPEC }],
+    ["runAgentAutomationNow", { id: BOT_A, automationId: AUTOMATION_A_ID }],
+  ];
+  for (const [method, args] of cases) {
+    await t.test(method, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+      const automations = new AutomationControllerHarness();
+      const gate = automations.hold(method, BOT_A);
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: bots,
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+        deleteBots: async (ids) => {
+          bots.remove(ids);
+          return {
+            deletedBotIds: [...ids],
+            survivingBotIds: [...bots.bots.keys()],
+            activeBotId: BOT_B,
+          };
+        },
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      const held = request(port, `native-automation-held-${method}`, method, args);
+      await waitFor(() => automations.calls.some(([name]) => name === method));
+      assert.equal((await request(port, `native-automation-delete-${method}`, "deleteAgents", {
+        ids: [BOT_A],
+      })).outcome.status, "ok");
+      assert.deepEqual((await request(port, `native-automation-b-${method}`, "getAgentAutomations", {
+        id: BOT_B,
+      })).outcome.value, [automation(BOT_B)]);
+      gate.release();
+      assert.deepEqual((await held).outcome, {
+        status: "failed",
+        failure: {
+          code: "source/transport-failure",
+          message: `OpenBot native ${method} failed.`,
+        },
+      });
+      assert.equal(port.closed, 0);
+    });
+  }
+});
+
+test("native automation aggregate reads filter a bot deleted while the controller snapshot is held", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const automations = new AutomationControllerHarness();
+  const gate = automations.hold("listAllAutomations");
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+    deleteBots: async (ids) => {
+      bots.remove(ids);
+      return {
+        deletedBotIds: [...ids],
+        survivingBotIds: [...bots.bots.keys()],
+        activeBotId: BOT_B,
+      };
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const held = request(port, "native-automation-aggregate-held", "listAllAutomations", {});
+  await waitFor(() => automations.calls.some(([method]) => method === "listAllAutomations"));
+  assert.equal((await request(port, "native-automation-aggregate-delete", "deleteAgents", {
+    ids: [BOT_A],
+  })).outcome.status, "ok");
+  gate.release();
+  assert.deepEqual((await held).outcome, {
+    status: "ok",
+    value: [{ agentId: BOT_B, automation: automation(BOT_B) }],
+  });
+});
+
+test("native automation held reads cannot return a Routine removed by a newer changed revision", async (t) => {
+  for (const method of ["getAgentAutomations", "listAllAutomations"]) {
+    await t.test(method, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const automations = new AutomationControllerHarness();
+      const gate = automations.hold(method, method === "getAgentAutomations" ? BOT_A : "*");
+      automations.setResponse("deleteAgentAutomation", () => {
+        automations.emit("changed", { agentId: BOT_A, automations: [], workflows: [] });
+        return [];
+      });
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: new BotControllerHarness(),
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      const args = method === "getAgentAutomations" ? { id: BOT_A } : {};
+      const held = request(port, `native-automation-stale-${method}`, method, args);
+      await waitFor(() => automations.calls.some(([called]) => called === method));
+      assert.equal((await request(port, `native-automation-newer-delete-${method}`,
+        "deleteAgentAutomation", { id: BOT_A, automationId: AUTOMATION_A_ID })).outcome.status, "ok");
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents-automation"
+        && frame.payload.agentId === BOT_A && frame.payload.automations.length === 0));
+      gate.release();
+      assert.deepEqual((await held).outcome, {
+        status: "failed",
+        failure: {
+          code: "source/transport-failure",
+          message: `OpenBot native ${method} failed.`,
+        },
+      });
+    });
+  }
+});
+
+test("native automation verifies bot membership and filters orphaned aggregate rows", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  automations.setResponse("listAllAutomations", [
+    { agentId: BOT_C, automation: automation(BOT_C) },
+    { agentId: BOT_A, automation: automation(BOT_A) },
+  ]);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  assert.deepEqual((await request(port, "native-automation-orphan-get", "getAgentAutomations", {
+    id: BOT_C,
+  })).outcome, {
+    status: "failed",
+    failure: {
+      code: "source/transport-failure",
+      message: "OpenBot native getAgentAutomations failed.",
+    },
+  });
+  assert.equal(automations.calls.some(([method]) => method === "getAgentAutomations"), false);
+  assert.deepEqual((await request(port, "native-automation-orphan-list", "listAllAutomations", {}))
+    .outcome.value, [{ agentId: BOT_A, automation: automation(BOT_A) }]);
+});
+
+test("native automation mutation failures stay sanitized and do not close the ready port", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  automations.setFailure("createAgentAutomation", new Error("private mutation failure"));
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  assert.deepEqual((await request(port, "native-automation-mutation-failure", "createAgentAutomation", {
+    id: BOT_A,
+    spec: AUTOMATION_SPEC,
+  })).outcome, {
+    status: "failed",
+    failure: {
+      code: "source/transport-failure",
+      message: "OpenBot native createAgentAutomation failed.",
+    },
+  });
+  assert.equal(port.closed, 0);
+  assert.equal((await request(port, "native-automation-mutation-failure-alive", "countAgents"))
+    .outcome.value, 1);
+});
+
+test("native automation returns a valid complete snapshot larger than the inbound frame ceiling", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const large = Array.from({ length: 5 }, (_, index) => automation(BOT_A, {
+    id: `large-routine-${index}`,
+    name: `Large Routine ${index}`,
+    prompt: `${index}${"x".repeat(60 * 1024)}`,
+    filePath: `openbot-local-routine:${BOT_A}:large-routine-${index}`,
+  }));
+  assert.ok(Buffer.byteLength(JSON.stringify(large), "utf8") > 256 * 1024);
+  automations.setResponse("getAgentAutomations", large);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const reply = await request(port, "native-automation-large-complete", "getAgentAutomations", { id: BOT_A });
+  assert.equal(reply.outcome.status, "ok");
+  assert.deepEqual(reply.outcome.value.map((entry) => [entry.id, entry.prompt.length]), [
+    ["large-routine-0", 61_441],
+    ["large-routine-1", 61_441],
+    ["large-routine-2", 61_441],
+    ["large-routine-3", 61_441],
+    ["large-routine-4", 61_441],
+  ]);
+});
+
+test("native automation cancellation replies once and suppresses its late controller completion", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const gate = automations.hold("getAgentAutomations", BOT_A);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness([bot(BOT_A), bot(BOT_B)]),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  port.receive({
+    kind: "request",
+    requestId: "native-automation-cancelled",
+    method: "getAgentAutomations",
+    args: { id: BOT_A },
+  });
+  await waitFor(() => automations.calls.some(([method]) => method === "getAgentAutomations"));
+  port.receive({ kind: "cancel", requestId: "native-automation-cancelled" });
+  await waitFor(() => port.frames.some((frame) => frame.requestId === "native-automation-cancelled"));
+  assert.deepEqual(port.frames.find((frame) => frame.requestId === "native-automation-cancelled"), {
+    kind: "reply",
+    requestId: "native-automation-cancelled",
+    outcome: {
+      status: "failed",
+      failure: { code: "cancelled", message: "OpenBot native request was cancelled." },
+    },
+  });
+  gate.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(port.frames.filter((frame) => frame.requestId === "native-automation-cancelled").length, 1);
+  assert.deepEqual((await request(port, "native-automation-after-cancel", "getAgentAutomations", {
+    id: BOT_B,
+  })).outcome.value, [automation(BOT_B)]);
+  assert.equal(port.closed, 0);
+});
+
+test("native automation port close and coordinator disposal suppress late replies and events", async (t) => {
+  for (const mode of ["port-close", "coordinator-dispose"]) {
+    await t.test(mode, async () => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const automations = new AutomationControllerHarness();
+      const gate = automations.hold("getAgentAutomations", BOT_A);
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: new BotControllerHarness(),
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+      });
+      const port = new PortHarness();
+      const unbind = coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      port.receive({
+        kind: "request",
+        requestId: `native-automation-late-${mode}`,
+        method: "getAgentAutomations",
+        args: { id: BOT_A },
+      });
+      await waitFor(() => automations.calls.some(([method]) => method === "getAgentAutomations"));
+      if (mode === "port-close") unbind();
+      else coordinator.dispose();
+      gate.release();
+      automations.emit("changed", {
+        agentId: BOT_A,
+        automations: [automation(BOT_A)],
+        workflows: [workflow(BOT_A)],
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(port.frames.some((frame) => frame.requestId === `native-automation-late-${mode}`), false);
+      assert.equal(port.frames.some((frame) => frame.family === "agents-automation"), false);
+      assert.equal(port.frames.some((frame) => frame.family === "agents-workflow"), false);
+      assert.equal(port.closed, 1);
+      coordinator.dispose();
+    });
+  }
+});
+
+test("native automation remote port close detaches ingress and suppresses late completion", async () => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const gate = automations.hold("getAgentAutomations", BOT_A);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  port.receive({
+    kind: "request",
+    requestId: "native-automation-remote-close",
+    method: "getAgentAutomations",
+    args: { id: BOT_A },
+  });
+  await waitFor(() => automations.calls.some(([method]) => method === "getAgentAutomations"));
+  port.emit("close");
+  gate.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(port.frames.some((frame) => frame.requestId === "native-automation-remote-close"), false);
+  assert.equal(port.listenerCount("message"), 0);
+  assert.equal(port.listenerCount("close"), 0);
+  assert.equal(port.closed, 1);
+  coordinator.dispose();
+});
+
+test("native automation changed events are revision-fenced and Bot B publishes during Bot A deletion", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const automations = new AutomationControllerHarness();
+  const deletionEntered = deferred();
+  const deletionRelease = deferred();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+    deleteBots: async (ids) => {
+      deletionEntered.resolve();
+      await deletionRelease.promise;
+      bots.remove(ids);
+      return {
+        deletedBotIds: [...ids],
+        survivingBotIds: [...bots.bots.keys()],
+        activeBotId: BOT_B,
+      };
+    },
+  });
+  t.after(() => {
+    deletionRelease.resolve();
+    coordinator.dispose();
+  });
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const deleting = request(port, "native-automation-event-delete-a", "deleteAgents", { ids: [BOT_A] });
+  await deletionEntered.promise;
+  automations.emit("changed", {
+    agentId: BOT_A,
+    automations: [automation(BOT_A)],
+    workflows: [workflow(BOT_A)],
+  });
+  automations.emit("changed", {
+    agentId: BOT_B,
+    automations: [automation(BOT_B)],
+    workflows: [workflow(BOT_B)],
+  });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents-automation"
+    && frame.payload.agentId === BOT_B));
+  assert.equal(port.frames.some((frame) => frame.family === "agents-automation"
+    && frame.payload.agentId === BOT_A), false);
+  deletionRelease.resolve();
+  assert.equal((await deleting).outcome.status, "ok");
+});
+
+test("native automation drops an older held changed publication after a newer same-bot revision", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness();
+  const automations = new AutomationControllerHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const originalList = bots.listBots.bind(bots);
+  const firstEntered = deferred();
+  const firstRelease = deferred();
+  t.after(() => firstRelease.resolve());
+  let eventListCalls = 0;
+  bots.listBots = async () => {
+    eventListCalls += 1;
+    if (eventListCalls === 1) {
+      firstEntered.resolve();
+      await firstRelease.promise;
+    }
+    return originalList();
+  };
+  automations.emit("changed", {
+    agentId: BOT_A,
+    automations: [automation(BOT_A, { name: "Older snapshot" })],
+    workflows: [workflow(BOT_A, { name: "Older snapshot" })],
+  });
+  await waitFor(() => eventListCalls === 1);
+  automations.emit("changed", {
+    agentId: BOT_A,
+    automations: [automation(BOT_A, { name: "Newer snapshot" })],
+    workflows: [workflow(BOT_A, { name: "Newer snapshot" })],
+  });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents-automation"
+    && frame.payload.automations[0].name === "Newer snapshot"));
+  firstRelease.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(port.frames.filter((frame) => frame.family === "agents-automation")
+    .map((frame) => frame.payload.automations[0].name), ["Newer snapshot"]);
+  assert.deepEqual(port.frames.filter((frame) => frame.family === "agents-workflow")
+    .map((frame) => frame.payload.workflows[0].name), ["Newer snapshot"]);
+});
+
+test("native automation committed mutations stay successful when a newer scheduler snapshot publishes", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const committed = automation(BOT_A, { name: "Committed reply" });
+  const newer = automation(BOT_A, { name: "Scheduler newer" });
+  automations.setResponse("createAgentAutomation", () => {
+    automations.emit("changed", {
+      agentId: BOT_A,
+      automations: [newer],
+      workflows: [workflowForAutomation(newer)],
+    });
+    return [committed];
+  });
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  assert.deepEqual((await request(port, "native-automation-newer-than-mutation",
+    "createAgentAutomation", { id: BOT_A, spec: AUTOMATION_SPEC })).outcome, {
+    status: "ok",
+    value: [newer],
+  });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents-automation"));
+  assert.deepEqual(port.frames.filter((frame) => frame.family === "agents-automation").at(-1).payload, {
+    agentId: BOT_A,
+    automations: [newer],
+  });
+});
+
+test("native automation permanently rejects a hostile frame even if caller data is rehabilitated", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const automations = new AutomationControllerHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  let getterTouches = 0;
+  const trigger = { type: "cron" };
+  Object.defineProperty(trigger, "schedule", {
+    configurable: true,
+    enumerable: true,
+    get() { getterTouches += 1; return "0 1 * * *"; },
+  });
+  port.receive({
+    kind: "request",
+    requestId: "native-automation-rehabilitated-hostile-frame",
+    method: "createAgentAutomation",
+    args: { id: BOT_A, spec: { ...AUTOMATION_SPEC, trigger } },
+  });
+  Object.defineProperty(trigger, "schedule", {
+    configurable: true,
+    enumerable: true,
+    value: "0 9 * * *",
+  });
+
+  await waitFor(() => port.frames.some((frame) => frame.requestId
+    === "native-automation-rehabilitated-hostile-frame"));
+  assert.deepEqual(port.frames.find((frame) => frame.requestId
+    === "native-automation-rehabilitated-hostile-frame").outcome, {
+    status: "failed",
+    failure: {
+      code: "source/malformed-request",
+      message: "Malformed OpenBot native request.",
+    },
+  });
+  assert.equal(getterTouches, 0);
+  assert.equal(automations.calls.length, 0);
+  assert.equal(port.closed, 0);
+});
+
+test("native automation failed bot deletion restores a committed mutation reply and authoritative events", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const automations = new AutomationControllerHarness();
+  const createGate = automations.hold("createAgentAutomation", BOT_A);
+  const deletionEntered = deferred();
+  const deletionRelease = deferred();
+  const committed = automation(BOT_A, { name: "Committed during failed deletion" });
+  automations.setResponse("createAgentAutomation", () => {
+    automations.emit("changed", {
+      agentId: BOT_A,
+      automations: [committed],
+      workflows: [workflowForAutomation(committed)],
+    });
+    return [committed];
+  });
+  automations.setResponse("getAgentAutomations", ({ id }) => id === BOT_A
+    ? [committed] : [automation(id)]);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+    deleteBots: async () => {
+      deletionEntered.resolve();
+      await deletionRelease.promise;
+      throw new Error("private deletion backend failed");
+    },
+  });
+  t.after(() => {
+    createGate.release();
+    deletionRelease.resolve();
+    coordinator.dispose();
+  });
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const creating = request(port, "native-automation-create-during-failed-delete",
+    "createAgentAutomation", { id: BOT_A, spec: AUTOMATION_SPEC });
+  await createGate.entered;
+  const deleting = request(port, "native-automation-failed-delete", "deleteAgents", { ids: [BOT_A] });
+  await deletionEntered.promise;
+  createGate.release();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  const repliedBeforeDeletionSettled = port.frames.some((frame) => frame.requestId
+    === "native-automation-create-during-failed-delete");
+
+  deletionRelease.resolve();
+  const deletionReply = await deleting;
+  const createReply = await creating;
+  assert.equal(repliedBeforeDeletionSettled, false,
+    "a committed mutation must wait for the active deletion claim to resolve");
+  assert.deepEqual(deletionReply.outcome, {
+    status: "failed",
+    failure: {
+      code: "source/transport-failure",
+      message: "OpenBot native deleteAgents failed.",
+    },
+  });
+  assert.deepEqual(createReply.outcome, { status: "ok", value: [committed] });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents-automation"
+    && frame.payload.agentId === BOT_A));
+  assert.deepEqual(port.frames.filter((frame) => frame.family === "agents-automation"), [{
+    kind: "event",
+    family: "agents-automation",
+    payload: { agentId: BOT_A, automations: [committed] },
+  }]);
+  assert.deepEqual(port.frames.filter((frame) => frame.family === "agents-workflow"), [{
+    kind: "event",
+    family: "agents-workflow",
+    payload: { agentId: BOT_A, workflows: [workflowForAutomation(committed)] },
+  }]);
+  assert.ok(automations.calls.some(([method, args]) => method === "getAgentAutomations"
+    && args.id === BOT_A), "rollback must reconcile from the authoritative controller");
+  assert.equal(port.closed, 0);
+});
+
+test("native automation follows two reentrant failed deletion claims before returning a committed mutation", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const automations = new AutomationControllerHarness();
+  const createGate = automations.hold("createAgentAutomation", BOT_A);
+  const firstRollbackGate = automations.hold("getAgentAutomations", BOT_A);
+  const deletionEntered = [deferred(), deferred()];
+  const deletionRelease = [deferred(), deferred()];
+  const committed = automation(BOT_A, { name: "Committed across two failed deletions" });
+  automations.setResponse("createAgentAutomation", () => {
+    automations.emit("changed", {
+      agentId: BOT_A,
+      automations: [committed],
+      workflows: [workflowForAutomation(committed)],
+    });
+    return [committed];
+  });
+  automations.setResponse("getAgentAutomations", ({ id }) => id === BOT_A
+    ? [committed] : [automation(id)]);
+  let deletionIndex = 0;
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    automationController: automations,
+    deleteBots: async () => {
+      const index = deletionIndex;
+      deletionIndex += 1;
+      deletionEntered[index].resolve();
+      await deletionRelease[index].promise;
+      throw new Error(`private deletion backend ${index} failed`);
+    },
+  });
+  t.after(() => {
+    createGate.release();
+    firstRollbackGate.release();
+    for (const gate of deletionRelease) gate.resolve();
+    coordinator.dispose();
+  });
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const creating = request(port, "native-automation-create-across-two-failed-deletes",
+    "createAgentAutomation", { id: BOT_A, spec: AUTOMATION_SPEC });
+  await createGate.entered;
+  const firstDeleting = request(port, "native-automation-first-failed-delete",
+    "deleteAgents", { ids: [BOT_A] });
+  await deletionEntered[0].promise;
+  createGate.release();
+  deletionRelease[0].resolve();
+  await firstRollbackGate.entered;
+
+  const secondDeleting = request(port, "native-automation-second-failed-delete",
+    "deleteAgents", { ids: [BOT_A] });
+  await deletionEntered[1].promise;
+  firstRollbackGate.release();
+  const crossBot = await request(port, "native-automation-cross-bot-during-claim-chain",
+    "getAgentAutomations", { id: BOT_B });
+  assert.deepEqual(crossBot.outcome, { status: "ok", value: [automation(BOT_B)] });
+  await new Promise((resolve) => setImmediate(resolve));
+  const repliedBeforeSecondSettled = port.frames.some((frame) => frame.requestId
+    === "native-automation-create-across-two-failed-deletes");
+
+  deletionRelease[1].resolve();
+  assert.equal((await firstDeleting).outcome.status, "failed");
+  assert.equal((await secondDeleting).outcome.status, "failed");
+  const createReply = await creating;
+  assert.equal(repliedBeforeSecondSettled, false,
+    "the committed mutation must follow the newer deletion claim instead of failing early");
+  assert.deepEqual(createReply.outcome, { status: "ok", value: [committed] });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents-automation"
+    && frame.payload.agentId === BOT_A));
+  assert.equal(port.closed, 0);
+});
+
+test("native automation remote triggers and stable controller failures keep exact sanitized classifications", async (t) => {
+  await t.test("known remote triggers are unavailable before controller mutation", async (st) => {
+    const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+    const automations = new AutomationControllerHarness();
+    const coordinator = new OpenBotNativeCoordinator({
+      botRuntimeController: new BotControllerHarness(),
+      conversationController: new ConversationHarness(),
+      automationController: automations,
+    });
+    st.after(() => coordinator.dispose());
+    const port = new PortHarness();
+    coordinator.bindPort(port);
+    port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+    await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+    const triggers = [
+      { type: "slack", channel: "*", match: { kind: "message" } },
+      { type: "github" },
+      { type: "microsoftTeams" },
+      { type: "linear" },
+      { type: "sentry" },
+      { type: "pagerduty" },
+      { type: "group", listeners: [{ type: "cron", schedule: "0 9 * * *" }] },
+    ];
+    for (const [index, trigger] of triggers.entries()) {
+      const outcome = (await request(port, `native-automation-remote-trigger-${index}`,
+        "createAgentAutomation", {
+          id: BOT_A,
+          spec: { ...AUTOMATION_SPEC, trigger },
+        })).outcome;
+      assert.deepEqual(outcome, {
+        status: "failed",
+        failure: {
+          code: "source/capability-unavailable",
+          message: "unknown gateway method: createAgentAutomation",
+        },
+      });
+    }
+    assert.deepEqual((await request(port, "native-automation-unknown-trigger",
+      "createAgentAutomation", {
+        id: BOT_A,
+        spec: { ...AUTOMATION_SPEC, trigger: { type: "private-webhook" } },
+      })).outcome, {
+      status: "failed",
+      failure: {
+        code: "source/malformed-request",
+        message: "Malformed OpenBot native request.",
+      },
+    });
+    assert.equal(automations.calls.length, 0);
+    assert.equal(port.closed, 0);
+  });
+
+  const mappings = [
+    ["OPENBOT_LOCAL_AUTOMATION_INVALID", "source/malformed-request", "Malformed OpenBot native request."],
+    ["OPENBOT_LOCAL_AUTOMATION_UNAVAILABLE", "source/capability-unavailable",
+      "unknown gateway method: createAgentAutomation"],
+    ["OPENBOT_LOCAL_AUTOMATION_STORE_FAILED", "source/transport-failure",
+      "OpenBot native createAgentAutomation failed."],
+    ["OPENBOT_LOCAL_AUTOMATION_FAILED", "source/transport-failure",
+      "OpenBot native createAgentAutomation failed."],
+    ["PRIVATE_CONTROLLER_ERROR", "source/transport-failure",
+      "OpenBot native createAgentAutomation failed."],
+    ["SPOOFED_COORDINATOR_ERROR", "source/transport-failure",
+      "OpenBot native createAgentAutomation failed."],
+  ];
+  for (const [code, expectedCode, expectedMessage] of mappings) {
+    await t.test(code, async (st) => {
+      const { OpenBotNativeCoordinator, OpenBotNativeCoordinatorError } = require(MODULE_PATH);
+      const automations = new AutomationControllerHarness();
+      const failure = code === "SPOOFED_COORDINATOR_ERROR"
+        ? new OpenBotNativeCoordinatorError(
+          "source/malformed-request",
+          "/Users/private/spoofed-coordinator-error.json",
+        )
+        : new Error(`/Users/private/${code}.json`);
+      if (code !== "SPOOFED_COORDINATOR_ERROR") failure.code = code;
+      automations.setFailure("createAgentAutomation", failure);
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: new BotControllerHarness(),
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      const outcome = (await request(port, `native-automation-controller-code-${code}`,
+        "createAgentAutomation", { id: BOT_A, spec: AUTOMATION_SPEC })).outcome;
+      assert.deepEqual(outcome, {
+        status: "failed",
+        failure: { code: expectedCode, message: expectedMessage },
+      });
+      assert.equal(JSON.stringify(outcome).includes("/Users/private"), false);
+      assert.equal(port.closed, 0);
+    });
+  }
+});
+
+test("native automation rejects unsorted and over-cap snapshots while accepting the legal aggregate maximum", async (t) => {
+  const earlier = automation(BOT_A, {
+    id: "earlier",
+    nextRunAt: AUTOMATION_NEXT_RUN_AT,
+    filePath: `openbot-local-routine:${BOT_A}:earlier`,
+  });
+  const later = automation(BOT_A, {
+    id: "later",
+    nextRunAt: AUTOMATION_NEXT_RUN_AT + 1_000,
+    filePath: `openbot-local-routine:${BOT_A}:later`,
+  });
+
+  for (const method of ["getAgentAutomations", "listAllAutomations", "changed"]) {
+    await t.test(`unsorted ${method}`, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const automations = new AutomationControllerHarness();
+      if (method === "getAgentAutomations") {
+        automations.setResponse(method, [later, earlier]);
+      } else if (method === "listAllAutomations") {
+        automations.setResponse(method, [later, earlier].map((routine) => ({
+          agentId: BOT_A,
+          automation: routine,
+        })));
+      }
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: new BotControllerHarness(),
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      if (method === "changed") {
+        automations.emit("changed", {
+          agentId: BOT_A,
+          automations: [later, earlier],
+          workflows: [workflowForAutomation(later), workflowForAutomation(earlier)],
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(port.frames.some((frame) => frame.family === "agents-automation"), false);
+        assert.equal(port.frames.some((frame) => frame.family === "agents-workflow"), false);
+      } else {
+        const args = method === "getAgentAutomations" ? { id: BOT_A } : {};
+        assert.deepEqual((await request(port, `native-automation-unsorted-${method}`,
+          method, args)).outcome, {
+          status: "failed",
+          failure: {
+            code: "source/transport-failure",
+            message: `OpenBot native ${method} failed.`,
+          },
+        });
+      }
+      assert.equal(port.closed, 0);
+    });
+  }
+
+  const comparatorEdges = [
+    ["null next-run sorts last", [
+      automation(BOT_A, {
+        id: "disabled-first",
+        nextRunAt: null,
+        filePath: `openbot-local-routine:${BOT_A}:disabled-first`,
+      }),
+      automation(BOT_A, {
+        id: "scheduled-second",
+        nextRunAt: AUTOMATION_NEXT_RUN_AT,
+        filePath: `openbot-local-routine:${BOT_A}:scheduled-second`,
+      }),
+    ]],
+    ["created-at breaks equal next-run ties", [
+      automation(BOT_A, {
+        id: "created-later-first",
+        createdAt: AUTOMATION_CREATED_AT + 1,
+        filePath: `openbot-local-routine:${BOT_A}:created-later-first`,
+      }),
+      automation(BOT_A, {
+        id: "created-earlier-second",
+        createdAt: AUTOMATION_CREATED_AT,
+        filePath: `openbot-local-routine:${BOT_A}:created-earlier-second`,
+      }),
+    ]],
+    ["id breaks equal timestamp ties", [
+      automation(BOT_A, {
+        id: "zeta-first",
+        filePath: `openbot-local-routine:${BOT_A}:zeta-first`,
+      }),
+      automation(BOT_A, {
+        id: "alpha-second",
+        filePath: `openbot-local-routine:${BOT_A}:alpha-second`,
+      }),
+    ]],
+  ];
+  for (const [name, rows] of comparatorEdges) {
+    await t.test(name, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const automations = new AutomationControllerHarness();
+      automations.setResponse("getAgentAutomations", rows);
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: new BotControllerHarness(),
+        conversationController: new ConversationHarness(),
+        automationController: automations,
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      assert.deepEqual((await request(port, `native-automation-order-${name}`,
+        "getAgentAutomations", { id: BOT_A })).outcome, {
+        status: "failed",
+        failure: {
+          code: "source/transport-failure",
+          message: "OpenBot native getAgentAutomations failed.",
+        },
+      });
+    });
+  }
+
+  await t.test("global aggregate order cannot place a later bot before an earlier bot", async (st) => {
+    const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+    const automations = new AutomationControllerHarness();
+    const earlierAcrossBots = automation(BOT_A, {
+      id: "global-earlier",
+      nextRunAt: AUTOMATION_NEXT_RUN_AT + 10,
+      filePath: `openbot-local-routine:${BOT_A}:global-earlier`,
+    });
+    const laterAcrossBots = automation(BOT_B, {
+      id: "global-later",
+      nextRunAt: AUTOMATION_NEXT_RUN_AT + 20,
+      filePath: `openbot-local-routine:${BOT_B}:global-later`,
+    });
+    automations.setResponse("listAllAutomations", [
+      { agentId: BOT_B, automation: laterAcrossBots },
+      { agentId: BOT_A, automation: earlierAcrossBots },
+    ]);
+    const coordinator = new OpenBotNativeCoordinator({
+      botRuntimeController: new BotControllerHarness([bot(BOT_A), bot(BOT_B)]),
+      conversationController: new ConversationHarness(),
+      automationController: automations,
+    });
+    st.after(() => coordinator.dispose());
+    const port = new PortHarness();
+    coordinator.bindPort(port);
+    port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+    await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+    assert.deepEqual((await request(port, "native-automation-global-aggregate-order",
+      "listAllAutomations", {})).outcome, {
+      status: "failed",
+      failure: {
+        code: "source/transport-failure",
+        message: "OpenBot native listAllAutomations failed.",
+      },
+    });
+  });
+
+  await t.test("51 rows for one bot exceed the per-bot aggregate cap", async (st) => {
+    const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+    const automations = new AutomationControllerHarness();
+    const overCap = Array.from({ length: 51 }, (_, index) => {
+      const id = `over-cap-${String(index).padStart(2, "0")}`;
+      return {
+        agentId: BOT_A,
+        automation: automation(BOT_A, {
+          id,
+          nextRunAt: AUTOMATION_NEXT_RUN_AT + index,
+          filePath: `openbot-local-routine:${BOT_A}:${id}`,
+        }),
+      };
+    });
+    automations.setResponse("listAllAutomations", overCap);
+    const coordinator = new OpenBotNativeCoordinator({
+      botRuntimeController: new BotControllerHarness(),
+      conversationController: new ConversationHarness(),
+      automationController: automations,
+    });
+    st.after(() => coordinator.dispose());
+    const port = new PortHarness();
+    coordinator.bindPort(port);
+    port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+    await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+    assert.deepEqual((await request(port, "native-automation-over-cap-aggregate",
+      "listAllAutomations", {})).outcome, {
+      status: "failed",
+      failure: {
+        code: "source/transport-failure",
+        message: "OpenBot native listAllAutomations failed.",
+      },
+    });
+  });
+
+  await t.test("50 rows each for two bots remains a valid complete aggregate", async (st) => {
+    const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+    const automations = new AutomationControllerHarness();
+    const legal = [BOT_A, BOT_B].flatMap((agentId, botIndex) => Array.from(
+      { length: 50 },
+      (_, index) => {
+        const id = `legal-${botIndex}-${String(index).padStart(2, "0")}`;
+        return {
+          agentId,
+          automation: automation(agentId, {
+            id,
+            nextRunAt: AUTOMATION_NEXT_RUN_AT + (botIndex * 50) + index,
+            prompt: `${agentId}:${id}:${"x".repeat(60 * 1024)}`,
+            filePath: `openbot-local-routine:${agentId}:${id}`,
+          }),
+        };
+      },
+    ));
+    assert.ok(Buffer.byteLength(JSON.stringify(legal), "utf8") > 256 * 1024);
+    automations.setResponse("listAllAutomations", legal);
+    const coordinator = new OpenBotNativeCoordinator({
+      botRuntimeController: new BotControllerHarness([bot(BOT_A), bot(BOT_B)]),
+      conversationController: new ConversationHarness(),
+      automationController: automations,
+    });
+    st.after(() => coordinator.dispose());
+    const port = new PortHarness();
+    coordinator.bindPort(port);
+    port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+    await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+    const reply = await request(port, "native-automation-legal-aggregate-max",
+      "listAllAutomations", {});
+    assert.equal(reply.outcome.status, "ok");
+    assert.equal(reply.outcome.value.length, 100);
+    assert.deepEqual(reply.outcome.value.map(({ agentId }) => agentId).reduce((counts, agentId) => {
+      counts[agentId] = (counts[agentId] ?? 0) + 1;
+      return counts;
+    }, {}), { [BOT_A]: 50, [BOT_B]: 50 });
+  });
+});
+
+test("native automation orphan and deletion-claimed events cannot poison Bot B aggregate reads", async (t) => {
+  await t.test("orphan event", async (st) => {
+    const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+    const bots = new BotControllerHarness([bot(BOT_B)]);
+    const automations = new AutomationControllerHarness();
+    const aggregateGate = automations.hold("listAllAutomations");
+    automations.setResponse("listAllAutomations", [{
+      agentId: BOT_B,
+      automation: automation(BOT_B),
+    }]);
+    const coordinator = new OpenBotNativeCoordinator({
+      botRuntimeController: bots,
+      conversationController: new ConversationHarness(),
+      automationController: automations,
+    });
+    st.after(() => {
+      aggregateGate.release();
+      coordinator.dispose();
+    });
+    const port = new PortHarness();
+    coordinator.bindPort(port);
+    port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+    await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+    const held = request(port, "native-automation-orphan-does-not-poison", "listAllAutomations", {});
+    await aggregateGate.entered;
+    const listCallsBeforeEvent = bots.calls.filter(([method]) => method === "listBots").length;
+    automations.emit("changed", {
+      agentId: BOT_C,
+      automations: [automation(BOT_C)],
+      workflows: [workflow(BOT_C)],
+    });
+    await waitFor(() => bots.calls.filter(([method]) => method === "listBots").length
+      > listCallsBeforeEvent);
+    aggregateGate.release();
+    assert.deepEqual((await held).outcome, {
+      status: "ok",
+      value: [{ agentId: BOT_B, automation: automation(BOT_B) }],
+    });
+    assert.equal(port.frames.some((frame) => frame.family === "agents-automation"
+      && frame.payload.agentId === BOT_C), false);
+  });
+
+  await t.test("event while another bot is deletion-claimed", async (st) => {
+    const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+    const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+    const automations = new AutomationControllerHarness();
+    const aggregateGate = automations.hold("listAllAutomations");
+    const deletionEntered = deferred();
+    const deletionRelease = deferred();
+    automations.setResponse("listAllAutomations", [{
+      agentId: BOT_B,
+      automation: automation(BOT_B),
+    }]);
+    const coordinator = new OpenBotNativeCoordinator({
+      botRuntimeController: bots,
+      conversationController: new ConversationHarness(),
+      automationController: automations,
+      deleteBots: async (ids) => {
+        deletionEntered.resolve();
+        await deletionRelease.promise;
+        bots.remove(ids);
+        return {
+          deletedBotIds: [...ids],
+          survivingBotIds: [...bots.bots.keys()],
+          activeBotId: BOT_B,
+        };
+      },
+    });
+    st.after(() => {
+      aggregateGate.release();
+      deletionRelease.resolve();
+      coordinator.dispose();
+    });
+    const port = new PortHarness();
+    coordinator.bindPort(port);
+    port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+    await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+    const held = request(port, "native-automation-claimed-event-does-not-poison",
+      "listAllAutomations", {});
+    await aggregateGate.entered;
+    const deleting = request(port, "native-automation-claimed-event-delete",
+      "deleteAgents", { ids: [BOT_A] });
+    await deletionEntered.promise;
+    automations.emit("changed", {
+      agentId: BOT_A,
+      automations: [automation(BOT_A)],
+      workflows: [workflow(BOT_A)],
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    aggregateGate.release();
+    const aggregateReply = await held;
+    deletionRelease.resolve();
+    const deletionReply = await deleting;
+    assert.deepEqual(aggregateReply.outcome, {
+      status: "ok",
+      value: [{ agentId: BOT_B, automation: automation(BOT_B) }],
+    });
+    assert.equal(deletionReply.outcome.status, "ok");
+    assert.equal(port.frames.some((frame) => frame.family === "agents-automation"
+      && frame.payload.agentId === BOT_A), false);
+  });
 });
 
 test("malformed, duplicate, and oversized frames close only their port while unsupported methods fail explicitly", async (t) => {

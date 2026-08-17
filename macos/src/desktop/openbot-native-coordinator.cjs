@@ -16,6 +16,16 @@ const MAX_MESSAGES = 512;
 const MAX_TAIL_LIMIT = 500;
 const MAX_INFLIGHT_REQUESTS = 64;
 const MAX_REQUESTS_PER_PORT = 4096;
+const MAX_AUTOMATIONS = 100;
+const MAX_AUTOMATIONS_PER_BOT = 50;
+const MAX_AUTOMATION_RUNS = 20;
+const MAX_AUTOMATION_NAME_LENGTH = 80;
+const MAX_AUTOMATION_SCHEDULE_LENGTH = 512;
+const MAX_AUTOMATION_DESCRIPTION_LENGTH = 300;
+const MAX_AUTOMATION_METADATA_LENGTH = 300;
+const MAX_AUTOMATION_ID_LENGTH = 256;
+const MAX_COALESCED_RUN_IDS = 25;
+const MALFORMED_AUTOMATION_ARGS = Symbol("malformed automation args");
 const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CONVERSATION_ID = /^conversation-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const INVOCATION_ID = /^invocation-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -23,18 +33,53 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const APPEARANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const TERMINAL_EVENTS = new Set(["completed", "failed", "cancelled"]);
+const AUTOMATION_METHODS = new Set([
+  "getAgentAutomations",
+  "listAllAutomations",
+  "createAgentAutomation",
+  "updateAgentAutomation",
+  "setAgentAutomationEnabled",
+  "deleteAgentAutomation",
+  "runAgentAutomationNow",
+]);
+const AUTOMATION_ID_FIELDS = new Set(["id", "automationId"]);
+const AUTOMATION_ENABLE_FIELDS = new Set(["id", "automationId", "isEnabled"]);
+const AUTOMATION_SPEC_FIELDS = new Set(["name", "prompt", "trigger", "isEnabled"]);
+const AUTOMATION_CREATE_FIELDS = new Set(["id", "spec"]);
+const AUTOMATION_UPDATE_FIELDS = new Set(["id", "automationId", "spec"]);
+const AUTOMATION_TRIGGER_FIELDS = new Set(["type", "schedule"]);
+const AUTOMATION_PUBLIC_FIELDS = new Set([
+  "id", "name", "prompt", "trigger", "schedule", "triggerDescription", "isEnabled",
+  "provenance", "createdAt", "lastRunAt", "nextRunAt", "runs", "filePath",
+]);
+const AUTOMATION_RUN_FIELDS = new Set([
+  "id", "trigger", "startedAt", "finishedAt", "status", "detail", "errorKind",
+  "event", "coalescedRunIds",
+]);
+const AUTOMATION_RUN_REQUIRED_FIELDS = new Set([
+  "id", "trigger", "startedAt", "finishedAt", "status",
+]);
+const AUTOMATION_AGGREGATE_FIELDS = new Set(["agentId", "automation"]);
+const AUTOMATION_CHANGED_FIELDS = new Set(["agentId", "automations", "workflows"]);
+const AUTOMATION_WORKFLOW_FIELDS = new Set([
+  "id", "name", "description", "body", "trigger", "source", "sourceRef", "pluginId",
+  "publishedByCurrentUser", "isEnabledForAgent", "scheduleDescription", "createdAt",
+  "lastRunAt", "nextRunAt", "helperScripts", "runs", "filePath",
+]);
+const AUTOMATION_WORKFLOW_TRIGGER_FIELDS = new Set(["schedule", "isEnabled"]);
+const REMOTE_AUTOMATION_TRIGGER_TYPES = new Set([
+  "slack", "github", "microsoftTeams", "linear", "sentry", "pagerduty", "group",
+]);
 const EMPTY_AGENT_ARRAY_READ_METHODS = new Set([
   "getAgentWorkflows",
   "getConversationOutline",
   "getSubagents",
   "getAsyncTasks",
-  "getAgentAutomations",
 ]);
 const EMPTY_NONE_ARRAY_READ_METHODS = new Set([
   "skillsCatalog",
   "syncPluginSkills",
   "getTrays",
-  "listAllAutomations",
 ]);
 const FALSE_NONE_READ_METHODS = new Set([
   "isAgentNetworkEnabled",
@@ -52,6 +97,7 @@ const SUPPORTED_METHODS = new Set([
   "kickstartAgent",
   "getCloudAgentInfo",
   "getAgentAvatar",
+  ...AUTOMATION_METHODS,
   ...EMPTY_AGENT_ARRAY_READ_METHODS,
   ...EMPTY_NONE_ARRAY_READ_METHODS,
   "getForeverBoxStatus",
@@ -151,15 +197,387 @@ function messageData(event) {
   return descriptor.value;
 }
 
+function recoverAutomationRequestFrame(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) return null;
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    return null;
+  }
+  if ((prototype !== Object.prototype && prototype !== null)
+    || Reflect.ownKeys(descriptors).length !== 4
+    || ["kind", "requestId", "method", "args"].some((key) => {
+      const descriptor = descriptors[key];
+      return !descriptor || !("value" in descriptor);
+    })) return null;
+  const kind = descriptors.kind.value;
+  const requestId = descriptors.requestId.value;
+  const method = descriptors.method.value;
+  if (kind !== "request" || typeof requestId !== "string" || requestId.length === 0
+    || utf8Bytes(requestId) > MAX_REQUEST_ID_BYTES || typeof method !== "string"
+    || method.length === 0 || utf8Bytes(method) > MAX_METHOD_BYTES
+    || !AUTOMATION_METHODS.has(method)) return null;
+  return Object.freeze({
+    kind: "request",
+    requestId,
+    method,
+    // cloneFrameData rejected some part of this request. Keep the safe envelope so
+    // the renderer receives the method's normal malformed-request reply, but never
+    // retain caller-owned arguments that could be changed before async dispatch.
+    args: MALFORMED_AUTOMATION_ARGS,
+  });
+}
+
 function exactRecord(value, allowed, required = allowed) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) {
     throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
   }
-  const keys = Object.keys(value);
-  if (keys.some((key) => !allowed.has(key)) || [...required].some((key) => !Object.hasOwn(value, key))) {
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  if ((prototype !== Object.prototype && prototype !== null)
+    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+      || DANGEROUS_KEYS.has(key) || !allowed.has(key) || !("value" in descriptors[key]))
+    || [...required].some((key) => !descriptors[key])) {
+    throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  return Object.fromEntries(Object.entries(descriptors)
+    .map(([key, descriptor]) => [key, descriptor.value]));
+}
+
+function outputRecord(value, allowed, required = allowed) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) {
+    throw new TypeError("invalid automation output");
+  }
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw new TypeError("invalid automation output");
+  }
+  if ((prototype !== Object.prototype && prototype !== null)
+    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
+      || DANGEROUS_KEYS.has(key) || !allowed.has(key) || !("value" in descriptors[key]))
+    || [...required].some((key) => !descriptors[key])) {
+    throw new TypeError("invalid automation output");
+  }
+  return Object.fromEntries(Object.entries(descriptors)
+    .map(([key, descriptor]) => [key, descriptor.value]));
+}
+
+function outputDenseArray(value, maximum) {
+  if (!Array.isArray(value) || types.isProxy(value)) throw new TypeError("invalid automation output");
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw new TypeError("invalid automation output");
+  }
+  const length = descriptors.length?.value;
+  if (prototype !== Array.prototype || !Number.isSafeInteger(length) || length < 0
+    || length > maximum || Reflect.ownKeys(descriptors).length !== length + 1) {
+    throw new TypeError("invalid automation output");
+  }
+  const result = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[index];
+    if (!descriptor || !("value" in descriptor)) throw new TypeError("invalid automation output");
+    result.push(descriptor.value);
+  }
+  return result;
+}
+
+function frozenPublicValue(value) {
+  if (Array.isArray(value)) return Object.freeze(value.map(frozenPublicValue));
+  if (!value || typeof value !== "object") return value;
+  return Object.freeze(Object.fromEntries(Object.entries(value)
+    .map(([key, nested]) => [key, frozenPublicValue(nested)])));
+}
+
+function outputString(value, maximum, { bytes = false, allowEmpty = false } = {}) {
+  if (typeof value !== "string" || value.includes("\0")
+    || (!allowEmpty && value.trim().length === 0)
+    || (bytes ? utf8Bytes(value) : value.length) > maximum) {
+    throw new TypeError("invalid automation output");
+  }
+  return value;
+}
+
+function outputEpoch(value, { nullable = false } = {}) {
+  if (nullable && value === null) return null;
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError("invalid automation output");
+  return value;
+}
+
+function requestAutomationId(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_AUTOMATION_ID_LENGTH
+    || value === "." || value === ".." || /[\\/\0]/u.test(value)) {
     throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
   }
   return value;
+}
+
+function outputAutomationId(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_AUTOMATION_ID_LENGTH
+    || value === "." || value === ".." || /[\\/\0]/u.test(value)) {
+    throw new TypeError("invalid automation output");
+  }
+  return value;
+}
+
+function automationSpec(value, method) {
+  const raw = exactRecord(value, AUTOMATION_SPEC_FIELDS);
+  if (typeof raw.name !== "string" || raw.name.includes("\0") || raw.name.length > 4096) {
+    throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  const normalizedName = raw.name.trim().replace(/\s+/gu, " ");
+  if (normalizedName.length === 0 || normalizedName.length > MAX_AUTOMATION_NAME_LENGTH
+    || typeof raw.prompt !== "string" || raw.prompt.includes("\0")
+    || raw.prompt.trim().length === 0 || utf8Bytes(raw.prompt) > MAX_TEXT_BYTES
+    || typeof raw.isEnabled !== "boolean") {
+    throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  let triggerRecord;
+  if (raw.trigger && typeof raw.trigger === "object" && !Array.isArray(raw.trigger)
+    && !types.isProxy(raw.trigger)) {
+    try {
+      const prototype = Object.getPrototypeOf(raw.trigger);
+      const descriptors = Object.getOwnPropertyDescriptors(raw.trigger);
+      if ((prototype === Object.prototype || prototype === null)
+        && Reflect.ownKeys(descriptors).every((key) => typeof key === "string"
+          && !DANGEROUS_KEYS.has(key) && "value" in descriptors[key])
+        && descriptors.type && typeof descriptors.type.value === "string") {
+        triggerRecord = Object.fromEntries(Object.entries(descriptors)
+          .map(([key, descriptor]) => [key, descriptor.value]));
+      }
+    } catch {}
+  }
+  if (triggerRecord && REMOTE_AUTOMATION_TRIGGER_TYPES.has(triggerRecord.type)) {
+    throw capabilityUnavailable(method);
+  }
+  const trigger = exactRecord(raw.trigger, AUTOMATION_TRIGGER_FIELDS);
+  if (trigger.type !== "cron" || typeof trigger.schedule !== "string"
+    || trigger.schedule.includes("\0") || trigger.schedule.trim().length === 0
+    || trigger.schedule.length > MAX_AUTOMATION_SCHEDULE_LENGTH) {
+    throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  return frozenPublicValue({
+    name: raw.name,
+    prompt: raw.prompt,
+    trigger: { type: "cron", schedule: trigger.schedule },
+    isEnabled: raw.isEnabled,
+  });
+}
+
+function automationOrder(left, right) {
+  if (left.nextRunAt === null && right.nextRunAt !== null) return 1;
+  if (left.nextRunAt !== null && right.nextRunAt === null) return -1;
+  if (left.nextRunAt !== right.nextRunAt) return left.nextRunAt - right.nextRunAt;
+  if (left.createdAt !== right.createdAt) return left.createdAt - right.createdAt;
+  return left.id.localeCompare(right.id);
+}
+
+function assertAutomationOrder(rows, project = (value) => value) {
+  for (let index = 1; index < rows.length; index += 1) {
+    if (automationOrder(project(rows[index - 1]), project(rows[index])) > 0) {
+      throw new TypeError("invalid automation output");
+    }
+  }
+}
+
+function automationRun(value) {
+  const raw = outputRecord(value, AUTOMATION_RUN_FIELDS, AUTOMATION_RUN_REQUIRED_FIELDS);
+  const id = outputAutomationId(raw.id);
+  const startedAt = outputEpoch(raw.startedAt);
+  const finishedAt = outputEpoch(raw.finishedAt, { nullable: true });
+  if (!new Set(["manual", "event", "schedule"]).has(raw.trigger)
+    || !new Set(["running", "ok", "error"]).has(raw.status)
+    || (raw.status === "running") !== (finishedAt === null)
+    || (finishedAt !== null && finishedAt < startedAt)) {
+    throw new TypeError("invalid automation output");
+  }
+  const optional = {};
+  for (const key of ["detail", "errorKind", "event"]) {
+    if (raw[key] !== undefined) optional[key] = outputString(raw[key], MAX_AUTOMATION_METADATA_LENGTH);
+  }
+  if (raw.status === "running" && (optional.detail !== undefined || optional.errorKind !== undefined)
+    || raw.status === "ok" && optional.errorKind !== undefined) {
+    throw new TypeError("invalid automation output");
+  }
+  if (raw.coalescedRunIds !== undefined) {
+    const ids = outputDenseArray(raw.coalescedRunIds, MAX_COALESCED_RUN_IDS)
+      .map(outputAutomationId);
+    if (ids.length === 0) throw new TypeError("invalid automation output");
+    optional.coalescedRunIds = ids;
+  }
+  return frozenPublicValue({
+    id,
+    trigger: raw.trigger,
+    startedAt,
+    finishedAt,
+    status: raw.status,
+    ...optional,
+  });
+}
+
+function automationRow(value, expectedBotId) {
+  const raw = outputRecord(value, AUTOMATION_PUBLIC_FIELDS);
+  const id = outputAutomationId(raw.id);
+  const name = outputString(raw.name, MAX_AUTOMATION_NAME_LENGTH);
+  const prompt = outputString(raw.prompt, MAX_TEXT_BYTES, { bytes: true });
+  const trigger = outputRecord(raw.trigger, AUTOMATION_TRIGGER_FIELDS);
+  const schedule = outputString(trigger.schedule, MAX_AUTOMATION_SCHEDULE_LENGTH);
+  if (trigger.type !== "cron" || raw.schedule !== schedule || raw.provenance !== "local"
+    || typeof raw.isEnabled !== "boolean") throw new TypeError("invalid automation output");
+  const triggerDescription = outputString(
+    raw.triggerDescription,
+    MAX_AUTOMATION_DESCRIPTION_LENGTH,
+  );
+  const runs = outputDenseArray(raw.runs, MAX_AUTOMATION_RUNS).map(automationRun);
+  if (new Set(runs.map((run) => run.id)).size !== runs.length
+    || runs.filter((run) => run.status === "running").length > 1) {
+    throw new TypeError("invalid automation output");
+  }
+  for (let index = 1; index < runs.length; index += 1) {
+    if (runs[index - 1].startedAt < runs[index].startedAt) {
+      throw new TypeError("invalid automation output");
+    }
+  }
+  const logicalPath = `openbot-local-routine:${expectedBotId}:${id}`;
+  if (raw.filePath !== logicalPath) throw new TypeError("invalid automation output");
+  return frozenPublicValue({
+    id,
+    name,
+    prompt,
+    trigger: { type: "cron", schedule },
+    schedule,
+    triggerDescription,
+    isEnabled: raw.isEnabled,
+    provenance: "local",
+    createdAt: outputEpoch(raw.createdAt),
+    lastRunAt: outputEpoch(raw.lastRunAt, { nullable: true }),
+    nextRunAt: outputEpoch(raw.nextRunAt, { nullable: true }),
+    runs,
+    filePath: logicalPath,
+  });
+}
+
+function automationSnapshot(value, expectedBotId) {
+  const rows = outputDenseArray(value, MAX_AUTOMATIONS_PER_BOT)
+    .map((entry) => automationRow(entry, expectedBotId));
+  if (new Set(rows.map((entry) => entry.id)).size !== rows.length) {
+    throw new TypeError("invalid automation output");
+  }
+  assertAutomationOrder(rows);
+  return Object.freeze(rows);
+}
+
+function automationAggregate(value) {
+  const rows = outputDenseArray(value, MAX_AUTOMATIONS).map((entry) => {
+    const raw = outputRecord(entry, AUTOMATION_AGGREGATE_FIELDS);
+    const agentId = outputBotId(raw.agentId);
+    return frozenPublicValue({ agentId, automation: automationRow(raw.automation, agentId) });
+  });
+  if (new Set(rows.map((entry) => `${entry.agentId}\0${entry.automation.id}`)).size !== rows.length) {
+    throw new TypeError("invalid automation output");
+  }
+  const perBot = new Map();
+  for (const row of rows) {
+    let botRows = perBot.get(row.agentId);
+    if (!botRows) {
+      botRows = [];
+      perBot.set(row.agentId, botRows);
+    }
+    botRows.push(row.automation);
+    if (botRows.length > MAX_AUTOMATIONS_PER_BOT) throw new TypeError("invalid automation output");
+  }
+  assertAutomationOrder(rows, (entry) => entry.automation);
+  return Object.freeze(rows);
+}
+
+function workflowRow(value, expectedBotId) {
+  const raw = outputRecord(value, AUTOMATION_WORKFLOW_FIELDS);
+  const id = outputAutomationId(raw.id);
+  const trigger = outputRecord(raw.trigger, AUTOMATION_WORKFLOW_TRIGGER_FIELDS);
+  const runs = outputDenseArray(raw.runs, MAX_AUTOMATION_RUNS).map(automationRun);
+  const helperScripts = outputDenseArray(raw.helperScripts, 0);
+  const logicalPath = `openbot-local-routine:${expectedBotId}:${id}`;
+  if (raw.description !== "" || raw.source !== "automation" || raw.sourceRef !== null
+    || raw.pluginId !== null || raw.publishedByCurrentUser !== false
+    || raw.isEnabledForAgent !== true || typeof trigger.isEnabled !== "boolean"
+    || raw.filePath !== logicalPath) throw new TypeError("invalid automation output");
+  return frozenPublicValue({
+    id,
+    name: outputString(raw.name, MAX_AUTOMATION_NAME_LENGTH),
+    description: "",
+    body: outputString(raw.body, MAX_TEXT_BYTES, { bytes: true }),
+    trigger: {
+      schedule: outputString(trigger.schedule, MAX_AUTOMATION_SCHEDULE_LENGTH),
+      isEnabled: trigger.isEnabled,
+    },
+    source: "automation",
+    sourceRef: null,
+    pluginId: null,
+    publishedByCurrentUser: false,
+    isEnabledForAgent: true,
+    scheduleDescription: outputString(raw.scheduleDescription, MAX_AUTOMATION_DESCRIPTION_LENGTH),
+    createdAt: outputEpoch(raw.createdAt),
+    lastRunAt: outputEpoch(raw.lastRunAt, { nullable: true }),
+    nextRunAt: outputEpoch(raw.nextRunAt, { nullable: true }),
+    helperScripts,
+    runs,
+    filePath: logicalPath,
+  });
+}
+
+function workflowFromAutomation(row) {
+  return frozenPublicValue({
+    id: row.id,
+    name: row.name,
+    description: "",
+    body: row.prompt,
+    trigger: { schedule: row.schedule, isEnabled: row.isEnabled },
+    source: "automation",
+    sourceRef: null,
+    pluginId: null,
+    publishedByCurrentUser: false,
+    isEnabledForAgent: true,
+    scheduleDescription: row.triggerDescription,
+    createdAt: row.createdAt,
+    lastRunAt: row.lastRunAt,
+    nextRunAt: row.nextRunAt,
+    helperScripts: [],
+    runs: row.runs,
+    filePath: row.filePath,
+  });
+}
+
+function automationChangedEvent(value) {
+  const raw = outputRecord(value, AUTOMATION_CHANGED_FIELDS);
+  const agentId = outputBotId(raw.agentId);
+  const automations = automationSnapshot(raw.automations, agentId);
+  const workflowValues = outputDenseArray(raw.workflows, MAX_AUTOMATIONS_PER_BOT);
+  if (workflowValues.length !== automations.length) throw new TypeError("invalid automation output");
+  const workflows = Object.freeze(workflowValues.map((entry, index) => {
+    const projected = workflowRow(entry, agentId);
+    if (JSON.stringify(projected) !== JSON.stringify(workflowFromAutomation(automations[index]))) {
+      throw new TypeError("invalid automation output");
+    }
+    return projected;
+  }));
+  return Object.freeze({ agentId, automations, workflows });
 }
 
 function boundedString(value, maximumBytes, { allowEmpty = false } = {}) {
@@ -200,6 +618,13 @@ function promptInputDigest({
 function botId(value) {
   if (typeof value !== "string" || !BOT_ID.test(value)) {
     throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  return value;
+}
+
+function outputBotId(value) {
+  if (typeof value !== "string" || !BOT_ID.test(value)) {
+    throw new TypeError("invalid automation output");
   }
   return value;
 }
@@ -276,6 +701,23 @@ function failureOutcome(error, method) {
       message: `OpenBot native ${method} failed.`,
     },
   };
+}
+
+function automationControllerFailure(error, method) {
+  let code = null;
+  if (error && typeof error === "object" && !types.isProxy(error)) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+      if (descriptor && "value" in descriptor && typeof descriptor.value === "string") {
+        code = descriptor.value;
+      }
+    } catch {}
+  }
+  if (code === "OPENBOT_LOCAL_AUTOMATION_INVALID") {
+    return coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
+  if (code === "OPENBOT_LOCAL_AUTOMATION_UNAVAILABLE") return capabilityUnavailable(method);
+  return new TypeError("OpenBot native automation controller failed");
 }
 
 function validateBot(bot) {
@@ -355,6 +797,7 @@ function validateConversationRecord(value, expectedBotId, expectedConversationId
 class OpenBotNativeCoordinator {
   #bots;
   #conversations;
+  #automations;
   #deleteBots;
   #onSelectAgent;
   #readActiveAgentId;
@@ -370,6 +813,12 @@ class OpenBotNativeCoordinator {
   #botEpochs = new Map();
   #deletionClaims = new Map();
   #deletedBots = new Set();
+  #automationRevisions = new Map();
+  #automationSnapshots = new Map();
+  #automationGlobalRevision = 0;
+  #automationPendingEvents = new Map();
+  #automationEventTasks = new Map();
+  #automationMutations = new Set();
   #rosterEpoch = 0;
   #activeAgentId = "";
   #activeRevision = 0;
@@ -378,10 +827,12 @@ class OpenBotNativeCoordinator {
   #disposed = false;
   #botListener;
   #conversationListener;
+  #automationListener;
 
   constructor({
     botRuntimeController,
     conversationController,
+    automationController = null,
     deleteBots = null,
     onSelectAgent = null,
     readActiveAgentId = null,
@@ -402,6 +853,14 @@ class OpenBotNativeCoordinator {
         && typeof conversationController.removeListener !== "function")) {
       throw new TypeError("OpenBot native coordinator requires a StandaloneConversationController-like dependency.");
     }
+    if (automationController !== null && (!automationController
+      || typeof automationController !== "object" || types.isProxy(automationController)
+      || [...AUTOMATION_METHODS].some((name) => typeof automationController[name] !== "function")
+      || typeof automationController.on !== "function"
+      || (typeof automationController.off !== "function"
+        && typeof automationController.removeListener !== "function"))) {
+      throw new TypeError("OpenBot native coordinator automationController must be controller-like.");
+    }
     if (deleteBots !== null && typeof deleteBots !== "function") {
       throw new TypeError("OpenBot native coordinator deleteBots must be a function.");
     }
@@ -414,6 +873,7 @@ class OpenBotNativeCoordinator {
     if (typeof now !== "function") throw new TypeError("OpenBot native coordinator now must be a function.");
     this.#bots = botRuntimeController;
     this.#conversations = conversationController;
+    this.#automations = automationController;
     this.#deleteBots = deleteBots;
     this.#onSelectAgent = onSelectAgent;
     this.#readActiveAgentId = readActiveAgentId;
@@ -423,8 +883,10 @@ class OpenBotNativeCoordinator {
       void this.#publishAgentsToAll();
     };
     this.#conversationListener = (event) => { this.#receiveConversationEvent(event); };
+    this.#automationListener = (event) => { this.#receiveAutomationEvent(event); };
     this.#bots.on("bot-changed", this.#botListener);
     this.#conversations.on("event", this.#conversationListener);
+    if (this.#automations) this.#automations.on("changed", this.#automationListener);
   }
 
   bindPort(port) {
@@ -445,9 +907,12 @@ class OpenBotNativeCoordinator {
       inflight: 0,
       requests: new Map(),
       onMessage: null,
+      onClose: null,
     };
     binding.onMessage = (event) => this.#receivePortMessage(binding, event);
+    binding.onClose = () => this.#disposeBinding(binding);
     port.on("message", binding.onMessage);
+    port.on("close", binding.onClose);
     try { port.start(); } catch (error) {
       this.#removePortListener(binding);
       try { port.close(); } catch {}
@@ -459,10 +924,18 @@ class OpenBotNativeCoordinator {
 
   #receivePortMessage(binding, event) {
     if (binding.disposed) return;
+    let rawFrame;
     let frame;
-    try { frame = cloneFrameData(messageData(event)); } catch {
+    try { rawFrame = messageData(event); } catch {
       this.#protocolError(binding, "malformed-frame");
       return;
+    }
+    try { frame = cloneFrameData(rawFrame); } catch {
+      frame = recoverAutomationRequestFrame(rawFrame);
+      if (!frame) {
+        this.#protocolError(binding, "malformed-frame");
+        return;
+      }
     }
     if (binding.state === "awaiting-hello") {
       if (!this.#isHello(frame)) {
@@ -519,7 +992,10 @@ class OpenBotNativeCoordinator {
     binding.requests.set(frame.requestId, operation);
     void Promise.resolve()
       .then(() => this.#dispatch(frame.method, frame.args))
-      .then((value) => ({ status: "ok", value: cloneReplyValue(value) }))
+      .then((value) => ({
+        status: "ok",
+        value: AUTOMATION_METHODS.has(frame.method) ? value : cloneReplyValue(value),
+      }))
       .catch((error) => failureOutcome(error, frame.method))
       .then((outcome) => {
         binding.inflight -= 1;
@@ -566,6 +1042,7 @@ class OpenBotNativeCoordinator {
     if (!SUPPORTED_METHODS.has(method)) {
       throw capabilityUnavailable(method);
     }
+    if (AUTOMATION_METHODS.has(method)) return this.#dispatchAutomation(method, args);
     if (method === "listAgents") {
       this.#noneArgs(args);
       return this.#agentRows();
@@ -631,6 +1108,238 @@ class OpenBotNativeCoordinator {
     exactRecord(args, new Set(), new Set());
   }
 
+  #automationRequest(method, rawArgs) {
+    if (method === "listAllAutomations") {
+      exactRecord(rawArgs, new Set(), new Set());
+      return Object.freeze({});
+    }
+    if (method === "getAgentAutomations") {
+      const args = exactRecord(rawArgs, new Set(["id"]));
+      return Object.freeze({ id: botId(args.id) });
+    }
+    if (method === "createAgentAutomation") {
+      const args = exactRecord(rawArgs, AUTOMATION_CREATE_FIELDS);
+      return Object.freeze({ id: botId(args.id), spec: automationSpec(args.spec, method) });
+    }
+    if (method === "updateAgentAutomation") {
+      const args = exactRecord(rawArgs, AUTOMATION_UPDATE_FIELDS);
+      return Object.freeze({
+        id: botId(args.id),
+        automationId: requestAutomationId(args.automationId),
+        spec: automationSpec(args.spec, method),
+      });
+    }
+    if (method === "setAgentAutomationEnabled") {
+      const args = exactRecord(rawArgs, AUTOMATION_ENABLE_FIELDS);
+      if (typeof args.isEnabled !== "boolean") {
+        throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+      }
+      return Object.freeze({
+        id: botId(args.id),
+        automationId: requestAutomationId(args.automationId),
+        isEnabled: args.isEnabled,
+      });
+    }
+    if (method === "deleteAgentAutomation" || method === "runAgentAutomationNow") {
+      const args = exactRecord(rawArgs, AUTOMATION_ID_FIELDS);
+      return Object.freeze({
+        id: botId(args.id),
+        automationId: requestAutomationId(args.automationId),
+      });
+    }
+    throw capabilityUnavailable(method);
+  }
+
+  async #dispatchAutomation(method, rawArgs) {
+    const request = this.#automationRequest(method, rawArgs);
+    if (!this.#automations) throw capabilityUnavailable(method);
+    if (method === "listAllAutomations") {
+      const revision = this.#automationGlobalRevision;
+      let rawValue;
+      try { rawValue = await this.#automations.listAllAutomations(request); }
+      catch (error) { throw automationControllerFailure(error, method); }
+      if (this.#disposed) throw new TypeError("native coordinator disposed");
+      const projected = automationAggregate(rawValue);
+      const visibleBotIds = await this.#stableVisibleBotIds();
+      if (this.#automationGlobalRevision !== revision) {
+        throw new TypeError("stale native automation aggregate");
+      }
+      return Object.freeze(projected.filter((entry) => visibleBotIds.has(entry.agentId)));
+    }
+
+    const id = request.id;
+    const token = this.#captureBot(id);
+    await this.#assertAutomationBotVisible(token);
+    this.#assertBotCurrent(token);
+    const revision = this.#automationRevisions.get(id) ?? 0;
+    const mutation = method === "getAgentAutomations" ? null : {
+      id,
+      token,
+      deletionClaim: null,
+    };
+    if (mutation) this.#automationMutations.add(mutation);
+    try {
+      let rawValue;
+      try { rawValue = await this.#automations[method](request); }
+      catch (error) { throw automationControllerFailure(error, method); }
+
+      if (method === "runAgentAutomationNow") {
+        if (rawValue !== undefined) throw new TypeError("invalid automation output");
+        await this.#drainAutomationEventTasks(id);
+        await this.#assertAutomationMutationVisible(mutation);
+        return undefined;
+      }
+
+      const projected = automationSnapshot(rawValue, id);
+      await this.#drainAutomationEventTasks(id);
+      if (!mutation) {
+        await this.#assertAutomationBotVisible(token);
+        this.#assertBotCurrent(token);
+        if ((this.#automationRevisions.get(id) ?? 0) !== revision) {
+          throw new TypeError("stale native automation snapshot");
+        }
+        return projected;
+      }
+
+      await this.#assertAutomationMutationVisible(mutation);
+      const currentRevision = this.#automationRevisions.get(id) ?? 0;
+      if (currentRevision !== revision) {
+        const latest = this.#automationSnapshots.get(id)?.automations;
+        if (latest) return latest;
+      }
+      return projected;
+    } finally {
+      if (mutation) this.#automationMutations.delete(mutation);
+    }
+  }
+
+  async #assertAutomationMutationVisible(operation) {
+    let token = operation.token;
+    let handledClaim = null;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const claim = operation.deletionClaim;
+      if (claim && claim !== handledClaim) {
+        const outcome = await claim.settlement;
+        handledClaim = claim;
+        if (outcome.deleted) throw new TypeError("stale native automation mutation");
+        if (operation.deletionClaim !== claim) continue;
+        token = this.#captureBot(operation.id);
+      }
+      try {
+        await this.#assertAutomationBotVisible(token);
+        if (operation.deletionClaim !== claim) continue;
+        return;
+      } catch (error) {
+        if (operation.deletionClaim !== claim) continue;
+        throw error;
+      }
+    }
+    throw new TypeError("stale native automation mutation");
+  }
+
+  async #drainAutomationEventTasks(id) {
+    const tasks = [...(this.#automationEventTasks.get(id) ?? [])];
+    if (tasks.length > 0) await Promise.allSettled(tasks);
+  }
+
+  async #stableVisibleBotIds() {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const rosterEpoch = this.#rosterEpoch;
+      const values = await this.#bots.listBots();
+      if (this.#disposed) throw new TypeError("native coordinator disposed");
+      if (this.#rosterEpoch !== rosterEpoch) continue;
+      if (!Array.isArray(values) || values.length > MAX_AGENTS) throw new TypeError("invalid bot list");
+      const ids = new Set();
+      for (const value of values) {
+        const current = validateBot(value);
+        if (!this.#deletedBots.has(current.botId) && !this.#deletionClaims.has(current.botId)) {
+          ids.add(current.botId);
+        }
+      }
+      if (this.#rosterEpoch === rosterEpoch) return ids;
+    }
+    throw new TypeError("stale native roster");
+  }
+
+  async #assertAutomationBotVisible(token) {
+    this.#assertBotCurrent(token);
+    const ids = await this.#stableVisibleBotIds();
+    this.#assertBotCurrent(token);
+    if (!ids.has(token.id)) throw new TypeError("missing bot");
+  }
+
+  #receiveAutomationEvent(rawEvent) {
+    if (this.#disposed || !this.#automations) return;
+    let event;
+    try { event = automationChangedEvent(rawEvent); } catch { return; }
+    let token;
+    try { token = this.#captureBot(event.agentId); } catch { return; }
+    const marker = Object.freeze({ event });
+    this.#automationPendingEvents.set(event.agentId, marker);
+    const task = (async () => {
+      try {
+        await this.#assertAutomationBotVisible(token);
+        if (this.#automationPendingEvents.get(event.agentId) !== marker) return;
+        this.#commitAutomationEvent(event);
+      } catch {
+        // Invalid, deleted, superseded, or disposed automation snapshots are never published.
+      } finally {
+        if (this.#automationPendingEvents.get(event.agentId) === marker) {
+          this.#automationPendingEvents.delete(event.agentId);
+        }
+      }
+    })();
+    let tasks = this.#automationEventTasks.get(event.agentId);
+    if (!tasks) {
+      tasks = new Set();
+      this.#automationEventTasks.set(event.agentId, tasks);
+    }
+    tasks.add(task);
+    void task.finally(() => {
+      tasks.delete(task);
+      if (tasks.size === 0 && this.#automationEventTasks.get(event.agentId) === tasks) {
+        this.#automationEventTasks.delete(event.agentId);
+      }
+    });
+  }
+
+  #commitAutomationEvent(event) {
+    const nextRevision = (this.#automationRevisions.get(event.agentId) ?? 0) + 1;
+    const nextGlobalRevision = this.#automationGlobalRevision + 1;
+    if (!Number.isSafeInteger(nextRevision) || !Number.isSafeInteger(nextGlobalRevision)) {
+      throw new TypeError("native automation revision exhausted");
+    }
+    this.#automationRevisions.set(event.agentId, nextRevision);
+    this.#automationGlobalRevision = nextGlobalRevision;
+    this.#automationSnapshots.set(event.agentId, event);
+    this.#broadcastEvent("agents-automation", {
+      agentId: event.agentId,
+      automations: event.automations,
+    });
+    this.#broadcastEvent("agents-workflow", {
+      agentId: event.agentId,
+      workflows: event.workflows,
+    });
+  }
+
+  async #reconcileAutomationBot(id) {
+    if (!this.#automations || this.#disposed) return false;
+    const token = this.#captureBot(id);
+    let rawValue;
+    try { rawValue = await this.#automations.getAgentAutomations(Object.freeze({ id })); }
+    catch { return false; }
+    let automations;
+    try { automations = automationSnapshot(rawValue, id); } catch { return false; }
+    try { await this.#assertAutomationBotVisible(token); } catch { return false; }
+    const event = Object.freeze({
+      agentId: id,
+      automations,
+      workflows: Object.freeze(automations.map(workflowFromAutomation)),
+    });
+    try { this.#commitAutomationEvent(event); } catch { return false; }
+    return true;
+  }
+
   #advanceRosterEpoch() {
     if (!Number.isSafeInteger(this.#rosterEpoch + 1)) throw new TypeError("native roster epoch exhausted");
     this.#rosterEpoch += 1;
@@ -694,13 +1403,22 @@ class OpenBotNativeCoordinator {
     if (ids.some((id) => this.#deletedBots.has(id) || this.#deletionClaims.has(id))) {
       throw new TypeError("native bot deletion is unavailable");
     }
+    let settle;
+    const settlement = new Promise((resolve) => { settle = resolve; });
     const claim = Object.freeze({
       activeAgentId: this.#activeAgentId,
       activeRevision: this.#activeRevision,
+      settlement,
+      settle,
     });
     for (const id of ids) {
       this.#advanceBotEpoch(id);
       this.#deletionClaims.set(id, claim);
+      this.#automationPendingEvents.delete(id);
+    }
+    const targets = new Set(ids);
+    for (const operation of this.#automationMutations) {
+      if (targets.has(operation.id)) operation.deletionClaim = claim;
     }
     this.#purgeVolatileBotOperations(ids);
     this.#advanceRosterEpoch();
@@ -732,6 +1450,9 @@ class OpenBotNativeCoordinator {
       if (deleted) {
         this.#deletedBots.add(id);
         this.#botEpochs.delete(id);
+        this.#automationRevisions.delete(id);
+        this.#automationSnapshots.delete(id);
+        this.#automationPendingEvents.delete(id);
       }
     }
     this.#advanceRosterEpoch();
@@ -888,12 +1609,15 @@ class OpenBotNativeCoordinator {
         ids,
       );
       this.#releaseDeletion(ids, claim, { deleted: true });
+      claim.settle(Object.freeze({ deleted: true }));
     } catch (error) {
       this.#releaseDeletion(ids, claim, { deleted: false });
       if (this.#activeRevision === claim.activeRevision) {
         this.#setActiveAgentId(claim.activeAgentId);
       }
       void this.#publishAgentsToAll();
+      await Promise.all(ids.map((id) => this.#reconcileAutomationBot(id)));
+      claim.settle(Object.freeze({ deleted: false }));
       throw error;
     }
     const deletedIds = new Set(outcome.deletedBotIds);
@@ -1471,6 +2195,7 @@ class OpenBotNativeCoordinator {
     try {
       const off = binding.port.off || binding.port.removeListener;
       off.call(binding.port, "message", binding.onMessage);
+      off.call(binding.port, "close", binding.onClose);
     } catch {}
   }
 
@@ -1488,8 +2213,12 @@ class OpenBotNativeCoordinator {
     this.#disposed = true;
     const botOff = this.#bots.off || this.#bots.removeListener;
     const conversationOff = this.#conversations.off || this.#conversations.removeListener;
+    const automationOff = this.#automations && (this.#automations.off || this.#automations.removeListener);
     try { botOff.call(this.#bots, "bot-changed", this.#botListener); } catch {}
     try { conversationOff.call(this.#conversations, "event", this.#conversationListener); } catch {}
+    if (automationOff) {
+      try { automationOff.call(this.#automations, "changed", this.#automationListener); } catch {}
+    }
     for (const binding of [...this.#bindings]) this.#disposeBinding(binding);
     this.#conversationIds.clear();
     this.#conversationPromises.clear();
@@ -1501,6 +2230,11 @@ class OpenBotNativeCoordinator {
     this.#botEpochs.clear();
     this.#deletionClaims.clear();
     this.#deletedBots.clear();
+    this.#automationRevisions.clear();
+    this.#automationSnapshots.clear();
+    this.#automationPendingEvents.clear();
+    this.#automationEventTasks.clear();
+    this.#automationMutations.clear();
     this.#activeAgentPromise = null;
   }
 }
