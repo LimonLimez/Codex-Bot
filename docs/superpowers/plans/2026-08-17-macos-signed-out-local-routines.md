@@ -134,13 +134,11 @@ git push origin macos/codex-bot
 - Create: `macos/test/local-automation-native-io.test.cjs`
 - Create: `macos/src/desktop/local-automation-store.cjs`
 - Create: `macos/test/local-automation-store.test.cjs`
-- Modify: `macos/native/openbot-profile-publish.c`
-- Modify: `macos/test/openbot-user-data.test.cjs`
 
 **Interfaces:**
 - Consumes: normalized cron strings from Task 1.
 - Produces: `LocalAutomationStore` and `LocalAutomationStoreError`.
-- Native adapter: `new LocalAutomationNativeIO({filePath, helperPath, fs?, spawn?, timeoutMs?})` captures and enforces the existing private directory identity and exposes only `read()` / `write(source)`.
+- Native adapter: `new LocalAutomationNativeIO({filePath, fs?})` captures and enforces the existing private directory identity through its verified macOS VolFS path and exposes only `read()` / `write(source)`.
 - Store constructor: `new LocalAutomationStore({stateIO, randomUUID?, now?})`; it has no pathname-I/O fallback.
 - Read methods: `list(botId)`, `listAll()`.
 - Config mutations: `create({botId, automation})`, `replace({botId, automationId, expectedRevision, automation})`, `delete({botId, automationId, expectedRevision})`.
@@ -160,11 +158,14 @@ const automation = {
   triggerDescription: "At 9:00 AM, Monday through Friday",
   isEnabled: true, nextRunAt: Date.parse("2026-08-17T13:00:00.000Z"),
 };
-const store = new LocalAutomationStore({ filePath, randomUUID: ids.next, now: clock.now });
+const stateIO = new LocalAutomationNativeIO({ filePath });
+const store = new LocalAutomationStore({ stateIO, randomUUID: ids.next, now: clock.now });
 const created = await store.create({ botId: BOT_A, automation });
 assert.equal(created.length, 1);
 assert.equal(created[0].revision, 1);
-assert.deepEqual(await new LocalAutomationStore({ filePath }).list(BOT_A), created);
+assert.deepEqual(await new LocalAutomationStore({
+  stateIO: new LocalAutomationNativeIO({ filePath }),
+}).list(BOT_A), created);
 ```
 
 Assert the 50-per-bot cap, 100 aggregate cap, deterministic next-run/created ordering, unique canonical IDs, 80-character names, 64-KiB prompt bound, and 20-run truncation. Store reads intentionally retain the private `conversationId` for the controller; Task 3 must strip it from every native projection.
@@ -177,7 +178,7 @@ Expected: FAIL because `local-automation-store.cjs` does not exist.
 
 - [ ] **Step 3: Add atomicity, recovery, deletion, and hostile DTO REDs**
 
-In `local-automation-native-io.test.cjs`, cover inherited-directory-fd read/write, temporary-file write, file sync, atomic rename, directory sync, committed-uncertain read-back, symlink/private-directory refusal, parent/file substitution after validation, bounded helper output, timeout/signal failure, and temp cleanup. Compile the real native helper and prove that a deterministic spawn-time parent replacement cannot redirect either a read or write. In the store test, inject a bounded `stateIO` fake to cover exact read/write uncertainty, restart recovery of `running` to terminal `error`, exact bot deletion retry/idempotency, oversized descriptors before traversal, proxies, accessors, cycles, unknown keys, sparse arrays, and cross-bot isolation.
+In `local-automation-native-io.test.cjs`, cover verified VolFS-parent read/write, temporary-file creation, file sync, atomic rename, directory sync, committed-uncertain double read-back, symlink/private-directory refusal, ancestor/parent/file substitution after validation, unsupported or mismatched VolFS identity, bounded state, single-link private files, exact owned-temp cleanup, and preservation of unknown replacements. Prove that replacing the configured directory or an ancestor cannot redirect a read or write away from the held original directory. In the store test, inject a bounded `stateIO` fake to cover exact read/write uncertainty, restart recovery of `running` to terminal `error`, exact bot deletion retry/idempotency, oversized descriptors before traversal, proxies, accessors, cycles, unknown keys, sparse arrays, and cross-bot isolation.
 
 ```js
 const recovered = await restarted.recoverRunning({ finishedAt: NOW_2 });
@@ -203,7 +204,7 @@ Persist exactly:
 }
 ```
 
-Use descriptor-first validation and frozen clones at every public boundary. Keep the JSON store free of path operations and require a `stateIO` boundary. The adapter requires the existing private state directory rather than creating or chmod-repairing it, opens it with `O_DIRECTORY | O_NOFOLLOW`, validates the descriptor against its captured identity and current pathname, and keeps the handle alive while passing it as child fd 3 to the signed helper. Extend `openbot-profile-publish.c` without changing its existing two-absolute-path profile-publication behavior: bounded, versioned `--state-read-v1` and `--state-write-v1` commands must validate fd 3 against the passed identity, use only `openat`/`fstatat`/`unlinkat`/`renameatx_np` operations relative to it, reject symlinks and non-private modes, sync the file and directory, and expose no private path or content in errors. The adapter must recheck that the pathname still names the opened directory after the helper settles. On a post-replacement uncertainty, it exact-reads back through the same descriptor-relative helper and accepts only matching bytes. Keep all store mutations on one private promise queue.
+Use descriptor-first validation and frozen clones at every public boundary. Keep the JSON store free of path operations and require a `stateIO` boundary. The adapter requires the existing private state directory rather than creating or chmod-repairing it, rejects a noncanonical or symlinked configured path, opens it with `O_DIRECTORY | O_NOFOLLOW`, and verifies the same exact directory through `/.vol/<device>/<inode>`. Hold the directory handle throughout the operation; use only the stable VolFS parent for state and temporary-file `lstat`, `open`, `rename`, and `unlink`; require exact `0700`/`0600` ownership and single-link regular files; and re-canonicalize plus identity-check the configured directory before and after work. Sync the temporary file before rename and the held directory after rename. A rename or post-commit uncertainty succeeds only after two matching bounded reads separated by a successful directory sync, while a still-owned temporary is cleaned and an unknown replacement is preserved. Unsupported VolFS behavior fails closed. Keep all store mutations on one private promise queue.
 
 - [ ] **Step 5: Run focused and adjacent GREEN**
 
@@ -214,7 +215,7 @@ Run: `node --check macos/src/desktop/local-automation-native-io.cjs && node --ch
 - [ ] **Step 6: Commit the durable store slice**
 
 ```bash
-git add macos/src/desktop/local-automation-native-io.cjs macos/test/local-automation-native-io.test.cjs macos/src/desktop/local-automation-store.cjs macos/test/local-automation-store.test.cjs macos/native/openbot-profile-publish.c macos/test/openbot-user-data.test.cjs
+git add macos/src/desktop/local-automation-native-io.cjs macos/test/local-automation-native-io.test.cjs macos/src/desktop/local-automation-store.cjs macos/test/local-automation-store.test.cjs
 git commit -m "feat(macOS): persist local bot routines"
 git push origin macos/codex-bot
 ```
