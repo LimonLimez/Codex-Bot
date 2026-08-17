@@ -825,6 +825,16 @@ function verifyRendererLocalOnlySource(rendererSource) {
     !preview.includes("p.jsx(dbn"),
     "computer preview renders only the local browser seat",
   );
+  const handoffPublisher = uniqueFunctionRegion(
+    rendererSource,
+    ["function QOn", "jbn(t", "handBack", "dismiss"],
+    "computer handoff publisher",
+  ).source;
+  assertPatchInvariant(
+    handoffPublisher.includes("openBox: GBOpenComputer") &&
+      !handoffPublisher.includes("openBox: n.openBox"),
+    "computer handoff cards open the current Open Bot seat instead of the stock cloud box",
+  );
   assertPatchInvariant(
     rendererSource.includes(
       'const wDn = [{ id: "general", label: "General", icon: "settings-gear" }];',
@@ -2316,6 +2326,12 @@ function patchRenderer(root, viewToken, viewPort) {
     text.slice(0, previewRegion.start) +
     patchedPreview +
     text.slice(previewRegion.end);
+  text = replaceOnce(
+    text,
+    "jbn(t, { openBox: n.openBox, handBack: n.handBack, dismiss: n.dismiss });",
+    "jbn(t, { openBox: GBOpenComputer, handBack: n.handBack, dismiss: n.dismiss });",
+    "computer handoff card local-seat opener",
+  );
 
   text = replaceOnce(
     text,

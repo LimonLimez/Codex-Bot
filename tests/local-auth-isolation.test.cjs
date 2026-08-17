@@ -183,6 +183,12 @@ function _bn() {
     children: p.jsx(GBLiveSeat, {}),
   });
 }
+function QOn(n, e) {
+  const t = Lbn(n.handoffs, e);
+  Cr(() => {
+    jbn(t, { openBox: GBOpenComputer, handBack: n.handBack, dismiss: n.dismiss });
+  });
+}
 const wDn = [{ id: "general", label: "General", icon: "settings-gear" }];
 function IDn() {
   const u = 640;

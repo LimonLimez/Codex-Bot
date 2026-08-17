@@ -1,5 +1,16 @@
 const GB_SEAT_VIEW_URL = "http://127.0.0.1:__CODEX_VIEW_PORT__",
-  GB_SEAT_REQUEST = globalThis.__CODEX_BOT_VIEW_REQUEST__;
+  GB_SEAT_REQUEST = globalThis.__CODEX_BOT_VIEW_REQUEST__,
+  GB_OPEN_COMPUTER_EVENT = "open-bot:open-computer";
+function GBOpenComputer() {
+  if (
+    typeof globalThis.CustomEvent !== "function" ||
+    typeof globalThis.dispatchEvent !== "function"
+  )
+    return false;
+  return globalThis.dispatchEvent(
+    new globalThis.CustomEvent(GB_OPEN_COMPUTER_EVENT),
+  );
+}
 function GBApprovalDetailLines(presentation) {
   const lines = [];
   for (const action of presentation?.actions ?? []) {
@@ -455,6 +466,13 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
     V = I
       ? `Vendor cloud \u00b7 Experimental \u00b7 billing possible \u00b7 ${L}`
       : L;
+  T.useEffect(() => {
+    const a = () => {
+      void H();
+    };
+    globalThis.addEventListener?.(GB_OPEN_COMPUTER_EVENT, a);
+    return () => globalThis.removeEventListener?.(GB_OPEN_COMPUTER_EVENT, a);
+  }, [H]);
   return h.jsxs(o ? "dialog" : "div", {
     ref: d,
     role: "application",

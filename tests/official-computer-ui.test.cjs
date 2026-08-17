@@ -86,6 +86,7 @@ function createLiveSeatHarness({
   const requests = [];
   const intervals = [];
   const documentListeners = new Map();
+  const globalListeners = new Map();
   const focusOrigin = {
     isConnected: true,
     focusCount: 0,
@@ -225,6 +226,22 @@ function createLiveSeatHarness({
     {
       crypto: { randomUUID: () => "control-id" },
       __CODEX_BOT_VIEW_REQUEST__: request,
+      CustomEvent: class CustomEvent {
+        constructor(type) {
+          this.type = type;
+        }
+      },
+      addEventListener(type, listener) {
+        globalListeners.set(type, listener);
+      },
+      removeEventListener(type, listener) {
+        if (globalListeners.get(type) === listener)
+          globalListeners.delete(type);
+      },
+      dispatchEvent(event) {
+        globalListeners.get(event.type)?.(event);
+        return true;
+      },
     },
     documentMock,
     (callback, delay) => {
@@ -242,6 +259,7 @@ function createLiveSeatHarness({
     requests,
     intervals,
     documentListeners,
+    globalListeners,
     documentMock,
     focusOrigin,
     effects: () => effects,
@@ -467,6 +485,31 @@ test("the stock-branding sweep preserves Cursor wording in Codex-owned UI", () =
     ownedNode.nodeValue,
     "Sign in to Cursor with your Cursor account",
   );
+});
+
+test("a transcript Open computer action takes over the mounted Open Bot seat", async () => {
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const harness = createLiveSeatHarness({
+    statusProvider: "private",
+    frameProvider: "private",
+  });
+  harness.render();
+  const openComputerEffect = harness.effects().at(-1);
+  const cleanup = openComputerEffect();
+  assert.equal(harness.globalListeners.has("open-bot:open-computer"), true);
+
+  harness.globalListeners.get("open-bot:open-computer")();
+  await flush();
+
+  assert.equal(harness.stateSlots[2], true);
+  assert.ok(
+    harness.requests.some(
+      ({ requestPath, body }) =>
+        requestPath === "/api/control" && body.action === "acquire",
+    ),
+  );
+  cleanup();
+  assert.equal(harness.globalListeners.size, 0);
 });
 
 test("official vendor login links are accepted only at the exact trusted route", () => {
