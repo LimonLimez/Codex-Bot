@@ -74,7 +74,20 @@ const WS_FILES = Object.freeze([
 ]);
 
 const MAIN_ANCHOR = '"use strict";var fjn=Object.create;';
-const MAIN_PATCH = '"use strict";require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));var fjn=Object.create;';
+const MAIN_PATCH = '"use strict";require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));var __openbotEarlyWebviewGuard;var fjn=Object.create;';
+const MAIN_ACTIVATE_HANDLER = 'xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})';
+// A loaded local-protocol window is app-ready; stock remote-only services keep booting under the existing catch.
+const MAIN_WINDOW_EDGE_ANCHOR = 'jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(';
+const MAIN_WINDOW_EDGE_PATCH = `jEr=F=>o.emit("mcp-auth-completed",F),aJn(),Ic.markPhase("window"),ijn=!0,await mjn(),${MAIN_ACTIVATE_HANDLER},Ic.noteReady(),mh=Rzn(`;
+const MAIN_MEDIA_PROTOCOL_ANCHOR = ';aJn(),Ic.markPhase("auth_service");';
+const MAIN_MEDIA_PROTOCOL_PATCH = ';Ic.markPhase("auth_service");';
+const MAIN_WEBVIEW_HARDENER_ANCHOR = 'qEr?.hardenWebviewAttach(r.webContents),bu=r';
+const MAIN_WEBVIEW_HARDENER_PATCH = 'qEr!=null?qEr.hardenWebviewAttach(r.webContents):(__openbotEarlyWebviewGuard=t=>t.preventDefault(),r.webContents.on("will-attach-webview",__openbotEarlyWebviewGuard)),bu=r';
+const MAIN_VNC_SERVICE_ANCHOR = '});qEr=$,s={pipes:';
+// Install the real hardener before removing the temporary deny listener so a thrown handoff stays fail-closed.
+const MAIN_VNC_SERVICE_PATCH = '});qEr=$,$.configureBoxVncSession(),bu!=null&&!bu.isDestroyed()&&($.hardenWebviewAttach(bu.webContents),__openbotEarlyWebviewGuard!=null&&bu.webContents.removeListener("will-attach-webview",__openbotEarlyWebviewGuard)),__openbotEarlyWebviewGuard=void 0,s={pipes:';
+const MAIN_LATE_WINDOW_ANCHOR = `}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),${MAIN_ACTIVATE_HANDLER}`;
+const MAIN_LATE_WINDOW_PATCH = '})';
 const COORDINATOR_REQUEST_ANCHOR = 'L=M({invokeRequest:()=>{s.ipcRenderer.invoke("sand:coordinator-port-request")}})';
 const COORDINATOR_REQUEST_PATCH = 'L=M({invokeRequest:()=>{s.ipcRenderer.invoke("openbot:coordinator-port-request")}})';
 const PRELOAD_ANCHOR = 's.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>';
@@ -89,7 +102,37 @@ function patchMainSource(source) {
   if (typeof source !== "string" || source.includes("codex/desktop/runtime.cjs")) {
     throw new Error("Codex desktop main patch is already installed or invalid.");
   }
-  return replaceUnique(source, MAIN_ANCHOR, MAIN_PATCH, "Grok Electron main runtime");
+  const runtime = replaceUnique(source, MAIN_ANCHOR, MAIN_PATCH, "Grok Electron main runtime");
+  const earlyWindow = replaceUnique(
+    runtime,
+    MAIN_WINDOW_EDGE_ANCHOR,
+    MAIN_WINDOW_EDGE_PATCH,
+    "Grok Electron early window bootstrap",
+  );
+  const earlyMediaProtocol = replaceUnique(
+    earlyWindow,
+    MAIN_MEDIA_PROTOCOL_ANCHOR,
+    MAIN_MEDIA_PROTOCOL_PATCH,
+    "Grok Electron media protocol bootstrap",
+  );
+  const earlyWebviewGuard = replaceUnique(
+    earlyMediaProtocol,
+    MAIN_WEBVIEW_HARDENER_ANCHOR,
+    MAIN_WEBVIEW_HARDENER_PATCH,
+    "Grok Electron early-window webview guard",
+  );
+  const vncCatchUp = replaceUnique(
+    earlyWebviewGuard,
+    MAIN_VNC_SERVICE_ANCHOR,
+    MAIN_VNC_SERVICE_PATCH,
+    "Grok Electron early-window VNC catch-up",
+  );
+  return replaceUnique(
+    vncCatchUp,
+    MAIN_LATE_WINDOW_ANCHOR,
+    MAIN_LATE_WINDOW_PATCH,
+    "Grok Electron late window bootstrap",
+  );
 }
 
 function patchPreloadSource(source) {

@@ -79,7 +79,7 @@ async function syntheticAsar(t, overrides = {}) {
   );
   fs.writeFileSync(
     path.join(tree, "dist", "electron-main", "main.cjs"),
-    'const setup="kept";\n"use strict";var fjn=Object.create;const stockFeature="kept";\n',
+    'const setup="kept";\n"use strict";var fjn=Object.create;jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase("auth_service");let $=Dzn({});qEr=$,s={pipes:{}};qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const stockFeature="kept";\n',
   );
   fs.writeFileSync(
     path.join(tree, "dist", "host", "host-main.cjs"),

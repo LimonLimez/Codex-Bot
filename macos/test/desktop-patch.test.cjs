@@ -4,11 +4,78 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const patchPath = path.join(__dirname, "..", "src", "patch", "desktop.cjs");
 
-const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;const mainFeature='kept';\n";
+const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;jEr=F=>o.emit(\"mcp-auth-completed\",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase(\"auth_service\");let $=Dzn({});qEr=$,s={pipes:{}};qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase(\"window\"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on(\"activate\",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const mainFeature='kept';\n";
+const STOCK_MAIN_WITH_HELD_REMOTE_READY = `"use strict";var fjn=Object.create;
+function createWebContents(){return{kind:"window-web-contents",listeners:new Map(),on(name,listener){let values=this.listeners.get(name)??[];values.push(listener);this.listeners.set(name,values)},removeListener(name,listener){let values=this.listeners.get(name)??[],index=values.indexOf(listener);if(index>=0){values.splice(index,1);globalThis.__startup.removedWebviewGuards+=1}this.listeners.set(name,values)},emit(name,...args){for(let listener of [...(this.listeners.get(name)??[])])listener(...args)},listenerCount(name){return(this.listeners.get(name)??[]).length}}}
+const Ic=globalThis.__startup.Ic,o={emit(){}},xt={
+  BrowserWindow:class BrowserWindow{constructor(){globalThis.__startup.windows+=1;globalThis.__startup.events.push("browser-window");this.webContents=createWebContents();this.destroyed=false;globalThis.__startup.liveWindows.push(this)}static getAllWindows(){return globalThis.__startup.liveWindows.filter(window=>!window.isDestroyed())}isDestroyed(){return this.destroyed}destroy(){this.destroyed=true}},
+  app:{on(name,handler){if(name==="activate"){globalThis.__startup.activateHandlers+=1;globalThis.__startup.activateHandler=handler}}}
+};
+const Rzn=value=>{globalThis.__startup.remoteCompleted=true;return value},UOn=()=>{},Dzn=()=>({
+  configureBoxVncSession(){globalThis.__startup.vncConfigurations+=1},
+  hardenWebviewAttach(contents){if(globalThis.__startup.hardenerFailure!=null)throw globalThis.__startup.hardenerFailure;globalThis.__startup.hardenedContents.push(contents);contents.on("will-attach-webview",()=>{globalThis.__startup.realWebviewAttachEvents+=1})}
+});
+let ijn=false,jEr,mh,qEr,s,bu,FEr;
+function aJn(){globalThis.__startup.protocolRegistrations+=1;globalThis.__startup.events.push("protocol")}
+async function mjn(){qEr?.configureBoxVncSession();let r=new xt.BrowserWindow();qEr?.hardenWebviewAttach(r.webContents),bu=r,globalThis.__startup.window=r}
+function sjn(){bu!=null&&!bu.isDestroyed()||FEr==null&&(FEr=mjn().finally(()=>{FEr=void 0}))}
+globalThis.__bootstrapDone=(async()=>{
+  jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(await globalThis.__remoteReady);aJn(),Ic.markPhase("auth_service");
+  let $=Dzn({});qEr=$,s={pipes:{}};
+  UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})
+})().catch(error=>{Ic.noteFailed(error);throw error});
+`;
 const STOCK_PRELOAD = "const stock='kept';const L=M({invokeRequest:()=>{s.ipcRenderer.invoke(\"sand:coordinator-port-request\")}});s.contextBridge.exposeInMainWorld(\"desktop\",Q);s.contextBridge.exposeInMainWorld(\"coordinatorPort\",X);s.ipcRenderer.on(\"sand:coordinator-port\",e=>{});\n";
+
+function startSyntheticMain(remoteReady, overrides = {}) {
+  const { patchMainSource } = require(patchPath);
+  const startup = {
+    activateHandlers: 0,
+    activateHandler: null,
+    events: [],
+    hardenedContents: [],
+    hardenerFailure: null,
+    liveWindows: [],
+    protocolRegistrations: 0,
+    ready: false,
+    readyCalls: 0,
+    realWebviewAttachEvents: 0,
+    remoteCompleted: false,
+    remoteFailures: [],
+    removedWebviewGuards: 0,
+    vncConfigurations: 0,
+    window: null,
+    windows: 0,
+    ...overrides,
+  };
+  startup.Ic = {
+    markPhase() {},
+    noteReady() {
+      startup.ready = true;
+      startup.readyCalls += 1;
+    },
+    noteFailed(error) {
+      startup.remoteFailures.push(error);
+    },
+  };
+  const context = {
+    __remoteReady: remoteReady,
+    __startup: startup,
+    require(request) {
+      if (request === "../codex/desktop/runtime.cjs") {
+        return { installDesktopRuntime() {} };
+      }
+      if (request === "electron") return {};
+      throw new Error(`Unexpected synthetic require: ${request}`);
+    },
+  };
+  vm.runInNewContext(patchMainSource(STOCK_MAIN_WITH_HELD_REMOTE_READY), context);
+  return { context, startup };
+}
 
 test("desktop patch adds isolated main/preload facades without changing stock exports", () => {
   const { patchMainSource, patchPreloadSource } = require(patchPath);
@@ -58,6 +125,123 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   }
   assert.throws(() => patchMainSource(main), /already|anchor/i);
   assert.throws(() => patchPreloadSource(preload), /already|anchor/i);
+});
+
+test("desktop patch creates the stock window while remote-service readiness is held", async () => {
+  let releaseRemoteReady;
+  const remoteReady = new Promise(resolve => {
+    releaseRemoteReady = resolve;
+  });
+  const { context, startup } = startSyntheticMain(remoteReady);
+  await Promise.resolve();
+
+  assert.equal(startup.remoteCompleted, false, "the stock remote gate must still be held");
+  assert.deepEqual(startup.events, ["protocol", "browser-window"], "media protocol must precede the window");
+  assert.equal(startup.protocolRegistrations, 1);
+  assert.equal(startup.windows, 1, "window creation must not wait for stock remote readiness");
+  const blockedAttach = {
+    prevented: false,
+    preventDefault() {
+      this.prevented = true;
+    },
+  };
+  startup.window.webContents.emit("will-attach-webview", blockedAttach, {}, {});
+  assert.equal(blockedAttach.prevented, true, "early webviews must fail closed before VNC hardening exists");
+  assert.equal(startup.realWebviewAttachEvents, 0);
+  assert.equal(startup.window.webContents.listenerCount("will-attach-webview"), 1);
+  assert.equal(startup.vncConfigurations, 0, "late VNC services must still be held");
+  assert.deepEqual(startup.hardenedContents, []);
+  assert.equal(startup.ready, true, "the usable local window is ready while remote-only services are held");
+  assert.equal(startup.readyCalls, 1, "local startup readiness must be reported exactly once");
+  assert.equal(startup.activateHandlers, 1, "window recreation must be armed before remote readiness");
+  assert.equal(typeof startup.activateHandler, "function");
+  releaseRemoteReady();
+  await context.__bootstrapDone;
+  assert.equal(startup.remoteCompleted, true);
+  assert.equal(startup.ready, true);
+  assert.equal(startup.readyCalls, 1);
+  assert.equal(startup.protocolRegistrations, 1, "the relocated media protocol registration must run once");
+  assert.equal(startup.windows, 1, "the relocated stock window creator must run exactly once");
+  assert.equal(startup.vncConfigurations, 1, "late VNC setup must catch up to the early window exactly once");
+  assert.deepEqual(startup.hardenedContents, [startup.window.webContents]);
+  assert.equal(startup.removedWebviewGuards, 1, "the exact temporary guard must be removed at handoff");
+  assert.equal(startup.window.webContents.listenerCount("will-attach-webview"), 1, "the real hardener must own future attaches");
+  const hardenedAttach = { prevented: false, preventDefault() { this.prevented = true; } };
+  startup.window.webContents.emit("will-attach-webview", hardenedAttach, {}, {});
+  assert.equal(hardenedAttach.prevented, false);
+  assert.equal(startup.realWebviewAttachEvents, 1);
+  assert.equal(startup.activateHandlers, 1, "stock activation handling must remain installed");
+
+  const firstWindow = startup.window;
+  firstWindow.destroy();
+  startup.activateHandler();
+  startup.activateHandler();
+  await Promise.resolve();
+  assert.equal(startup.windows, 2, "repeated activation must recreate exactly one window");
+  assert.notEqual(startup.window, firstWindow);
+  assert.equal(startup.vncConfigurations, 2, "the recreated window must use the ready VNC service");
+  assert.deepEqual(startup.hardenedContents, [firstWindow.webContents, startup.window.webContents]);
+  assert.equal(startup.window.webContents.listenerCount("will-attach-webview"), 1);
+  assert.equal(startup.activateHandlers, 1, "activation registration must not duplicate");
+});
+
+test("early webview denial survives a throwing real hardener", async () => {
+  let releaseRemoteReady;
+  const remoteReady = new Promise(resolve => {
+    releaseRemoteReady = resolve;
+  });
+  const hardenerFailure = new Error("synthetic hardener failure");
+  const { context, startup } = startSyntheticMain(remoteReady, { hardenerFailure });
+  await Promise.resolve();
+  assert.equal(startup.ready, true);
+  assert.equal(startup.readyCalls, 1);
+
+  const rejected = assert.rejects(context.__bootstrapDone, error => error === hardenerFailure);
+  releaseRemoteReady();
+  await rejected;
+
+  assert.deepEqual(startup.remoteFailures, [hardenerFailure]);
+  assert.equal(startup.removedWebviewGuards, 0, "a failed handoff must retain the deny guard");
+  assert.deepEqual(startup.hardenedContents, []);
+  assert.equal(startup.window.webContents.listenerCount("will-attach-webview"), 1);
+  const blockedAttach = { prevented: false, preventDefault() { this.prevented = true; } };
+  startup.window.webContents.emit("will-attach-webview", blockedAttach, {}, {});
+  assert.equal(blockedAttach.prevented, true);
+  assert.equal(startup.realWebviewAttachEvents, 0);
+});
+
+test("a remote failure after local readiness remains captured", async () => {
+  let rejectRemoteReady;
+  const remoteReady = new Promise((_resolve, reject) => {
+    rejectRemoteReady = reject;
+  });
+  const remoteFailure = new Error("synthetic remote readiness failure");
+  const { context, startup } = startSyntheticMain(remoteReady);
+  await Promise.resolve();
+  assert.equal(startup.ready, true);
+  assert.equal(startup.readyCalls, 1);
+
+  const rejected = assert.rejects(context.__bootstrapDone, error => error === remoteFailure);
+  rejectRemoteReady(remoteFailure);
+  await rejected;
+
+  assert.equal(startup.ready, true, "a usable local window remains ready");
+  assert.equal(startup.readyCalls, 1);
+  assert.deepEqual(startup.remoteFailures, [remoteFailure]);
+  assert.equal(startup.remoteCompleted, false);
+  assert.equal(startup.activateHandlers, 1, "remote failure must not remove local window recreation");
+  const failedBootstrapWindow = startup.window;
+  failedBootstrapWindow.destroy();
+  startup.activateHandler();
+  startup.activateHandler();
+  await Promise.resolve();
+  assert.equal(startup.windows, 2, "activation after remote failure must create exactly one local window");
+  assert.notEqual(startup.window, failedBootstrapWindow);
+  assert.equal(startup.vncConfigurations, 0, "remote VNC remains unavailable after the failed gate");
+  const blockedAttach = { prevented: false, preventDefault() { this.prevented = true; } };
+  startup.window.webContents.emit("will-attach-webview", blockedAttach, {}, {});
+  assert.equal(blockedAttach.prevented, true, "the recreated local window must remain fail-closed");
+  assert.equal(startup.activateHandlers, 1);
 });
 
 test("desktop packaging includes every direct inference runtime module in the audited ASAR", () => {
