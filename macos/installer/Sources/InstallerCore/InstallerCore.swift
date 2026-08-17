@@ -199,6 +199,45 @@ public struct InstallerReceipt: Equatable, Sendable {
     }
 }
 
+private struct HelperBranding {
+    let suffix: String
+    let vendorIdentifier: String
+    let openBotIdentifier: String
+
+    var vendorName: String { "Grok Bot Helper\(suffix)" }
+    var vendorBundleName: String { "Electron Helper\(suffix)" }
+    var openBotName: String { "OpenBot Helper\(suffix)" }
+}
+
+private let helperBrandings = [
+    HelperBranding(
+        suffix: "",
+        vendorIdentifier: "com.anysphere.sand.helper",
+        openBotIdentifier: "com.limonlimez.openbot.helper"
+    ),
+    HelperBranding(
+        suffix: " (GPU)",
+        vendorIdentifier: "com.anysphere.sand.helper.GPU",
+        openBotIdentifier: "com.limonlimez.openbot.helper.GPU"
+    ),
+    HelperBranding(
+        suffix: " (Plugin)",
+        vendorIdentifier: "com.anysphere.sand.helper.Plugin",
+        openBotIdentifier: "com.limonlimez.openbot.helper.Plugin"
+    ),
+    HelperBranding(
+        suffix: " (Renderer)",
+        vendorIdentifier: "com.anysphere.sand.helper.Renderer",
+        openBotIdentifier: "com.limonlimez.openbot.helper.Renderer"
+    ),
+]
+
+private let helperEntitlementKeys = Set([
+    "com.apple.security.cs.allow-jit",
+    "com.apple.security.cs.allow-unsigned-executable-memory",
+    "com.apple.security.cs.disable-library-validation",
+])
+
 private func realItem(_ url: URL, directory: Bool) throws {
     guard url.isFileURL, url.path.hasPrefix("/") else { throw InstallerFailure.unsafePath }
     let values: URLResourceValues
@@ -290,6 +329,7 @@ public final class InstallerTransaction: @unchecked Sendable {
             try files.createDirectory(at: stageRoot, withIntermediateDirectories: false)
             try files.copyItem(at: paths.vendorApp, to: stagedApp)
             try patch(stagedApp: stagedApp, nodeExecutable: vendorExecutable)
+            try rebrand(stagedApp: stagedApp)
             try signAndVerify(stagedApp: stagedApp)
 
             try files.createDirectory(
@@ -405,6 +445,7 @@ public final class InstallerTransaction: @unchecked Sendable {
               profilePublisherDigest == paths.expectedProfilePublisherSHA256 else {
             throw InstallerFailure.invalidInput
         }
+        try validateBundleBrandingLayout(app: paths.vendorApp, openBot: false)
         try prepareWorkingDirectory(canonicalVendor: canonicalVendor)
     }
 
@@ -444,6 +485,145 @@ public final class InstallerTransaction: @unchecked Sendable {
             throw InstallerFailure.unsafePath
         }
         accepted = true
+    }
+
+    private func directoryEntryNames(_ directory: URL) throws -> [String] {
+        try realItem(directory, directory: true)
+        do {
+            return try files.contentsOfDirectory(atPath: directory.path).sorted()
+        } catch {
+            throw InstallerFailure.invalidInput
+        }
+    }
+
+    private func plistDictionary(at url: URL) throws -> [String: Any] {
+        try realItem(url, directory: false)
+        do {
+            guard let plist = try PropertyListSerialization.propertyList(
+                from: Data(contentsOf: url), options: [], format: nil
+            ) as? [String: Any] else {
+                throw InstallerFailure.invalidInput
+            }
+            return plist
+        } catch let failure as InstallerFailure {
+            throw failure
+        } catch {
+            throw InstallerFailure.invalidInput
+        }
+    }
+
+    private func writePlistDictionary(_ plist: [String: Any], to url: URL) throws {
+        do {
+            let data = try PropertyListSerialization.data(
+                fromPropertyList: plist, format: .binary, options: 0
+            )
+            try data.write(to: url, options: .atomic)
+        } catch {
+            throw InstallerFailure.transactionFailed
+        }
+    }
+
+    private func validateBundleBrandingLayout(app: URL, openBot: Bool) throws {
+        try realItem(app, directory: true)
+        let contents = app.appendingPathComponent("Contents", isDirectory: true)
+        let macOS = contents.appendingPathComponent("MacOS", isDirectory: true)
+        let frameworks = contents.appendingPathComponent("Frameworks", isDirectory: true)
+        let rootPlistURL = contents.appendingPathComponent("Info.plist")
+        try realItem(contents, directory: true)
+        let expectedRootName = openBot ? "OpenBot" : "Grok Bot"
+        guard try directoryEntryNames(macOS) == [expectedRootName] else {
+            throw InstallerFailure.invalidInput
+        }
+        try realItem(macOS.appendingPathComponent(expectedRootName), directory: false)
+        let rootPlist = try plistDictionary(at: rootPlistURL)
+        guard rootPlist["CFBundleIdentifier"] as? String
+                == (openBot ? "com.limonlimez.openbot" : "com.anysphere.sand"),
+              rootPlist["CFBundleName"] as? String == expectedRootName,
+              rootPlist["CFBundleDisplayName"] as? String == expectedRootName,
+              rootPlist["CFBundleExecutable"] as? String == expectedRootName else {
+            throw InstallerFailure.invalidInput
+        }
+        if !openBot {
+            guard rootPlist["CFBundleShortVersionString"] as? String == "0.20.0",
+                  rootPlist["CFBundleVersion"] as? String == "0.20.0" else {
+                throw InstallerFailure.invalidInput
+            }
+        }
+
+        let frameworkEntries = try directoryEntryNames(frameworks)
+        let expectedHelperEntries = Set(helperBrandings.map {
+            "\(openBot ? $0.openBotName : $0.vendorName).app"
+        })
+        let helperLikeEntries = Set(frameworkEntries.filter {
+            $0.hasSuffix(".app") || $0.localizedCaseInsensitiveContains("helper")
+        })
+        guard helperLikeEntries == expectedHelperEntries else {
+            throw InstallerFailure.invalidInput
+        }
+
+        for helper in helperBrandings {
+            let helperName = openBot ? helper.openBotName : helper.vendorName
+            let helperBundle = frameworks.appendingPathComponent("\(helperName).app", isDirectory: true)
+            let helperContents = helperBundle.appendingPathComponent("Contents", isDirectory: true)
+            let helperMacOS = helperContents.appendingPathComponent("MacOS", isDirectory: true)
+            let helperExecutable = helperMacOS.appendingPathComponent(helperName)
+            try realItem(helperBundle, directory: true)
+            try realItem(helperContents, directory: true)
+            guard try directoryEntryNames(helperMacOS) == [helperName] else {
+                throw InstallerFailure.invalidInput
+            }
+            try realItem(helperExecutable, directory: false)
+            let helperPlist = try plistDictionary(at: helperContents.appendingPathComponent("Info.plist"))
+            let expectedIdentifier = openBot ? helper.openBotIdentifier : helper.vendorIdentifier
+            let expectedBundleName = openBot ? helper.openBotName : helper.vendorBundleName
+            guard helperPlist["CFBundleIdentifier"] as? String == expectedIdentifier,
+                  helperPlist["CFBundleName"] as? String == expectedBundleName,
+                  helperPlist["CFBundleDisplayName"] as? String == helperName,
+                  helperPlist["CFBundleExecutable"] as? String == helperName,
+                  helperPlist["CFBundlePackageType"] as? String == "APPL",
+                  helperPlist["CFBundleVersion"] as? String == "0.20.0",
+                  helperPlist["LSUIElement"] as? Bool == true else {
+                throw InstallerFailure.invalidInput
+            }
+        }
+    }
+
+    private func rebrand(stagedApp: URL) throws {
+        try validateBundleBrandingLayout(app: stagedApp, openBot: false)
+        let contents = stagedApp.appendingPathComponent("Contents", isDirectory: true)
+        let macOS = contents.appendingPathComponent("MacOS", isDirectory: true)
+        try files.moveItem(
+            at: macOS.appendingPathComponent("Grok Bot"),
+            to: macOS.appendingPathComponent("OpenBot")
+        )
+
+        let frameworks = contents.appendingPathComponent("Frameworks", isDirectory: true)
+        for helper in helperBrandings {
+            let vendorBundle = frameworks.appendingPathComponent("\(helper.vendorName).app", isDirectory: true)
+            let openBotBundle = frameworks.appendingPathComponent("\(helper.openBotName).app", isDirectory: true)
+            try files.moveItem(at: vendorBundle, to: openBotBundle)
+            let helperMacOS = openBotBundle.appendingPathComponent("Contents/MacOS", isDirectory: true)
+            try files.moveItem(
+                at: helperMacOS.appendingPathComponent(helper.vendorName),
+                to: helperMacOS.appendingPathComponent(helper.openBotName)
+            )
+            let helperPlistURL = openBotBundle.appendingPathComponent("Contents/Info.plist")
+            var helperPlist = try plistDictionary(at: helperPlistURL)
+            helperPlist["CFBundleIdentifier"] = helper.openBotIdentifier
+            helperPlist["CFBundleName"] = helper.openBotName
+            helperPlist["CFBundleDisplayName"] = helper.openBotName
+            helperPlist["CFBundleExecutable"] = helper.openBotName
+            try writePlistDictionary(helperPlist, to: helperPlistURL)
+        }
+
+        let rootPlistURL = contents.appendingPathComponent("Info.plist")
+        var rootPlist = try plistDictionary(at: rootPlistURL)
+        rootPlist["CFBundleIdentifier"] = "com.limonlimez.openbot"
+        rootPlist["CFBundleName"] = "OpenBot"
+        rootPlist["CFBundleDisplayName"] = "OpenBot"
+        rootPlist["CFBundleExecutable"] = "OpenBot"
+        try writePlistDictionary(rootPlist, to: rootPlistURL)
+        try validateBundleBrandingLayout(app: stagedApp, openBot: true)
     }
 
     private func patch(stagedApp: URL, nodeExecutable: URL) throws {
@@ -512,7 +692,9 @@ public final class InstallerTransaction: @unchecked Sendable {
             from: Data(contentsOf: plistURL), options: [], format: nil
         ) as? [String: Any] else { throw InstallerFailure.invalidInput }
         plist["CFBundleIdentifier"] = "com.limonlimez.openbot"
+        plist["CFBundleName"] = "OpenBot"
         plist["CFBundleDisplayName"] = "OpenBot"
+        plist["CFBundleExecutable"] = "OpenBot"
         plist["CFBundleShortVersionString"] = "0.2.0-macos.1"
         plist["CFBundleVersion"] = "0.2.0.1"
         plist["CodexBotSidecarBytes"] = sidecarBytes
@@ -547,6 +729,15 @@ public final class InstallerTransaction: @unchecked Sendable {
         try receipt.write(to: receiptURL, options: .atomic)
         try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: receiptURL.path)
         try updatePlist(stagedApp: stagedApp, sidecarBytes: sidecarData.count, sidecarSHA256: sidecarSHA256)
+        let frameworks = stagedApp.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        for helper in helperBrandings {
+            let helperBundle = frameworks.appendingPathComponent("\(helper.openBotName).app", isDirectory: true)
+            try checked(runner, CommandCall(
+                executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+                arguments: helperSigningArguments(for: helperBundle)
+            ))
+            try verifyHelperSignature(helperBundle, expectedIdentifier: helper.openBotIdentifier)
+        }
         try checked(runner, CommandCall(
             executable: URL(fileURLWithPath: "/usr/bin/codesign"),
             arguments: signingArguments(for: stagedApp)
@@ -559,5 +750,64 @@ public final class InstallerTransaction: @unchecked Sendable {
 
     private func signingArguments(for target: URL) -> [String] {
         ["--force", "--timestamp=none", "--sign", "-", target.path]
+    }
+
+    private func helperSigningArguments(for target: URL) -> [String] {
+        [
+            "--force",
+            "--timestamp=none",
+            "--preserve-metadata=flags,entitlements",
+            "--sign", "-",
+            target.path,
+        ]
+    }
+
+    private func verifyHelperSignature(_ helper: URL, expectedIdentifier: String) throws {
+        let result = try runner.run(CommandCall(
+            executable: URL(fileURLWithPath: "/usr/bin/codesign"),
+            arguments: [
+                "--display",
+                "--verbose=4",
+                "--requirements", "-",
+                "--entitlements", "-",
+                "--xml",
+                helper.path,
+            ]
+        ))
+        guard result.status == 0 else { throw InstallerFailure.commandFailed }
+        var output = result.stdout
+        output.append(0x0a)
+        output.append(result.stderr)
+        guard let display = String(data: output, encoding: .utf8) else {
+            throw InstallerFailure.invalidInput
+        }
+        let lines = display.split(whereSeparator: \Character.isNewline).map(String.init)
+        let identifierLines = lines.filter { $0.hasPrefix("Identifier=") }
+        let codeDirectoryLines = lines.filter { $0.hasPrefix("CodeDirectory ") }
+        let signatureLines = lines.filter { $0.hasPrefix("Signature=") }
+        let requirementLines = lines.filter { $0.hasPrefix("# designated =>") }
+        let freshAdHocRequirement = #"^# designated => cdhash H"[a-f0-9]{40}"$"#
+        guard identifierLines == ["Identifier=\(expectedIdentifier)"],
+              codeDirectoryLines.count == 1,
+              codeDirectoryLines[0].contains(" flags=0x10002(adhoc,runtime) "),
+              signatureLines == ["Signature=adhoc"],
+              requirementLines.count == 1,
+              requirementLines[0].range(
+                  of: freshAdHocRequirement, options: .regularExpression
+              ) != nil,
+              !display.contains("com.anysphere.sand") else {
+            throw InstallerFailure.invalidInput
+        }
+
+        guard let xmlStart = display.range(of: "<?xml"),
+              let plistEnd = display.range(of: "</plist>", range: xmlStart.lowerBound..<display.endIndex),
+              let xmlData = String(display[xmlStart.lowerBound..<plistEnd.upperBound]).data(using: .utf8),
+              let entitlements = try? PropertyListSerialization.propertyList(
+                  from: xmlData, options: [], format: nil
+              ) as? [String: Any],
+              Set(entitlements.keys) == helperEntitlementKeys,
+              helperEntitlementKeys.allSatisfy({ entitlements[$0] as? Bool == true }) else {
+            throw InstallerFailure.invalidInput
+        }
     }
 }
