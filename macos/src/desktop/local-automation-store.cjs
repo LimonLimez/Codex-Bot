@@ -1,8 +1,5 @@
 "use strict";
 
-const fs = require("node:fs/promises");
-const path = require("node:path");
-const { randomUUID } = require("node:crypto");
 const { types } = require("node:util");
 const { parseLocalCron } = require("./local-cron-schedule.cjs");
 
@@ -21,7 +18,6 @@ const MAX_COALESCED_INPUT_IDS = 256;
 const MAX_OPAQUE_ID_LENGTH = 256;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CONVERSATION_ID = /^conversation-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const INVOCATION_ID = /^invocation-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -80,12 +76,15 @@ function ownData(value, allowed, required = allowed) {
 
 function denseArray(value, maximum) {
   if (!Array.isArray(value) || types.isProxy(value)) fail();
+  let prototype;
   let descriptors;
-  try { descriptors = Object.getOwnPropertyDescriptors(value); } catch { fail(); }
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch { fail(); }
   const length = descriptors.length?.value;
-  if (!Number.isSafeInteger(length) || length < 0 || length > maximum
-    || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string"
-      || (key !== "length" && !/^(?:0|[1-9]\d*)$/.test(key)))) fail();
+  if (prototype !== Array.prototype || !Number.isSafeInteger(length) || length < 0
+    || length > maximum || Reflect.ownKeys(descriptors).length !== length + 1) fail();
   const result = [];
   for (let index = 0; index < length; index += 1) {
     const descriptor = descriptors[index];
@@ -169,8 +168,10 @@ function cronTrigger(value) {
 
 function config(value) {
   const raw = ownData(value, CONFIG_FIELDS);
+  if (typeof raw.name !== "string" || raw.name.length > 4096 || raw.name.includes("\0")) fail();
+  const name = raw.name.trim().replace(/\s+/g, " ");
   return {
-    name: boundedString(raw.name, { maximum: MAX_NAME_LENGTH }),
+    name: boundedString(name, { maximum: MAX_NAME_LENGTH }),
     prompt: boundedString(raw.prompt, { maximum: MAX_PROMPT_BYTES, bytes: true }),
     trigger: cronTrigger(raw.trigger),
     triggerDescription: boundedString(raw.triggerDescription, {
@@ -246,6 +247,7 @@ function storedAutomation(value) {
   if (updatedAt < createdAt) fail();
   const runs = denseArray(raw.runs, MAX_RUNS).map((entry) => runRecord(entry, { persisted: true }));
   if (new Set(runs.map((entry) => entry.id)).size !== runs.length) fail();
+  if (runs.filter((entry) => entry.status === "running").length > 1) fail();
   for (let index = 1; index < runs.length; index += 1) {
     if (runs[index - 1].startedAt < runs[index].startedAt) fail();
   }
@@ -284,7 +286,7 @@ function emptyState() { return { schemaVersion: SCHEMA_VERSION, automations: [] 
 
 function slugName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "").slice(0, 48).replace(/-+$/g, "");
+    .replace(/^-+|-+$/g, "").slice(0, 48);
 }
 
 function availableAutomationId(state, owner, name, now) {
@@ -399,22 +401,14 @@ function normalizeDeleteBotsRequest(value) {
 }
 
 class LocalAutomationStore {
-  #filePath;
-  #fs;
-  #makeId;
+  #stateIO;
   #now;
   #queue = Promise.resolve();
 
-  constructor({ filePath, fs: fsApi = fs, randomUUID: makeId = randomUUID,
-    now = () => new Date().toISOString() } = {}) {
-    if (typeof filePath !== "string" || !path.isAbsolute(filePath)
-      || !fsApi || typeof fsApi.lstat !== "function" || typeof fsApi.readFile !== "function"
-      || typeof fsApi.mkdir !== "function" || typeof fsApi.open !== "function"
-      || typeof fsApi.rename !== "function" || typeof fsApi.chmod !== "function"
-      || typeof makeId !== "function" || typeof now !== "function") fail();
-    this.#filePath = filePath;
-    this.#fs = fsApi;
-    this.#makeId = makeId;
+  constructor({ stateIO, now = () => new Date().toISOString() } = {}) {
+    if (!stateIO || typeof stateIO !== "object" || typeof stateIO.read !== "function"
+      || typeof stateIO.write !== "function" || typeof now !== "function") fail();
+    this.#stateIO = stateIO;
     this.#now = now;
   }
 
@@ -653,13 +647,6 @@ class LocalAutomationStore {
     });
   }
 
-  #newUuid() {
-    let value;
-    try { value = this.#makeId(); } catch { fail(); }
-    if (typeof value !== "string" || !UUID.test(value)) fail();
-    return value;
-  }
-
   #ownedIndex(state, owner, id) {
     const index = state.automations.findIndex((entry) => entry.botId === owner && entry.id === id);
     if (index < 0) fail();
@@ -683,39 +670,10 @@ class LocalAutomationStore {
   }
 
   async #readState() {
-    const directory = path.dirname(this.#filePath);
-    let directoryStat;
-    try { directoryStat = await this.#fs.lstat(directory); }
-    catch (error) {
-      if (error?.code === "ENOENT") return emptyState();
-      fail();
-    }
-    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) fail();
-    if ((directoryStat.mode & 0o777) !== 0o700) {
-      try {
-        await this.#fs.chmod(directory, 0o700);
-        directoryStat = await this.#fs.lstat(directory);
-      } catch { fail(); }
-      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
-        || (directoryStat.mode & 0o777) !== 0o700) fail();
-    }
-    let stat;
-    try { stat = await this.#fs.lstat(this.#filePath); }
-    catch (error) {
-      if (error?.code === "ENOENT") return emptyState();
-      fail();
-    }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES) fail();
-    if ((stat.mode & 0o777) !== 0o600) {
-      try {
-        await this.#fs.chmod(this.#filePath, 0o600);
-        stat = await this.#fs.lstat(this.#filePath);
-      } catch { fail(); }
-      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES
-        || (stat.mode & 0o777) !== 0o600) fail();
-    }
     let source;
-    try { source = await this.#fs.readFile(this.#filePath, "utf8"); } catch { fail(); }
+    try { source = await this.#stateIO.read(); } catch { fail(); }
+    if (source === null) return emptyState();
+    if (typeof source !== "string") fail();
     if (Buffer.byteLength(source, "utf8") > MAX_FILE_BYTES) fail();
     try { return normalizeState(JSON.parse(source)); } catch { fail(); }
   }
@@ -725,49 +683,7 @@ class LocalAutomationStore {
     let source;
     try { source = `${JSON.stringify(state, null, 2)}\n`; } catch { fail(); }
     if (Buffer.byteLength(source, "utf8") > MAX_FILE_BYTES) fail();
-    const directory = path.dirname(this.#filePath);
-    let temporary = null;
-    let fileHandle = null;
-    let directoryHandle = null;
-    let renamed = false;
-    try {
-      await this.#fs.mkdir(directory, { recursive: true, mode: 0o700 });
-      let directoryStat = await this.#fs.lstat(directory);
-      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) fail();
-      if ((directoryStat.mode & 0o777) !== 0o700) {
-        await this.#fs.chmod(directory, 0o700);
-        directoryStat = await this.#fs.lstat(directory);
-      }
-      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
-        || (directoryStat.mode & 0o777) !== 0o700) fail();
-      temporary = path.join(directory, `.${path.basename(this.#filePath)}.${this.#newUuid()}.tmp`);
-      fileHandle = await this.#fs.open(temporary, "wx", 0o600);
-      await fileHandle.writeFile(source, "utf8");
-      await fileHandle.sync();
-      await fileHandle.close();
-      fileHandle = null;
-      await this.#fs.rename(temporary, this.#filePath);
-      renamed = true;
-      temporary = null;
-      await this.#fs.chmod(this.#filePath, 0o600);
-      directoryHandle = await this.#fs.open(directory, "r");
-      await directoryHandle.sync();
-      await directoryHandle.close();
-      directoryHandle = null;
-    } catch {
-      try { await fileHandle?.close(); } catch {}
-      try { await directoryHandle?.close(); } catch {}
-      if (temporary) {
-        try { await this.#fs.rm(temporary, { force: true }); } catch {}
-      }
-      if (renamed) {
-        try {
-          const committed = await this.#readState();
-          if (JSON.stringify(committed) === JSON.stringify(state)) return;
-        } catch {}
-      }
-      fail();
-    }
+    try { await this.#stateIO.write(source); } catch { fail(); }
   }
 }
 

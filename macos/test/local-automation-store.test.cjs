@@ -44,16 +44,34 @@ async function fixture(t, overrides = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-local-automation-store-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const filePath = path.join(root, "private", "local-automations.v1.json");
+  await fs.mkdir(path.dirname(filePath), { mode: 0o700 });
   return {
     filePath,
     root,
     store: new LocalAutomationStore({
-      filePath,
+      stateIO: fileStateIO(filePath),
       randomUUID: uuidSequence(),
       now: () => NOW_1,
       ...overrides,
     }),
   };
+}
+
+function fileStateIO(filePath, overrides = {}) {
+  return {
+    async read() {
+      try { return await fs.readFile(filePath, "utf8"); }
+      catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+    },
+    async write(source) {
+      await fs.writeFile(filePath, source, { mode: 0o600 });
+    },
+    ...overrides,
+  };
+}
+
+function localStore({ filePath, stateIO = fileStateIO(filePath), ...options }) {
+  return new LocalAutomationStore({ stateIO, ...options });
 }
 
 function assertDeepFrozen(value) {
@@ -85,13 +103,13 @@ test("schema-v1 CRUD persists exact private records and returns deeply frozen bo
     conversationId: null,
   });
   assertDeepFrozen(created);
-  assert.deepEqual(await new LocalAutomationStore({ filePath }).list(BOT_A), created);
+  assert.deepEqual(await localStore({ filePath }).list(BOT_A), created);
   assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")), {
     schemaVersion: 1,
     automations: [created[0]],
   });
 
-  const updatedStore = new LocalAutomationStore({ filePath, now: () => NOW_2 });
+  const updatedStore = localStore({ filePath, now: () => NOW_2 });
   const replaced = await updatedStore.replace({
     botId: BOT_A,
     automationId: AUTOMATION_A,
@@ -117,7 +135,7 @@ test("lists use deterministic next-run then created ordering with exact bot isol
     "2026-08-17T12:00:04.000Z",
   ];
   let time = 0;
-  const store = new LocalAutomationStore({
+  const store = localStore({
     filePath,
     randomUUID: uuidSequence(0x201),
     now: () => times[time++],
@@ -152,7 +170,7 @@ test("enforces unique safe ids and bounded config fields before durable mutation
     await assert.rejects(store.create(request), { code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED" });
   }
   assert.deepEqual(await fs.readFile(filePath), before);
-  assert.throws(() => new LocalAutomationStore({ filePath: "relative.json" }), LocalAutomationStoreError);
+  assert.throws(() => new LocalAutomationStore({ stateIO: null }), LocalAutomationStoreError);
 });
 
 test("creation derives Grok-compatible slug collision and empty-slug fallback ids", async (t) => {
@@ -181,10 +199,10 @@ test("persisted and requested automation ids accept only opaque safe directory s
   const state = JSON.parse(await fs.readFile(filePath, "utf8"));
   state.automations[0].id = "legacy.safe_id";
   await fs.writeFile(filePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
-  assert.equal((await new LocalAutomationStore({ filePath }).list(BOT_A))[0].id, "legacy.safe_id");
+  assert.equal((await localStore({ filePath }).list(BOT_A))[0].id, "legacy.safe_id");
 
   for (const id of ["", ".", "..", "a/b", "a\\b", "nul\0id"] ) {
-    await assert.rejects(new LocalAutomationStore({ filePath }).delete({
+    await assert.rejects(localStore({ filePath }).delete({
       botId: BOT_A, automationId: id, expectedRevision: 1,
     }), { code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED" });
   }
@@ -360,7 +378,7 @@ test("restart recovery terminals running records before exact bot deletion and r
     },
     nextRunAt: 1_786_975_200_000,
   });
-  const restarted = new LocalAutomationStore({ filePath });
+  const restarted = localStore({ filePath });
   const recovered = await restarted.recoverRunning({ finishedAt: NOW_2_MS });
   assert.equal(recovered[0].runs[0].status, "error");
   assert.equal(recovered[0].runs[0].finishedAt, NOW_2_MS);
@@ -374,158 +392,70 @@ test("restart recovery terminals running records before exact bot deletion and r
   });
 });
 
-test("atomic commits sync a randomized private sibling file and its parent directory", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-local-automation-atomic-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const filePath = path.join(root, "private", "local-automations.v1.json");
-  const operations = [];
-  const observedFs = {
-    ...fs,
-    async open(target, flags, mode) {
-      operations.push(["open", target, flags, mode]);
-      const handle = await fs.open(target, flags, mode);
-      return {
-        async writeFile(...args) { operations.push(["write", target]); return handle.writeFile(...args); },
-        async sync() { operations.push(["sync", target]); return handle.sync(); },
-        async close() { operations.push(["close", target]); return handle.close(); },
-      };
-    },
-    async rename(from, to) {
-      operations.push(["rename", from, to]);
-      return fs.rename(from, to);
-    },
+test("mutations delegate one exact schema source to injected state IO", async () => {
+  let durable = null;
+  const writes = [];
+  const stateIO = {
+    async read() { return durable; },
+    async write(source) { writes.push(source); durable = source; },
   };
-  const store = new LocalAutomationStore({
-    filePath,
-    fs: observedFs,
-    randomUUID: () => "00000000-0000-4000-8000-000000000101",
-    now: () => NOW_1,
-  });
+  const store = new LocalAutomationStore({ stateIO, now: () => NOW_1 });
   await store.create({ botId: BOT_A, automation: automation() });
-  const temporary = path.join(root, "private",
-    ".local-automations.v1.json.00000000-0000-4000-8000-000000000101.tmp");
-  assert.deepEqual(operations.filter(([operation]) => new Set(["write", "sync", "rename"]).has(operation)), [
-    ["write", temporary],
-    ["sync", temporary],
-    ["rename", temporary, filePath],
-    ["sync", path.dirname(filePath)],
-  ]);
-  assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600);
-  assert.equal((await fs.stat(path.dirname(filePath))).mode & 0o777, 0o700);
-  await assert.rejects(fs.lstat(temporary), { code: "ENOENT" });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(JSON.parse(writes[0]), {
+    schemaVersion: 1,
+    automations: [(await store.list(BOT_A))[0]],
+  });
 });
 
-test("post-rename uncertainty succeeds only when exact intended state reads back", async (t) => {
-  const { filePath } = await fixture(t);
-  let failDirectorySync = true;
-  const uncertainFs = {
-    ...fs,
-    async open(target, flags, mode) {
-      const handle = await fs.open(target, flags, mode);
-      if (target !== path.dirname(filePath)) return handle;
-      return {
-        async sync() {
-          if (failDirectorySync) {
-            failDirectorySync = false;
-            throw new Error("directory sync uncertain /Users/person/private");
-          }
-          return handle.sync();
-        },
-        close: (...args) => handle.close(...args),
-      };
-    },
+test("state IO write success is authoritative and reopen reads its committed source", async () => {
+  let durable = null;
+  const stateIO = {
+    async read() { return durable; },
+    async write(source) { durable = source; },
   };
-  const store = new LocalAutomationStore({
-    filePath,
-    fs: uncertainFs,
-    randomUUID: () => "00000000-0000-4000-8000-000000000101",
-    now: () => NOW_1,
-  });
+  const store = new LocalAutomationStore({ stateIO, now: () => NOW_1 });
   const result = await store.create({ botId: BOT_A, automation: automation() });
   assert.equal(result[0].revision, 1);
-  assert.equal((await new LocalAutomationStore({ filePath }).list(BOT_A))[0].id, AUTOMATION_A);
+  assert.equal((await new LocalAutomationStore({ stateIO }).list(BOT_A))[0].id, AUTOMATION_A);
 });
 
-test("precommit failure preserves bytes while committed exact deletion is retry-safe", async (t) => {
-  const { filePath, store } = await fixture(t);
-  await store.create({ botId: BOT_A, automation: automation() });
-  const before = await fs.readFile(filePath);
-  const precommit = new LocalAutomationStore({
-    filePath,
-    fs: { ...fs, async open() { throw new Error("ENOSPC /Users/person/private"); } },
+test("state IO failure preserves durable source and store errors stay sanitized", async () => {
+  let durable = null;
+  const initialIO = {
+    async read() { return durable; },
+    async write(source) { durable = source; },
+  };
+  await new LocalAutomationStore({ stateIO: initialIO, now: () => NOW_1 })
+    .create({ botId: BOT_A, automation: automation() });
+  const before = durable;
+  const failed = new LocalAutomationStore({
+    stateIO: {
+      async read() { return durable; },
+      async write() { throw new Error("ENOSPC /Users/person/private"); },
+    },
   });
-  await assert.rejects(precommit.deleteBots({ botIds: [BOT_A] }), (error) => {
+  await assert.rejects(failed.deleteBots({ botIds: [BOT_A] }), (error) => {
     assert.equal(error.code, "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED");
     assert.doesNotMatch(String(error.stack), /ENOSPC|Users|private/);
     return true;
   });
-  assert.deepEqual(await fs.readFile(filePath), before);
-
-  let failDirectorySync = true;
-  const committed = new LocalAutomationStore({
-    filePath,
-    fs: {
-      ...fs,
-      async open(target, flags, mode) {
-        const handle = await fs.open(target, flags, mode);
-        if (target !== path.dirname(filePath)) return handle;
-        return {
-          async sync() {
-            if (failDirectorySync) {
-              failDirectorySync = false;
-              throw new Error("commit uncertain");
-            }
-            return handle.sync();
-          },
-          close: (...args) => handle.close(...args),
-        };
-      },
-    },
-  });
-  assert.deepEqual(await committed.deleteBots({ botIds: [BOT_A] }), {
-    deletedAutomationIds: [AUTOMATION_A],
-  });
-  assert.deepEqual(await committed.deleteBots({ botIds: [BOT_A] }), {
-    deletedAutomationIds: [],
-  });
+  assert.equal(durable, before);
 });
 
-test("refuses symlink parents files and oversized durable sources before reading", async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-local-automation-unsafe-"));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const real = path.join(root, "real");
-  const linked = path.join(root, "linked");
-  await fs.mkdir(real, { mode: 0o700 });
-  await fs.symlink(real, linked, "dir");
-  const symlinkStore = new LocalAutomationStore({ filePath: path.join(linked, "state.json") });
-  await assert.rejects(symlinkStore.create({ botId: BOT_A, automation: automation() }), {
-    code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED",
-  });
-
-  const filePath = path.join(real, "state.json");
-  await fs.writeFile(filePath, "{}", { mode: 0o600 });
-  const fileLink = path.join(real, "linked-state.json");
-  await fs.symlink(filePath, fileLink);
-  await assert.rejects(new LocalAutomationStore({ filePath: fileLink }).listAll(), {
-    code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED",
-  });
-
-  let reads = 0;
-  const oversized = new LocalAutomationStore({
-    filePath,
-    fs: {
-      ...fs,
-      async lstat(target) {
-        const stat = await fs.lstat(target);
-        return target === filePath ? new Proxy(stat, {
-          get(object, key) { return key === "size" ? 20 * 1024 * 1024 : object[key]; },
-        }) : stat;
-      },
-      async readFile(...args) { reads += 1; return fs.readFile(...args); },
+test("state IO read failures and oversized sources fail before persisted traversal", async () => {
+  await assert.rejects(new LocalAutomationStore({
+    stateIO: {
+      async read() { throw new Error("private replacement content"); },
+      async write() {},
     },
-  });
-  await assert.rejects(oversized.listAll(), { code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED" });
-  assert.equal(reads, 0);
+  }).listAll(), { code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED" });
+  await assert.rejects(new LocalAutomationStore({
+    stateIO: {
+      async read() { return "x".repeat(17 * 1024 * 1024); },
+      async write() {},
+    },
+  }).listAll(), { code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED" });
 });
 
 test("hostile DTOs fail descriptor-first without accessor traversal or durable mutation", async (t) => {
@@ -597,8 +527,111 @@ test("malformed persisted records reject unknown keys sparse runs and private-fi
   ];
   for (const state of malformedStates) {
     await fs.writeFile(filePath, `${JSON.stringify(state)}\n`, { mode: 0o600 });
-    await assert.rejects(new LocalAutomationStore({ filePath }).listAll(), {
+    await assert.rejects(localStore({ filePath }).listAll(), {
       code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED",
+    });
+  }
+});
+
+test("stored names normalize whitespace and preserve Grok slug boundary hyphens", async (t) => {
+  const { store } = await fixture(t);
+  const normalized = await store.create({
+    botId: BOT_A,
+    automation: automation({ name: "  Daily   Report  " }),
+  });
+  assert.equal(normalized[0].name, "Daily Report");
+  assert.equal(normalized[0].id, "daily-report");
+
+  const first = await store.create({
+    botId: BOT_A,
+    automation: automation({ name: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b" }),
+  });
+  assert.equal(first.find((entry) => entry.name
+    === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b").id,
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-");
+  const second = await store.create({
+    botId: BOT_A,
+    automation: automation({ name: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b" }),
+  });
+  assert.equal(second.find((entry) => entry.id
+    === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa--2").name,
+  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa b");
+});
+
+test("dense arrays reject hostile prototypes and extra maximum-index accessors", async (t) => {
+  const { filePath, store } = await fixture(t);
+  await store.create({ botId: BOT_A, automation: automation() });
+  const before = await fs.readFile(filePath);
+  let accessorReads = 0;
+  const extra = [BOT_A];
+  Object.defineProperty(extra, "4294967295", {
+    get() { accessorReads += 1; throw new Error("must not read"); },
+  });
+  const hostilePrototype = [BOT_A];
+  Object.setPrototypeOf(hostilePrototype, { inherited: BOT_B });
+
+  await assert.rejects(store.deleteBots({ botIds: extra }), {
+    code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED",
+  });
+  await assert.rejects(store.deleteBots({ botIds: hostilePrototype }), {
+    code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED",
+  });
+  assert.equal(accessorReads, 0);
+  assert.deepEqual(await fs.readFile(filePath), before);
+});
+
+test("persisted routines reject multiple running records before load accept or finish", async (t) => {
+  const { filePath, store } = await fixture(t);
+  const [created] = await store.create({ botId: BOT_A, automation: automation() });
+  const malformed = {
+    schemaVersion: 1,
+    automations: [{
+      ...created,
+      lastRunAt: NOW_1_MS + 2,
+      runs: [{
+        id: "running-newest",
+        trigger: "schedule",
+        startedAt: NOW_1_MS + 2,
+        finishedAt: null,
+        status: "running",
+        invocationId: null,
+      }, {
+        id: "running-older",
+        trigger: "manual",
+        startedAt: NOW_1_MS + 1,
+        finishedAt: null,
+        status: "running",
+        invocationId: null,
+      }],
+    }],
+  };
+
+  for (const [name, operation] of [
+    ["load", (reopened) => reopened.listAll()],
+    ["accept", (reopened) => reopened.acceptRun({
+      botId: BOT_A,
+      automationId: AUTOMATION_A,
+      runId: "running-newest",
+      invocationId: INVOCATION_A,
+      conversationId: CONVERSATION_A,
+    })],
+    ["finish", (reopened) => reopened.finishRun({
+      botId: BOT_A,
+      automationId: AUTOMATION_A,
+      runId: "running-newest",
+      finishedAt: NOW_2_MS,
+      status: "error",
+      detail: undefined,
+      errorKind: "interrupted",
+    })],
+  ]) {
+    await t.test(name, async () => {
+      await fs.writeFile(filePath, `${JSON.stringify(malformed)}\n`, { mode: 0o600 });
+      const before = await fs.readFile(filePath);
+      await assert.rejects(operation(localStore({ filePath })), {
+        code: "OPENBOT_LOCAL_AUTOMATION_STORE_FAILED",
+      });
+      assert.deepEqual(await fs.readFile(filePath), before);
     });
   }
 });
