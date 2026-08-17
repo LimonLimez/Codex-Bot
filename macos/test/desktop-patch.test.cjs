@@ -66,6 +66,10 @@ test("desktop packaging includes every direct inference runtime module in the au
   const required = [
     "bridge/inference-socket-client.cjs",
     "desktop/bot-deletion-coordinator.cjs",
+    "desktop/local-automation-controller.cjs",
+    "desktop/local-automation-native-io.cjs",
+    "desktop/local-automation-store.cjs",
+    "desktop/local-cron-schedule.cjs",
     "desktop/cliproxy-inference-transport.cjs",
     "desktop/codex-account-controller.cjs",
     "desktop/codex-app-server-manager.cjs",

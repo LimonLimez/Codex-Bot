@@ -194,6 +194,7 @@ function batches(values, size = MAX_LIVE_DELETE_BOTS) {
 class BotDeletionCoordinator {
   #botRuntimeController;
   #botStore;
+  #automationController;
   #conversationController;
   #computerTargetRouter;
   #computerBoundary;
@@ -211,6 +212,7 @@ class BotDeletionCoordinator {
   constructor({
     botRuntimeController,
     botStore,
+    automationController,
     conversationController,
     computerTargetRouter,
     computerBoundary,
@@ -222,6 +224,7 @@ class BotDeletionCoordinator {
       || !botStore || typeof botStore.list !== "function"
       || typeof botStore.listPendingDeletions !== "function"
       || typeof botStore.completeDeletion !== "function"
+      || !automationController || typeof automationController.deleteBots !== "function"
       || !conversationController || typeof conversationController.deleteBots !== "function"
       || !computerTargetRouter || typeof computerTargetRouter.deleteBot !== "function"
       || !computerBoundary || typeof computerBoundary.deleteBot !== "function"
@@ -234,6 +237,7 @@ class BotDeletionCoordinator {
     }
     this.#botRuntimeController = botRuntimeController;
     this.#botStore = botStore;
+    this.#automationController = automationController;
     this.#conversationController = conversationController;
     this.#computerTargetRouter = computerTargetRouter;
     this.#computerBoundary = computerBoundary;
@@ -412,6 +416,9 @@ class BotDeletionCoordinator {
 
   async #performCleanup(receipt, successorBotId) {
     for (const botId of receipt.botIds) await this.#computerTargetRouter.deleteBot(botId);
+    for (const botIds of batches(receipt.botIds)) {
+      await this.#automationController.deleteBots({ botIds });
+    }
     for (const botIds of batches(receipt.botIds)) {
       await this.#conversationController.deleteBots({ botIds });
     }

@@ -44,6 +44,7 @@ function pendingReceipt(overrides = {}) {
 
 function fixture({
   receipts = [pendingReceipt()],
+  automationFailure = null,
   boundaryFailure = null,
   boundaryGate = null,
   bindingsGate = null,
@@ -57,6 +58,7 @@ function fixture({
 } = {}) {
   const order = [];
   let pending = [...receipts];
+  let failAutomation = automationFailure;
   let failBoundary = boundaryFailure;
   const anchorFailures = Array.isArray(anchorFailure)
     ? [...anchorFailure]
@@ -96,6 +98,17 @@ function fixture({
       return { deletedConversationIds: [] };
     },
   };
+  const automationController = {
+    async deleteBots({ botIds }) {
+      order.push(`automations:${botIds.join(",")}`);
+      if (failAutomation) {
+        const failure = failAutomation;
+        failAutomation = null;
+        throw failure;
+      }
+      return { deletedAutomationIds: [] };
+    },
+  };
   const computerTargetRouter = {
     async deleteBot(botId) { order.push(`router:${botId}`); },
   };
@@ -125,6 +138,7 @@ function fixture({
   const coordinator = new BotDeletionCoordinator({
     botRuntimeController,
     botStore,
+    automationController,
     conversationController,
     computerTargetRouter,
     computerBoundary,
@@ -153,6 +167,7 @@ test("live deletion anchors once then replays every exact owner before completin
     "list-pending",
     `router:${BOT_A}`,
     `router:${BOT_B}`,
+    `automations:${BOT_A},${BOT_B}`,
     `conversations:${BOT_A},${BOT_B}`,
     `boundary:${BOT_A}:${LOCAL_A}`,
     `boundary:${BOT_B}:null`,
@@ -227,6 +242,24 @@ test("a pre-anchor failure reaches no cleanup while a post-anchor failure return
     pendingDeletionIds: [],
   });
   assert.deepEqual(after.pending(), []);
+});
+
+test("Routine cleanup failure leaves the tombstone before conversations and replays in order", async () => {
+  const value = fixture({ automationFailure: new Error("private Routine cleanup failure") });
+
+  assert.deepEqual(await value.coordinator.deleteBots([BOT_A, BOT_B]), value.outcome);
+  assert.equal(value.pending().length, 1);
+  assert.equal(value.order.some((entry) => entry.startsWith("conversations:")), false);
+  assert.equal(value.order.some((entry) => entry.startsWith("complete:")), false);
+
+  assert.deepEqual(await value.coordinator.reconcilePending(), {
+    completedDeletionIds: [DELETION_A],
+    pendingDeletionIds: [],
+  });
+  const replayAutomation = value.order.findLastIndex((entry) => entry.startsWith("automations:"));
+  const replayConversations = value.order.findLastIndex((entry) => entry.startsWith("conversations:"));
+  assert.equal(replayAutomation >= 0 && replayConversations > replayAutomation, true);
+  assert.equal(value.order.at(-1), `complete:${DELETION_A}`);
 });
 
 test("startup replay handles every receipt without re-running the durable visibility anchor", async () => {

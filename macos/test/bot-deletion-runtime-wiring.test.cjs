@@ -112,6 +112,7 @@ test("production deletion composition shares the exact durable cleanup owners", 
   const dependencies = {
     controller: { deleteBots() {} },
     store: { list() {}, listPendingDeletions() {}, completeDeletion() {} },
+    automations: { deleteBots() {} },
     conversations: { deleteBots() {} },
     computerTargetRouter: { deleteBot() {} },
     computerBoundary: { deleteBot() {} },
@@ -132,6 +133,7 @@ test("production deletion composition shares the exact durable cleanup owners", 
   assert.deepEqual(constructed, {
     botRuntimeController: dependencies.controller,
     botStore: dependencies.store,
+    automationController: dependencies.automations,
     conversationController: dependencies.conversations,
     computerTargetRouter: dependencies.computerTargetRouter,
     computerBoundary: dependencies.computerBoundary,
@@ -139,6 +141,165 @@ test("production deletion composition shares the exact durable cleanup owners", 
     conversationBindingsFile: dependencies.conversationBindingsPath,
     deleteConversationBindings: deleteBindings,
   });
+});
+
+test("local Routine composition prepares private storage and wires the real ownership chain", async (t) => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const { createLocalAutomationComposition } = require(runtimePath);
+  assert.equal(typeof createLocalAutomationComposition, "function");
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "openbot-routine-runtime-")));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "private");
+  const conversations = new EventEmitter();
+  Object.assign(conversations, {
+    list() { return []; },
+    create() { throw new Error("unused"); },
+    read() { throw new Error("unused"); },
+    send() { throw new Error("unused"); },
+  });
+
+  const composition = createLocalAutomationComposition({ stateRoot, conversations });
+
+  assert.equal(composition.controller.constructor.name, "LocalAutomationController");
+  assert.equal(composition.store.constructor.name, "LocalAutomationStore");
+  assert.equal(composition.stateIO.constructor.name, "LocalAutomationNativeIO");
+  assert.equal(fs.lstatSync(stateRoot).mode & 0o777, 0o700);
+  await composition.controller.start();
+  const created = await composition.controller.createAgentAutomation({
+    id: BOT_A,
+    spec: {
+      name: "Installer smoke Routine",
+      prompt: "Verify the installed native shell.",
+      trigger: { type: "cron", schedule: "0 * * * *" },
+      isEnabled: false,
+    },
+  });
+  assert.equal(created.length, 1);
+  const stateFile = path.join(stateRoot, "local-automations.v1.json");
+  assert.equal(fs.lstatSync(stateFile).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(fs.readFileSync(stateFile, "utf8")).automations[0].botId, BOT_A);
+  await composition.controller.dispose();
+});
+
+test("native Routine methods wait for Routine startup while ordinary bot IPC only waits for deletion replay", async () => {
+  const { IPC_CHANNELS, installDesktopRuntime } = require(runtimePath);
+  const harness = electronHarness();
+  const replay = deferred();
+  const start = deferred();
+  const effects = [];
+  let factoryOptions = null;
+  const controller = new EventEmitter();
+  Object.assign(controller, {
+    listBots() { effects.push("list-bots"); return []; },
+    async reconcile() {},
+    dispose() {},
+  });
+  const automations = new EventEmitter();
+  Object.assign(automations, {
+    async start() {
+      effects.push(`automation-start:${automations.listenerCount("changed")}`);
+      await start.promise;
+    },
+    async getAgentAutomations() { effects.push("automation-read"); return []; },
+    async listAllAutomations() { return []; },
+    async createAgentAutomation() { return []; },
+    async updateAgentAutomation() { return []; },
+    async setAgentAutomationEnabled() { return []; },
+    async deleteAgentAutomation() { return []; },
+    async runAgentAutomationNow() {},
+    async deleteBots() { return { deletedAutomationIds: [] }; },
+    async dispose() { effects.push("automation-dispose"); },
+  });
+  const installed = installDesktopRuntime(harness.electron, {
+    controller,
+    selectionStore: {},
+    localAutomationController: automations,
+    botDeletionCoordinator: {
+      async reconcilePending() { effects.push("deletion-replay"); await replay.promise; },
+      async deleteBots() {},
+      async dispose() {},
+    },
+    nativeCoordinatorFactory(options) {
+      factoryOptions = options;
+      options.automationController.on("changed", () => {});
+      return { bindPort() { return () => {}; }, dispose() {} };
+    },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+  assert.deepEqual(Object.keys(factoryOptions.automationController).sort(), [
+    "createAgentAutomation",
+    "deleteAgentAutomation",
+    "getAgentAutomations",
+    "listAllAutomations",
+    "off",
+    "on",
+    "removeListener",
+    "runAgentAutomationNow",
+    "setAgentAutomationEnabled",
+    "updateAgentAutomation",
+  ]);
+  const botList = harness.handlers.get(IPC_CHANNELS.list)(harness.event);
+  const routineList = factoryOptions.automationController.getAgentAutomations({ id: BOT_A });
+  await tick();
+  assert.deepEqual(effects, ["deletion-replay"]);
+
+  replay.resolve();
+  assert.deepEqual(await botList, []);
+  await tick();
+  assert.deepEqual(effects, ["deletion-replay", "automation-start:1", "list-bots"]);
+
+  start.resolve();
+  assert.deepEqual(await routineList, []);
+  assert.equal(effects.at(-1), "automation-read");
+  await installed.dispose();
+});
+
+test("Routine startup failure stays on Routine methods and leaves ordinary bot IPC usable", async () => {
+  const { IPC_CHANNELS, installDesktopRuntime } = require(runtimePath);
+  const harness = electronHarness();
+  let factoryOptions = null;
+  const controller = new EventEmitter();
+  Object.assign(controller, { listBots() { return []; }, async reconcile() {}, dispose() {} });
+  const automations = new EventEmitter();
+  Object.assign(automations, {
+    async start() { throw new Error("private Routine startup detail"); },
+    async getAgentAutomations() { throw new Error("must remain gated"); },
+    async listAllAutomations() { return []; },
+    async createAgentAutomation() { return []; },
+    async updateAgentAutomation() { return []; },
+    async setAgentAutomationEnabled() { return []; },
+    async deleteAgentAutomation() { return []; },
+    async runAgentAutomationNow() {},
+    async deleteBots() { return { deletedAutomationIds: [] }; },
+    async dispose() {},
+  });
+  const installed = installDesktopRuntime(harness.electron, {
+    controller,
+    selectionStore: {},
+    localAutomationController: automations,
+    botDeletionCoordinator: {
+      async reconcilePending() {}, async deleteBots() {}, async dispose() {},
+    },
+    nativeCoordinatorFactory(options) {
+      factoryOptions = options;
+      return { bindPort() { return () => {}; }, dispose() {} };
+    },
+    accountController: {
+      async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+
+  assert.deepEqual(await harness.handlers.get(IPC_CHANNELS.list)(harness.event), []);
+  await assert.rejects(
+    factoryOptions.automationController.getAgentAutomations({ id: BOT_A }),
+    /private Routine startup detail/,
+  );
+  await installed.dispose();
 });
 
 test("native deletion and startup share the durable selected active bot with the renderer", async () => {
@@ -695,10 +856,24 @@ test("disposal awaits deletion coordination before owners and prevents late gate
       order.push("deletion-done");
     },
   };
+  const automations = new EventEmitter();
+  Object.assign(automations, {
+    async start() { order.push("automation-start"); },
+    async getAgentAutomations() { return []; },
+    async listAllAutomations() { return []; },
+    async createAgentAutomation() { return []; },
+    async updateAgentAutomation() { return []; },
+    async setAgentAutomationEnabled() { return []; },
+    async deleteAgentAutomation() { return []; },
+    async runAgentAutomationNow() {},
+    async deleteBots() { return { deletedAutomationIds: [] }; },
+    async dispose() { order.push("automation"); },
+  });
   const installed = installDesktopRuntime(harness.electron, {
     controller,
     selectionStore: {},
     botDeletionCoordinator: deletionCoordinator,
+    localAutomationController: automations,
     standaloneConversations: conversations,
     computerBoundary: boundary,
     computerTargetRouter: { dispose() { order.push("router"); } },
@@ -721,8 +896,9 @@ test("disposal awaits deletion coordination before owners and prevents late gate
 
   deletionDisposal.resolve();
   await disposal;
+  assert.equal(order.indexOf("automation") > order.indexOf("deletion-done"), true);
   for (const owner of ["conversations", "boundary", "router", "controller", "bridge"]) {
-    assert.equal(order.indexOf(owner) > order.indexOf("deletion-done"), true, owner);
+    assert.equal(order.indexOf(owner) > order.indexOf("automation"), true, owner);
   }
   replay.resolve();
   await rejectedList;
@@ -730,6 +906,7 @@ test("disposal awaits deletion coordination before owners and prevents late gate
   assert.equal(effects.bridgeStarts, 0);
   assert.equal(effects.controllerLists, 0);
   assert.equal(effects.controllerReconciles, 0);
+  assert.equal(order.includes("automation-start"), false);
 });
 
 test("rejected deletion replay fails every gated surface closed without late startup", async () => {

@@ -14,6 +14,9 @@ const { CLIProxyInferenceTransport } = require("./cliproxy-inference-transport.c
 const { InferenceBridgeServer } = require("./inference-bridge-server.cjs");
 const { InferenceProviderRouter } = require("./inference-provider-router.cjs");
 const { BotDeletionCoordinator } = require("./bot-deletion-coordinator.cjs");
+const { LocalAutomationController } = require("./local-automation-controller.cjs");
+const { LocalAutomationNativeIO } = require("./local-automation-native-io.cjs");
+const { LocalAutomationStore } = require("./local-automation-store.cjs");
 const { BOT_ID, ModelSelectionStore } = require("./model-selection-store.cjs");
 const { deleteConversationBindings } = require("../bridge/runtime-config.cjs");
 const {
@@ -74,6 +77,15 @@ const OPTIONAL_MODEL_EFFORTS = Object.freeze({
   "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
   "claude-sonnet-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
 });
+const LOCAL_AUTOMATION_METHODS = Object.freeze([
+  "getAgentAutomations",
+  "listAllAutomations",
+  "createAgentAutomation",
+  "updateAgentAutomation",
+  "setAgentAutomationEnabled",
+  "deleteAgentAutomation",
+  "runAgentAutomationNow",
+]);
 
 function sanitizedFailure() {
   const error = new Error("Codex bot operation failed.");
@@ -736,6 +748,7 @@ function createStandaloneComputerComposition({
 function createBotDeletionCoordinator({
   controller,
   store,
+  automations,
   conversations,
   computerTargetRouter,
   computerBoundary,
@@ -750,6 +763,7 @@ function createBotDeletionCoordinator({
   return new CoordinatorClass({
     botRuntimeController: controller,
     botStore: store,
+    automationController: automations,
     conversationController: conversations,
     computerTargetRouter,
     computerBoundary,
@@ -757,6 +771,64 @@ function createBotDeletionCoordinator({
     conversationBindingsFile: conversationBindingsPath,
     deleteConversationBindings: deleteBindings,
   });
+}
+
+function prepareLocalAutomationStateRoot(stateRoot) {
+  if (typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
+    || path.normalize(stateRoot) !== stateRoot || stateRoot.includes("\0")) throw sanitizedFailure();
+  try {
+    fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+    const before = fs.lstatSync(stateRoot);
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : -1;
+    if (!before.isDirectory() || before.isSymbolicLink()
+      || currentUid < 0 || before.uid !== currentUid
+      || fs.realpathSync.native(stateRoot) !== stateRoot) throw sanitizedFailure();
+    fs.chmodSync(stateRoot, 0o700);
+    const after = fs.lstatSync(stateRoot);
+    if (!after.isDirectory() || after.isSymbolicLink() || after.uid !== currentUid
+      || (after.mode & 0o7777) !== 0o700) throw sanitizedFailure();
+  } catch { throw sanitizedFailure(); }
+}
+
+function createLocalAutomationComposition({
+  stateRoot,
+  conversations,
+  NativeIOClass = LocalAutomationNativeIO,
+  StoreClass = LocalAutomationStore,
+  ControllerClass = LocalAutomationController,
+} = {}) {
+  if (!conversations || typeof conversations !== "object"
+    || typeof NativeIOClass !== "function" || typeof StoreClass !== "function"
+    || typeof ControllerClass !== "function") throw sanitizedFailure();
+  prepareLocalAutomationStateRoot(stateRoot);
+  try {
+    const stateIO = new NativeIOClass({
+      filePath: path.join(stateRoot, "local-automations.v1.json"),
+    });
+    const store = new StoreClass({ stateIO });
+    const controller = new ControllerClass({ store, conversations });
+    return Object.freeze({ controller, stateIO, store });
+  } catch { throw sanitizedFailure(); }
+}
+
+function unavailableLocalAutomationCleanup() {
+  return Object.freeze({
+    async deleteBots() { throw sanitizedFailure(); },
+  });
+}
+
+function readyLocalAutomationController(controller, ready) {
+  const delegate = {};
+  for (const method of LOCAL_AUTOMATION_METHODS) {
+    delegate[method] = (...args) => Promise.resolve(ready)
+      .then(() => controller[method](...args));
+  }
+  delegate.on = (...args) => controller.on(...args);
+  delegate.off = (...args) => (typeof controller.off === "function"
+    ? controller.off(...args)
+    : controller.removeListener(...args));
+  delegate.removeListener = (...args) => controller.removeListener(...args);
+  return Object.freeze(delegate);
 }
 
 function productionDependencies(electron) {
@@ -786,18 +858,29 @@ function productionDependencies(electron) {
     toolBridge: computer.toolBridge,
     computerTargetRouter: computer.targetRouter,
   });
+  let localAutomation = null;
+  try {
+    localAutomation = createLocalAutomationComposition({
+      stateRoot,
+      conversations: inferenceBridge.conversations,
+    });
+  } catch {}
   const botDeletionCoordinator = createBotDeletionCoordinator({
     controller,
     store: botStore,
+    automations: localAutomation?.controller ?? unavailableLocalAutomationCleanup(),
     conversations: inferenceBridge.conversations,
     computerTargetRouter: computer.targetRouter,
     computerBoundary: computer.boundary,
     selectionStore,
     conversationBindingsPath,
   });
-  const nativeCoordinatorFactory = ({ onSelectAgent, deleteBots, readActiveAgentId }) => new OpenBotNativeCoordinator({
+  const nativeCoordinatorFactory = ({
+    onSelectAgent, deleteBots, readActiveAgentId, automationController,
+  }) => new OpenBotNativeCoordinator({
     botRuntimeController: controller,
     conversationController: inferenceBridge.conversations,
+    automationController,
     deleteBots,
     onSelectAgent,
     readActiveAgentId,
@@ -818,6 +901,7 @@ function productionDependencies(electron) {
     localDesktopManager: computer.localManager,
     controller,
     inferenceBridge,
+    localAutomationController: localAutomation?.controller ?? null,
     nativeCoordinatorFactory,
     standaloneConversations: inferenceBridge.conversations,
     selectionStore,
@@ -881,6 +965,15 @@ function installDesktopRuntime(electron, injected = {}) {
   });
   const computerTargetRouter = dependencies.computerTargetRouter || null;
   const localDesktopManager = dependencies.localDesktopManager || null;
+  const localAutomationController = dependencies.localAutomationController ?? null;
+  if (localAutomationController !== null
+    && (!localAutomationController || typeof localAutomationController !== "object"
+      || LOCAL_AUTOMATION_METHODS.some((method) => typeof localAutomationController[method] !== "function")
+      || typeof localAutomationController.start !== "function"
+      || typeof localAutomationController.deleteBots !== "function"
+      || typeof localAutomationController.dispose !== "function"
+      || typeof localAutomationController.on !== "function"
+      || typeof localAutomationController.removeListener !== "function")) throw sanitizedFailure();
   const profileSetupReceipts = new Map();
   const computerSetupReceipts = new Map();
   const registered = [];
@@ -897,11 +990,22 @@ function installDesktopRuntime(electron, injected = {}) {
     ? Promise.resolve()
     : Promise.resolve().then(() => botDeletionCoordinator.reconcilePending());
   void startupReady.catch(() => {});
+  const automationReady = localAutomationController === null
+    ? Promise.resolve()
+    : startupReady.then(() => {
+      if (disposed) throw sanitizedFailure();
+      return localAutomationController.start();
+    });
+  void automationReady.catch(() => {});
+  const nativeAutomationController = localAutomationController === null
+    ? null
+    : readyLocalAutomationController(localAutomationController, automationReady);
   const nativeCoordinator = dependencies.nativeCoordinator
     || (typeof dependencies.nativeCoordinatorFactory === "function"
       ? dependencies.nativeCoordinatorFactory({
         onSelectAgent: selectNativeAgent,
         deleteBots: botDeletionCoordinator === null ? null : deleteNativeBots,
+        automationController: nativeAutomationController,
         readActiveAgentId: typeof selectionStore.readActiveBotId === "function"
           ? () => selectionStore.readActiveBotId()
           : null,
@@ -1436,10 +1540,16 @@ function installDesktopRuntime(electron, injected = {}) {
         captureOwner(() => controller.dispose());
         return Promise.all(owners).then(() => undefined);
       };
-      if (botDeletionCoordinator === null) capture(disposeOwners);
-      else {
+      if (botDeletionCoordinator === null && localAutomationController === null) {
+        capture(disposeOwners);
+      } else {
         capture(async () => {
-          try { await botDeletionCoordinator.dispose(); } catch {}
+          if (botDeletionCoordinator !== null) {
+            try { await botDeletionCoordinator.dispose(); } catch {}
+          }
+          if (localAutomationController !== null) {
+            try { await localAutomationController.dispose(); } catch {}
+          }
           await disposeOwners();
         });
       }
@@ -1513,6 +1623,7 @@ module.exports = {
   IPC_CHANNELS,
   RUNTIME_EVENT_CHANNEL,
   createBotDeletionCoordinator,
+  createLocalAutomationComposition,
   createDirectCodexManager,
   createInferenceBridgeRuntime,
   createLazySidecarManager,
