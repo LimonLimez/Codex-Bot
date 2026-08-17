@@ -1179,6 +1179,43 @@ async function executeAction(seat, page, action) {
   }
 }
 
+const CHALLENGE_SURFACE_SELECTOR = [
+  'iframe[src*="captcha" i]',
+  'iframe[src*="challenge" i]',
+  '[id*="captcha" i]',
+  '[class*="captcha" i]',
+  "#challenge-running",
+  "#challenge-stage",
+  'form[action*="/challenge" i]',
+  'input[name*="captcha" i]',
+  "[data-sitekey]",
+].join(",");
+
+function pageLooksLikeChallenge({
+  url = "",
+  title = "",
+  bodyPreview = "",
+  hasChallengeSurface = false,
+} = {}) {
+  if (hasChallengeSurface) return true;
+  if (
+    /\/(?:cdn-cgi\/challenge-platform|captcha|challenge)(?:\/|\?|$)/i.test(url)
+  )
+    return true;
+  if (
+    /^(?:just a moment|attention required|security (?:check|verification)|verify (?:that )?you are human|checking your browser)(?:[.!…]|$)/i.test(
+      title.trim(),
+    )
+  )
+    return true;
+
+  const body = bodyPreview.trim();
+  if (body.length === 0 || body.length > 6000) return false;
+  return /(?:verify (?:that )?you are human|confirm (?:that )?you are human|checking (?:the security of your connection|your browser)|complete (?:the |this )?(?:captcha|security challenge)|enable javascript and cookies to continue|cloudflare ray id|we(?:'|’|\u2019)ll have you designing again soon)/i.test(
+    body,
+  );
+}
+
 async function classifyPage(page) {
   const url = page.url();
   const title = await page.title().catch(() => "");
@@ -1189,11 +1226,17 @@ async function classifyPage(page) {
     .locator("body")
     .innerText({ timeout: 2000 })
     .catch(() => "");
-  const challengeText = `${title}\n${bodyPreview}`;
+  let hasChallengeSurface = false;
+  try {
+    const challengeLocator = page.locator(CHALLENGE_SURFACE_SELECTOR);
+    if (typeof challengeLocator?.isVisible === "function") {
+      hasChallengeSurface = await challengeLocator.isVisible();
+    }
+  } catch {
+    hasChallengeSurface = false;
+  }
   if (
-    /cloudflare|verifying(?:\.\.\.)?|just a moment|security check|required|we(?:'|’|\u2019)ll have you designing again soon|checking your browser/i.test(
-      challengeText,
-    )
+    pageLooksLikeChallenge({ url, title, bodyPreview, hasChallengeSurface })
   ) {
     return {
       state: "challenge",
@@ -1494,6 +1537,7 @@ module.exports = {
   immutableActionSnapshot,
   approvalOriginForPage,
   approvalContextForActions,
+  pageLooksLikeChallenge,
   pendingApprovalForSeat,
   pendingApprovals,
   decidePendingApproval,

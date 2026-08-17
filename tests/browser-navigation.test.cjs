@@ -16,6 +16,54 @@ const manager = require(
   ),
 );
 
+test("ordinary GitHub repository copy is not mistaken for a verification challenge", () => {
+  assert.equal(
+    manager.pageLooksLikeChallenge({
+      url: "https://github.com/sitesbyleons/sites-by-leon",
+      title: "sitesbyleons/sites-by-leon: Bold, cinematic websites",
+      bodyPreview: [
+        "Code Issues Pull requests Actions Projects Security and quality Insights",
+        "Add staging Hermes identity verification",
+        "Required checks and architecture documentation",
+        "Security check configuration",
+        "README Contributors Languages",
+      ].join("\n"),
+    }),
+    false,
+  );
+});
+
+test("browser verification detection requires a concrete challenge signal", () => {
+  assert.equal(
+    manager.pageLooksLikeChallenge({
+      url: "https://example.com/cdn-cgi/challenge-platform/h/g/orchestrate",
+    }),
+    true,
+  );
+  assert.equal(
+    manager.pageLooksLikeChallenge({
+      url: "https://example.com/",
+      title: "Just a moment...",
+    }),
+    true,
+  );
+  assert.equal(
+    manager.pageLooksLikeChallenge({
+      url: "https://example.com/",
+      hasChallengeSurface: true,
+    }),
+    true,
+  );
+  assert.equal(
+    manager.pageLooksLikeChallenge({
+      url: "https://example.com/",
+      title: "Example Domain",
+      bodyPreview: "Verify that you are human before continuing.",
+    }),
+    true,
+  );
+});
+
 test("isolated browser navigation preserves public HTTP and HTTPS destinations", () => {
   for (const target of [
     "https://www.canva.com/design/",
