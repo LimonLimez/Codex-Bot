@@ -38,6 +38,8 @@ test("the macOS package is isolated from the Windows release line", () => {
     ":(exclude)macos/**",
     ":(exclude)docs/superpowers/specs/2026-08-14-macos-grok-020-preserve-patch-design.md",
     ":(exclude)docs/superpowers/plans/2026-08-14-macos-grok-020-preserve-patch.md",
+    ":(exclude)docs/superpowers/specs/2026-08-17-macos-signed-out-local-routines-design.md",
+    ":(exclude)docs/superpowers/plans/2026-08-17-macos-signed-out-local-routines.md",
     ":(exclude).github/workflows/macos-release.yml",
   )
     .trim()
