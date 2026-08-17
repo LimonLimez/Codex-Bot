@@ -4,6 +4,58 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $stream = [IO.File]::Open($LiteralPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($hasher.ComputeHash($stream))).Replace('-', '')
+    } finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Invoke-GitHubReleaseRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][hashtable]$Headers
+    )
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            return Invoke-RestMethod -Uri $Uri -Headers $Headers -TimeoutSec 45
+        } catch {
+            $lastError = $_
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+    throw $lastError
+}
+
+function Invoke-GitHubDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][hashtable]$Headers,
+        [Parameter(Mandatory = $true)][string]$OutFile
+    )
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -Headers $Headers -OutFile $OutFile -TimeoutSec 90
+            return
+        } catch {
+            if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Seconds (5 * $attempt)
+        }
+    }
+}
+
 $cliProxyVersion = '7.2.130'
 $cliProxyZipSha256 = 'C1D9F07AF4698C4F63A5F6A866BECD8279B7AF849F6E17D7EF4A7D049B54E3B7'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -68,7 +120,7 @@ try {
     }
 
     $headers = @{ 'User-Agent' = 'Codex-Bot-Release-Builder' }
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v$cliProxyVersion" -Headers $headers
+    $release = Invoke-GitHubReleaseRequest -Uri "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v$cliProxyVersion" -Headers $headers
     if ([string]$release.tag_name -ne "v$cliProxyVersion") { throw 'CLIProxyAPI release tag did not match the pinned version.' }
     $assetName = "CLIProxyAPI_${cliProxyVersion}_windows_amd64.zip"
     $asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
@@ -77,13 +129,13 @@ try {
 
     $zipPath = Join-Path $buildRoot $asset.name
     $checksumsPath = Join-Path $buildRoot 'checksums.txt'
-    Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $zipPath
-    Invoke-WebRequest -Uri $checksumsAsset.browser_download_url -Headers $headers -OutFile $checksumsPath
+    Invoke-GitHubDownload -Uri $asset.browser_download_url -Headers $headers -OutFile $zipPath
+    Invoke-GitHubDownload -Uri $checksumsAsset.browser_download_url -Headers $headers -OutFile $checksumsPath
     $checksumLine = Get-Content -LiteralPath $checksumsPath | Where-Object { $_ -match ([regex]::Escape($asset.name) + '$') } | Select-Object -First 1
     if (-not $checksumLine) { throw "No checksum was published for $($asset.name)." }
     $publishedHash = ($checksumLine -split '\s+')[0].ToUpperInvariant()
     $expectedHash = $cliProxyZipSha256.ToUpperInvariant()
-    $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToUpperInvariant()
+    $actualHash = (Get-Sha256Hex -LiteralPath $zipPath).ToUpperInvariant()
     if ($publishedHash -ne $expectedHash) { throw "The published CLIProxyAPI checksum does not match the reviewed pinned checksum." }
     if ($actualHash -ne $expectedHash) { throw "CLIProxyAPI checksum mismatch: expected $expectedHash, got $actualHash" }
 
@@ -100,7 +152,7 @@ try {
             Remove-Item -LiteralPath $resolvedExtract -Recurse -Force
         }
     }
-    Invoke-WebRequest -Uri "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/v$cliProxyVersion/LICENSE" -Headers $headers -OutFile (Join-Path $vendorRoot 'LICENSE')
+    Invoke-GitHubDownload -Uri "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/v$cliProxyVersion/LICENSE" -Headers $headers -OutFile (Join-Path $vendorRoot 'LICENSE')
 
     if (-not $InnoCompiler) {
         $candidates = @(
@@ -133,7 +185,7 @@ try {
         throw "Inno Setup did not produce the expected current-version installer: $installerName"
     }
     $installer = Get-Item -LiteralPath $installerPath
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer.FullName).Hash.ToLowerInvariant()
+    $hash = (Get-Sha256Hex -LiteralPath $installer.FullName).ToLowerInvariant()
     $hashFile = "$installerPath.sha256"
     $expectedSidecar = "$hash  $installerName"
     $expectedSidecar | Set-Content -LiteralPath $hashFile -Encoding Ascii

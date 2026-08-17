@@ -21,8 +21,10 @@ let refreshTimer = null;
 let connectionPollTimer = null;
 let officialConnectionPollTimer = null;
 let officialApprovalPollTimer = null;
+let groupTaskPollTimer = null;
 let officialComputerOperationInFlight = false;
 let officialPermissionOperationInFlight = false;
+let privatePermissionOperationInFlight = false;
 let officialEnableAfterCursorLogin = false;
 let officialEnableContinuationInFlight = false;
 let providerActivationInFlight = false;
@@ -30,6 +32,7 @@ let providerConnectionNotice = { message: "", tone: "info" };
 let selectedProviderId = null;
 let officialComputerNotice = { message: "", tone: "info" };
 let officialPermissionNotice = { message: "", tone: "info" };
+let privatePermissionNotice = { message: "", tone: "info" };
 let pendingOAuthDevice = null;
 let activeModelPicker = null;
 let onboardingStep = "providers";
@@ -46,6 +49,7 @@ const PROVIDER_ICON_DATA = Object.freeze({
 const agentStatusCache = new Map();
 const pendingAgentStatusLoads = new Map();
 const officialApprovalLoads = new WeakSet();
+const groupTaskLoads = new WeakSet();
 
 const MODEL_FALLBACKS = [
   {
@@ -170,7 +174,9 @@ function updateReasoningSlider(control) {
 
 function hasCodexConnection(status) {
   return Boolean(
-    status?.account?.signedIn || status?.connection?.mode === "api-key",
+    status?.account?.signedIn ||
+    status?.connection?.mode === "api-key" ||
+    status?.connection?.mode === "local",
   );
 }
 
@@ -256,6 +262,8 @@ function providerLogo(providerId) {
   const common = 'aria-hidden="true" viewBox="0 0 40 40"';
   if (providerId === "antigravity")
     return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#fff"/><path d="M31.8 20.3c0-1-.1-1.8-.3-2.7H20v4.8h6.7a5.8 5.8 0 0 1-2.5 3.7v3.2h4.1c2.4-2.2 3.5-5.4 3.5-9Z" fill="#4285F4"/><path d="M20 32c3.3 0 6.1-1.1 8.2-2.9l-4.1-3.1a7.5 7.5 0 0 1-11.2-3.9H8.7v3.3A12 12 0 0 0 20 32Z" fill="#34A853"/><path d="M12.9 22.2a7.3 7.3 0 0 1 0-4.5v-3.3H8.7a12 12 0 0 0 0 11l4.2-3.2Z" fill="#FBBC05"/><path d="M20 12.5c1.9 0 3.6.7 4.9 1.9l3.6-3.5A12 12 0 0 0 8.7 14.5l4.2 3.3a7.4 7.4 0 0 1 7.1-5.3Z" fill="#EA4335"/></svg>`;
+  if (providerId === "local")
+    return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#2f7d68"/><rect x="9" y="10" width="22" height="15" rx="3" fill="none" stroke="#fff" stroke-width="2.4"/><path d="M14 30h12M20 25v5" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="14" cy="17.5" r="1.5" fill="#fff"/><path d="M19 17.5h7" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>`;
   return `<svg ${common}><rect x="2" y="2" width="36" height="36" rx="11" fill="#7357ff"/><path d="m20 8 10.5 12L20 32 9.5 20 20 8Zm0 6.4L15.1 20l4.9 5.6 4.9-5.6-4.9-5.6Z" fill="#fff"/></svg>`;
 }
 
@@ -388,6 +396,17 @@ function setVendorPermissionNotice(message, tone = "info", root = document) {
   notice.dataset.tone = officialPermissionNotice.tone;
 }
 
+function setPrivatePermissionNotice(message, tone = "info", root = document) {
+  privatePermissionNotice = {
+    message: String(message || ""),
+    tone: tone === "error" ? "error" : "info",
+  };
+  const notice = root.querySelector?.("[data-codex-private-permission-notice]");
+  if (!notice) return;
+  notice.textContent = privatePermissionNotice.message;
+  notice.dataset.tone = privatePermissionNotice.tone;
+}
+
 function clearOfficialEnableIntent() {
   officialEnableAfterCursorLogin = false;
 }
@@ -427,6 +446,20 @@ function officialComputerState(status) {
       provider: "official-grok-cloud",
       alwaysAllowComputerActions:
         value.permissions?.provider === "official-grok-cloud" &&
+        value.permissions?.alwaysAllowComputerActions === true,
+    },
+  };
+}
+
+function privateComputerState(status) {
+  const value = status?.privateComputer || {};
+  return {
+    provider: "private-browser",
+    available: value.available !== false,
+    permissions: {
+      provider: "private-browser",
+      alwaysAllowComputerActions:
+        value.permissions?.provider === "private-browser" &&
         value.permissions?.alwaysAllowComputerActions === true,
     },
   };
@@ -573,41 +606,74 @@ function officialComputerHtml(status) {
 
 function vendorComputerPermissionsHtml(status) {
   const computer = officialComputerState(status);
-  const enabled = computer.permissions.alwaysAllowComputerActions;
+  const privateComputer = privateComputerState(status);
+  const privateEnabled = privateComputer.permissions.alwaysAllowComputerActions;
+  const vendorEnabled = computer.permissions.alwaysAllowComputerActions;
   const unavailable = computer.mode === "unknown";
-  const permissionLocked = unavailable || (!computer.connected && !enabled);
-  const busy = officialPermissionOperationInFlight;
-  const disabled = permissionLocked || busy || !enabled;
-  const enabledDescription =
+  const vendorLocked = unavailable || (!computer.connected && !vendorEnabled);
+  const privateBusy = privatePermissionOperationInFlight;
+  const vendorBusy = officialPermissionOperationInFlight;
+  const privateDisabled =
+    !privateComputer.available || privateBusy || !privateEnabled;
+  const vendorDisabled = vendorLocked || vendorBusy || !vendorEnabled;
+  const vendorEnabledDescription =
     computer.mode === "official" && computer.connected
       ? "On for this connected official vendor account. Signing out or starting another sign-in turns it off; you can also turn it off here to restore Allow once or Deny cards."
       : "Stored for this official vendor account on this Windows user. It is not active while the vendor computer is disconnected; you can turn it off here to restore Allow once or Deny cards.";
   return `
-    <section class="codex-card codex-permissions-card" aria-labelledby="codex-permissions-title" aria-busy="${busy ? "true" : "false"}">
+    <section class="codex-card codex-permissions-card" aria-labelledby="codex-permissions-title" aria-busy="${privateBusy || vendorBusy ? "true" : "false"}">
       <div class="codex-card-heading">
         <div>
-          <h2 id="codex-permissions-title">Permissions</h2>
-          <p>Controls for the shared official vendor computer only.</p>
+          <h2 id="codex-permissions-title">Computer permissions</h2>
+          <p>Choose separately for the Private browser and the vendor cloud computer.</p>
         </div>
-        <span class="codex-route-badge${enabled ? " is-vendor" : ""}">${enabled ? "Always allow is on" : "Ask for each action"}</span>
+        <span class="codex-route-badge">Provider-specific</span>
       </div>
-      <div class="codex-permission-warning" id="codex-vendor-permission-warning" role="note">
-        <strong>Turning this on gives employees broad control of the shared vendor computer.</strong>
-        <span>They may click, drag, type, press keys, submit forms, and navigate without showing an approval card for each action. This does not grant access to the Private browser or any other tool.</span>
-        <span>Take control, session and screen-generation changes, action deadlines, and safety stops still interrupt work. The provider-scoped choice is protected for this Windows user with Windows DPAPI.</span>
+      <div class="codex-permission-scope" data-provider="private-browser">
+        <div class="codex-permission-scope-heading">
+          <div><strong>Private browser</strong><small>Each employee's isolated local browser</small></div>
+          <span class="codex-route-badge${privateEnabled ? " is-active" : ""}">${privateEnabled ? "Always allow" : "Ask each time"}</span>
+        </div>
+        <div class="codex-permission-warning" id="codex-private-permission-warning" role="note">
+          <strong>Always allow lets employees control their Private browsers without asking for every action.</strong>
+          <span>Clicks, typing, key presses, form submissions, and navigation will run without an approval card. Take control, session changes, deadlines, and browser safety limits still stop work when needed.</span>
+        </div>
+        ${
+          privateEnabled
+            ? ""
+            : `<label class="codex-computer-ack"><input type="checkbox" data-codex-private-permission-ack aria-describedby="codex-private-permission-warning"${!privateComputer.available || privateBusy ? " disabled" : ""} /><span>I understand that employees can act in their Private browsers without asking each time.</span></label>`
+        }
+        <button class="codex-switch-row" type="button" role="switch" aria-checked="${privateEnabled ? "true" : "false"}" aria-describedby="codex-private-permission-warning" data-codex-private-always-allow${privateDisabled ? " disabled" : ""}>
+          <span class="codex-switch-icon" aria-hidden="true">${boltIcon({ size: 15 })}</span>
+          <span><strong>Always allow Private browser actions</strong><small>${privateEnabled ? "On. Private browser actions run without approval cards; turn this off to ask in chat again." : "Off. Non-automatic Private browser actions ask in the chat."}</small></span>
+          <span class="codex-switch-track" aria-hidden="true"><span></span></span>
+        </button>
+        ${!privateComputer.available ? '<p class="codex-official-error" role="alert">The Private browser service is unavailable, so this permission cannot be changed.</p>' : ""}
+        <p class="codex-settings-notice" data-codex-private-permission-notice data-tone="${privatePermissionNotice.tone}" aria-live="polite">${escapeHtml(privatePermissionNotice.message)}</p>
       </div>
-      ${
-        enabled
-          ? ""
-          : `<label class="codex-computer-ack"><input type="checkbox" data-codex-vendor-permission-ack aria-describedby="codex-vendor-permission-warning"${permissionLocked || busy ? " disabled" : ""} /><span>I understand that employees can act on the shared vendor computer without asking each time.</span></label>`
-      }
-      <button class="codex-switch-row" type="button" role="switch" aria-checked="${enabled ? "true" : "false"}" aria-describedby="codex-vendor-permission-warning" data-codex-vendor-always-allow${disabled ? " disabled" : ""}>
-        <span class="codex-switch-icon" aria-hidden="true">${boltIcon({ size: 15 })}</span>
-          <span><strong>Always allow computer actions</strong><small>${enabled ? enabledDescription : "Off. Each non-automatic vendor action asks in the chat."}</small></span>
-        <span class="codex-switch-track" aria-hidden="true"><span></span></span>
-      </button>
-      ${permissionLocked ? `<p class="codex-official-error" role="alert">${unavailable ? (enabled ? "The official provider helper is unavailable. Always allow remains stored and cannot be changed until the helper returns." : "The official provider helper is unavailable, so Always allow cannot be enabled.") : "Connect the official vendor account before enabling this permission."}</p>` : !computer.connected && enabled ? '<p class="codex-official-error" role="alert">The vendor computer is disconnected, but Always allow is still stored locally. Turn it off here or reconnect the account.</p>' : ""}
-      <p class="codex-settings-notice" data-codex-permission-notice data-tone="${officialPermissionNotice.tone}" aria-live="polite">${escapeHtml(officialPermissionNotice.message)}</p>
+      <div class="codex-permission-scope" data-provider="official-grok-cloud">
+        <div class="codex-permission-scope-heading">
+          <div><strong>Vendor cloud computer</strong><small>One shared remote computer for every employee</small></div>
+          <span class="codex-route-badge${vendorEnabled ? " is-vendor" : ""}">${vendorEnabled ? "Always allow" : "Ask each time"}</span>
+        </div>
+        <div class="codex-permission-warning" id="codex-vendor-permission-warning" role="note">
+          <strong>Always allow gives employees broad control of the shared vendor computer.</strong>
+          <span>They may click, drag, type, press keys, submit forms, and navigate without showing an approval card for each action. This never changes the Private browser permission above.</span>
+          <span>Take control, session and screen-generation changes, action deadlines, and safety stops still interrupt work. This choice is protected for this Windows user with Windows DPAPI.</span>
+        </div>
+        ${
+          vendorEnabled
+            ? ""
+            : `<label class="codex-computer-ack"><input type="checkbox" data-codex-vendor-permission-ack aria-describedby="codex-vendor-permission-warning"${vendorLocked || vendorBusy ? " disabled" : ""} /><span>I understand that employees can act on the shared vendor computer without asking each time.</span></label>`
+        }
+        <button class="codex-switch-row" type="button" role="switch" aria-checked="${vendorEnabled ? "true" : "false"}" aria-describedby="codex-vendor-permission-warning" data-codex-vendor-always-allow${vendorDisabled ? " disabled" : ""}>
+          <span class="codex-switch-icon" aria-hidden="true">${boltIcon({ size: 15 })}</span>
+          <span><strong>Always allow vendor computer actions</strong><small>${vendorEnabled ? vendorEnabledDescription : "Off. Non-automatic vendor actions ask in the chat."}</small></span>
+          <span class="codex-switch-track" aria-hidden="true"><span></span></span>
+        </button>
+        ${vendorLocked ? `<p class="codex-official-error" role="alert">${unavailable ? (vendorEnabled ? "The official provider helper is unavailable. Always allow remains stored and cannot be changed until the helper returns." : "The official provider helper is unavailable, so Always allow cannot be enabled.") : "Connect the official vendor account before enabling this permission."}</p>` : !computer.connected && vendorEnabled ? '<p class="codex-official-error" role="alert">The vendor computer is disconnected, but Always allow is still stored locally. Turn it off here or reconnect the account.</p>' : ""}
+        <p class="codex-settings-notice" data-codex-permission-notice data-tone="${officialPermissionNotice.tone}" aria-live="polite">${escapeHtml(officialPermissionNotice.message)}</p>
+      </div>
     </section>`;
 }
 
@@ -1071,7 +1137,7 @@ function onboardingProviderStepHtml(status) {
   const options = providers
     .map(
       (provider) =>
-        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selected.id ? " selected" : ""}>${escapeHtml(provider.label)}</option>`,
+        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-local-base-url="${escapeHtml(provider.baseUrl || "")}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selected.id ? " selected" : ""}>${escapeHtml(provider.label)}</option>`,
     )
     .join("");
   const tiles = providers
@@ -1089,7 +1155,9 @@ function onboardingProviderStepHtml(status) {
             ? "Connected"
             : provider.loginKind === "service-account"
               ? "Import key"
-              : "Sign in";
+              : provider.loginKind === "local"
+                ? "Configure server"
+                : "Sign in";
       return `<button class="codex-provider-tile${active ? " is-active" : ""}" type="button" data-codex-onboarding-provider="${escapeHtml(provider.id)}" aria-pressed="${active ? "true" : "false"}"${pending ? " disabled" : ""}>
         <span class="codex-provider-logo">${providerLogo(provider.id)}</span>
         <span class="codex-provider-tile-copy"><strong>${escapeHtml(provider.label)}</strong><small>${escapeHtml(state)}</small></span>
@@ -1100,8 +1168,8 @@ function onboardingProviderStepHtml(status) {
   return `<section class="codex-onboarding-panel" aria-labelledby="codex-connect-title">
     <div class="codex-onboarding-heading">
       <span class="codex-step-count">1 of 3</span>
-      <h2 id="codex-connect-title">Sign in to providers</h2>
-      <p>Choose the AI account you want Open Bot to use. You can connect more providers later in Settings.</p>
+      <h2 id="codex-connect-title">Connect an AI provider</h2>
+      <p>Choose an AI account or a local model server for Open Bot. You can connect more providers later in Settings.</p>
     </div>
     <div class="codex-provider-grid" role="group" aria-label="AI providers">${tiles}</div>
     <select class="codex-visually-hidden" data-codex-provider aria-label="Selected AI provider">${options}</select>
@@ -1115,6 +1183,14 @@ function onboardingProviderStepHtml(status) {
       <input id="codex-onboarding-vertex-key" type="file" accept="application/json,.json" required />
       <button type="submit">Verify & import for Vertex AI</button>
       <small>The key is handed only to the bundled local importer and the temporary upload is deleted.</small>
+    </form>
+    <form class="codex-local-form" data-codex-local-form${selected?.loginKind === "local" ? "" : " hidden"}>
+      <label for="codex-onboarding-local-url">Local OpenAI-compatible endpoint</label>
+      <input id="codex-onboarding-local-url" data-codex-local-url type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="codex-onboarding-local-help" value="${escapeHtml(selected?.baseUrl || "http://127.0.0.1:11434/v1")}" required />
+      <label for="codex-onboarding-local-key">API key <span>(optional)</span></label>
+      <input id="codex-onboarding-local-key" data-codex-local-key type="password" autocomplete="off" spellcheck="false" maxlength="4096" aria-describedby="codex-onboarding-local-help" />
+      <button type="submit">Connect & discover models</button>
+      <small id="codex-onboarding-local-help">Only a literal 127.0.0.1 address is accepted. Your server and selected model must support OpenAI-compatible streaming and tool calling.</small>
     </form>
     <form class="codex-key-form" data-codex-key-form hidden>
       <label for="codex-onboarding-api-key">OpenAI API key</label>
@@ -1227,6 +1303,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         ];
   const usage = status.usage || {};
   const apiKeyActive = connection.mode === "api-key";
+  const localActive = connection.mode === "local";
   const connectedProviderId =
     connection.provider === "openai-api-key"
       ? account.provider || "codex"
@@ -1250,7 +1327,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
   const providerOptions = providers
     .map(
       (provider) =>
-        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selectedProvider.id ? " selected" : ""}>${escapeHtml(provider.label)}${provider.signedIn ? " — connected" : ""}</option>`,
+        `<option value="${escapeHtml(provider.id)}" data-label="${escapeHtml(provider.label)}" data-description="${escapeHtml(provider.description)}" data-login-kind="${escapeHtml(provider.loginKind)}" data-signed-in="${provider.signedIn ? "true" : "false"}" data-local-base-url="${escapeHtml(provider.baseUrl || "")}" data-credential-revision="${provider.credentialRevision == null ? "" : escapeHtml(provider.credentialRevision)}"${provider.id === selectedProvider.id ? " selected" : ""}>${escapeHtml(provider.label)}${provider.signedIn ? " — connected" : ""}</option>`,
     )
     .join("");
   const plan = account.plan
@@ -1263,9 +1340,11 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
       : "Not connected";
   const accountDetail = apiKeyActive
     ? "Stored securely for this Windows user"
-    : account.signedIn
-      ? account.email || `${connectedProvider.label} account`
-      : "Choose a provider or use an OpenAI API key";
+    : localActive
+      ? connectedProvider.baseUrl || "Loopback model endpoint"
+      : account.signedIn
+        ? account.email || `${connectedProvider.label} account`
+        : "Choose a provider or use an OpenAI API key";
   const connectionDetail =
     apiKeyActive && !account.signedIn
       ? "Direct OpenAI API"
@@ -1274,7 +1353,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
     !apiKeyActive && account.avatarUrl
       ? `<img class="codex-avatar" src="${escapeHtml(account.avatarUrl)}" alt="" />`
       : `<span class="codex-avatar codex-initials">${escapeHtml(apiKeyActive ? "OA" : initials(account.name))}</span>`;
-  const activeOAuth = !apiKeyActive;
+  const activeOAuth = !apiKeyActive && !localActive;
   const providerActionLabel = selectedProvider.signedIn
     ? activeOAuth
       ? connectedProvider.id === selectedProvider.id
@@ -1286,11 +1365,11 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
   const firstRunIntroduction = firstRun
     ? `<div class="codex-first-run-copy">
         <h2 id="codex-connect-title">Connect an AI provider to start</h2>
-        <p>Choose which account and model family your employees will use. CLIProxyAPI keeps the connection local and routes only to your selection.</p>
+        <p>Choose which account or local model family your employees will use. Open Bot stores the connection locally and routes only to your selection.</p>
       </div>`
     : "";
   const firstRunAssurance = firstRun
-    ? `<p class="codex-connection-assurance">Each sign-in opens only that provider's reviewed official authorization page. API keys and imported credentials are stored only for this Windows user.</p>`
+    ? `<p class="codex-connection-assurance">Hosted-provider sign-ins open only reviewed official authorization pages. API keys, imported credentials, and local-server settings are stored only for this Windows user.</p>`
     : "";
   return `
     <section class="codex-card${firstRun ? " codex-first-run-card" : ""}" aria-label="AI provider connection">
@@ -1310,7 +1389,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         <p data-codex-provider-description>${escapeHtml(selectedProvider.description)}</p>
       </div>
       <div class="codex-actions">
-        <button type="button" data-codex-provider-connect${selectedProvider.loginKind === "service-account" ? " hidden" : ""}>${escapeHtml(providerActionLabel)}</button>
+        <button type="button" data-codex-provider-connect${["service-account", "local"].includes(selectedProvider.loginKind) ? " hidden" : ""}>${escapeHtml(providerActionLabel)}</button>
         <button type="button" data-codex-key-toggle>Use OpenAI API key</button>
       </div>
       <form class="codex-vertex-form" data-codex-vertex-form${selectedProvider.loginKind === "service-account" ? "" : " hidden"}>
@@ -1318,6 +1397,14 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
         <input id="codex-vertex-key" type="file" accept="application/json,.json" required />
         <button type="submit">Verify & import for Vertex AI</button>
         <small>The key is handed only to the bundled local CLIProxyAPI importer, then the temporary upload is deleted. It is never written to logs.</small>
+      </form>
+      <form class="codex-local-form" data-codex-local-form${selectedProvider.loginKind === "local" ? "" : " hidden"}>
+        <label for="codex-local-url">Local OpenAI-compatible endpoint</label>
+        <input id="codex-local-url" data-codex-local-url type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="200" aria-describedby="codex-local-help" value="${escapeHtml(selectedProvider.baseUrl || "http://127.0.0.1:11434/v1")}" required />
+        <label for="codex-local-key">API key <span>(optional)</span></label>
+        <input id="codex-local-key" data-codex-local-key type="password" autocomplete="off" spellcheck="false" maxlength="4096" aria-describedby="codex-local-help" placeholder="Leave blank to keep the saved key" />
+        <button type="submit">Connect & discover models</button>
+        <small id="codex-local-help">Works with Ollama, LM Studio, vLLM, and other OpenAI-compatible servers on this PC. Only literal 127.0.0.1 endpoints are allowed; tool calling and streaming are required for employee workflows.</small>
       </form>
       <form class="codex-key-form" data-codex-key-form hidden>
         <label for="codex-api-key">OpenAI API key</label>
@@ -1567,6 +1654,7 @@ function syncProviderControls(panel) {
     description: selected.dataset.description || "",
     loginKind: selected.dataset.loginKind || "oauth",
     signedIn: selected.dataset.signedIn === "true",
+    baseUrl: selected.dataset.localBaseUrl || "",
     credentialRevision: selected.dataset.credentialRevision
       ? Number(selected.dataset.credentialRevision)
       : null,
@@ -1577,10 +1665,12 @@ function syncProviderControls(panel) {
   if (description) description.textContent = provider.description;
   const connect = panel.querySelector("[data-codex-provider-connect]");
   const vertexForm = panel.querySelector("[data-codex-vertex-form]");
+  const localForm = panel.querySelector("[data-codex-local-form]");
   const vertex = provider.loginKind === "service-account";
+  const local = provider.loginKind === "local";
   const pending = pendingOAuthDevice?.provider === provider.id;
   if (connect) {
-    connect.hidden = vertex;
+    connect.hidden = vertex || local;
     connect.disabled = pending;
     connect.textContent = pending
       ? `Waiting for ${provider.label}`
@@ -1591,6 +1681,17 @@ function syncProviderControls(panel) {
         : `Connect ${provider.label}`;
   }
   if (vertexForm) vertexForm.hidden = !vertex;
+  if (localForm) {
+    localForm.hidden = !local;
+    const endpoint = localForm.querySelector("[data-codex-local-url]");
+    if (
+      local &&
+      endpoint &&
+      provider.baseUrl &&
+      endpoint !== document.activeElement
+    )
+      endpoint.value = provider.baseUrl;
+  }
   return provider;
 }
 
@@ -1632,8 +1733,10 @@ function wireConnectionPanel(panel) {
         });
       providerConnectionNotice = { message: "", tone: "info" };
       const provider = syncProviderControls(panel);
-      if (provider?.loginKind !== "service-account")
+      if (!["service-account", "local"].includes(provider?.loginKind))
         panel.querySelector("[data-codex-provider-connect]")?.click();
+      else if (provider?.loginKind === "local")
+        panel.querySelector("[data-codex-local-url]")?.focus();
       else panel.querySelector("[data-codex-vertex-form] input")?.focus();
     });
   }
@@ -1673,6 +1776,77 @@ function wireConnectionPanel(panel) {
       rememberOnboardingCompleted();
       if (lastStatus) installCodexOnboarding(lastStatus);
     });
+  const privatePermissionAcknowledgement = panel.querySelector(
+    "[data-codex-private-permission-ack]",
+  );
+  const privatePermissionControl = panel.querySelector(
+    "[data-codex-private-always-allow]",
+  );
+  privatePermissionAcknowledgement?.addEventListener("change", () => {
+    privatePermissionAcknowledgement.removeAttribute("aria-invalid");
+    if (privatePermissionControl)
+      privatePermissionControl.disabled =
+        !privatePermissionAcknowledgement.checked;
+    if (privatePermissionAcknowledgement.checked)
+      setPrivatePermissionNotice("", "info", panel);
+  });
+  privatePermissionControl?.addEventListener("click", async () => {
+    const enabled =
+      privatePermissionControl.getAttribute("aria-checked") === "true";
+    const next = !enabled;
+    if (next && !privatePermissionAcknowledgement?.checked) {
+      privatePermissionAcknowledgement?.setAttribute("aria-invalid", "true");
+      privatePermissionAcknowledgement?.focus();
+      setPrivatePermissionNotice(
+        "Read the Private browser warning and check the acknowledgement before enabling Always allow.",
+        "error",
+        panel,
+      );
+      return;
+    }
+    if (privatePermissionOperationInFlight) return;
+    privatePermissionOperationInFlight = true;
+    privatePermissionControl.disabled = true;
+    if (privatePermissionAcknowledgement)
+      privatePermissionAcknowledgement.disabled = true;
+    setPrivatePermissionNotice(
+      next
+        ? "Saving the Private browser permission..."
+        : "Restoring Private browser approval cards...",
+      "info",
+      panel,
+    );
+    try {
+      const response = await request("/api/private-computer", {
+        action: "permissions",
+        provider: "private-browser",
+        alwaysAllowComputerActions: next,
+        acknowledged: next,
+      });
+      if (!response?.status?.permissions)
+        throw new Error(
+          "The Private browser did not confirm the permission change.",
+        );
+      lastStatus = {
+        ...lastStatus,
+        privateComputer: response.status,
+      };
+      setPrivatePermissionNotice(
+        next
+          ? "Always allow is on for Private browsers. New actions will run without approval cards."
+          : "Always allow is off for Private browsers. New actions will ask in the chat.",
+      );
+    } catch (error) {
+      setPrivatePermissionNotice(
+        error?.message || "The Private browser permission was not changed.",
+        "error",
+      );
+      await loadStatus();
+    } finally {
+      privatePermissionOperationInFlight = false;
+      if (lastStatus) installConnectionPanel(lastStatus);
+    }
+  });
   const permissionAcknowledgement = panel.querySelector(
     "[data-codex-vendor-permission-ack]",
   );
@@ -1727,7 +1901,7 @@ function wireConnectionPanel(panel) {
       };
       setVendorPermissionNotice(
         next
-          ? "Always allow is on for the official vendor computer only."
+          ? "Always allow is on for the vendor cloud computer. The Private browser setting is unchanged."
           : "Always allow is off. Vendor actions will ask in the chat again.",
       );
     } catch (error) {
@@ -1821,7 +1995,11 @@ function wireConnectionPanel(panel) {
       const connectControl = event.currentTarget;
       const notice = panel.querySelector("[data-codex-notice]");
       const provider = syncProviderControls(panel);
-      if (!provider || provider.loginKind === "service-account") return;
+      if (
+        !provider ||
+        ["service-account", "local"].includes(provider.loginKind)
+      )
+        return;
       connectControl.disabled = true;
       const canReuseProvider = Boolean(
         provider.signedIn &&
@@ -1871,6 +2049,48 @@ function wireConnectionPanel(panel) {
         providerConnectionNotice = { message: error.message, tone: "error" };
       } finally {
         if (connectControl.isConnected) syncProviderControls(panel);
+      }
+    });
+  panel
+    .querySelector("[data-codex-local-form]")
+    ?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const provider = syncProviderControls(panel);
+      if (provider?.id !== "local") return;
+      const form = event.currentTarget;
+      const endpoint = form.querySelector("[data-codex-local-url]");
+      const key = form.querySelector("[data-codex-local-key]");
+      const submit = form.querySelector("button[type='submit']");
+      const notice = panel.querySelector("[data-codex-notice]");
+      submit.disabled = true;
+      notice.textContent = "Connecting and discovering local models...";
+      notice.dataset.tone = "info";
+      try {
+        const result = await request("/api/codex/auth", {
+          action: "local-connect",
+          baseUrl: endpoint.value,
+          apiKey: key.value,
+        });
+        key.value = "";
+        selectedProviderId = "local";
+        if (result.status) {
+          acceptAuthoritativeStatus(result.status);
+          const count = result.status.preferences?.catalog?.models?.length || 0;
+          providerConnectionNotice = {
+            message: `${count} local model${count === 1 ? "" : "s"} discovered. New requests will stay on this PC.`,
+            tone: "info",
+          };
+          applyUi();
+        } else {
+          notice.textContent = "Local models connected.";
+          await loadStatus();
+        }
+      } catch (error) {
+        notice.textContent = error.message;
+        notice.dataset.tone = "error";
+        providerConnectionNotice = { message: error.message, tone: "error" };
+      } finally {
+        if (submit.isConnected) submit.disabled = false;
       }
     });
   panel
@@ -2046,8 +2266,10 @@ function installConnectionPanel(status) {
       providerConnectionNotice,
       officialComputerOperationInFlight,
       officialPermissionOperationInFlight,
+      privatePermissionOperationInFlight,
       officialComputerNotice,
       officialPermissionNotice,
+      privatePermissionNotice,
     });
     if (panel.dataset.signature !== signature) {
       panel.dataset.signature = signature;
@@ -2400,6 +2622,163 @@ function installModelPickers() {
   }
 }
 
+function groupTaskStatusLabel(status) {
+  return (
+    {
+      queued: "Queued",
+      working: "Working",
+      complete: "Done",
+      passed: "No update",
+      blocked: "Blocked",
+    }[status] || "Queued"
+  );
+}
+
+function groupTaskSummary(task) {
+  const members = Array.isArray(task?.members) ? task.members : [];
+  const counts = members.reduce((summary, member) => {
+    summary[member.status] = (summary[member.status] || 0) + 1;
+    return summary;
+  }, {});
+  if (counts.working)
+    return `${counts.working} working · ${members.length} teammates`;
+  if (task?.state === "complete") {
+    const done = (counts.complete || 0) + (counts.passed || 0);
+    return `${done} of ${members.length} finished`;
+  }
+  return `${members.length} teammates queued`;
+}
+
+function removeGroupTaskTrackerForForm(form) {
+  const host = form?.parentElement?.parentElement;
+  host
+    ?.querySelectorAll(":scope > [data-codex-group-task-tracker]")
+    .forEach((tracker) => tracker.remove());
+}
+
+function renderGroupTaskTracker(form, task) {
+  const groupId = String(task?.groupId || "");
+  const host = form?.parentElement?.parentElement;
+  if (!groupId || !host) {
+    removeGroupTaskTrackerForForm(form);
+    return;
+  }
+  let tracker = host.querySelector(
+    `:scope > [data-codex-group-task-tracker][data-codex-group-id="${CSS.escape(groupId)}"]`,
+  );
+  const taskKey = String(task.id || "");
+  const taskSignature = JSON.stringify({
+    id: taskKey,
+    state: String(task.state || "active"),
+    updatedAt: String(task.updatedAt || ""),
+    members: (task.members || []).map((member) => [
+      member.id,
+      member.status,
+      member.updatedAt || "",
+    ]),
+  });
+  if (tracker?.dataset.codexTaskSignature === taskSignature) return;
+  if (!tracker) {
+    host
+      .querySelectorAll(":scope > [data-codex-group-task-tracker]")
+      .forEach((item) => item.remove());
+    tracker = document.createElement("section");
+    tracker.dataset.codexGroupTaskTracker = "true";
+    tracker.dataset.codexGroupId = groupId;
+    tracker.className = "codex-group-task-tracker";
+    host.insertBefore(tracker, form.parentElement);
+  }
+  tracker.dataset.codexTaskKey = taskKey;
+  tracker.dataset.codexTaskSignature = taskSignature;
+  tracker.dataset.state = String(task.state || "active");
+  const titleId = `codex-group-task-${crypto.randomUUID()}`;
+  const members = (task.members || [])
+    .map(
+      (member) => `
+        <li data-status="${escapeHtml(member.status)}">
+          <span class="codex-group-task-dot" aria-hidden="true"></span>
+          <strong>${escapeHtml(member.name)}</strong>
+          <span>${escapeHtml(groupTaskStatusLabel(member.status))}</span>
+        </li>`,
+    )
+    .join("");
+  tracker.innerHTML = `
+    <header>
+      <div>
+        <span>Group task</span>
+        <strong id="${titleId}">${escapeHtml(task.groupName || "Group work")}</strong>
+      </div>
+      <div class="codex-group-task-actions">
+        <span data-codex-group-task-state>${escapeHtml(groupTaskSummary(task))}</span>
+        ${
+          task.state === "complete"
+            ? '<button type="button" data-codex-clear-group-task aria-label="Clear completed group task">Clear</button>'
+            : ""
+        }
+      </div>
+    </header>
+    <p>${escapeHtml(task.summary || "Working on the latest group request")}</p>
+    <ol aria-labelledby="${titleId}">${members}</ol>`;
+  const clear = tracker.querySelector("[data-codex-clear-group-task]");
+  clear?.addEventListener("click", async () => {
+    clear.disabled = true;
+    try {
+      await request("/api/group-tasks", { action: "clear", groupId });
+      tracker.remove();
+    } catch (error) {
+      clear.disabled = false;
+      clear.textContent = "Try again";
+    }
+  });
+}
+
+async function refreshGroupTaskForForm(form) {
+  const groupId = String(form?.dataset?.codexAgentId || "");
+  if (!groupId || groupTaskLoads.has(form)) return;
+  groupTaskLoads.add(form);
+  try {
+    const response = await request(
+      `/api/group-tasks?groupId=${encodeURIComponent(groupId)}`,
+    );
+    if (!form.isConnected) return;
+    if (response?.task?.groupId === groupId)
+      renderGroupTaskTracker(form, response.task);
+    else removeGroupTaskTrackerForForm(form);
+  } catch {
+    // A tracker is auxiliary; preserve the conversation if the local bridge is restarting.
+  } finally {
+    groupTaskLoads.delete(form);
+  }
+}
+
+function refreshGroupTaskTrackers() {
+  const forms = [
+    ...document.querySelectorAll("form[data-codex-agent-id]"),
+  ].filter(
+    (form) =>
+      form.isConnected !== false &&
+      (typeof form.getClientRects !== "function" ||
+        form.getClientRects().length > 0),
+  );
+  for (const tracker of document.querySelectorAll(
+    "[data-codex-group-task-tracker]",
+  )) {
+    if (
+      !forms.some(
+        (form) => form.parentElement?.parentElement === tracker.parentElement,
+      )
+    )
+      tracker.remove();
+  }
+  for (const form of forms) void refreshGroupTaskForForm(form);
+}
+
+function syncGroupTaskPolling() {
+  if (!groupTaskPollTimer)
+    groupTaskPollTimer = setInterval(refreshGroupTaskTrackers, 1_000);
+  refreshGroupTaskTrackers();
+}
+
 function officialApprovalKey(pending) {
   const frame = pending?.frame || {};
   return [
@@ -2441,26 +2820,26 @@ function approvalActionLabel(action) {
   return `${kind}${target}${destination}${typed}`;
 }
 
-function removeOfficialApprovalCardForForm(form) {
+function removeOfficialApprovalCardForForm(form, seatId = null) {
   const anchor = form?.parentElement;
   const host = anchor?.parentElement;
   if (!host) return;
   for (const card of host.querySelectorAll(
     ":scope > [data-codex-chat-approval]",
   )) {
-    if (card.dataset.codexApprovalAgentId === form.dataset.codexAgentId)
-      card.remove();
+    if (!seatId || card.dataset.codexApprovalAgentId === seatId) card.remove();
   }
 }
 
 function renderOfficialApprovalCard(form, pending) {
-  const agentId = String(form?.dataset?.codexAgentId || "");
+  const agentId = String(pending?.seatId || "");
   const anchor = form?.parentElement;
   const host = anchor?.parentElement;
-  if (!agentId || !host || pending?.seatId !== agentId || !pending?.frame) {
-    removeOfficialApprovalCardForForm(form);
+  if (!agentId || !host) {
+    removeOfficialApprovalCardForForm(form, agentId || null);
     return;
   }
+  const requiresExactFrame = Boolean(pending?.frame);
   let card = [
     ...host.querySelectorAll(":scope > [data-codex-chat-approval]"),
   ].find((item) => item.dataset.codexApprovalAgentId === agentId);
@@ -2474,54 +2853,76 @@ function renderOfficialApprovalCard(form, pending) {
     host.insertBefore(card, anchor);
   }
   card.dataset.codexApprovalKey = approvalKey;
-  card.dataset.framePresented = "false";
+  card.dataset.codexApprovalProvider = requiresExactFrame
+    ? "official"
+    : "private";
+  card.dataset.framePresented = requiresExactFrame ? "false" : "true";
   const titleId = `codex-approval-${crypto.randomUUID()}`;
   card.setAttribute("aria-labelledby", titleId);
   const actions = (pending.presentation?.actions || [])
     .slice(0, 4)
     .map((action) => `<li>${escapeHtml(approvalActionLabel(action))}</li>`)
     .join("");
-  const expectedSource = `data:image/png;base64,${pending.frame.screenshotBase64}`;
+  const expectedSource = requiresExactFrame
+    ? `data:image/png;base64,${pending.frame.screenshotBase64}`
+    : "";
+  const providerLabel = requiresExactFrame
+    ? "Vendor computer"
+    : "Private browser";
+  const providerBadge = requiresExactFrame
+    ? '<span class="codex-route-badge is-vendor">Shared vendor screen</span>'
+    : '<span class="codex-route-badge">This employee\'s browser</span>';
+  const fallbackSummary = requiresExactFrame
+    ? "An employee wants to interact with the shared vendor computer."
+    : "An employee wants to use their private browser.";
+  const frameHtml = requiresExactFrame
+    ? `<figure>
+         <img src="${escapeHtml(expectedSource)}" alt="Exact shared vendor screen this action will use" data-codex-chat-approval-frame />
+         <figcaption>Allow once unlocks only this exact action on this displayed screen. If the screen or session changes, Open Bot asks again.</figcaption>
+       </figure>`
+    : "";
+  const initialStatus = requiresExactFrame
+    ? "Loading the exact approval screen..."
+    : "Browser access is on. Review this one action, then choose Allow once or Deny.";
   card.innerHTML = `
     <div class="codex-chat-approval-heading">
-      <div><span>Vendor computer</span><strong id="${titleId}">Computer action needs your permission</strong></div>
-      <span class="codex-route-badge is-vendor">Shared vendor screen</span>
+      <div><span>${providerLabel}</span><strong id="${titleId}">Computer action needs your permission</strong></div>
+      ${providerBadge}
     </div>
-    <p>${escapeHtml(pending.summary || "An employee wants to interact with the shared vendor computer.")}</p>
+    <p>${escapeHtml(pending.summary || fallbackSummary)}</p>
     ${actions ? `<ul>${actions}</ul>` : ""}
-    <figure>
-      <img src="${escapeHtml(expectedSource)}" alt="Exact shared vendor screen this action will use" data-codex-chat-approval-frame />
-      <figcaption>Allow once unlocks only this exact action on this displayed screen. If the screen or session changes, Open Bot asks again.</figcaption>
-    </figure>
+    ${frameHtml}
     <div class="codex-chat-approval-actions">
-      <button type="button" data-codex-chat-allow disabled>Allow once</button>
+      <button type="button" data-codex-chat-allow ${requiresExactFrame ? "disabled" : ""}>Allow once</button>
       <button type="button" data-codex-chat-deny>Deny</button>
-      <span data-codex-chat-approval-status role="status" aria-live="polite">Loading the exact approval screen...</span>
+      <span data-codex-chat-approval-status role="status" aria-live="polite">${initialStatus}</span>
     </div>`;
   const image = card.querySelector("[data-codex-chat-approval-frame]");
   const allow = card.querySelector("[data-codex-chat-allow]");
   const deny = card.querySelector("[data-codex-chat-deny]");
   const status = card.querySelector("[data-codex-chat-approval-status]");
-  image.addEventListener("load", () => {
-    if (
-      card.dataset.codexApprovalKey !== approvalKey ||
-      image.getAttribute("src") !== expectedSource
-    )
-      return;
-    card.dataset.framePresented = "true";
-    allow.disabled = false;
-    status.textContent = "Exact screen displayed. Choose Allow once or Deny.";
-  });
-  image.addEventListener("error", () => {
-    if (card.dataset.codexApprovalKey !== approvalKey) return;
-    allow.disabled = true;
-    status.textContent =
-      "The exact approval screen could not be displayed. Deny or wait for a fresh request.";
-  });
-  image.src = expectedSource;
+  if (image) {
+    image.addEventListener("load", () => {
+      if (
+        card.dataset.codexApprovalKey !== approvalKey ||
+        image.getAttribute("src") !== expectedSource
+      )
+        return;
+      card.dataset.framePresented = "true";
+      allow.disabled = false;
+      status.textContent = "Exact screen displayed. Choose Allow once or Deny.";
+    });
+    image.addEventListener("error", () => {
+      if (card.dataset.codexApprovalKey !== approvalKey) return;
+      allow.disabled = true;
+      status.textContent =
+        "The exact approval screen could not be displayed. Deny or wait for a fresh request.";
+    });
+    image.src = expectedSource;
+  }
   const decide = async (decision) => {
     if (card.dataset.codexApprovalKey !== approvalKey) return;
-    const presented = decision === "allow-once";
+    const presented = decision === "allow-once" && requiresExactFrame;
     if (presented && card.dataset.framePresented !== "true") return;
     allow.disabled = true;
     deny.disabled = true;
@@ -2536,7 +2937,8 @@ function renderOfficialApprovalCard(form, pending) {
       card.remove();
     } catch (error) {
       if (card.dataset.codexApprovalKey === approvalKey) {
-        allow.disabled = card.dataset.framePresented !== "true";
+        allow.disabled =
+          requiresExactFrame && card.dataset.framePresented !== "true";
         deny.disabled = false;
         status.textContent =
           error?.message ||
@@ -2550,56 +2952,73 @@ function renderOfficialApprovalCard(form, pending) {
 }
 
 async function refreshOfficialApprovalForForm(form) {
-  const agentId = String(form?.dataset?.codexAgentId || "");
+  const mode = officialComputerState(lastStatus).mode;
   if (
-    !agentId ||
-    officialComputerState(lastStatus).mode !== "official" ||
+    !["private", "official"].includes(mode) ||
     officialApprovalLoads.has(form)
   )
     return;
   officialApprovalLoads.add(form);
   try {
-    const response = await request(
-      `/api/approval?seatKey=${encodeURIComponent(agentId)}`,
-    );
+    const response = await request("/api/approvals");
     if (
       form.isConnected === false ||
-      form.dataset.codexAgentId !== agentId ||
-      officialComputerState(lastStatus).mode !== "official"
+      officialComputerState(lastStatus).mode !== mode
     )
       return;
-    if (response?.pending) renderOfficialApprovalCard(form, response.pending);
-    else removeOfficialApprovalCardForForm(form);
+    const pending = Array.isArray(response?.pending) ? response.pending : [];
+    const seatIds = new Set();
+    for (const approval of pending) {
+      const seatId = String(approval?.seatId || "");
+      if (!seatId) continue;
+      seatIds.add(seatId);
+      renderOfficialApprovalCard(form, approval);
+    }
+    const anchor = form?.parentElement;
+    const host = anchor?.parentElement;
+    if (host) {
+      for (const card of host.querySelectorAll(
+        ":scope > [data-codex-chat-approval]",
+      )) {
+        if (!seatIds.has(card.dataset.codexApprovalAgentId)) card.remove();
+      }
+    }
   } catch (error) {
     const anchor = form?.parentElement;
     const host = anchor?.parentElement;
-    const card = host
-      ? [...host.querySelectorAll(":scope > [data-codex-chat-approval]")].find(
-          (item) => item.dataset.codexApprovalAgentId === agentId,
-        )
-      : null;
-    const allow = card?.querySelector("[data-codex-chat-allow]");
-    const status = card?.querySelector("[data-codex-chat-approval-status]");
-    if (allow) allow.disabled = true;
-    if (status)
-      status.textContent =
-        error?.message || "Could not refresh this approval safely.";
+    for (const card of host?.querySelectorAll(
+      ":scope > [data-codex-chat-approval]",
+    ) || []) {
+      const allow = card.querySelector("[data-codex-chat-allow]");
+      const status = card.querySelector("[data-codex-chat-approval-status]");
+      if (allow) allow.disabled = true;
+      if (status)
+        status.textContent =
+          error?.message || "Could not refresh this approval safely.";
+    }
   } finally {
     officialApprovalLoads.delete(form);
   }
 }
 
 function refreshOfficialApprovalCards() {
-  const forms = [...document.querySelectorAll("form[data-codex-agent-id]")];
+  const forms = [
+    ...document.querySelectorAll("form[data-codex-agent-id]"),
+  ].filter(
+    (form) =>
+      form.isConnected !== false &&
+      (typeof form.getClientRects !== "function" ||
+        form.getClientRects().length > 0),
+  );
   for (const card of document.querySelectorAll("[data-codex-chat-approval]")) {
     const stillOwned = forms.some(
-      (form) =>
-        form.dataset.codexAgentId === card.dataset.codexApprovalAgentId &&
-        form.parentElement?.parentElement === card.parentElement,
+      (form) => form.parentElement?.parentElement === card.parentElement,
     );
     if (!stillOwned) card.remove();
   }
-  if (officialComputerState(lastStatus).mode !== "official") {
+  if (
+    !["private", "official"].includes(officialComputerState(lastStatus).mode)
+  ) {
     for (const form of forms) removeOfficialApprovalCardForForm(form);
     return;
   }
@@ -2607,7 +3026,9 @@ function refreshOfficialApprovalCards() {
 }
 
 function syncOfficialApprovalPolling() {
-  if (officialComputerState(lastStatus).mode !== "official") {
+  if (
+    !["private", "official"].includes(officialComputerState(lastStatus).mode)
+  ) {
     clearInterval(officialApprovalPollTimer);
     officialApprovalPollTimer = null;
     refreshOfficialApprovalCards();
@@ -2630,6 +3051,7 @@ function applyUi() {
     installConnectionPanel(lastStatus);
     installModelPickers();
     syncOfficialApprovalPolling();
+    syncGroupTaskPolling();
   }
 }
 
@@ -2779,13 +3201,15 @@ style.textContent = `
   .codex-initials { display:grid; place-items:center; background:#202020; border:1px solid rgba(255,255,255,.16); font-weight:650; }
   .codex-account-copy { display:grid; gap:2px; min-width:0; }
   .codex-actions,.codex-key-form>div { display:flex; flex-wrap:wrap; gap:8px; }
-  .codex-provider-picker,.codex-vertex-form { display:grid; gap:7px; }
-  .codex-provider-picker>label,.codex-vertex-form>label { color:var(--sand-text-secondary,#d5d5d5); font-size:12px; font-weight:600; }
+  .codex-provider-picker,.codex-vertex-form,.codex-local-form { display:grid; gap:7px; }
+  .codex-provider-picker>label,.codex-vertex-form>label,.codex-local-form>label { color:var(--sand-text-secondary,#d5d5d5); font-size:12px; font-weight:600; }
   .codex-provider-picker>select { width:100%; min-height:40px; border:1px solid rgba(127,127,127,.38); border-radius:10px; padding:0 11px; color:inherit; background:#1d1d1d; color-scheme:dark; }
   .codex-provider-picker>p { color:var(--sand-text-tertiary,#aaa); font-size:12px; line-height:1.45; }
-  .codex-vertex-form { padding:11px; border:1px solid rgba(127,127,127,.28); border-radius:10px; background:rgba(127,127,127,.055); }
+  .codex-vertex-form,.codex-local-form { padding:11px; border:1px solid rgba(127,127,127,.28); border-radius:10px; background:rgba(127,127,127,.055); }
   .codex-vertex-form input[type="file"] { width:100%; min-height:38px; color:var(--sand-text-secondary,#d5d5d5); font-size:12px; }
   .codex-vertex-form input[type="file"]::file-selector-button { margin-inline-end:9px; border:1px solid rgba(127,127,127,.35); border-radius:8px; padding:7px 10px; color:inherit; background:rgba(127,127,127,.14); cursor:pointer; }
+  .codex-local-form input { width:100%; min-height:38px; border:1px solid rgba(127,127,127,.35); border-radius:8px; padding:8px 10px; color:inherit; background:rgba(127,127,127,.08); }
+  .codex-local-form label span { color:var(--sand-text-tertiary,#9a9a9a); font-weight:400; }
   .codex-card button { border:1px solid rgba(127,127,127,.35); border-radius:999px; color:inherit; background:rgba(127,127,127,.14); padding:7px 12px; cursor:pointer; }
   .codex-card button:hover { background:rgba(127,127,127,.23); }
   .codex-card button:disabled { opacity:.55; cursor:wait; }
@@ -2841,6 +3265,12 @@ style.textContent = `
   .codex-computer-disclosure strong { color:#f4ddb2; }
   .codex-permission-warning { display:grid; gap:4px; padding:11px 12px; border:1px solid rgba(235,179,87,.4); border-radius:9px; color:#decba9; background:rgba(125,82,21,.15); font-size:12px; line-height:1.5; overflow-wrap:anywhere; }
   .codex-permission-warning strong { color:#f4ddb2; }
+  .codex-permission-scope { display:grid; gap:10px; padding-block:14px; border-top:1px solid rgba(255,255,255,.1); }
+  .codex-card-heading + .codex-permission-scope { padding-top:4px; border-top:0; }
+  .codex-permission-scope-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+  .codex-permission-scope-heading>div { min-width:0; display:grid; gap:2px; }
+  .codex-permission-scope-heading strong { color:var(--sand-text-primary,#eee); font-size:13px; }
+  .codex-permission-scope-heading small { color:var(--sand-text-secondary,#aaa); font-size:11px; line-height:1.4; }
   .codex-official-login-domain { color:var(--sand-text-tertiary,#aaa); font-size:11px; line-height:1.45; overflow-wrap:anywhere; }
   .codex-official-login-domain strong { color:var(--sand-text-secondary,#ccc); }
   .codex-official-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
@@ -2910,6 +3340,26 @@ style.textContent = `
   .codex-chat-approval-actions button:disabled { opacity:.55; cursor:wait; }
   .codex-chat-approval-actions button:focus-visible { outline:2px solid #9dc6ff; outline-offset:2px; }
   .codex-chat-approval-actions span { flex:1 0 220px; color:#d6c9b3; font-size:11px; line-height:1.4; }
+  .codex-group-task-tracker { box-sizing:border-box; width:min(680px,calc(100% - 28px)); display:grid; gap:10px; align-self:flex-start; margin:8px 14px 12px; padding:13px; border:1px solid rgba(127,151,215,.38); border-radius:13px; color:var(--sand-text-primary,#eee); background:rgba(35,42,58,.92); box-shadow:0 12px 34px rgba(0,0,0,.24); }
+  .codex-group-task-tracker>header { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+  .codex-group-task-tracker>header>div:first-child { min-width:0; display:grid; gap:2px; }
+  .codex-group-task-tracker>header>div:first-child>span { color:#b9d0ff; font-size:11px; font-weight:650; letter-spacing:.05em; text-transform:uppercase; }
+  .codex-group-task-tracker>header strong { overflow:hidden; font-size:14px; text-overflow:ellipsis; white-space:nowrap; }
+  .codex-group-task-actions { flex:none; display:flex; align-items:center; gap:8px; }
+  .codex-group-task-actions>span { color:#b8c4da; font-size:11px; white-space:nowrap; }
+  .codex-group-task-actions button { border:0; padding:4px 0; color:#b9d7ff; background:transparent; font:inherit; font-size:11px; cursor:pointer; }
+  .codex-group-task-actions button:hover { color:#fff; text-decoration:underline; text-underline-offset:3px; }
+  .codex-group-task-actions button:focus-visible { outline:2px solid #9dc6ff; outline-offset:3px; border-radius:4px; }
+  .codex-group-task-tracker>p { max-width:68ch; margin:0; color:#d6ddea; font-size:12px; line-height:1.45; overflow-wrap:anywhere; }
+  .codex-group-task-tracker>ol { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:5px 12px; padding:0; margin:0; list-style:none; }
+  .codex-group-task-tracker li { min-width:0; display:grid; grid-template-columns:8px minmax(0,1fr) auto; align-items:center; gap:7px; color:#bec9dc; font-size:11px; }
+  .codex-group-task-tracker li strong { overflow:hidden; color:#eff3ff; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+  .codex-group-task-tracker li>span:last-child { color:#9faec7; white-space:nowrap; }
+  .codex-group-task-dot { width:7px; height:7px; border-radius:50%; background:#69748a; }
+  .codex-group-task-tracker li[data-status="working"] .codex-group-task-dot { background:#93b7ff; box-shadow:0 0 0 3px rgba(147,183,255,.14); }
+  .codex-group-task-tracker li[data-status="complete"] .codex-group-task-dot { background:#8ed5a4; }
+  .codex-group-task-tracker li[data-status="passed"] .codex-group-task-dot { background:#97a3b8; }
+  .codex-group-task-tracker li[data-status="blocked"] .codex-group-task-dot { background:#f0ae84; }
   html[data-codex-connection-required],html[data-codex-connection-required] body { overflow:hidden !important; }
   [data-codex-onboarding] { position:fixed; inset:0; z-index:2147483647; display:grid; place-items:center; overflow:auto; padding:clamp(20px,5vw,56px); background:rgba(11,11,11,.94); backdrop-filter:blur(12px); color:#f5f5f5; animation:codex-connect-enter 320ms cubic-bezier(.16,1,.3,1) both; }
   .codex-first-run-dialog { width:min(860px,100%); display:grid; gap:22px; }
@@ -2925,7 +3375,7 @@ style.textContent = `
   .codex-first-run-card [data-codex-provider-connect] { border-color:#f2f2f2; background:#f2f2f2; color:#111; font-weight:650; }
   .codex-first-run-card [data-codex-provider-connect]:hover { background:#fff; }
   .codex-visually-hidden { position:absolute !important; width:1px !important; height:1px !important; overflow:hidden !important; clip:rect(0 0 0 0) !important; clip-path:inset(50%) !important; white-space:nowrap !important; }
-  .codex-vertex-form[hidden],.codex-key-form[hidden] { display:none !important; }
+  .codex-vertex-form[hidden],.codex-local-form[hidden],.codex-key-form[hidden] { display:none !important; }
   .codex-onboarding-panel { display:grid; gap:20px; padding:clamp(20px,4vw,30px); border:1px solid rgba(255,255,255,.15); border-radius:18px; background:#171717; box-shadow:0 24px 70px rgba(0,0,0,.32); }
   .codex-onboarding-heading { display:grid; gap:7px; }
   .codex-onboarding-heading h2 { margin:0; max-width:28ch; font-size:clamp(24px,4vw,32px); line-height:1.08; letter-spacing:-.035em; text-wrap:balance; }
@@ -2995,7 +3445,10 @@ style.textContent = `
     .codex-route-badge,.codex-route-badge.is-vendor,.codex-route-badge.is-unavailable,.codex-official-state { justify-self:start; max-width:100%; text-align:start; }
     .codex-official-actions>button { width:100%; }
     .codex-chat-approval { width:calc(100% - 16px); margin-inline:8px; }
+    .codex-group-task-tracker { width:calc(100% - 16px); margin-inline:8px; }
     .codex-chat-approval-heading { display:grid; }
+    .codex-group-task-tracker>header { display:grid; }
+    .codex-group-task-actions { justify-content:space-between; }
     .codex-chat-approval-actions button { flex:1; }
     .codex-provider-grid,.codex-onboarding-computers,.codex-onboarding-summary { grid-template-columns:1fr; }
     .codex-onboarding-detail,.codex-onboarding-footer { align-items:stretch; flex-direction:column; }

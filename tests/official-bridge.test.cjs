@@ -112,6 +112,9 @@ test.before(async () => {
     closeSeatForKey: privateManager.closeSeatForKey,
     captureSeat: privateManager.captureSeat,
     executeSeatActions: privateManager.executeSeatActions,
+    pendingApprovals: privateManager.pendingApprovals,
+    computerPermissions: privateManager.computerPermissions,
+    setComputerPermissions: privateManager.setComputerPermissions,
   };
   official.status = async () => safeStatus("private");
   server = bridge.startViewServer({
@@ -311,6 +314,83 @@ test("vendor permission updates require an exact provider-scoped acknowledgement
   assert.equal(updates.length, 2);
 });
 
+test("Private browser permission updates are exact, scoped, and exposed in status", async () => {
+  const updates = [];
+  let alwaysAllow = false;
+  privateManager.computerPermissions = () => ({
+    provider: "private-browser",
+    alwaysAllowComputerActions: alwaysAllow,
+    injectedSecret: SECRET_SENTINEL,
+  });
+  privateManager.setComputerPermissions = (next, acknowledged, provider) => {
+    updates.push({ next, acknowledged, provider });
+    alwaysAllow = next;
+    return privateManager.computerPermissions();
+  };
+  const enabled = await request("/api/private-computer", {
+    body: {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+    },
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.text.includes(SECRET_SENTINEL), false);
+  assert.deepEqual(enabled.value.result, {
+    provider: "private-browser",
+    alwaysAllowComputerActions: true,
+  });
+  assert.deepEqual(enabled.value.status, {
+    provider: "private-browser",
+    available: true,
+    permissions: {
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+    },
+  });
+  assert.deepEqual(updates, [
+    {
+      next: true,
+      acknowledged: true,
+      provider: "private-browser",
+    },
+  ]);
+
+  const status = await request("/api/codex/status");
+  assert.equal(
+    status.value.privateComputer.permissions.alwaysAllowComputerActions,
+    true,
+  );
+
+  for (const body of [
+    {
+      action: "permissions",
+      provider: "official-grok-cloud",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+    },
+    {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: "true",
+      acknowledged: true,
+    },
+    {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+      unexpected: true,
+    },
+  ])
+    assert.equal(
+      (await request("/api/private-computer", { body })).status,
+      400,
+    );
+  assert.equal(updates.length, 1);
+});
+
 test("helper results are allowlisted before anything reaches the renderer", async () => {
   const loginUrl =
     "https://cursor.com/loginDeepControl?challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&uuid=123e4567-e89b-42d3-a456-426614174000&mode=login&redirectTarget=sand";
@@ -464,6 +544,39 @@ test("approval routes expose only the exact safe frame and echo its displayed bi
     binding,
   });
   assert.deepEqual(decision.value, { ok: true });
+
+  official.pendingApprovals = async () => [
+    {
+      requestId: "approval-request-list-1",
+      seatId: "group-member-a",
+      origin: "https://official-cloud-computer.invalid",
+      actionDigest: "action-digest-list-1",
+      riskClass: "confirmation",
+      summary: "Navigate to another page",
+      presentation: { actions: [{ kind: "navigate" }] },
+      expiresAt: Date.now() + 30_000,
+      frame: {
+        generation: 7,
+        sequence: 5,
+        sha256,
+        screenshotBase64: PNG_BASE64,
+        networkToken: SECRET_SENTINEL,
+      },
+      networkToken: SECRET_SENTINEL,
+    },
+  ];
+  const approvalList = await request("/api/approvals");
+  assert.equal(approvalList.status, 200);
+  assert.equal(approvalList.text.includes(SECRET_SENTINEL), false);
+  assert.equal(approvalList.value.pending.length, 1);
+  assert.equal(approvalList.value.pending[0].seatId, "group-member-a");
+  assert.deepEqual(approvalList.value.pending[0].frame, {
+    generation: 7,
+    sequence: 5,
+    sha256,
+    screenshotBase64: PNG_BASE64,
+    mimeType: "image/png",
+  });
 
   official.decidePendingApproval = async () => ({
     accepted: true,
@@ -668,6 +781,42 @@ test("provider epoch rejects a stale read before either provider action executes
   assert.equal(privateCaptureCalls, 1);
 });
 
+test("group-task endpoint exposes only the active group task and clears it", async () => {
+  const task = bridge.groupTaskTracker.begin({
+    groupId: "group-bridge",
+    groupName: "Release crew",
+    summary: "Verify the release together.",
+    members: [{ id: "scout", name: "Scout" }],
+  });
+  bridge.groupTaskTracker.updateMember(
+    "group-bridge",
+    task.id,
+    "scout",
+    "working",
+  );
+  const loaded = await request("/api/group-tasks?groupId=group-bridge");
+  assert.equal(loaded.status, 200);
+  assert.equal(loaded.value.task.id, task.id);
+  assert.equal(loaded.value.task.groupId, "group-bridge");
+  assert.equal(loaded.value.task.summary, "Verify the release together.");
+  assert.deepEqual(
+    loaded.value.task.members.map((member) => member.status),
+    ["working"],
+  );
+  assert.equal(
+    (await request("/api/group-tasks?groupId=group-bridge&extra=1")).status,
+    400,
+  );
+  const cleared = await request("/api/group-tasks", {
+    body: { action: "clear", groupId: "group-bridge" },
+  });
+  assert.deepEqual(cleared.value, { ok: true });
+  assert.equal(
+    (await request("/api/group-tasks?groupId=group-bridge")).value.task,
+    null,
+  );
+});
+
 test("installer and runtime preflight include the complete official-computer helper", () => {
   const installer = fs.readFileSync(
     path.join(root, "installer", "CodexBot.iss"),
@@ -681,6 +830,7 @@ test("installer and runtime preflight include the complete official-computer hel
     fs.readFileSync(path.join(root, "package.json"), "utf8"),
   );
   for (const file of [
+    "group-task-tracker.cjs",
     "official-computer-client.cjs",
     "official-computer-helper.cjs",
   ]) {

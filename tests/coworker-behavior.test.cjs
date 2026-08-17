@@ -179,6 +179,601 @@ test("team messaging and question-widget schemas pass through the local tool bri
   assert.deepEqual(converted[0].function.parameters, widgetParameters);
 });
 
+const LIVE_GROUP_TURN = `<timestamp>Sunday, Aug 16, 2026, 2:31 PM (UTC-4)</timestamp>
+<user_query>
+[Group chat: "New Bot, yo" - with yo]
+New messages in the room (oldest first):
+yo: wsp — ready when you are.
+User: talk to each other rq to test
+
+It's your turn, New Bot. Reply in character with a single SendMessage if you have something worth adding, or send "(pass)" if you don't.
+</user_query>`;
+
+function sendMessageTool() {
+  return {
+    name: "SendMessage",
+    description: "Send one visible message to the room.",
+    parameters: {
+      type: "object",
+      properties: {
+        type: { type: "string", enum: ["text", "widget"] },
+        content: { type: "string" },
+        widget: { type: "object" },
+      },
+      required: ["type"],
+    },
+  };
+}
+
+test("host-managed group turns are detected without treating ordinary chat as a room turn", () => {
+  assert.equal(
+    bridge.isGroupChatTurn([{ role: "user", content: LIVE_GROUP_TURN }]),
+    true,
+  );
+  assert.equal(
+    bridge.isGroupChatTurn([
+      { role: "user", content: "Make a group chat and talk to each other." },
+    ]),
+    false,
+  );
+  assert.equal(
+    bridge.isGroupChatTurn([
+      {
+        role: "user",
+        content:
+          '[Group chat: "demo" - with Pat]\nNew messages in the room (oldest first):\nUser: hello',
+      },
+    ]),
+    false,
+  );
+});
+
+test(
+  "group turns preserve foreground work tools, exclude background tasks, and suppress duplicate room chatter",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    let requestPayload;
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async (_url, options) => {
+      requestPayload = JSON.parse(options.body);
+      const usefulArgs = JSON.stringify({
+        type: "text",
+        content:
+          "Quick collaboration test: I drafted the room rule—share results, decisions, or blockers; skip status-only replies.",
+      });
+      const fillerArgs = JSON.stringify({
+        type: "text",
+        content: "Ready when you are.",
+      });
+      const body = [
+        {
+          id: "group-response",
+          choices: [
+            {
+              delta: {
+                content: "Here is the same answer outside the room message.",
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "group-useful",
+                    function: {
+                      name: "SendMessage",
+                      arguments: usefulArgs,
+                    },
+                  },
+                  {
+                    index: 1,
+                    id: "group-filler",
+                    function: {
+                      name: "SendMessage",
+                      arguments: fillerArgs,
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [],
+          usage: { prompt_tokens: 30, completion_tokens: 12, total_tokens: 42 },
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${body}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+
+    try {
+      const tools = [
+        sendMessageTool(),
+        {
+          name: "Shell",
+          description: "Run a foreground command and wait for its result.",
+          parameters: { type: "object" },
+        },
+        {
+          name: "Task",
+          description: "Launch a background task.",
+          parameters: { type: "object" },
+        },
+        {
+          name: "SendToAgent",
+          description: "Message a teammate.",
+          parameters: { type: "object" },
+        },
+        computerTool(),
+      ];
+      const result = bridge
+        .createPromptSession({ agentId: "group-bot" })
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-invocation", tools, {});
+      const events = [];
+      for await (const event of result.fullStream) events.push(event);
+      const response = await result.response;
+
+      assert.deepEqual(
+        requestPayload.tools.map((tool) => tool.function.name),
+        ["SendMessage", "Shell", "SendToAgent", "Computer"],
+      );
+      assert.equal(requestPayload.parallel_tool_calls, false);
+      assert.equal(requestPayload.tool_choice, "auto");
+      const groupInstruction = requestPayload.messages.find((message) =>
+        String(message.content).includes("<active_group_chat>"),
+      );
+      assert.ok(groupInstruction);
+      assert.match(groupInstruction.content, /shared work stream/i);
+      assert.match(groupInstruction.content, /do that work now/i);
+      assert.match(
+        groupInstruction.content,
+        /before sending anything visible/i,
+      );
+      assert.match(groupInstruction.content, /Do not launch background tasks/i);
+      assert.match(groupInstruction.content, /rather than in a direct chat/i);
+      assert.match(
+        groupInstruction.content,
+        /use Computer when it is available/i,
+      );
+      assert.match(
+        groupInstruction.content,
+        /Shell approval denial as a browser-permission failure/i,
+      );
+      const policy = requestPayload.messages.find((message) =>
+        String(message.content).includes("<digital_coworker_compatibility"),
+      );
+      assert.match(policy.content, /Permissions are capability-specific/i);
+      assert.match(policy.content, /denied Shell call is not evidence/i);
+      assert.match(groupInstruction.content, /without asking whether/i);
+      assert.match(groupInstruction.content, /Never send generic readiness/i);
+      assert.match(
+        groupInstruction.content,
+        /one small, self-contained useful contribution/i,
+      );
+      const sendTool = requestPayload.tools.find(
+        (tool) => tool.function.name === "SendMessage",
+      );
+      assert.match(
+        sendTool.function.description,
+        /foreground work is complete/i,
+      );
+      assert.match(
+        sendTool.function.description,
+        /never continue.*private chat/i,
+      );
+      const parameters = sendTool.function.parameters;
+      assert.deepEqual(parameters.properties.type.enum, ["text"]);
+      assert.ok(parameters.required.includes("content"));
+      assert.equal(parameters.properties.content.maxLength, 1_200);
+      assert.equal(
+        events.filter((event) => event.type === "tool-call").length,
+        1,
+      );
+      assert.equal(
+        events.some((event) => event.type === "text-delta"),
+        false,
+      );
+      assert.deepEqual(response.messages[0].content, [
+        {
+          type: "tool-call",
+          toolCallId: "group-useful",
+          toolName: "SendMessage",
+          args: {
+            type: "text",
+            content:
+              "Quick collaboration test: I drafted the room rule—share results, decisions, or blockers; skip status-only replies.",
+          },
+        },
+      ]);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+test(
+  "concrete group work runs in the foreground before one final shared-room result",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    const requestPayloads = [];
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async (_url, options) => {
+      const payload = JSON.parse(options.body);
+      requestPayloads.push(payload);
+      const firstStep = requestPayloads.length === 1;
+      const postRoomStep = requestPayloads.length === 3;
+      const toolCall = firstStep
+        ? {
+            index: 0,
+            id: "weather-read",
+            function: {
+              name: "Shell",
+              arguments: JSON.stringify({
+                command: "read-weather Indianapolis",
+              }),
+            },
+          }
+        : postRoomStep
+          ? {
+              index: 0,
+              id: "forbidden-background-work",
+              function: {
+                name: "Task",
+                arguments: JSON.stringify({ task: "continue in background" }),
+              },
+            }
+          : {
+              index: 0,
+              id: "weather-room-result",
+              function: {
+                name: "SendMessage",
+                arguments: JSON.stringify({
+                  type: "text",
+                  content:
+                    "Indianapolis: 78°F and partly cloudy now; the next three days stay warm with scattered storms possible Tuesday.",
+                }),
+              },
+            };
+      const body = [
+        {
+          id: firstStep ? "group-work" : "group-result",
+          choices: [{ delta: { tool_calls: [toolCall] } }],
+        },
+        {
+          choices: [],
+          usage: { prompt_tokens: 20, completion_tokens: 8, total_tokens: 28 },
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${body}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+
+    const workTools = [
+      sendMessageTool(),
+      {
+        name: "Shell",
+        description: "Run foreground research.",
+        parameters: {
+          type: "object",
+          properties: { command: { type: "string" } },
+          required: ["command"],
+        },
+      },
+      {
+        name: "Task",
+        description: "Launch background research.",
+        parameters: { type: "object" },
+      },
+    ];
+    const history = [{ role: "user", content: LIVE_GROUP_TURN }];
+
+    try {
+      const first = bridge
+        .createPromptSession({ agentId: "group-research-bot" })
+        .getExecutor(history)
+        .stream({}, "group-work-invocation", workTools, {});
+      for await (const _event of first.fullStream) {
+        // Drain the stream so the response is complete.
+      }
+      const firstResponse = await first.response;
+      assert.deepEqual(
+        firstResponse.messages[0].content.map((part) => part.toolName),
+        ["Shell"],
+      );
+      assert.deepEqual(
+        requestPayloads[0].tools.map((tool) => tool.function.name),
+        ["SendMessage", "Shell"],
+      );
+
+      const continuedHistory = [
+        ...history,
+        firstResponse.messages[0],
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "weather-read",
+              toolName: "Shell",
+              result: {
+                content: [
+                  {
+                    type: "text",
+                    text: "78°F, partly cloudy; three-day outlook warm with possible Tuesday storms.",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ];
+      const second = bridge
+        .createPromptSession({ agentId: "group-research-bot" })
+        .getExecutor(continuedHistory)
+        .stream({}, "group-result-invocation", workTools, {});
+      for await (const _event of second.fullStream) {
+        // Drain the stream so the response is complete.
+      }
+      const secondResponse = await second.response;
+
+      assert.equal(requestPayloads.length, 2);
+      assert.equal(
+        requestPayloads[1].messages.some((message) =>
+          String(message.content).includes("<active_group_chat>"),
+        ),
+        true,
+      );
+      assert.deepEqual(secondResponse.messages[0].content, [
+        {
+          type: "tool-call",
+          toolCallId: "weather-room-result",
+          toolName: "SendMessage",
+          args: {
+            type: "text",
+            content:
+              "Indianapolis: 78°F and partly cloudy now; the next three days stay warm with scattered storms possible Tuesday.",
+          },
+        },
+      ]);
+
+      const postRoomHistory = [
+        ...continuedHistory,
+        secondResponse.messages[0],
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "weather-room-result",
+              toolName: "SendMessage",
+              result: { type: "text", content: "Delivered to room." },
+            },
+          ],
+        },
+      ];
+      const third = bridge
+        .createPromptSession({ agentId: "group-research-bot" })
+        .getExecutor(postRoomHistory)
+        .stream({}, "group-post-message-invocation", workTools, {});
+      const thirdEvents = [];
+      for await (const event of third.fullStream) thirdEvents.push(event);
+      const thirdResponse = await third.response;
+
+      assert.equal(requestPayloads.length, 3);
+      assert.equal(requestPayloads[2].tools, undefined);
+      assert.equal(requestPayloads[2].tool_choice, "none");
+      assert.equal(requestPayloads[2].parallel_tool_calls, false);
+      assert.equal(
+        requestPayloads[2].messages.some((message) =>
+          String(message.content).includes("<post_group_message>"),
+        ),
+        true,
+      );
+      assert.equal(
+        thirdEvents.some(
+          (event) =>
+            event.type === "text-delta" || event.type.startsWith("tool-call"),
+        ),
+        false,
+      );
+      assert.deepEqual(thirdResponse.messages[0].content, []);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+test(
+  "group turns convert useful plain provider text into SendMessage and normalize pass",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    const responses = ["A useful self-contained result for the room.", "pass."];
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async () => {
+      const content = responses.shift();
+      const body = [
+        {
+          id: "group-text-response",
+          choices: [{ delta: { content } }],
+        },
+        {
+          choices: [],
+          usage: { prompt_tokens: 10, completion_tokens: 6, total_tokens: 16 },
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join("");
+      return new Response(`${body}data: [DONE]\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+
+    try {
+      const session = bridge.createPromptSession({ agentId: "group-bot" });
+      const first = session
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-text-invocation", [sendMessageTool()], {});
+      const firstEvents = [];
+      for await (const event of first.fullStream) firstEvents.push(event);
+      const firstResponse = await first.response;
+      assert.equal(
+        firstEvents.filter((event) => event.type === "tool-call").length,
+        1,
+      );
+      assert.deepEqual(firstResponse.messages[0].content[0].args, {
+        type: "text",
+        content: "A useful self-contained result for the room.",
+      });
+      assert.equal(
+        firstEvents.some((event) => event.type === "text-delta"),
+        false,
+      );
+
+      const second = session
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-pass-invocation", [sendMessageTool()], {});
+      const secondEvents = [];
+      for await (const event of second.fullStream) secondEvents.push(event);
+      const secondResponse = await second.response;
+      assert.equal(
+        secondEvents.some(
+          (event) =>
+            event.type === "text-delta" && event.textDelta === "(pass)",
+        ),
+        true,
+      );
+      assert.equal(
+        secondEvents.some((event) => event.type === "tool-call"),
+        false,
+      );
+      assert.deepEqual(secondResponse.messages[0].content, [
+        { type: "text", text: "(pass)" },
+      ]);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
+test(
+  "group pass reasoning never leaks through SendMessage",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async () => {
+      const events = [
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "leaked-pass-call",
+                    function: {
+                      name: "SendMessage",
+                      arguments: JSON.stringify({
+                        type: "text",
+                        content:
+                          'We need respond current group. Nothing to add. Must plain "(pass)" no tool according special. final is invisible? Group says emit exactly pass as assistant text and call no tool. Do so.',
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [],
+          usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+        },
+      ];
+      return new Response(
+        `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    };
+
+    try {
+      const result = bridge
+        .createPromptSession({ agentId: "group-pass-leak-bot" })
+        .getExecutor([{ role: "user", content: LIVE_GROUP_TURN }])
+        .stream({}, "group-pass-leak-invocation", [sendMessageTool()], {});
+      const events = [];
+      for await (const event of result.fullStream) events.push(event);
+      const response = await result.response;
+      assert.equal(
+        events.some((event) => event.type === "tool-call"),
+        false,
+      );
+      assert.equal(
+        events.some(
+          (event) =>
+            event.type === "text-delta" && event.textDelta === "(pass)",
+        ),
+        true,
+      );
+      assert.deepEqual(response.messages[0].content, [
+        { type: "text", text: "(pass)" },
+      ]);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
+
 test("SendMessage normalization removes provider-filled fields from other message types", () => {
   const generated = {
     type: "text",

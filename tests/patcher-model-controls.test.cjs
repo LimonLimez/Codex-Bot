@@ -11,13 +11,105 @@ const {
   patchSettingsViewSource,
   replaceFunction,
   verifyBrowserSeatLifecycleSource,
+  verifyClosedSessionDeletionSource,
   verifyHostComputerSeatRoutingSource,
+  verifyComputerResultEvidenceSource,
+  verifyParallelGroupDispatchSource,
   verifyHostAgentIdentitySource,
   verifyLocalExecComputerIsolationSource,
   verifyRendererComposerIdentitySource,
   verifyRendererRuntimeBindingsSource,
   verifySettingsViewSource,
 } = require(path.join(root, "scripts", "patch-app.cjs"));
+
+function parallelGroupDispatchFixture(parallel = true) {
+  return `function groupOrchestratorDeps(session) {
+  return {
+    groupId: session.id,
+    groupTaskTracker: null,
+  };
+}
+function runGroupTurn() {
+  this.deps.taskTracker?.begin({ groupId: this.deps.groupId });
+  this.deps.taskTracker?.complete(this.deps.groupId, task?.id);
+  this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "working");
+  this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "complete");
+  this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "passed");
+  this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "blocked");
+  const turns = round === 0
+    ? ${parallel ? "await Promise.all(speakerIds.map(runMember))" : "await speakerIds.map(runMember)"}
+    : await (async () => {
+        const ordered = [];
+        for (const memberId of speakerIds) ordered.push(await runMember(memberId));
+        return ordered;
+      })();
+}`;
+}
+
+test("group opening dispatch is parallel, tracked, and keeps later rounds ordered", () => {
+  assert.doesNotThrow(() =>
+    verifyParallelGroupDispatchSource(parallelGroupDispatchFixture(true)),
+  );
+  assert.throws(
+    () =>
+      verifyParallelGroupDispatchSource(parallelGroupDispatchFixture(false)),
+    /parallel/i,
+  );
+});
+
+function closedSessionDeletionFixture(withDispose = true) {
+  return `class Manager {
+  async runDeleteAgents(ids) {
+    for (const id of ids) {
+      const openSession = this.tm.sessions.liveSessions.get(id);
+      ${withDispose ? "if (openSession != null) await openSession.agentStore.dispose();" : ""}
+      this.tm.runnerRegistry.runners.delete(id);
+      this.tm.sessions.liveSessions.delete(id);
+      await this.tm.sessionStore.deleteSession(id);
+    }
+  }
+  // Stops a to-be-deleted agent's in-flight work before its data is removed.
+}`;
+}
+
+test("non-active bot deletion disposes open session stores before removing data", () => {
+  assert.doesNotThrow(() =>
+    verifyClosedSessionDeletionSource(closedSessionDeletionFixture(true)),
+  );
+  assert.throws(
+    () =>
+      verifyClosedSessionDeletionSource(closedSessionDeletionFixture(false)),
+    /closes its open database handle/i,
+  );
+});
+
+function computerResultEvidenceFixture(includeEvidence = true) {
+  return `function describeOutcome(result, operation) {
+  const success2 = result.result.value;
+  const lines2 = ["Computer action ran on the box desktop."];
+  ${
+    includeEvidence
+      ? `if (success2.log != null && success2.log.length > 0) {
+    lines2.push(success2.log);
+  }`
+      : ""
+  }
+  return lines2.join("\\n");
+}
+function renderComputerResult(output, operation) { return output; }
+`;
+}
+
+test("Computer result summaries preserve readable page evidence beside screenshots", () => {
+  assert.doesNotThrow(() =>
+    verifyComputerResultEvidenceSource(computerResultEvidenceFixture(true)),
+  );
+  assert.throws(
+    () =>
+      verifyComputerResultEvidenceSource(computerResultEvidenceFixture(false)),
+    /text evidence reaches the model/i,
+  );
+});
 
 function browserSeatLifecycleFixture() {
   return `function createHostGatewayApi(deps) {
@@ -83,13 +175,15 @@ function createScreenshotArgs(toolCallId) {
 }
 function buildTurnTools(host, turn, props) {
   const tools = [];
-  tools.push(
-    createComputerTool(remoteBoxResourceAccessor, {
-      getPersistImage: () => host.persistImage,
-      seatKey: host.resolveBoxId(),
-      isUnicodeTypingEnabled: host.isUnicodeTypingEnabled,
-    }),
-  );
+  if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {
+    tools.push(
+      createComputerTool(remoteBoxResourceAccessor, {
+        getPersistImage: () => host.persistImage,
+        seatKey: host.resolveBoxId(),
+        isUnicodeTypingEnabled: host.isUnicodeTypingEnabled,
+      }),
+    );
+  }
   if (host.isBrowserUseSubagent) {
     tools.push(...createSandBrowserTools({ resourceAccessor: remoteBoxResourceAccessor }));
   }
@@ -105,6 +199,14 @@ function buildTurnTools(host, turn, props) {
   return tools;
 }
 function afterBuildTurnTools() {}
+function buildBoxDesktopPrompt(host) {
+  const directLocalComputerOffered = process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1" && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable();
+  return directLocalComputerOffered ? [
+    "Use Computer directly for browser and desktop work",
+    "A denied Shell call does not mean browser access is blocked",
+    "Show the real Computer approval card",
+  ].join("\n") : "fallback";
+}
 `;
 }
 
@@ -317,6 +419,15 @@ test("computer-seat verifier scopes Computer and Screenshot and fails closed", (
   assert.throws(
     () => verifyHostComputerSeatRoutingSource(sharedFallback),
     /fails closed before creating an employee-scoped executor/,
+  );
+
+  const subagentOnly = source.replace(
+    'if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {',
+    "if (host.isComputerUseSubagent && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {",
+  );
+  assert.throws(
+    () => verifyHostComputerSeatRoutingSource(subagentOnly),
+    /local private and same-user group turns receive the direct employee-scoped Computer tool/,
   );
 });
 

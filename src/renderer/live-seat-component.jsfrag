@@ -165,24 +165,10 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
     }
   }, [n, o, X]);
   const j = T.useCallback(async () => {
-    if (aP.current) return;
-    if (aI.current !== "private") {
-      Q(null);
-      return;
-    }
-    aP.current = !0;
-    try {
-      const B = await GB_SEAT_REQUEST(
-        `/api/approval?seatKey=${encodeURIComponent(n)}`,
-      );
-      Q(aI.current === "private" ? (B.pending ?? null) : null);
-    } catch {
-      // Approval polling is independent from the live frame. A temporarily
-      // delayed screenshot must never hide or deadlock a pending decision.
-    } finally {
-      aP.current = !1;
-    }
-  }, [n]);
+    // Computer approvals belong beside the conversation for every provider.
+    // The live preview never owns a second, competing permission surface.
+    Q(null);
+  }, []);
   T.useEffect(() => {
     let a = !0;
     g();
@@ -192,12 +178,8 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
     };
   }, [g]);
   T.useEffect(() => {
-    let a = !0;
     j();
-    const v = setInterval(() => a && j(), 350);
-    return () => {
-      ((a = !1), clearInterval(v));
-    };
+    return () => {};
   }, [j]);
   T.useEffect(() => {
     if (!o) return;

@@ -8,6 +8,7 @@ This is an independent community project. It is not affiliated with, endorsed by
 
 - Choose **OpenAI Codex, Anthropic Claude, Google Antigravity, Moonshot Kimi, xAI, or Google Vertex AI** through the bundled local CLIProxyAPI sidecar.
 - Keep a direct OpenAI API key as an optional route; it is protected with Windows DPAPI for the current Windows user.
+- Connect a local OpenAI-compatible server such as **Ollama, LM Studio, or vLLM** through a loopback-only endpoint and discover its models automatically.
 - Pick a workspace model and reasoning level, then override either choice for an individual employee.
 - Set reasoning with a real stepped slider from the employee composer or Settings.
 - Give every employee a persistent, isolated Chrome or Edge browser profile.
@@ -20,28 +21,31 @@ This is an independent community project. It is not affiliated with, endorsed by
 1. Download `OpenBot-Setup-0.1.5.exe` from [Releases](https://github.com/LimonLimez/Open-Bot/releases).
 2. Let Setup reuse an exact Grok Bot 0.18.0 tree, or explicitly authorize the separate vendor-hosted download.
 3. Launch Open Bot and choose an AI provider from the connection list.
-4. Finish that provider's official sign-in, or import a Google Vertex service-account JSON key.
+4. Finish that provider's official sign-in, import a Google Vertex service-account JSON key, or connect a local model server at `http://127.0.0.1:<port>/v1`.
 5. Choose a model and reasoning level. Your workspace is ready when the selected account is connected.
 
 The app never asks for a provider password. OAuth and device flows open only reviewed official authorization pages.
 
 ## AI providers
 
-| Route              | Connection method                  | Models shown in the app                | Fast mode                                           |
-| ------------------ | ---------------------------------- | -------------------------------------- | --------------------------------------------------- |
-| OpenAI Codex       | ChatGPT/Codex device authorization | Sol, Terra, Luna                       | Supported through the reviewed CLIProxy model alias |
-| Anthropic Claude   | Anthropic OAuth                    | Opus, Sonnet, Fable                    | Not exposed by this route                           |
-| Google Antigravity | Google OAuth                       | Gemini and reviewed Antigravity models | Not exposed by this route                           |
-| Moonshot Kimi      | Kimi device authorization          | Kimi K3 and coding variants            | Not exposed by this route                           |
-| xAI                | xAI device authorization           | Grok and Grok Build                    | Not exposed by this route                           |
-| Google Vertex AI   | Service-account JSON import        | Gemini through Vertex AI               | Not exposed by this route                           |
-| OpenAI API key     | Direct key verification            | Sol, Terra, Luna                       | OpenAI Fast service tier; premium pricing may apply |
+| Route              | Connection method                   | Models shown in the app                | Fast mode                                           |
+| ------------------ | ----------------------------------- | -------------------------------------- | --------------------------------------------------- |
+| OpenAI Codex       | ChatGPT/Codex device authorization  | Sol, Terra, Luna                       | Supported through the reviewed CLIProxy model alias |
+| Anthropic Claude   | Anthropic OAuth                     | Opus, Sonnet, Fable                    | Not exposed by this route                           |
+| Google Antigravity | Google OAuth                        | Gemini and reviewed Antigravity models | Not exposed by this route                           |
+| Moonshot Kimi      | Kimi device authorization           | Kimi K3 and coding variants            | Not exposed by this route                           |
+| xAI                | xAI device authorization            | Grok and Grok Build                    | Not exposed by this route                           |
+| Google Vertex AI   | Service-account JSON import         | Gemini through Vertex AI               | Not exposed by this route                           |
+| OpenAI API key     | Direct key verification             | Sol, Terra, Luna                       | OpenAI Fast service tier; premium pricing may apply |
+| Local models       | Loopback OpenAI-compatible endpoint | Models discovered from `/v1/models`    | Not exposed; reasoning fields are omitted           |
 
-The provider list is pinned to the reviewed CLIProxyAPI version bundled with the release. Account, plan, region, and provider-side availability can still limit which models actually run. Requests fail closed if the selected route is unavailable; there is no silent fallback to another model provider.
+The hosted-provider list is pinned to the reviewed CLIProxyAPI version bundled with the release. Account, plan, region, provider-side availability, and local model capabilities can still limit which models actually run. Requests fail closed if the selected route is unavailable; there is no silent fallback to another model provider.
 
 Provider choices keep independent workspace and per-employee model preferences. Switching from Claude to Kimi and back, for example, restores the saved Claude model instead of forcing one provider's model ID onto another.
 
 CLIProxy OAuth and imported provider credentials remain in this installation's private local auth directory. A Vertex upload is written to a private temporary file only long enough for the local CLIProxy importer to validate and store it, then the upload is deleted. Never upload the local state directory or provider auth files.
+
+Local model setup accepts only a literal `http://127.0.0.1:<port>` endpoint, normalizes it to `/v1`, blocks Open Bot's own internal service ports, and never follows discovery redirects. Model discovery is time- and size-bounded. An optional local-server API key is protected with Windows DPAPI and is never returned to the renderer or written to logs. The selected model must implement OpenAI-compatible streaming chat completions and tool calling; a model appearing in `/v1/models` alone does not prove those capabilities. Open Bot sends local-model requests only to the configured loopback service, but that independently installed service may itself download models, contact a remote backend, or retain data according to its own configuration.
 
 ## Models and reasoning
 
@@ -54,6 +58,7 @@ Fast mode is deliberately provider-aware:
 - Codex OAuth uses CLIProxyAPI's reviewed `-fast` model mapping.
 - A direct OpenAI API key sends `service_tier: "fast"`; turning Fast off explicitly pins the standard/default tier.
 - Other provider routes keep Fast disabled instead of pretending the setting is supported.
+- Local routes keep Fast disabled and omit `reasoning_effort` for broad server compatibility.
 
 ## Computer modes
 
@@ -84,7 +89,7 @@ Vendor actions appear as chat-adjacent approval cards containing the exact scree
 - Windows 10 or 11 x64.
 - Google Chrome or Microsoft Edge.
 - Internet access during setup and provider sign-in.
-- An account with access to at least one listed provider, a Google Vertex service account, or an OpenAI API key.
+- An account with access to at least one listed provider, a Google Vertex service account, an OpenAI API key, or a compatible local model server.
 - A legitimate Grok Bot 0.18.0 Windows x64 installation. Setup can reuse one or—with explicit authorization—obtain the separate per-user installer directly from the vendor-hosted, version-pinned URL.
 
 The only supported Grok Bot `resources/app.asar` SHA-256 is:
@@ -117,7 +122,7 @@ OpenBot-Setup-0.1.5.exe /VERYSILENT /GROKBOTDIR="C:\Path\To\Grok Bot"
 
 Per-user state lives under `%LOCALAPPDATA%\Open Bot`. It can include provider auth files, API settings, conversations, attachments, downloads, logs, routines, browser profiles, and sanitized open-tab snapshots. Snapshots retain only public origin and path; URL credentials, query strings, and fragments are removed.
 
-All bridge services bind to `127.0.0.1` and require installer-generated random credentials. Model traffic leaves the PC only for the provider explicitly selected by the user. Website traffic leaves through the browser seat's checked public-web proxy. The optional vendor computer has the separate boundary described above.
+All bridge services bind to `127.0.0.1` and require installer-generated random credentials. Hosted-model traffic leaves the PC only for the provider explicitly selected by the user; local-model traffic is sent only to the configured loopback endpoint. A local server can still relay or retain requests independently. Website traffic leaves through the browser seat's checked public-web proxy. The optional vendor computer has the separate boundary described above.
 
 The interactive uninstaller asks whether to preserve state for a future reinstall or permanently wipe it. Silent uninstall preserves state. A wipe cannot revoke credentials or sessions already held by remote services, delete the vendor cloud computer, or verify remote deletion. If Windows cannot remove every local file, the uninstaller reports the remaining path.
 

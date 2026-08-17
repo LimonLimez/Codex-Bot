@@ -40,6 +40,15 @@ test("isolated Computer and Screenshot remain automatic only through employee-sc
   );
   assert.match(patcher, /seatKey: host\.resolveBoxId\(\)/);
   assert.match(patcher, /stable employee Screenshot seat key/);
+  assert.match(patcher, /direct local Computer availability/);
+  assert.match(
+    patcher,
+    /!host\.isSubagentRunner && !host\.isSharedRoomRunner && process\.env\.GROK_BOT_USE_LOCAL_COMPUTER === \"1\"/,
+  );
+  assert.match(
+    patcher,
+    /A denied Shell call does not mean browser access is blocked/,
+  );
 });
 
 test("approval gating preserves legitimate local coworker tools", () => {

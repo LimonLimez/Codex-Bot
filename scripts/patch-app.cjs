@@ -351,6 +351,34 @@ function verifyBrowserSeatLifecycleSource(hostSource) {
   );
 }
 
+function verifyClosedSessionDeletionSource(hostSource) {
+  const runDeleteAgents = sourceRegion(
+    hostSource,
+    "  async runDeleteAgents(ids) {",
+    "  // Stops a to-be-deleted agent's in-flight work before its data is removed.",
+    "agent session cleanup before deletion",
+  );
+  const openSession = runDeleteAgents.indexOf(
+    "const openSession = this.tm.sessions.liveSessions.get(id);",
+  );
+  const dispose = runDeleteAgents.indexOf(
+    "await openSession.agentStore.dispose();",
+  );
+  const removeLive = runDeleteAgents.indexOf(
+    "this.tm.sessions.liveSessions.delete(id);",
+  );
+  const deleteOnDisk = runDeleteAgents.indexOf(
+    "await this.tm.sessionStore.deleteSession(id);",
+  );
+  assertPatchInvariant(
+    openSession >= 0 &&
+      dispose > openSession &&
+      removeLive > dispose &&
+      deleteOnDisk > removeLive,
+    "a non-active bot closes its open database handle before its session directory is deleted",
+  );
+}
+
 function verifyHostComputerSeatRoutingSource(hostSource) {
   const execute = sourceRegion(
     hostSource,
@@ -397,6 +425,16 @@ function verifyHostComputerSeatRoutingSource(hostSource) {
     ],
     "turn tool assembly",
   ).source;
+  const localMainRegistration = tools.indexOf(
+    'if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {',
+  );
+  const computerRegistration = tools.indexOf(
+    "createComputerTool(remoteBoxResourceAccessor, {",
+  );
+  assertPatchInvariant(
+    localMainRegistration >= 0 && computerRegistration > localMainRegistration,
+    "local private and same-user group turns receive the direct employee-scoped Computer tool",
+  );
   const computer = sourceRegion(
     tools,
     "createComputerTool(remoteBoxResourceAccessor, {",
@@ -429,6 +467,65 @@ function verifyHostComputerSeatRoutingSource(hostSource) {
   assertPatchInvariant(
     tools.split("seatKey: host.resolveBoxId(),").length - 1 === 2,
     "only the Computer and Screenshot registrations receive employee browser-seat keys",
+  );
+  for (const marker of [
+    'const directLocalComputerOffered = process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1" && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable();',
+    "Use Computer directly for browser and desktop work",
+    "A denied Shell call does not mean browser access is blocked",
+    "real Computer approval card",
+  ]) {
+    assertPatchInvariant(
+      hostSource.includes(marker),
+      `local direct-computer guidance retains ${marker}`,
+    );
+  }
+}
+
+function verifyComputerResultEvidenceSource(hostSource) {
+  const describeOutcome = sourceRegion(
+    hostSource,
+    "function describeOutcome",
+    "\nfunction renderComputerResult",
+    "Computer result summary",
+  );
+  assertPatchInvariant(
+    describeOutcome.includes(
+      "if (success2.log != null && success2.log.length > 0)",
+    ) && describeOutcome.includes("lines2.push(success2.log);"),
+    "Computer result text evidence reaches the model beside its screenshot",
+  );
+}
+
+function verifyParallelGroupDispatchSource(hostSource) {
+  assertPatchInvariant(
+    hostSource.includes("groupId: session.id") &&
+      hostSource.includes("groupTaskTracker"),
+    "group turns receive the local task-tracker bridge",
+  );
+  assertPatchInvariant(
+    hostSource.includes("this.deps.taskTracker?.begin({") &&
+      hostSource.includes(
+        "this.deps.taskTracker?.complete(this.deps.groupId, task?.id)",
+      ),
+    "group task lifecycle is recorded from start through completion",
+  );
+  assertPatchInvariant(
+    hostSource.includes("await Promise.all(speakerIds.map(runMember))"),
+    "the opening group wave dispatches member work in parallel",
+  );
+  assertPatchInvariant(
+    hostSource.includes("round === 0") &&
+      hostSource.includes(
+        "for (const memberId of speakerIds) ordered.push(await runMember(memberId));",
+      ),
+    "later group rounds remain ordered for teammate follow-ups",
+  );
+  assertPatchInvariant(
+    hostSource.includes('"working"') &&
+      hostSource.includes('"complete"') &&
+      hostSource.includes('"passed"') &&
+      hostSource.includes('"blocked"'),
+    "each parallel member has an explicit tracker state",
   );
 }
 
@@ -517,6 +614,7 @@ function verifyHostLocalOnlySource(hostSource) {
   verifyBrowserSeatLifecycleSource(hostSource);
   verifyHostComputerSeatRoutingSource(hostSource);
   verifyCoworkerHostBehaviorSource(hostSource);
+  verifyParallelGroupDispatchSource(hostSource);
 }
 
 function patchRendererComposerIdentitySource(rendererSource) {
@@ -1416,6 +1514,130 @@ try {
 
   text = replaceOnce(
     text,
+    `      isSharedRoom: groupConfig?.sharedRoomId != null,
+      resolveMembers: (ids) => this.resolveGroupMembers(ids, remoteMembers),`,
+    `      isSharedRoom: groupConfig?.sharedRoomId != null,
+      groupId: session.id,
+      taskTracker: process.env.GROK_BOT_WINDOWS_COMPUTER_BRIDGE
+        ? require(process.env.GROK_BOT_WINDOWS_COMPUTER_BRIDGE).groupTaskTracker
+        : null,
+      resolveMembers: (ids) => this.resolveGroupMembers(ids, remoteMembers),`,
+    "group task tracker host bridge",
+  );
+  text = replaceOnce(
+    text,
+    `    let totalMessages = 0;
+    for (let round = 0; round < GROUP_MAX_ROUNDS; round++) {
+      if (!this.deps.isCurrent()) return;
+      const responderIds = resolveResponders(members, this.deps.readHistory()).map(
+        (member) => member.id
+      );
+      let messagesThisRound = 0;
+      for (const memberId of orderRoundSpeakers(responderIds, round)) {
+        if (totalMessages >= GROUP_MAX_MEMBER_TURNS) return;
+        if (!this.deps.isCurrent()) return;
+        const member = memberById.get(memberId);
+        if (member == null) continue;
+        const sent = await this.runOneTurn(args.group, member, members);
+        let hitCap = false;
+        for (const content of sent) {
+          this.deps.postMemberMessage(member, content);
+          totalMessages++;
+          messagesThisRound++;
+          if (totalMessages >= GROUP_MAX_MEMBER_TURNS) {
+            hitCap = true;
+            break;
+          }
+        }
+        this.deps.finalizeMemberTurn?.(member);
+        if (hitCap) return;
+      }
+      if (messagesThisRound === 0) return;
+    }`,
+    `    let totalMessages = 0;
+    const historyForTask = this.deps.readHistory();
+    const latestTaskEntry = [...historyForTask].reverse().find((entry) => entry?.role === "user");
+    const task = this.deps.taskTracker?.begin({
+      groupId: this.deps.groupId,
+      groupName: args.group.name,
+      summary: typeof latestTaskEntry?.content === "string" ? latestTaskEntry.content : "Working on the latest group request",
+      members,
+    });
+    try {
+      for (let round = 0; round < GROUP_MAX_ROUNDS; round++) {
+        if (!this.deps.isCurrent()) return;
+        const responderIds = resolveResponders(members, this.deps.readHistory()).map(
+          (member) => member.id
+        );
+        const speakerIds = orderRoundSpeakers(responderIds, round).slice(
+          0,
+          Math.max(0, GROUP_MAX_MEMBER_TURNS - totalMessages),
+        );
+        let messagesThisRound = 0;
+        const runMember = async (memberId) => {
+          if (!this.deps.isCurrent()) return { member: null, sent: [] };
+          const member = memberById.get(memberId);
+          if (member == null) return { member: null, sent: [] };
+          this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "working");
+          try {
+            const sent = await this.runOneTurn(args.group, member, members);
+            this.deps.taskTracker?.updateMember(
+              this.deps.groupId,
+              task?.id,
+              member.id,
+              sent.some((content) => !isPassContent(content)) ? "complete" : "passed",
+            );
+            return { member, sent };
+          } catch (error) {
+            this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "blocked");
+            return { member, sent: [] };
+          }
+        };
+        // The opening wave is independent work. Dispatch it together so one
+        // slow researcher does not make every teammate wait; later rounds stay
+        // ordered so teammates can react to the visible first-pass findings.
+        const turns = round === 0
+          ? await Promise.all(speakerIds.map(runMember))
+          : await (async () => {
+              const ordered = [];
+              for (const memberId of speakerIds) ordered.push(await runMember(memberId));
+              return ordered;
+            })();
+        for (const { member, sent } of turns) {
+          if (member == null) continue;
+          let hitCap = false;
+          for (const content of sent) {
+            this.deps.postMemberMessage(member, content);
+            totalMessages++;
+            messagesThisRound++;
+            if (totalMessages >= GROUP_MAX_MEMBER_TURNS) {
+              hitCap = true;
+              break;
+            }
+          }
+          this.deps.finalizeMemberTurn?.(member);
+          if (hitCap) return;
+        }
+        if (messagesThisRound === 0) return;
+      }
+    } finally {
+      this.deps.taskTracker?.complete(this.deps.groupId, task?.id);
+    }`,
+    "parallel group opening dispatch",
+  );
+
+  text = replaceOnce(
+    text,
+    "      this.tm.runnerRegistry.runners.delete(id);\n      this.tm.sessions.liveSessions.delete(id);",
+    `      const openSession = this.tm.sessions.liveSessions.get(id);
+      if (openSession != null) await openSession.agentStore.dispose();
+      this.tm.runnerRegistry.runners.delete(id);
+      this.tm.sessions.liveSessions.delete(id);`,
+    "close non-active agent session before deleting its database",
+  );
+
+  text = replaceOnce(
+    text,
     "  start() {\n    const cached3 = loadCachedBootstrap(this.options.getCacheDir());",
     '  start() {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") {\n      this.refreshSnapshot();\n      return;\n    }\n    const cached3 = loadCachedBootstrap(this.options.getCacheDir());',
     "host experiment startup isolation",
@@ -1615,6 +1837,15 @@ try {
 
   text = replaceOnce(
     text,
+    "  if (success2.screenshotPath != null && success2.screenshotPath.length > 0) {",
+    `  if (success2.log != null && success2.log.length > 0) {
+    lines2.push(success2.log);
+  }
+  if (success2.screenshotPath != null && success2.screenshotPath.length > 0) {`,
+    "computer page text evidence",
+  );
+  text = replaceOnce(
+    text,
     '    return createImageResult(output.result.value.screenshot, "image/webp", summary);',
     '    return createImageResult(output.result.value.screenshot, process.env.GROK_BOT_WINDOWS_COMPUTER_BRIDGE ? "image/png" : "image/webp", summary);',
     "computer image result",
@@ -1660,6 +1891,26 @@ try {
   );
   text = replaceOnce(
     text,
+    "  if (host.isComputerUseSubagent && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {",
+    '  if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {',
+    "direct local Computer availability",
+  );
+  text = replaceOnce(
+    text,
+    '    const browserUseOffered = host.isBrowserUseSubagentEnabled?.() === true;\n    return [\n      "## The box desktop",\n      ...browserUseOffered ? [',
+    `    const browserUseOffered = host.isBrowserUseSubagentEnabled?.() === true;
+    const directLocalComputerOffered = process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1" && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable();
+    return [
+      "## The box desktop",
+      ...directLocalComputerOffered ? [
+        "You have Computer and the read-only Screenshot on your own employee browser seat. Use Computer directly for browser and desktop work, including public web research; do not substitute Shell curl, Python networking, or a background computerUse task when Computer is listed.",
+        "Computer follows the app's real per-action computer policy. If an action needs approval, the app presents the real Computer approval card. Do not invent an approval, ask only in prose, or tell the user to change Agent execution, Shell, vendor-computer, or another unrelated permission.",
+        "A denied Shell call does not mean browser access is blocked. Continue through Computer, inspect the returned screenshot after each material action, and verify the destination or result before reporting success."
+      ] : browserUseOffered ? [`,
+    "direct local Computer guidance",
+  );
+  text = replaceOnce(
+    text,
     '    const remoteBox = extensions.api("forever-box").box;',
     '    const remoteBox = process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1" ? localExec.box : extensions.api("forever-box").box;',
     "local employee computer",
@@ -1672,7 +1923,10 @@ try {
   );
   verifyCoworkerHostBehaviorSource(text);
   verifyBrowserSeatLifecycleSource(text);
+  verifyClosedSessionDeletionSource(text);
   verifyHostComputerSeatRoutingSource(text);
+  verifyComputerResultEvidenceSource(text);
+  verifyParallelGroupDispatchSource(text);
 
   fs.writeFileSync(file, text, "utf8");
 }
@@ -2212,7 +2466,10 @@ module.exports = {
   replaceFunction,
   verifyCoworkerHostBehaviorSource,
   verifyBrowserSeatLifecycleSource,
+  verifyClosedSessionDeletionSource,
   verifyHostComputerSeatRoutingSource,
+  verifyComputerResultEvidenceSource,
+  verifyParallelGroupDispatchSource,
   verifyHostAgentIdentitySource,
   verifyHostLocalOnlySource,
   verifyLocalExecComputerIsolationSource,
