@@ -9,10 +9,11 @@ const path = require("node:path");
 const test = require("node:test");
 
 const auditPath = path.join(__dirname, "..", "scripts", "audit-release.cjs");
+const buildInstallerPath = path.join(__dirname, "..", "scripts", "build-installer-app.cjs");
 const packagePath = path.join(__dirname, "..", "scripts", "package-dmg.cjs");
 
 function auditFixture(t, entries = []) {
-  const { auditTree, writeInstallerManifest } = require(auditPath);
+  const { auditPayloadTree, writeInstallerManifest } = require(auditPath);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-release-audit-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const app = path.join(root, "Install OpenBot DEVELOPMENT.app");
@@ -28,7 +29,7 @@ function auditFixture(t, entries = []) {
   writeInstallerManifest(app);
   return {
     app,
-    audit: () => auditTree(root, { expectedAppName: path.basename(app) }),
+    audit: () => auditPayloadTree(root, { expectedAppName: path.basename(app) }),
     root,
   };
 }
@@ -57,6 +58,105 @@ function signedInstallerFixture(t) {
   assert.equal(signed.status, 0, signed.stderr);
   return { app, executable, manifestPath, root };
 }
+
+function provenanceFixture(t, mutateReceipt = (receipt) => receipt) {
+  const {
+    PROVENANCE_RELATIVE,
+    createInstallerProvenanceReceipt,
+  } = require(buildInstallerPath);
+  const { writeInstallerManifest } = require(auditPath);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-provenance-audit-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const app = path.join(root, "Install OpenBot DEVELOPMENT.app");
+  const executable = path.join(app, "Contents", "MacOS", "InstallCodexBot");
+  const sidecar = path.join(app, "Contents", "Resources", "CLIProxy", "cli-proxy-api");
+  const codex = path.join(app, "Contents", "Resources", "CodexRuntime", "codex");
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+  fs.mkdirSync(path.dirname(codex), { recursive: true });
+  fs.writeFileSync(executable, "safe\n");
+  fs.writeFileSync(path.join(app, "Contents", "Info.plist"), "safe\n");
+  fs.writeFileSync(sidecar, Buffer.from(
+    "/Users/runner/hostedtoolcache/go/1.26.4/arm64\0"
+      + "/Users/runner/work/CLIProxyAPI/CLIProxyAPI/internal/home/certificate.go\0",
+    "latin1",
+  ));
+  fs.writeFileSync(codex, Buffer.from(
+    "/Users/runner/.cargo/registry/src/package/src/lib.rsOTELhttp://localhost:4317\0",
+    "latin1",
+  ));
+  const receipt = mutateReceipt(JSON.parse(JSON.stringify(createInstallerProvenanceReceipt({
+    installedCodexRuntime: codex,
+    installedSidecar: sidecar,
+  }))));
+  const receiptPath = path.join(app, ...PROVENANCE_RELATIVE.split("/"));
+  fs.writeFileSync(receiptPath, `${JSON.stringify(receipt)}\n`);
+  const manifestPath = writeInstallerManifest(app);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const expected = new Map(manifest.entries.map((entry) => [entry.path, entry]));
+  return { app, codex, expected, receiptPath, root, sidecar };
+}
+
+test("release audit accepts only the authorized Developer ID signature chain", () => {
+  const {
+    assertAuthorizedInstallerSignature,
+    installerSignatureVerificationArguments,
+  } = require(auditPath);
+  const externalRequirement = '=anchor apple generic and certificate leaf[subject.OU] = "HKCH65M45F" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists';
+  assert.equal(typeof assertAuthorizedInstallerSignature, "function");
+  assert.equal(typeof installerSignatureVerificationArguments, "function");
+  assert.deepEqual(installerSignatureVerificationArguments("/tmp/Install OpenBot.app"), [
+    "--verify", "--deep", "--strict",
+    "--test-requirement", externalRequirement,
+    "/tmp/Install OpenBot.app",
+  ]);
+  const authorizedDisplay = [
+    "Executable=/private/tmp/Install OpenBot DEVELOPMENT.app/Contents/MacOS/InstallCodexBot",
+    "Authority=Developer ID Application: Harlin Sidwell (HKCH65M45F)",
+    "Authority=Developer ID Certification Authority",
+    "Authority=Apple Root CA",
+    "TeamIdentifier=HKCH65M45F",
+  ].join("\n");
+  assert.throws(
+    () => assertAuthorizedInstallerSignature(authorizedDisplay),
+    /external Apple requirement/i,
+  );
+  assert.deepEqual(assertAuthorizedInstallerSignature(authorizedDisplay, {
+    externalRequirementVerified: true,
+  }), {
+    authority: "Developer ID Application: Harlin Sidwell (HKCH65M45F)",
+    teamIdentifier: "HKCH65M45F",
+  });
+  assert.throws(
+    () => assertAuthorizedInstallerSignature([
+      "Authority=Developer ID Application: Locally Forged Lookalike (HKCH65M45F)",
+      "Authority=Developer ID Certification Authority",
+      "Authority=Apple Root CA",
+      "TeamIdentifier=HKCH65M45F",
+    ].join("\n")),
+    /external Apple requirement/i,
+  );
+  for (const output of [
+    "Signature=adhoc\nTeamIdentifier=not set",
+    "Authority=Apple Development: Harlin Sidwell (HKCH65M45F)\nTeamIdentifier=HKCH65M45F",
+    "Authority=Developer ID Application: Someone Else (ABCDE12345)\nAuthority=Developer ID Certification Authority\nTeamIdentifier=ABCDE12345",
+    "Authority=Developer ID Application: Harlin Sidwell (HKCH65M45F)\nTeamIdentifier=HKCH65M45F",
+  ]) {
+    assert.throws(
+      () => assertAuthorizedInstallerSignature(output, { externalRequirementVerified: true }),
+      /authorized Developer ID/i,
+    );
+  }
+});
+
+test("release audit rejects an otherwise valid ad-hoc installer before trusting its manifest", (t) => {
+  const { auditTree } = require(auditPath);
+  const fixture = signedInstallerFixture(t);
+  assert.throws(
+    () => auditTree(fixture.root, { expectedAppName: path.basename(fixture.app) }),
+    /authorized Developer ID|code signature verification failed/i,
+  );
+});
 
 test("release audit rejects manifest-approved local profiles state workspaces evidence and development files", async (t) => {
   const cases = [
@@ -116,93 +216,121 @@ test("release audit accepts reviewed pinned binaries without treating high entro
   assert.doesNotThrow(fixture.audit);
 });
 
-test("release audit distinguishes reviewed public CI build paths from personal paths", async (t) => {
-  await t.test("exact upstream binary members accept only reviewed public CI roots", (subtest) => {
-    const fixture = auditFixture(subtest, [
-      [
-        "Resources/CLIProxy/cli-proxy-api",
-        Buffer.from([
-          "/Users/runner/go/pkg/mod/example.org/module/file.go",
-          "/Users/runner/go/pkg/mod/example.org/module/home/client.go",
-          "/Users/runner/hostedtoolcache/go/1.24.0/arm64/src/runtime/proc.go",
-          "/Users/runner/work/CLIProxyAPI/CLIProxyAPI/internal/server.go",
-        ].join("\0")),
-      ],
-      [
-        "Resources/CodexRuntime/codex",
-        Buffer.from([
-          "/Users/runner/.cargo/registry/src/index.crates.io/package/src/lib.rs",
-          "/Users/runner/.cargo/git/checkouts/package/revision/src/lib.rs",
-          "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/lib.rs",
-        ].join("\0")),
-      ],
-    ]);
-    assert.doesNotThrow(fixture.audit);
+test("public CI path exemptions require a sealed exact provenance receipt", (t) => {
+  const {
+    credentialMaterialKind,
+    loadInstallerProvenance,
+    reviewedRootsForMember,
+  } = require(auditPath);
+  const fixture = provenanceFixture(t);
+  const cliRelative = "Contents/Resources/CLIProxy/cli-proxy-api";
+  const codexRelative = "Contents/Resources/CodexRuntime/codex";
+  const identity = (file) => ({
+    bytes: fs.statSync(file).size,
+    sha256: crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+  });
+  const cliIdentity = identity(fixture.sidecar);
+  const codexIdentity = identity(fixture.codex);
+  const trustedMembers = loadInstallerProvenance(fixture.app, fixture.expected);
+  const cliPublic = Buffer.from([
+    "/Users/runner/hostedtoolcache/go/1.26.4/arm64",
+    "/Users/runner/work/CLIProxyAPI/CLIProxyAPI/internal/home/certificate.go",
+  ].join("\x00"), "latin1").toString("latin1");
+  const codexPublic = "/Users/runner/.cargo/registry/src/package/src/lib.rsOTELhttp://localhost:4317";
+
+  assert.equal(reviewedRootsForMember(cliRelative, cliIdentity, trustedMembers).length > 0, true);
+  assert.equal(reviewedRootsForMember(codexRelative, codexIdentity, trustedMembers).length > 0, true);
+  assert.equal(credentialMaterialKind(cliPublic, {
+    relative: cliRelative, memberIdentity: cliIdentity, trustedMembers,
+  }), null);
+  assert.equal(credentialMaterialKind(codexPublic, {
+    relative: codexRelative, memberIdentity: codexIdentity, trustedMembers,
+  }), null);
+
+  const mutatedHash = `${cliIdentity.sha256[0] === "0" ? "1" : "0"}${cliIdentity.sha256.slice(1)}`;
+  assert.equal(reviewedRootsForMember(
+    cliRelative,
+    { ...cliIdentity, sha256: mutatedHash },
+    trustedMembers,
+  ).length, 0);
+  assert.equal(credentialMaterialKind(cliPublic, {
+    relative: cliRelative,
+    memberIdentity: { ...cliIdentity, sha256: mutatedHash },
+    trustedMembers,
+  }), "strict");
+  assert.equal(credentialMaterialKind(cliPublic, {
+    relative: "Contents/Resources/Notices/copied.bin",
+    memberIdentity: cliIdentity,
+    trustedMembers,
+  }), "strict");
+  assert.equal(credentialMaterialKind(`${cliPublic}\x00/Users/private-developer/file`, {
+    relative: cliRelative,
+    memberIdentity: cliIdentity,
+    trustedMembers,
+  }), "strict");
+});
+
+test("provenance validation rejects missing edited unpinned and mutated members", async (t) => {
+  const { loadInstallerProvenance } = require(auditPath);
+
+  await t.test("missing receipt", (subtest) => {
+    const fixture = provenanceFixture(subtest);
+    fs.rmSync(fixture.receiptPath);
+    assert.throws(
+      () => loadInstallerProvenance(fixture.app, fixture.expected),
+      /provenance receipt is missing/i,
+    );
   });
 
-  await t.test("a reviewed public CI path remains valid across an audit chunk boundary", (subtest) => {
-    const splitAt = (1024 * 1024) - Buffer.byteLength("/Users/run");
-    const fixture = auditFixture(subtest, [[
-      "Resources/CLIProxy/cli-proxy-api",
-      Buffer.concat([
-        Buffer.alloc(splitAt, 0x78),
-        Buffer.from("/Users/runner/hostedtoolcache/go/1.24.0/arm64/src/runtime/proc.go\0"),
-      ]),
-    ]]);
-    assert.doesNotThrow(fixture.audit);
-  });
-
-  for (const [label, relative, contents] of [
-    [
-      "reviewed-looking path in an ordinary member",
-      "Resources/Patcher/compiled.bin",
-      "/Users/runner/.cargo/registry/src/private/file.rs",
-    ],
-    [
-      "unreviewed repository in CLIProxy",
-      "Resources/CLIProxy/cli-proxy-api",
-      "/Users/runner/work/private-repository/private/file.go",
-    ],
-    [
-      "unreviewed Cargo directory in Codex",
-      "Resources/CodexRuntime/codex",
-      "/Users/runner/.cargo/private/credentials",
-    ],
-    [
-      "a reviewed root cannot conceal a concatenated private home",
-      "Resources/CLIProxy/cli-proxy-api",
-      "/Users/runner/go/pkg/mod/example:/Users/private-developer/project",
-    ],
-    [
-      "a reviewed root cannot escape through parent path segments",
-      "Resources/CLIProxy/cli-proxy-api",
-      "/Users/runner/work/CLIProxyAPI/../../private-developer/project",
-    ],
-  ]) {
-    await t.test(label, (subtest) => {
-      const fixture = auditFixture(subtest, [[relative, Buffer.from(contents)]]);
-      assert.throws(fixture.audit, /privacy audit.*personal absolute path/i);
+  await t.test("wrong source pin", (subtest) => {
+    const fixture = provenanceFixture(subtest, (receipt) => {
+      receipt.sourcePins.cliProxyApi.sha256 = "0".repeat(64);
+      return receipt;
     });
-  }
+    assert.throws(
+      () => loadInstallerProvenance(fixture.app, fixture.expected),
+      /provenance receipt is invalid/i,
+    );
+  });
+
+  await t.test("wrong member path", (subtest) => {
+    const fixture = provenanceFixture(subtest, (receipt) => {
+      receipt.members[0].path = "Contents/Resources/Notices/copied.bin";
+      return receipt;
+    });
+    assert.throws(
+      () => loadInstallerProvenance(fixture.app, fixture.expected),
+      /provenance receipt is invalid/i,
+    );
+  });
+
+  await t.test("one-byte packaged mutation", (subtest) => {
+    const fixture = provenanceFixture(subtest);
+    fs.appendFileSync(fixture.sidecar, Buffer.from([0xff]));
+    assert.throws(
+      () => loadInstallerProvenance(fixture.app, fixture.expected),
+      /provenance member mismatch/i,
+    );
+  });
+
+  await t.test("manifest disagreement", (subtest) => {
+    const fixture = provenanceFixture(subtest);
+    const entry = fixture.expected.get("Contents/Resources/CLIProxy/cli-proxy-api");
+    fixture.expected.set(entry.path, { ...entry, sha256: "f".repeat(64) });
+    assert.throws(
+      () => loadInstallerProvenance(fixture.app, fixture.expected),
+      /provenance member mismatch/i,
+    );
+  });
 });
 
-test("exact reviewed binaries ignore only embedded static token vocabulary", () => {
-  const { credentialMaterialKind } = require(auditPath);
-  assert.equal(typeof credentialMaterialKind, "function");
-  const staticVocabulary = `usage: Authorization: Bearer ${"a".repeat(40)} example sk-${"b".repeat(24)}`;
-  assert.equal(credentialMaterialKind(staticVocabulary, { exactReviewedBinary: false }), "generic-token");
-  assert.equal(credentialMaterialKind(staticVocabulary, { exactReviewedBinary: true }), null);
-  for (const value of [
-    "/Users/private/source",
-    "-----BEGIN PRIVATE KEY-----",
-    '{"access_token":"abc123"}',
-    "fixture-private-auth-token-value",
-    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJwcml2YXRlIn0.c2lnbmF0dXJlLXZhbHVl",
-  ]) {
-    assert.equal(credentialMaterialKind(value, { exactReviewedBinary: true }), "strict");
-  }
+test("untrusted member paths never receive the public CI provenance exemption", (t) => {
+  const fixture = auditFixture(t, [[
+    "Resources/Notices/copied-upstream.bin",
+    Buffer.from("/Users/runner/.cargo/registry/src/package/src/lib.rs\\0"),
+  ]]);
+  assert.throws(fixture.audit, /privacy audit.*personal absolute path/i);
 });
-
 test("release audit distinguishes reviewed user-data source from an actual user data store", async (t) => {
   await t.test("reviewed source", (subtest) => {
     const fixture = auditFixture(subtest, [
@@ -239,7 +367,20 @@ test("release audit rejects symlinks and extra image roots", (t) => {
   );
 });
 
-test("installer preflight binds InstallCodexBot byte count and strict signature before packaging", (t) => {
+test("release audit rejects a root app symlink before traversal", (t) => {
+  const { auditPayloadTree } = require(auditPath);
+  const external = auditFixture(t);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-root-app-symlink-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const expectedAppName = path.basename(external.app);
+  fs.symlinkSync(external.app, path.join(root, expectedAppName));
+  assert.throws(
+    () => auditPayloadTree(root, { expectedAppName }),
+    /installer app must be a real directory/i,
+  );
+});
+
+test("installer preflight binds bytes and rejects an unauthorized ad-hoc signature", (t) => {
   const { preflightInstallerApp, verifyInstallerSignature } = require(packagePath);
   assert.equal(typeof preflightInstallerApp, "function");
   assert.equal(typeof verifyInstallerSignature, "function");
@@ -254,10 +395,13 @@ test("installer preflight binds InstallCodexBot byte count and strict signature 
     bytes: fs.statSync(fixture.executable).size,
   });
   assert.doesNotThrow(() => verifyInstallerSignature(fixture.app));
-  assert.doesNotThrow(() => preflightInstallerApp({
-    installerApp: fixture.app,
-    expectedAppName: path.basename(fixture.app),
-  }));
+  assert.throws(
+    () => preflightInstallerApp({
+      installerApp: fixture.app,
+      expectedAppName: path.basename(fixture.app),
+    }),
+    /authorized Developer ID|code signature verification failed/i,
+  );
 
   const descriptor = fs.openSync(fixture.executable, "r+");
   try {

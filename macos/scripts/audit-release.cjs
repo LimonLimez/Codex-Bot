@@ -12,11 +12,14 @@ const FORBIDDEN_SEGMENTS = new Set([
   "conversations", "cookies", "history", "logs",
 ]);
 const FORBIDDEN_SUFFIXES = [".log", ".pem", ".key", ".p12", ".mobileprovision"];
-const PERSONAL_PATH = /(?:\/Users\/[^/\x00-\x20"'<>]+(?:\/[^\x00-\x20"'<>]*)?|\/home\/[^/\x00-\x20"'<>]+(?:\/[^\x00-\x20"'<>]*)?|[A-Za-z]:\\Users\\[^\\\x00-\x20"'<>]+(?:\\[^\x00-\x20"'<>]*)?)/;
+const HOME_PREFIX = /(?=(\/Users\/|\/home\/|[A-Za-z]:\\Users\\))/gi;
 const STRICT_PRIVATE_SECRET = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|\bfixture-private-[A-Za-z0-9_-]*(?:auth|access|refresh|oauth|secret|token)[A-Za-z0-9_-]*\b|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|client[_-]?secret|oauth[_-]?token|csrf[_-]?token|private[_-]?token|secret[_-]?token)\s*["'`]?\s*[:=]\s*(?:["'`][A-Za-z0-9_./+\-=]{3,}["'`]|(?=[A-Za-z0-9_./+\-=]{3,}(?:[^A-Za-z0-9_./+\-=]|$))(?=[A-Za-z0-9_./+\-=]*[0-9+\-=])[A-Za-z0-9_./+\-=]{3,})/i;
 const PLAIN_PRIVATE_SECRET = /\b(?:access_token|refresh_token|auth_token|client_secret|oauth_token|csrf_token|private_token|secret_token|password|passwd|cookie|session_cookie)\s*["'`]?\s*[:=]\s*(?:["'`][A-Za-z0-9_./+\-=]{3,}["'`]|[A-Za-z]{8,})(?=[^A-Za-z0-9_./+\-=]|$)/i;
 const GENERIC_TOKEN_SECRET = /\b(?:ghp|github_pat|sk|sess)-[A-Za-z0-9_\-]{20,}\b|\bBearer\s+[A-Za-z0-9_./+\-=]{6,}\b/i;
 const MANIFEST_RELATIVE = "Contents/Resources/INSTALLER-MANIFEST.json";
+const PROVENANCE_RELATIVE = "Contents/Resources/INSTALLER-PROVENANCE.json";
+const AUTHORIZED_DEVELOPER_ID_TEAM = "HKCH65M45F";
+const AUTHORIZED_INSTALLER_REQUIREMENT = '=anchor apple generic and certificate leaf[subject.OU] = "HKCH65M45F" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists';
 const SIGNATURE_RELATIVES = new Set([
   "Contents/_CodeSignature",
   "Contents/_CodeSignature/CodeResources",
@@ -34,35 +37,52 @@ const REVIEWED_PUBLIC_CI_ROOTS = new Map([
     "/Users/runner/.rustup/toolchains",
   ])],
 ]);
-const REVIEWED_UPSTREAM_BINARIES = new Set(REVIEWED_PUBLIC_CI_ROOTS.keys());
+const CLI_PROXY_INTERNAL_HOME_SOURCE_ROOT = "/Users/runner/work/CLIProxyAPI/CLIProxyAPI/internal/home/";
+const CLI_PROXY_RELATIVE = "Contents/Resources/CLIProxy/cli-proxy-api";
+const CODEX_RUNTIME_RELATIVE = "Contents/Resources/CodexRuntime/codex";
 
-function unreviewedPersonalPath(contents, relative = "", { allowTrailingPartial = false } = {}) {
+function reviewedRootsForMember(relative, identity = {}, trustedMembers = null) {
+  const expected = trustedMembers instanceof Map ? trustedMembers.get(relative) : null;
+  if (expected == null || identity.bytes !== expected.bytes || identity.sha256 !== expected.sha256) return [];
+  return REVIEWED_PUBLIC_CI_ROOTS.get(relative) || [];
+}
+
+function reviewedHomePrefix(contents, offset, prefix, relative, reviewedRoots) {
+  for (const root of reviewedRoots) {
+    if (!contents.startsWith(root, offset)) continue;
+    const after = contents[offset + root.length];
+    if (after == null || after === "/" || after.charCodeAt(0) <= 0x20) return true;
+  }
+  if (relative !== CLI_PROXY_RELATIVE || prefix.toLowerCase() !== "/home/") return false;
+  const nestedOffset = CLI_PROXY_INTERNAL_HOME_SOURCE_ROOT.lastIndexOf("/home/");
+  const sourceStart = offset - nestedOffset;
+  return sourceStart >= 0 && contents.startsWith(CLI_PROXY_INTERNAL_HOME_SOURCE_ROOT, sourceStart);
+}
+
+function unreviewedPinnedHomePath(contents, relative = "", {
+  memberIdentity = null,
+  trustedMembers = null,
+} = {}) {
   if (typeof contents !== "string") return true;
-  const reviewedRoots = REVIEWED_PUBLIC_CI_ROOTS.get(relative) || [];
-  const matcher = new RegExp(`(?<![A-Za-z0-9._~%+\\-])(?=(${PERSONAL_PATH.source}))`, "gi");
-  for (const match of contents.matchAll(matcher)) {
-    const candidate = match[1];
-    if (allowTrailingPartial
-      && match.index + candidate.length === contents.length
-      && candidate.length < SCAN_CARRY_BYTES) {
-      continue;
-    }
-    const reviewed = path.posix.normalize(candidate) === candidate
-      && reviewedRoots.some((root) => candidate === root || candidate.startsWith(`${root}/`));
-    if (!reviewed) {
-      return candidate;
-    }
+  const reviewedRoots = reviewedRootsForMember(relative, memberIdentity || {}, trustedMembers);
+  for (const match of contents.matchAll(new RegExp(HOME_PREFIX.source, HOME_PREFIX.flags))) {
+    if (!reviewedHomePrefix(contents, match.index, match[1], relative, reviewedRoots)) return match[1];
   }
   return null;
 }
 
 function credentialMaterialKind(contents, {
-  allowTrailingPartial = false,
-  exactReviewedBinary = false,
+  memberIdentity = null,
   relative = "",
+  trustedMembers = null,
 } = {}) {
   if (typeof contents !== "string") return "strict";
-  if (unreviewedPersonalPath(contents, relative, { allowTrailingPartial })
+  const exactReviewedBinary = reviewedRootsForMember(
+    relative,
+    memberIdentity || {},
+    trustedMembers,
+  ).length > 0;
+  if (unreviewedPinnedHomePath(contents, relative, { memberIdentity, trustedMembers })
     || STRICT_PRIVATE_SECRET.test(contents) || PLAIN_PRIVATE_SECRET.test(contents)) return "strict";
   if (!exactReviewedBinary && GENERIC_TOKEN_SECRET.test(contents)) return "generic-token";
   return null;
@@ -124,6 +144,62 @@ function containsBytes(file, needle) {
 
 function fail(reason) {
   throw new Error(`Release privacy audit failed: ${reason}`);
+}
+
+function assertAuthorizedInstallerSignature(output, { externalRequirementVerified = false } = {}) {
+  if (!externalRequirementVerified) {
+    fail("installer signature external Apple requirement was not verified");
+  }
+  const text = String(output || "");
+  const authorities = [...text.matchAll(/^Authority=(.+)$/gm)].map((match) => match[1]);
+  const teamIdentifier = /^TeamIdentifier=(.+)$/m.exec(text)?.[1] || null;
+  const authority = authorities[0] || null;
+  const authorizedApplication = authority != null
+    && authority.startsWith("Developer ID Application: ")
+    && authority.endsWith(` (${AUTHORIZED_DEVELOPER_ID_TEAM})`);
+  if (!authorizedApplication || teamIdentifier !== AUTHORIZED_DEVELOPER_ID_TEAM
+    || !authorities.includes("Developer ID Certification Authority")
+    || !authorities.includes("Apple Root CA")) {
+    fail("installer is not signed by the authorized Developer ID");
+  }
+  return { authority, teamIdentifier };
+}
+
+function installerSignatureVerificationArguments(app) {
+  return [
+    "--verify", "--deep", "--strict",
+    "--test-requirement", AUTHORIZED_INSTALLER_REQUIREMENT,
+    app,
+  ];
+}
+
+function inspectInstallerSignature(app) {
+  const verify = childProcess.spawnSync(
+    "/usr/bin/codesign",
+    installerSignatureVerificationArguments(app),
+    {
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  if (verify.error || verify.status !== 0) {
+    fail("installer code signature verification failed");
+  }
+  const display = childProcess.spawnSync("/usr/bin/codesign", [
+    "--display", "--verbose=4", app,
+  ], {
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (display.error || display.status !== 0) {
+    fail("installer code signature could not be inspected");
+  }
+  return assertAuthorizedInstallerSignature(
+    `${display.stdout || ""}\n${display.stderr || ""}`,
+    { externalRequirementVerified: true },
+  );
 }
 
 function safeRelative(relative) {
@@ -219,26 +295,115 @@ function loadInstallerManifest(app) {
   return expected;
 }
 
-function scanFile(file, relative) {
-  const exactReviewedBinary = REVIEWED_UPSTREAM_BINARIES.has(relative);
+function hasExactKeys(value, keys) {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+}
+
+function loadInstallerProvenance(app, expectedManifest) {
+  const readReceipt = (filename) => {
+    const receipt = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "assets", filename), "utf8"));
+    if (receipt == null || typeof receipt !== "object" || Array.isArray(receipt)
+      || receipt.executable == null || typeof receipt.executable !== "object"
+      || Array.isArray(receipt.executable) || !Number.isSafeInteger(receipt.executable.bytes)
+      || typeof receipt.executable.sha256 !== "string"
+      || !/^[a-f0-9]{64}$/.test(receipt.executable.sha256)) {
+      fail("reviewed upstream source receipt is invalid");
+    }
+    return receipt.executable;
+  };
+  const cliProxySource = readReceipt("cliproxyapi-7.2.132-darwin-aarch64.json");
+  const codexSource = readReceipt("openai-codex-0.147.0-darwin-arm64.json");
+  const installerVersion = require("../package.json").version;
+  const receiptPath = path.join(app, ...PROVENANCE_RELATIVE.split("/"));
+  let receiptStat;
+  try { receiptStat = fs.lstatSync(receiptPath); } catch { fail("installer provenance receipt is missing"); }
+  if (!receiptStat.isFile() || receiptStat.isSymbolicLink()
+    || receiptStat.size < 100 || receiptStat.size > 64 * 1024) {
+    fail("installer provenance receipt is invalid");
+  }
+  let receipt;
+  try { receipt = JSON.parse(fs.readFileSync(receiptPath, "utf8")); } catch {
+    fail("installer provenance receipt is invalid");
+  }
+  if (!hasExactKeys(receipt, ["members", "schemaVersion", "sourcePins", "version"])
+    || receipt.schemaVersion !== 1 || receipt.version !== installerVersion
+    || !hasExactKeys(receipt.sourcePins, ["cliProxyApi", "codexRuntime"])
+    || !hasExactKeys(receipt.sourcePins.cliProxyApi, ["bytes", "sha256"])
+    || !hasExactKeys(receipt.sourcePins.codexRuntime, ["bytes", "sha256"])
+    || receipt.sourcePins.cliProxyApi.bytes !== cliProxySource.bytes
+    || receipt.sourcePins.cliProxyApi.sha256 !== cliProxySource.sha256
+    || receipt.sourcePins.codexRuntime.bytes !== codexSource.bytes
+    || receipt.sourcePins.codexRuntime.sha256 !== codexSource.sha256
+    || !Array.isArray(receipt.members) || receipt.members.length !== 2) {
+    fail("installer provenance receipt is invalid");
+  }
+
+  const definitions = [
+    { path: CLI_PROXY_RELATIVE, source: "cliProxyApi" },
+    { path: CODEX_RUNTIME_RELATIVE, source: "codexRuntime" },
+  ];
+  const trustedMembers = new Map();
+  for (let index = 0; index < definitions.length; index += 1) {
+    const member = receipt.members[index];
+    const definition = definitions[index];
+    if (!hasExactKeys(member, ["bytes", "path", "sha256", "source"])
+      || member.path !== definition.path || member.source !== definition.source
+      || !Number.isSafeInteger(member.bytes) || member.bytes < 1
+      || typeof member.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(member.sha256)) {
+      fail("installer provenance receipt is invalid");
+    }
+    const memberPath = path.join(app, ...member.path.split("/"));
+    let memberStat;
+    try { memberStat = fs.lstatSync(memberPath); } catch { fail("installer provenance member is missing"); }
+    const manifestEntry = expectedManifest.get(member.path);
+    if (!memberStat.isFile() || memberStat.isSymbolicLink()
+      || member.bytes !== memberStat.size || member.sha256 !== sha256File(memberPath)
+      || manifestEntry?.type !== "file" || manifestEntry.bytes !== member.bytes
+      || manifestEntry.sha256 !== member.sha256) {
+      fail("installer provenance member mismatch");
+    }
+    trustedMembers.set(member.path, Object.freeze({
+      bytes: member.bytes,
+      sha256: member.sha256,
+    }));
+  }
+
+  const receiptManifestEntry = expectedManifest.get(PROVENANCE_RELATIVE);
+  if (receiptManifestEntry?.type !== "file" || receiptManifestEntry.bytes !== receiptStat.size
+    || receiptManifestEntry.sha256 !== sha256File(receiptPath)) {
+    fail("installer provenance manifest mismatch");
+  }
+  return trustedMembers;
+}
+
+function scanFile(file, relative, trustedMembers = null) {
+  const stat = fs.statSync(file);
+  const memberIdentity = { bytes: stat.size, sha256: sha256File(file) };
+  const exactReviewedBinary = reviewedRootsForMember(
+    relative,
+    memberIdentity,
+    trustedMembers,
+  ).length > 0;
   const descriptor = fs.openSync(file, "r");
-  const buffer = Buffer.allocUnsafe(1024 * 1024 + 1024);
-  let carry = 0;
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  let carry = Buffer.alloc(0);
   try {
     for (;;) {
-      const bytes = fs.readSync(descriptor, buffer, carry, 1024 * 1024, null);
-      const length = carry + bytes;
-      const contents = buffer.subarray(0, length).toString("latin1");
-      const allowTrailingPartial = bytes !== 0;
-      if (unreviewedPersonalPath(contents, relative, { allowTrailingPartial })) {
+      const bytes = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      const combined = carry.length === 0
+        ? buffer.subarray(0, bytes)
+        : Buffer.concat([carry, buffer.subarray(0, bytes)]);
+      const contents = combined.toString("latin1");
+      if (unreviewedPinnedHomePath(contents, relative, { memberIdentity, trustedMembers })) {
         fail(`personal absolute path found in ${relative}`);
       }
-      if (credentialMaterialKind(contents, { allowTrailingPartial, exactReviewedBinary, relative }) != null) {
+      if (STRICT_PRIVATE_SECRET.test(contents) || PLAIN_PRIVATE_SECRET.test(contents)
+        || (!exactReviewedBinary && GENERIC_TOKEN_SECRET.test(contents))) {
         fail(`credential material found in ${relative}`);
       }
       if (bytes === 0) break;
-      carry = Math.min(SCAN_CARRY_BYTES, length);
-      buffer.copyWithin(0, length - carry, length);
+      carry = Buffer.from(combined.subarray(Math.max(0, combined.length - SCAN_CARRY_BYTES)));
     }
   } finally {
     fs.closeSync(descriptor);
@@ -255,18 +420,24 @@ function run(executable, args) {
   return result.stdout;
 }
 
-function auditTree(root, options = {}) {
+function resolveInstallerRoot(root, expectedAppName) {
   const resolved = path.resolve(root);
-  const expectedAppName = options.expectedAppName;
   const rootStat = fs.lstatSync(resolved);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) fail("release root is not a real directory");
   const roots = fs.readdirSync(resolved).sort();
   if (!expectedAppName || roots.length !== 1 || roots[0] !== expectedAppName || !expectedAppName.endsWith(".app")) {
     fail("image root must contain exactly the expected installer app");
   }
-
   const app = path.join(resolved, expectedAppName);
-  const expected = loadInstallerManifest(app);
+  let appStat;
+  try { appStat = fs.lstatSync(app); } catch { fail("installer app must be a real directory"); }
+  if (!appStat.isDirectory() || appStat.isSymbolicLink()) {
+    fail("installer app must be a real directory");
+  }
+  return { app, resolved };
+}
+
+function auditTreeContents(app, expected, trustedMembers) {
   const seen = new Set();
   let fileCount = 0;
   let totalBytes = 0;
@@ -307,7 +478,7 @@ function auditTree(root, options = {}) {
         personalPathMatches += 1;
         fail(`local developer path found in ${relative}`);
       }
-      try { scanFile(absolute, relative); } catch (error) {
+      try { scanFile(absolute, relative, trustedMembers); } catch (error) {
         if (/personal absolute path/.test(error.message)) personalPathMatches += 1;
         if (/credential material/.test(error.message)) secretMatches += 1;
         throw error;
@@ -318,6 +489,20 @@ function auditTree(root, options = {}) {
   if (seen.size !== expected.size) fail("installer manifest member is missing");
   if (fileCount === 0) fail("installer app is empty");
   return Object.freeze({ fileCount, totalBytes, personalPathMatches, secretMatches });
+}
+
+function auditPayloadTree(root, options = {}) {
+  const { app } = resolveInstallerRoot(root, options.expectedAppName);
+  const expected = loadInstallerManifest(app);
+  return auditTreeContents(app, expected, new Map());
+}
+
+function auditTree(root, options = {}) {
+  const { app } = resolveInstallerRoot(root, options.expectedAppName);
+  inspectInstallerSignature(app);
+  const expected = loadInstallerManifest(app);
+  const trustedMembers = loadInstallerProvenance(app, expected);
+  return auditTreeContents(app, expected, trustedMembers);
 }
 
 function auditDmg(dmg, options = {}) {
@@ -360,18 +545,23 @@ function main() {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
+module.exports = {
+  assertAuthorizedInstallerSignature,
+  auditDmg,
+  auditPayloadTree,
+  auditTree,
+  containsBytes,
+  credentialMaterialKind,
+  installerSignatureVerificationArguments,
+  loadInstallerProvenance,
+  parseArgs,
+  reviewedRootsForMember,
+  writeInstallerManifest,
+};
+
 if (require.main === module) {
   try { main(); } catch (error) {
     process.stderr.write(`${error.message || error}\n`);
     process.exitCode = 1;
   }
 }
-
-module.exports = {
-  auditDmg,
-  auditTree,
-  containsBytes,
-  credentialMaterialKind,
-  parseArgs,
-  writeInstallerManifest,
-};

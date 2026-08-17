@@ -18,6 +18,10 @@ const CODEX_RUNTIME_BYTES = 219997536;
 const CODEX_RUNTIME_SHA256 = "19c4f144c5226a9f17c58e6f0fa854843b0f77a6eb420f40e2745a12f10f5d37";
 const CODEX_RUNTIME_LICENSE_BYTES = 10926;
 const CODEX_RUNTIME_LICENSE_SHA256 = "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc";
+const PROVENANCE_RELATIVE = "Contents/Resources/INSTALLER-PROVENANCE.json";
+const SIDECAR_RELATIVE = "Contents/Resources/CLIProxy/cli-proxy-api";
+const CODEX_RUNTIME_RELATIVE = "Contents/Resources/CodexRuntime/codex";
+const AUTHORIZED_DEVELOPER_ID_TEAM = "HKCH65M45F";
 const NODE_PACKAGES = Object.freeze([
   "@electron/asar",
   "balanced-match",
@@ -70,6 +74,41 @@ function realFile(file, label) {
   const stat = fs.lstatSync(resolved);
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`${label} must be a real file`);
   return { file: resolved, stat };
+}
+
+function createInstallerProvenanceReceipt({ installedCodexRuntime, installedSidecar }) {
+  const sidecar = realFile(installedSidecar, "Installed CLIProxyAPI executable");
+  const codexRuntime = realFile(installedCodexRuntime, "Installed Codex runtime executable");
+  return {
+    schemaVersion: 1,
+    version: VERSION,
+    sourcePins: {
+      cliProxyApi: { bytes: SIDECAR_BYTES, sha256: SIDECAR_SHA256 },
+      codexRuntime: { bytes: CODEX_RUNTIME_BYTES, sha256: CODEX_RUNTIME_SHA256 },
+    },
+    members: [
+      {
+        path: SIDECAR_RELATIVE,
+        source: "cliProxyApi",
+        bytes: sidecar.stat.size,
+        sha256: sha256File(sidecar.file),
+      },
+      {
+        path: CODEX_RUNTIME_RELATIVE,
+        source: "codexRuntime",
+        bytes: codexRuntime.stat.size,
+        sha256: sha256File(codexRuntime.file),
+      },
+    ],
+  };
+}
+
+function assertAuthorizedSigningIdentity(identity) {
+  if (typeof identity !== "string"
+    || !new RegExp(`^Developer ID Application: [^\\r\\n]+ \\(${AUTHORIZED_DEVELOPER_ID_TEAM}\\)$`).test(identity)) {
+    throw new Error("Installer builds require the authorized Developer ID signing identity");
+  }
+  return identity;
 }
 
 function copyFile(source, target, mode = 0o644) {
@@ -278,6 +317,7 @@ function signingArguments(identity, target, development) {
 function buildInstaller(options) {
   const macRoot = path.resolve(__dirname, "..");
   const repoRoot = path.resolve(macRoot, "..");
+  const signingIdentity = assertAuthorizedSigningIdentity(options["signing-identity"] || "-");
   const releaseCheckout = captureReleaseCheckout({ repoRoot, release: Boolean(options.release) });
   const output = path.resolve(options.output || path.join(macRoot, "dist", VERSION));
   if (fs.existsSync(output)) throw new Error("Installer output already exists");
@@ -324,11 +364,6 @@ function buildInstaller(options) {
       timestamped: codexManifest.executable.timestamped,
     }),
   });
-  const signingIdentity = options["signing-identity"] || "-";
-  if (options.release && !/^Developer ID Application: /.test(signingIdentity)) {
-    throw new Error("A Developer ID Application identity is required for a release installer");
-  }
-
   let installerBinary = options["installer-binary"];
   if (!installerBinary) {
     run("/usr/bin/swift", [
@@ -402,6 +437,15 @@ function buildInstaller(options) {
     run("/usr/bin/codesign", signingArguments(signingIdentity, installedExecutable, !options.release));
     run("/usr/bin/codesign", signingArguments(signingIdentity, profilePublisher, !options.release));
     run("/usr/bin/codesign", signingArguments(signingIdentity, installedSidecar, !options.release));
+    const provenancePath = path.join(app, ...PROVENANCE_RELATIVE.split("/"));
+    fs.writeFileSync(
+      provenancePath,
+      `${JSON.stringify(createInstallerProvenanceReceipt({
+        installedCodexRuntime,
+        installedSidecar,
+      }))}\n`,
+      { mode: 0o644, flag: "wx" },
+    );
     fs.writeFileSync(
       path.join(contents, "Info.plist"),
       plist(
@@ -419,6 +463,8 @@ function buildInstaller(options) {
       ),
       { mode: 0o644 },
     );
+    run("/usr/bin/xattr", ["-cr", app]);
+    run("/usr/bin/codesign", signingArguments(signingIdentity, app, !options.release));
     writeInstallerManifest(app);
     run("/usr/bin/xattr", ["-cr", app]);
     run("/usr/bin/codesign", signingArguments(signingIdentity, app, !options.release));
@@ -459,13 +505,16 @@ module.exports = {
   PATCHER_ASSET_FILES,
   PATCHER_SCRIPT_FILES,
   PATCHER_SOURCE_FILES,
+  PROVENANCE_RELATIVE,
   SIDECAR_BYTES,
   SIDECAR_LICENSE_BYTES,
   SIDECAR_LICENSE_SHA256,
   SIDECAR_SHA256,
   VERSION,
+  assertAuthorizedSigningIdentity,
   buildInstaller,
   captureReleaseCheckout,
+  createInstallerProvenanceReceipt,
   parseArgs,
   stagePatcherPayload,
   verifyReleaseCheckout,

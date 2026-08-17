@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -8,6 +9,71 @@ const childProcess = require("node:child_process");
 const test = require("node:test");
 
 const scriptPath = path.join(__dirname, "..", "scripts", "build-installer-app.cjs");
+
+test("installer builder creates an exact signed-member provenance receipt from pinned inputs", (t) => {
+  const {
+    CODEX_RUNTIME_BYTES,
+    CODEX_RUNTIME_SHA256,
+    PROVENANCE_RELATIVE,
+    SIDECAR_BYTES,
+    SIDECAR_SHA256,
+    VERSION,
+    createInstallerProvenanceReceipt,
+  } = require(scriptPath);
+  assert.equal(typeof createInstallerProvenanceReceipt, "function");
+  assert.equal(PROVENANCE_RELATIVE, "Contents/Resources/INSTALLER-PROVENANCE.json");
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-provenance-test-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sidecar = path.join(root, "cli-proxy-api");
+  const codex = path.join(root, "codex");
+  fs.writeFileSync(sidecar, "signed-sidecar\n");
+  fs.writeFileSync(codex, "official-codex\n");
+
+  const receipt = createInstallerProvenanceReceipt({
+    installedCodexRuntime: codex,
+    installedSidecar: sidecar,
+  });
+  assert.deepEqual(receipt, {
+    schemaVersion: 1,
+    version: VERSION,
+    sourcePins: {
+      cliProxyApi: { bytes: SIDECAR_BYTES, sha256: SIDECAR_SHA256 },
+      codexRuntime: { bytes: CODEX_RUNTIME_BYTES, sha256: CODEX_RUNTIME_SHA256 },
+    },
+    members: [
+      {
+        path: "Contents/Resources/CLIProxy/cli-proxy-api",
+        source: "cliProxyApi",
+        bytes: fs.statSync(sidecar).size,
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(sidecar)).digest("hex"),
+      },
+      {
+        path: "Contents/Resources/CodexRuntime/codex",
+        source: "codexRuntime",
+        bytes: fs.statSync(codex).size,
+        sha256: crypto.createHash("sha256").update(fs.readFileSync(codex)).digest("hex"),
+      },
+    ],
+  });
+});
+
+test("installer builder requires the authorized Developer ID even for DEVELOPMENT output", () => {
+  const { assertAuthorizedSigningIdentity } = require(scriptPath);
+  assert.equal(typeof assertAuthorizedSigningIdentity, "function");
+  assert.equal(
+    assertAuthorizedSigningIdentity("Developer ID Application: Harlin Sidwell (HKCH65M45F)"),
+    "Developer ID Application: Harlin Sidwell (HKCH65M45F)",
+  );
+  for (const identity of [
+    "-",
+    "Apple Development: Harlin Sidwell (HKCH65M45F)",
+    "Developer ID Application: Someone Else (ABCDE12345)",
+    "Developer ID Application: Harlin Sidwell (HKCH65M45F)\nother",
+  ]) {
+    assert.throws(() => assertAuthorizedSigningIdentity(identity), /authorized Developer ID/i);
+  }
+});
 
 function relativeFiles(root) {
   const files = [];
@@ -87,13 +153,20 @@ test("installer bundles the macOS privacy notice instead of Windows release poli
   assert.match(source, /["']-arch["'],\s*["']arm64["']/);
   assert.match(source, /\/usr\/bin\/lipo/);
   assert.match(source, /OpenBotMigration["'],\s*["']openbot-profile-publish/);
+  const outerSeals = [...source.matchAll(/signingArguments\(signingIdentity, app, !options\.release\)/g)]
+    .map((match) => match.index);
+  const manifestWrite = source.indexOf("writeInstallerManifest(app)");
+  assert.equal(outerSeals.length, 2);
+  assert.equal(outerSeals[0] < manifestWrite && manifestWrite < outerSeals[1], true);
   assert.match(source, /OpenBotProfilePublisherBytes/);
   assert.match(source, /OpenBotProfilePublisherSHA256/);
   assert.match(source, /--options["'],\s*["']runtime/);
   assert.match(source, /--timestamp/);
   assert.doesNotMatch(source, /<key>CodexBotSigningIdentity<\/key>/);
   assert.doesNotMatch(notice, /%LOCALAPPDATA%|Windows DPAPI|Grok Bot 0\.18\.0/i);
+  assert.doesNotMatch(notice, /\/Users\//);
   assert.match(notice, /macOS|CLIProxyAPI|127\.0\.0\.1/);
+  assert.match(notice, /public GitHub Actions.*Cargo.*Rust.*Go/is);
   const bundledNotice = fs.readFileSync(path.join(__dirname, "..", "NOTICE.md"), "utf8");
   assert.match(bundledNotice, /Codex 0\.147\.0/);
   assert.match(bundledNotice, /CLIProxyAPI 7\.2\.132/);
@@ -242,7 +315,7 @@ test("release checkout capture requires a clean HEAD exactly equal to origin mai
 test("exact pinned inputs build an isolated signed development installer bundle", {
   skip: !process.env.CLIPROXYAPI_DARWIN_ARM64 || !process.env.CLIPROXYAPI_LICENSE
     || !process.env.CODEX_RUNTIME_ARCHIVE || !process.env.CODEX_RUNTIME_BINARY
-    || !process.env.CODEX_RUNTIME_LICENSE,
+    || !process.env.CODEX_RUNTIME_LICENSE || !process.env.OPENBOT_INSTALLER_SIGNING_IDENTITY,
 }, (t) => {
   const { buildInstaller } = require(scriptPath);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-installer-bundle-test-"));
@@ -255,7 +328,7 @@ test("exact pinned inputs build an isolated signed development installer bundle"
     "codex-runtime": process.env.CODEX_RUNTIME_BINARY,
     "codex-license": process.env.CODEX_RUNTIME_LICENSE,
     "installer-binary": path.join(__dirname, "..", "installer", ".build", "release", "InstallCodexBot"),
-    "signing-identity": "-",
+    "signing-identity": process.env.OPENBOT_INSTALLER_SIGNING_IDENTITY,
     release: false,
   });
   assert.equal(receipt.development, true);
@@ -276,6 +349,39 @@ test("exact pinned inputs build an isolated signed development installer bundle"
   assert.equal(fs.statSync(packagedRuntime).size, 219997536);
   assert.equal(runtimeReceipt.version, "0.147.0");
   assert.equal(runtimeReceipt.sha256, "19c4f144c5226a9f17c58e6f0fa854843b0f77a6eb420f40e2745a12f10f5d37");
+  const provenancePath = path.join(resources, "INSTALLER-PROVENANCE.json");
+  const provenance = JSON.parse(fs.readFileSync(provenancePath, "utf8"));
+  assert.deepEqual(provenance.sourcePins, {
+    cliProxyApi: { bytes: 58558850, sha256: "a46fe86e32845876832c6f2c7e66587ab7d9ee70d899ee5a7112de29f7d70cd6" },
+    codexRuntime: { bytes: 219997536, sha256: "19c4f144c5226a9f17c58e6f0fa854843b0f77a6eb420f40e2745a12f10f5d37" },
+  });
+  const memberFiles = new Map([
+    ["Contents/Resources/CLIProxy/cli-proxy-api", path.join(resources, "CLIProxy", "cli-proxy-api")],
+    ["Contents/Resources/CodexRuntime/codex", packagedRuntime],
+  ]);
+  for (const member of provenance.members) {
+    const file = memberFiles.get(member.path);
+    assert.equal(typeof file, "string");
+    assert.equal(member.bytes, fs.statSync(file).size);
+    assert.equal(member.sha256, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+  }
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(resources, "INSTALLER-MANIFEST.json"),
+    "utf8",
+  ));
+  assert.equal(manifest.entries.some((entry) => entry.path === "Contents/Resources/INSTALLER-PROVENANCE.json"), true);
+  const { installerSignatureVerificationArguments } = require(path.join(
+    __dirname,
+    "..",
+    "scripts",
+    "audit-release.cjs",
+  ));
+  const signature = childProcess.spawnSync(
+    "/usr/bin/codesign",
+    installerSignatureVerificationArguments(receipt.app),
+    { encoding: "utf8" },
+  );
+  assert.equal(signature.status, 0, signature.stderr);
   assert.equal(fs.readFileSync(path.join(resources, "CodexRuntime", "LICENSE"), "utf8").includes("Apache License"), true);
   const privacy = fs.readFileSync(path.join(resources, "Notices", "PRIVACY.md"), "utf8");
   assert.match(privacy, /macOS|CLIProxyAPI/);

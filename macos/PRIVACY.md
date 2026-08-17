@@ -63,7 +63,7 @@ enforces that release boundary.
 
 The unmodified, integrity-pinned Codex and CLIProxyAPI executables can contain
 public upstream CI source paths recorded by their compilers. The audit permits
-only the enumerated `/Users/runner` Cargo, Rust toolchain, Go module cache, and
-official project-workspace roots inside those two exact installer members. It
-still rejects every other absolute home path, every such path in any other
-member, and all detected credential material.
+only the enumerated public GitHub Actions Cargo registry, Rust toolchain, Go
+module cache, and official project-workspace roots inside those two exact
+installer members. It still rejects every other absolute home path, every such
+path in any other member, and all detected credential material.
