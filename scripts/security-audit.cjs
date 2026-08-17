@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
+const MACOS_PRODUCT_ROOT = path.join(ROOT, "macos");
 const SKIP_DIRECTORIES = new Set([
   ".git",
   "node_modules",
@@ -125,8 +126,12 @@ function collect(directory, files = []) {
       files.push({ path: path.join(directory, entry.name), symlink: true });
       continue;
     }
-    if (entry.isDirectory() && SKIP_DIRECTORIES.has(entry.name)) continue;
     const file = path.join(directory, entry.name);
+    if (
+      entry.isDirectory() &&
+      (SKIP_DIRECTORIES.has(entry.name) || file === MACOS_PRODUCT_ROOT)
+    )
+      continue;
     if (entry.isDirectory()) collect(file, files);
     else if (entry.isFile()) files.push({ path: file, symlink: false });
   }

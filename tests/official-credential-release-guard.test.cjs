@@ -9,7 +9,6 @@ const path = require("node:path");
 const test = require("node:test");
 
 const root = path.resolve(__dirname, "..");
-const auditScript = path.join(root, "scripts", "security-audit.cjs");
 
 function run(command, args, cwd = root) {
   return childProcess.spawnSync(command, args, {
@@ -23,65 +22,118 @@ function copyAuditFixture() {
   const fixture = fs.mkdtempSync(
     path.join(os.tmpdir(), "codex-release-audit-test-"),
   );
-  const excluded = new Set([".git", "node_modules", "build", "artifacts"]);
-  fs.cpSync(root, fixture, {
-    recursive: true,
-    filter(source) {
-      const relative = path.relative(root, source);
-      const first = relative.split(path.sep)[0];
-      return relative === "" || !excluded.has(first);
-    },
-  });
+  const indexed = run("git", ["ls-files", "-z"]);
+  assert.equal(indexed.status, 0, indexed.stderr || indexed.stdout);
+  const tracked = indexed.stdout.split("\0").filter(Boolean);
+  for (const relative of tracked) {
+    const segments = relative.split("/");
+    if (segments[0] === "macos") continue;
+    const source = path.join(root, ...segments);
+    const destination = path.join(fixture, ...segments);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    const stat = fs.lstatSync(source);
+    if (stat.isSymbolicLink()) {
+      fs.symlinkSync(fs.readlinkSync(source), destination);
+    } else {
+      fs.copyFileSync(source, destination);
+    }
+  }
   const initialized = run("git", ["init", "--quiet"], fixture);
   assert.equal(initialized.status, 0, initialized.stderr || initialized.stdout);
-  const indexed = run("git", ["add", "-A"], fixture);
-  assert.equal(indexed.status, 0, indexed.stderr || indexed.stdout);
+  const added = run("git", ["add", "--force", "--all"], fixture);
+  assert.equal(added.status, 0, added.stderr || added.stdout);
   return fixture;
 }
 
 test("official OAuth state is ignored and rejected without hiding official source", () => {
+  const fixture = copyAuditFixture();
   const credentialPaths = [
     "official-computer/credentials.json",
     "copied-state/official-computer/credentials.json",
   ];
+  try {
+    for (const relativePath of credentialPaths) {
+      const ignored = run(
+        "git",
+        ["check-ignore", "--no-index", "--", relativePath],
+        fixture,
+      );
+      assert.equal(
+        ignored.status,
+        0,
+        `${relativePath} must be ignored: ${ignored.stderr || ignored.stdout}`,
+      );
 
-  for (const relativePath of credentialPaths) {
-    const ignored = run("git", [
-      "check-ignore",
-      "--no-index",
-      "--",
-      relativePath,
-    ]);
+      const audited = run(
+        process.execPath,
+        [path.join(fixture, "scripts", "security-audit.cjs"), relativePath],
+        fixture,
+      );
+      assert.equal(audited.status, 1);
+      assert.match(audited.stderr, /forbidden private runtime-data path/);
+    }
+
+    const sourcePath = "src/official-computer-helper.cjs";
+    const sourceIgnored = run(
+      "git",
+      ["check-ignore", "--no-index", "--", sourcePath],
+      fixture,
+    );
     assert.equal(
-      ignored.status,
-      0,
-      `${relativePath} must be ignored: ${ignored.stderr || ignored.stdout}`,
+      sourceIgnored.status,
+      1,
+      sourceIgnored.stderr || sourceIgnored.stdout,
     );
 
-    const audited = run(process.execPath, [auditScript, relativePath]);
-    assert.equal(audited.status, 1);
-    assert.match(audited.stderr, /forbidden private runtime-data path/);
+    const sourceAudited = run(
+      process.execPath,
+      [path.join(fixture, "scripts", "security-audit.cjs"), sourcePath],
+      fixture,
+    );
+    assert.equal(
+      sourceAudited.status,
+      0,
+      sourceAudited.stderr || sourceAudited.stdout,
+    );
+  } finally {
+    fs.rmSync(fixture, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 50,
+    });
   }
+});
 
-  const sourcePath = "src/official-computer-helper.cjs";
-  const sourceIgnored = run("git", [
-    "check-ignore",
-    "--no-index",
-    "--",
-    sourcePath,
-  ]);
-  assert.equal(
-    sourceIgnored.status,
-    1,
-    sourceIgnored.stderr || sourceIgnored.stdout,
-  );
+test("Windows release audit excludes only the top-level macOS product", () => {
+  const fixture = copyAuditFixture();
+  try {
+    const fixtureAudit = path.join(fixture, "scripts", "security-audit.cjs");
+    const topLevel = path.join(fixture, "macos", "forbidden.log");
+    const nested = path.join(fixture, "src", "macos", "forbidden.log");
+    const contents = "forbidden release fixture\n";
+    fs.mkdirSync(path.dirname(topLevel), { recursive: true });
+    fs.writeFileSync(topLevel, contents);
 
-  const sourceAudited = run(process.execPath, [auditScript, sourcePath]);
-  assert.equal(
-    sourceAudited.status,
-    0,
-    sourceAudited.stderr || sourceAudited.stdout,
-  );
+    const excluded = run(process.execPath, [fixtureAudit], fixture);
+    assert.equal(excluded.status, 0, excluded.stderr || excluded.stdout);
+
+    fs.mkdirSync(path.dirname(nested), { recursive: true });
+    fs.writeFileSync(nested, contents);
+    const rejected = run(process.execPath, [fixtureAudit], fixture);
+    assert.equal(rejected.status, 1);
+    assert.match(
+      rejected.stderr,
+      /src\/macos\/forbidden\.log: forbidden release file type \.log/,
+    );
+  } finally {
+    fs.rmSync(fixture, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 50,
+    });
+  }
 });
 
 test("normal release audit allows only an empty artifacts directory or the exact canonical pair", () => {

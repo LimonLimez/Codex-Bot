@@ -6,6 +6,8 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
+const windowsTest = process.platform === "win32" ? test : test.skip;
+
 const root = path.resolve(__dirname, "..");
 const { verifyLocalAuthIsolationSources } = require(
   path.join(root, "scripts", "patch-app.cjs"),
@@ -306,7 +308,7 @@ test("post-patch verifier rejects removal of the direct-launch handoff", () => {
   );
 });
 
-test("wrapped-launch predicate accepts only the launcher's exact loopback descriptor", () => {
+windowsTest("wrapped-launch predicate accepts only the launcher's exact loopback descriptor", () => {
   const stateRoot = "C:\\Users\\test\\AppData\\Local\\Open Bot";
   assert.equal(
     evaluateWrappedLaunchEnvironment({

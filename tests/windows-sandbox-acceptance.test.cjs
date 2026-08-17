@@ -8,6 +8,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
+const windowsTest = process.platform === "win32" ? test : test.skip;
+
 const root = path.resolve(__dirname, "..");
 const generator = path.join(
   root,
@@ -118,7 +120,7 @@ function generate(fixture, output, extra = []) {
   ]);
 }
 
-test("dry run generates two isolated WSB scenarios from an audited DEVELOPMENT pair", (t) => {
+windowsTest("dry run generates two isolated WSB scenarios from an audited DEVELOPMENT pair", (t) => {
   const fixture = createDevelopmentInstallerFixture(t);
   const output = path.join(fixture.temporary, "generated");
   const result = generate(fixture, output);
@@ -194,7 +196,7 @@ test("dry run generates two isolated WSB scenarios from an audited DEVELOPMENT p
   );
 });
 
-test("generation fails closed on an unreviewed hash, non-development name, or reused evidence root", (t) => {
+windowsTest("generation fails closed on an unreviewed hash, non-development name, or reused evidence root", (t) => {
   const fixture = createDevelopmentInstallerFixture(t);
 
   const wrongHash = { ...fixture, hash: "0".repeat(64) };
@@ -412,7 +414,7 @@ test("authenticated backend evidence contains only allowlisted booleans, counts,
   );
 });
 
-test("post-install archive verification recomputes bytes and rejects a nonempty corrupt archive", (t) => {
+windowsTest("post-install archive verification recomputes bytes and rejects a nonempty corrupt archive", (t) => {
   const temporary = fs.mkdtempSync(
     path.join(os.tmpdir(), "codex-bot-patch-recompute-"),
   );
@@ -499,7 +501,7 @@ if ($verified) { exit 0 } else { exit 7 }`,
   assert.equal(corrupt.status, 7, corrupt.stderr || corrupt.stdout);
 });
 
-test("both PowerShell harness scripts parse without errors", () => {
+windowsTest("both PowerShell harness scripts parse without errors", () => {
   for (const script of [generator, runner]) {
     const parsed = run(
       powershell,

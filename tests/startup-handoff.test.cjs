@@ -6,6 +6,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
+const windowsTest = process.platform === "win32" ? test : test.skip;
+
 const root = path.resolve(__dirname, "..");
 const read = (relativePath) =>
   fs.readFileSync(path.join(root, ...relativePath.split("/")), "utf8");
@@ -57,7 +59,9 @@ test("scheduled and interactive launches use the windowless system script host",
   assert.match(hiddenRunner, /Case "launcher"[\s\S]*waitForExit = False/);
   assert.match(hiddenRunner, /Case "watchdog"[\s\S]*waitForExit = True/);
   assert.match(hiddenRunner, /shell\.Run\(command, 0, waitForExit\)/);
+});
 
+windowsTest("the windowless system script host executes the hidden runner", () => {
   const syntaxProbe = spawnSync(
     path.join(
       process.env.SystemRoot || "C:\\Windows",

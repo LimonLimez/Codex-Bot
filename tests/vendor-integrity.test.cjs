@@ -9,6 +9,8 @@ const path = require("node:path");
 const test = require("node:test");
 const { setTimeout: delay } = require("node:timers/promises");
 
+const windowsTest = process.platform === "win32" ? test : test.skip;
+
 const root = path.resolve(__dirname, "..");
 const runtimeVerifier = path.join(root, "scripts", "Verify-GrokBotRuntime.ps1");
 const installerVerifier = path.join(
@@ -188,7 +190,7 @@ test("the reviewed 0.18 runtime manifest is complete, canonical, and pinned", ()
   }
 });
 
-test("the runtime verifier accepts a complete matching tree with the pinned signer", (t) => {
+windowsTest("the runtime verifier accepts a complete matching tree with the pinned signer", (t) => {
   const fixture = createFixture(t, [
     ["resources/app.asar", "supported archive bytes\n"],
   ]);
@@ -197,7 +199,7 @@ test("the runtime verifier accepts a complete matching tree with the pinned sign
   assert.equal(JSON.parse(result.stdout).ok, true);
 });
 
-test("the runtime verifier rejects missing, extra, and hash-mismatched files", async (t) => {
+windowsTest("the runtime verifier rejects missing, extra, and hash-mismatched files", async (t) => {
   await t.test("missing", (subtest) => {
     const fixture = createFixture(subtest, [
       ["resources/app.asar", "supported archive bytes\n"],
@@ -223,7 +225,7 @@ test("the runtime verifier rejects missing, extra, and hash-mismatched files", a
   });
 });
 
-test("the runtime verifier rejects reparse points without traversing them", (t) => {
+windowsTest("the runtime verifier rejects reparse points without traversing them", (t) => {
   const fixture = createFixture(t);
   const outside = path.join(fixture.temporary, "outside");
   fs.mkdirSync(outside);
@@ -240,7 +242,7 @@ test("the runtime verifier rejects reparse points without traversing them", (t) 
   assert.match(result.stderr, /reparse point/i);
 });
 
-test("the runtime verifier rejects a valid signature from any signer except the pin", (t) => {
+windowsTest("the runtime verifier rejects a valid signature from any signer except the pin", (t) => {
   const fixture = createFixture(t);
   const result = verifyFixture(
     fixture,
@@ -250,7 +252,7 @@ test("the runtime verifier rejects a valid signature from any signer except the 
   assert.match(result.stderr, /not by the reviewed pinned signer/i);
 });
 
-test("the vendor-installer verifier pins size, bytes, metadata, and artifact signer", (t) => {
+test("the vendor-installer verifier pins size, bytes, metadata, and artifact signer", () => {
   const source = fs.readFileSync(installerVerifier, "utf8");
   for (const pin of [
     String(expectedInstallerSize),
@@ -272,7 +274,9 @@ test("the vendor-installer verifier pins size, bytes, metadata, and artifact sig
       source.indexOf("SignatureHelper"),
     "the exact bytes must be pinned before trusting their signature",
   );
+});
 
+windowsTest("the vendor-installer verifier rejects files with the wrong length", (t) => {
   const temporary = fs.mkdtempSync(
     path.join(os.tmpdir(), "codex-bot-installer-verifier-"),
   );

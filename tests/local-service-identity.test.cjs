@@ -6,6 +6,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
+const windowsTest = process.platform === "win32" ? test : test.skip;
+
 const root = path.resolve(__dirname, "..");
 const helper = path.join(root, "src", "runtime", "Local-Service-Identity.ps1");
 const read = (relativePath) =>
@@ -54,7 +56,7 @@ function firstLine(stream) {
   });
 }
 
-test("listener identity requires the current user, exact executable, and expected PID", async (t) => {
+windowsTest("listener identity requires the current user, exact executable, and expected PID", async (t) => {
   const listenerScript = [
     "$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)",
     "$listener.Start()",
@@ -96,7 +98,7 @@ test("listener identity requires the current user, exact executable, and expecte
   });
 });
 
-test("supervisor adoption accepts a verified listener when another same-install process wins the bind", async (t) => {
+windowsTest("supervisor adoption accepts a verified listener when another same-install process wins the bind", async (t) => {
   const listenerScript = [
     "$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)",
     "$listener.Start()",

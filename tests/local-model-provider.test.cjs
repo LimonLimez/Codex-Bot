@@ -6,6 +6,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
+const windowsTest = process.platform === "win32" ? test : test.skip;
+
 const root = path.resolve(__dirname, "..");
 const connectionPath = path.join(root, "src", "codex-connection.cjs");
 const stateKey = Symbol.for("codexbot.connection.state");
@@ -160,7 +162,7 @@ test("local provider cannot be selected before a successful discovery", (t) => {
   );
 });
 
-test("an optional local key is DPAPI-protected, hidden, and reusable only for the same endpoint", async (t) => {
+windowsTest("an optional local key is DPAPI-protected, hidden, and reusable only for the same endpoint", async (t) => {
   const { stateRoot, connection } = environment(t);
   const testKey = ["local", "test", "secret", "value"].join("-");
   const authorization = [];
