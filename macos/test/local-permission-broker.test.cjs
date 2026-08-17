@@ -100,6 +100,7 @@ function fixture(overrides = {}) {
       });
     }),
     revoke: mock.fn(async (botId, grantId) => calls.revoked.push({ botId, grantId })),
+    deleteBot: mock.fn(async () => {}),
     listPublic: mock.fn(async () => []),
   };
   Object.assign(store, overrides.store || {});
@@ -528,4 +529,234 @@ test("disposal while resource selection is pending prevents every later permissi
   assert.match((await decisionOutcome).message, /disposed/i);
   assert.match((await pendingOutcome).message, /disposed/i);
   assert.equal(effect.mock.callCount(), 0);
+});
+
+test("deleteBot synchronously fences one bot, coalesces callers, and leaves another bot usable", async (t) => {
+  const deletionEntered = deferred();
+  const releaseDeletion = deferred();
+  let nextId = 0;
+  const { bookmark, broker, store } = fixture({
+    randomUUID() {
+      nextId += 1;
+      return `00000000-0000-4000-8000-${String(nextId).padStart(12, "0")}`;
+    },
+    readCurrentComputer: mock.fn(async (botId) => computer(botId)),
+    store: {
+      deleteBot: mock.fn(async (botId) => {
+        assert.equal(botId, BOT_A);
+        deletionEntered.resolve();
+        await releaseDeletion.promise;
+      }),
+    },
+  });
+  t.after(() => broker.dispose());
+  const effectA = mock.fn(async () => "deleted-must-not-run");
+  const effectB = mock.fn(async (received) => {
+    assert.deepEqual(received, bookmark);
+    return "other-bot-done";
+  });
+  const first = await promptFor(broker, () => broker.request(request(BOT_A), effectA));
+  const firstOutcome = first.pending.catch((error) => error);
+
+  const deletion = broker.deleteBot(BOT_A);
+  const sameDeletion = broker.deleteBot(BOT_A);
+  const blocked = broker.request(request(BOT_A), effectA).catch((error) => error);
+  assert.equal((await blocked).code, "OPENBOT_PERMISSION_BOT_DELETING");
+  assert.equal((await firstOutcome).code, "OPENBOT_PERMISSION_CANCELLED");
+  await deletionEntered.promise;
+  assert.equal(store.deleteBot.mock.callCount(), 1);
+  assert.equal(effectA.mock.callCount(), 0);
+
+  const other = await promptFor(broker, () => broker.request(request(BOT_B), effectB));
+  assert.deepEqual(await broker.list(BOT_B), []);
+  assert.equal(
+    await broker.decide({ ...identity(other.prompt), decision: "once" }),
+    "other-bot-done",
+  );
+  assert.equal(await other.pending, "other-bot-done");
+  assert.equal(effectB.mock.callCount(), 1);
+  releaseDeletion.resolve();
+  await Promise.all([deletion, sameDeletion]);
+  assert.equal(store.deleteBot.mock.callCount(), 1);
+});
+
+test("deleteBot waits for late remember cleanup and revokes the cancelled grant before deletion", async (t) => {
+  const rememberEntered = deferred();
+  const releaseRemember = deferred();
+  const revokeEntered = deferred();
+  const releaseRevoke = deferred();
+  const deleteCalls = [];
+  const grant = Object.freeze({
+    grantId: "grant-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    botId: BOT_A,
+    capability: "filesystem.read",
+    resourceId: "folder-a",
+    resourceLabel: "Folder A",
+    scope: "always",
+    createdAt: "2026-08-15T12:34:56.000Z",
+  });
+  const { broker, store } = fixture({
+    store: {
+      remember: mock.fn(async () => {
+        rememberEntered.resolve();
+        await releaseRemember.promise;
+        return grant;
+      }),
+      revoke: mock.fn(async (botId, grantId) => {
+        assert.deepEqual({ botId, grantId }, { botId: BOT_A, grantId: grant.grantId });
+        revokeEntered.resolve();
+        await releaseRevoke.promise;
+      }),
+      deleteBot: mock.fn(async (botId) => deleteCalls.push(botId)),
+    },
+  });
+  t.after(() => broker.dispose());
+  const effect = mock.fn(async () => "must-not-run");
+  const { pending, prompt } = await promptFor(broker, () => broker.request(request(), effect));
+  const pendingOutcome = pending.catch((error) => error);
+  const decisionOutcome = broker.decide({ ...identity(prompt), decision: "always" })
+    .catch((error) => error);
+  await rememberEntered.promise;
+
+  const deletion = broker.deleteBot(BOT_A);
+  assert.deepEqual(deleteCalls, []);
+  releaseRemember.resolve();
+  await revokeEntered.promise;
+  assert.deepEqual(deleteCalls, []);
+  assert.equal(effect.mock.callCount(), 0);
+  releaseRevoke.resolve();
+
+  assert.equal((await decisionOutcome).code, "OPENBOT_PERMISSION_CANCELLED");
+  assert.equal((await pendingOutcome).code, "OPENBOT_PERMISSION_CANCELLED");
+  await deletion;
+  assert.deepEqual(deleteCalls, [BOT_A]);
+  assert.equal(store.remember.mock.callCount(), 1);
+  assert.equal(store.revoke.mock.callCount(), 1);
+  assert.equal(store.deleteBot.mock.callCount(), 1);
+});
+
+test("deleteBot waits for an active effect and suppresses its late successful publication", async (t) => {
+  const effectEntered = deferred();
+  const releaseEffect = deferred();
+  const deletionEntered = deferred();
+  const { broker, store } = fixture({
+    store: {
+      deleteBot: mock.fn(async () => deletionEntered.resolve()),
+    },
+  });
+  t.after(() => broker.dispose());
+  const effect = mock.fn(async () => {
+    effectEntered.resolve();
+    await releaseEffect.promise;
+    return "late-success";
+  });
+  const { pending, prompt } = await promptFor(broker, () => broker.request(request(), effect));
+  const pendingOutcome = pending.catch((error) => error);
+  const decisionOutcome = broker.decide({ ...identity(prompt), decision: "once" })
+    .catch((error) => error);
+  await effectEntered.promise;
+
+  const deletion = broker.deleteBot(BOT_A);
+  await Promise.resolve();
+  assert.equal(store.deleteBot.mock.callCount(), 0);
+  releaseEffect.resolve();
+  assert.equal((await decisionOutcome).code, "OPENBOT_PERMISSION_CANCELLED");
+  assert.equal((await pendingOutcome).code, "OPENBOT_PERMISSION_CANCELLED");
+  await deletionEntered.promise;
+  await deletion;
+  assert.equal(effect.mock.callCount(), 1);
+  assert.equal(store.deleteBot.mock.callCount(), 1);
+});
+
+test("deleteBot cancellation dominates a late private effect failure", async (t) => {
+  const effectEntered = deferred();
+  const releaseEffect = deferred();
+  const { broker, store } = fixture();
+  t.after(() => broker.dispose());
+  const effect = mock.fn(async () => {
+    effectEntered.resolve();
+    await releaseEffect.promise;
+  });
+  const { pending, prompt } = await promptFor(broker, () => broker.request(request(), effect));
+  const pendingOutcome = pending.catch((error) => error);
+  const decisionOutcome = broker.decide({ ...identity(prompt), decision: "once" })
+    .catch((error) => error);
+  await effectEntered.promise;
+
+  const deletion = broker.deleteBot(BOT_A);
+  releaseEffect.reject(new Error("private-effect-failure"));
+  const decisionFailure = await decisionOutcome;
+  const pendingFailure = await pendingOutcome;
+  assert.equal(decisionFailure.code, "OPENBOT_PERMISSION_CANCELLED");
+  assert.equal(pendingFailure.code, "OPENBOT_PERMISSION_CANCELLED");
+  assert.doesNotMatch(`${decisionFailure} ${pendingFailure}`, /private-effect-failure/);
+  await deletion;
+  assert.equal(store.deleteBot.mock.callCount(), 1);
+});
+
+test("a failed delete keeps the exact bot fenced and one safe retry converges", async (t) => {
+  let attempts = 0;
+  const { broker, store } = fixture({
+    readCurrentComputer: mock.fn(async (botId) => computer(botId)),
+    store: {
+      deleteBot: mock.fn(async (botId) => {
+        assert.equal(botId, BOT_A);
+        attempts += 1;
+        if (attempts === 1) throw new Error("private-store-path");
+      }),
+    },
+  });
+  t.after(() => broker.dispose());
+
+  await assert.rejects(
+    broker.deleteBot(BOT_A),
+    (error) => error?.code === "OPENBOT_PERMISSION_DELETE_FAILED"
+      && !/private-store-path/.test(String(error)),
+  );
+  await assert.rejects(
+    broker.list(BOT_A),
+    (error) => error?.code === "OPENBOT_PERMISSION_BOT_DELETING",
+  );
+  assert.deepEqual(await broker.list(BOT_B), []);
+  await broker.deleteBot(BOT_A);
+  await broker.deleteBot(BOT_A);
+  assert.equal(store.deleteBot.mock.callCount(), 2, "completed retry must be idempotent");
+});
+
+test("broker disposal dominates a late permission-store deletion failure", async () => {
+  const deletionEntered = deferred();
+  const releaseDeletion = deferred();
+  const { broker } = fixture({
+    store: {
+      deleteBot: mock.fn(async () => {
+        deletionEntered.resolve();
+        return releaseDeletion.promise;
+      }),
+    },
+  });
+  const deletion = broker.deleteBot(BOT_A);
+  await deletionEntered.promise;
+  broker.dispose();
+  releaseDeletion.reject(new Error("private-store-path"));
+
+  await assert.rejects(
+    deletion,
+    (error) => error?.code === "OPENBOT_PERMISSION_DISPOSED"
+      && !/private-store-path/.test(String(error)),
+  );
+});
+
+test("deleteBot requires exact store support and preserves hostile bot ID rejection", async (t) => {
+  assert.throws(
+    () => fixture({ store: { deleteBot: undefined } }),
+    /permission store/i,
+  );
+  const { broker, store } = fixture();
+  t.after(() => broker.dispose());
+  await assert.rejects(broker.deleteBot("BOT-NOT-VALID"), /Bot ID/i);
+  await assert.rejects(
+    broker.deleteBot(new Proxy({}, { getPrototypeOf() { throw new Error("private-path"); } })),
+    /Bot ID/i,
+  );
+  assert.equal(store.deleteBot.mock.callCount(), 0);
 });
