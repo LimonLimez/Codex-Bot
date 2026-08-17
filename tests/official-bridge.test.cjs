@@ -781,6 +781,42 @@ test("provider epoch rejects a stale read before either provider action executes
   assert.equal(privateCaptureCalls, 1);
 });
 
+test("group-task endpoint exposes only the active group task and clears it", async () => {
+  const task = bridge.groupTaskTracker.begin({
+    groupId: "group-bridge",
+    groupName: "Release crew",
+    summary: "Verify the release together.",
+    members: [{ id: "scout", name: "Scout" }],
+  });
+  bridge.groupTaskTracker.updateMember(
+    "group-bridge",
+    task.id,
+    "scout",
+    "working",
+  );
+  const loaded = await request("/api/group-tasks?groupId=group-bridge");
+  assert.equal(loaded.status, 200);
+  assert.equal(loaded.value.task.id, task.id);
+  assert.equal(loaded.value.task.groupId, "group-bridge");
+  assert.equal(loaded.value.task.summary, "Verify the release together.");
+  assert.deepEqual(
+    loaded.value.task.members.map((member) => member.status),
+    ["working"],
+  );
+  assert.equal(
+    (await request("/api/group-tasks?groupId=group-bridge&extra=1")).status,
+    400,
+  );
+  const cleared = await request("/api/group-tasks", {
+    body: { action: "clear", groupId: "group-bridge" },
+  });
+  assert.deepEqual(cleared.value, { ok: true });
+  assert.equal(
+    (await request("/api/group-tasks?groupId=group-bridge")).value.task,
+    null,
+  );
+});
+
 test("installer and runtime preflight include the complete official-computer helper", () => {
   const installer = fs.readFileSync(
     path.join(root, "installer", "CodexBot.iss"),
@@ -794,6 +830,7 @@ test("installer and runtime preflight include the complete official-computer hel
     fs.readFileSync(path.join(root, "package.json"), "utf8"),
   );
   for (const file of [
+    "group-task-tracker.cjs",
     "official-computer-client.cjs",
     "official-computer-helper.cjs",
   ]) {

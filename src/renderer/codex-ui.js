@@ -21,6 +21,7 @@ let refreshTimer = null;
 let connectionPollTimer = null;
 let officialConnectionPollTimer = null;
 let officialApprovalPollTimer = null;
+let groupTaskPollTimer = null;
 let officialComputerOperationInFlight = false;
 let officialPermissionOperationInFlight = false;
 let privatePermissionOperationInFlight = false;
@@ -48,6 +49,7 @@ const PROVIDER_ICON_DATA = Object.freeze({
 const agentStatusCache = new Map();
 const pendingAgentStatusLoads = new Map();
 const officialApprovalLoads = new WeakSet();
+const groupTaskLoads = new WeakSet();
 
 const MODEL_FALLBACKS = [
   {
@@ -2620,6 +2622,152 @@ function installModelPickers() {
   }
 }
 
+function groupTaskStatusLabel(status) {
+  return (
+    {
+      queued: "Queued",
+      working: "Working",
+      complete: "Done",
+      passed: "No update",
+      blocked: "Blocked",
+    }[status] || "Queued"
+  );
+}
+
+function groupTaskSummary(task) {
+  const members = Array.isArray(task?.members) ? task.members : [];
+  const counts = members.reduce((summary, member) => {
+    summary[member.status] = (summary[member.status] || 0) + 1;
+    return summary;
+  }, {});
+  if (counts.working)
+    return `${counts.working} working · ${members.length} teammates`;
+  if (task?.state === "complete") {
+    const done = (counts.complete || 0) + (counts.passed || 0);
+    return `${done} of ${members.length} finished`;
+  }
+  return `${members.length} teammates queued`;
+}
+
+function removeGroupTaskTrackerForForm(form) {
+  const host = form?.parentElement?.parentElement;
+  host
+    ?.querySelectorAll(":scope > [data-codex-group-task-tracker]")
+    .forEach((tracker) => tracker.remove());
+}
+
+function renderGroupTaskTracker(form, task) {
+  const groupId = String(task?.groupId || "");
+  const host = form?.parentElement?.parentElement;
+  if (!groupId || !host) {
+    removeGroupTaskTrackerForForm(form);
+    return;
+  }
+  let tracker = host.querySelector(
+    `:scope > [data-codex-group-task-tracker][data-codex-group-id="${CSS.escape(groupId)}"]`,
+  );
+  const taskKey = String(task.id || "");
+  if (
+    tracker?.dataset.codexTaskKey === taskKey &&
+    tracker.dataset.state === task.state
+  )
+    return;
+  if (!tracker) {
+    host
+      .querySelectorAll(":scope > [data-codex-group-task-tracker]")
+      .forEach((item) => item.remove());
+    tracker = document.createElement("section");
+    tracker.dataset.codexGroupTaskTracker = "true";
+    tracker.dataset.codexGroupId = groupId;
+    tracker.className = "codex-group-task-tracker";
+    host.insertBefore(tracker, form.parentElement);
+  }
+  tracker.dataset.codexTaskKey = taskKey;
+  tracker.dataset.state = String(task.state || "active");
+  const titleId = `codex-group-task-${crypto.randomUUID()}`;
+  const members = (task.members || [])
+    .map(
+      (member) => `
+        <li data-status="${escapeHtml(member.status)}">
+          <span class="codex-group-task-dot" aria-hidden="true"></span>
+          <strong>${escapeHtml(member.name)}</strong>
+          <span>${escapeHtml(groupTaskStatusLabel(member.status))}</span>
+        </li>`,
+    )
+    .join("");
+  tracker.innerHTML = `
+    <header>
+      <div>
+        <span>Group task</span>
+        <strong id="${titleId}">${escapeHtml(task.groupName || "Group work")}</strong>
+      </div>
+      <div class="codex-group-task-actions">
+        <span data-codex-group-task-state>${escapeHtml(groupTaskSummary(task))}</span>
+        <button type="button" data-codex-clear-group-task aria-label="Clear completed group task">Clear</button>
+      </div>
+    </header>
+    <p>${escapeHtml(task.summary || "Working on the latest group request")}</p>
+    <ol aria-labelledby="${titleId}">${members}</ol>`;
+  const clear = tracker.querySelector("[data-codex-clear-group-task]");
+  clear?.addEventListener("click", async () => {
+    clear.disabled = true;
+    try {
+      await request("/api/group-tasks", { action: "clear", groupId });
+      tracker.remove();
+    } catch (error) {
+      clear.disabled = false;
+      clear.textContent = "Try again";
+    }
+  });
+}
+
+async function refreshGroupTaskForForm(form) {
+  const groupId = String(form?.dataset?.codexAgentId || "");
+  if (!groupId || groupTaskLoads.has(form)) return;
+  groupTaskLoads.add(form);
+  try {
+    const response = await request(
+      `/api/group-tasks?groupId=${encodeURIComponent(groupId)}`,
+    );
+    if (!form.isConnected) return;
+    if (response?.task?.groupId === groupId)
+      renderGroupTaskTracker(form, response.task);
+    else removeGroupTaskTrackerForForm(form);
+  } catch {
+    // A tracker is auxiliary; preserve the conversation if the local bridge is restarting.
+  } finally {
+    groupTaskLoads.delete(form);
+  }
+}
+
+function refreshGroupTaskTrackers() {
+  const forms = [
+    ...document.querySelectorAll("form[data-codex-agent-id]"),
+  ].filter(
+    (form) =>
+      form.isConnected !== false &&
+      (typeof form.getClientRects !== "function" ||
+        form.getClientRects().length > 0),
+  );
+  for (const tracker of document.querySelectorAll(
+    "[data-codex-group-task-tracker]",
+  )) {
+    if (
+      !forms.some(
+        (form) => form.parentElement?.parentElement === tracker.parentElement,
+      )
+    )
+      tracker.remove();
+  }
+  for (const form of forms) void refreshGroupTaskForForm(form);
+}
+
+function syncGroupTaskPolling() {
+  if (!groupTaskPollTimer)
+    groupTaskPollTimer = setInterval(refreshGroupTaskTrackers, 1_000);
+  refreshGroupTaskTrackers();
+}
+
 function officialApprovalKey(pending) {
   const frame = pending?.frame || {};
   return [
@@ -2892,6 +3040,7 @@ function applyUi() {
     installConnectionPanel(lastStatus);
     installModelPickers();
     syncOfficialApprovalPolling();
+    syncGroupTaskPolling();
   }
 }
 
@@ -3180,6 +3329,26 @@ style.textContent = `
   .codex-chat-approval-actions button:disabled { opacity:.55; cursor:wait; }
   .codex-chat-approval-actions button:focus-visible { outline:2px solid #9dc6ff; outline-offset:2px; }
   .codex-chat-approval-actions span { flex:1 0 220px; color:#d6c9b3; font-size:11px; line-height:1.4; }
+  .codex-group-task-tracker { box-sizing:border-box; width:min(680px,calc(100% - 28px)); display:grid; gap:10px; align-self:flex-start; margin:8px 14px 12px; padding:13px; border:1px solid rgba(127,151,215,.38); border-radius:13px; color:var(--sand-text-primary,#eee); background:rgba(35,42,58,.92); box-shadow:0 12px 34px rgba(0,0,0,.24); }
+  .codex-group-task-tracker>header { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+  .codex-group-task-tracker>header>div:first-child { min-width:0; display:grid; gap:2px; }
+  .codex-group-task-tracker>header>div:first-child>span { color:#b9d0ff; font-size:11px; font-weight:650; letter-spacing:.05em; text-transform:uppercase; }
+  .codex-group-task-tracker>header strong { overflow:hidden; font-size:14px; text-overflow:ellipsis; white-space:nowrap; }
+  .codex-group-task-actions { flex:none; display:flex; align-items:center; gap:8px; }
+  .codex-group-task-actions>span { color:#b8c4da; font-size:11px; white-space:nowrap; }
+  .codex-group-task-actions button { border:0; padding:4px 0; color:#b9d7ff; background:transparent; font:inherit; font-size:11px; cursor:pointer; }
+  .codex-group-task-actions button:hover { color:#fff; text-decoration:underline; text-underline-offset:3px; }
+  .codex-group-task-actions button:focus-visible { outline:2px solid #9dc6ff; outline-offset:3px; border-radius:4px; }
+  .codex-group-task-tracker>p { max-width:68ch; margin:0; color:#d6ddea; font-size:12px; line-height:1.45; overflow-wrap:anywhere; }
+  .codex-group-task-tracker>ol { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:5px 12px; padding:0; margin:0; list-style:none; }
+  .codex-group-task-tracker li { min-width:0; display:grid; grid-template-columns:8px minmax(0,1fr) auto; align-items:center; gap:7px; color:#bec9dc; font-size:11px; }
+  .codex-group-task-tracker li strong { overflow:hidden; color:#eff3ff; font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
+  .codex-group-task-tracker li>span:last-child { color:#9faec7; white-space:nowrap; }
+  .codex-group-task-dot { width:7px; height:7px; border-radius:50%; background:#69748a; }
+  .codex-group-task-tracker li[data-status="working"] .codex-group-task-dot { background:#93b7ff; box-shadow:0 0 0 3px rgba(147,183,255,.14); }
+  .codex-group-task-tracker li[data-status="complete"] .codex-group-task-dot { background:#8ed5a4; }
+  .codex-group-task-tracker li[data-status="passed"] .codex-group-task-dot { background:#97a3b8; }
+  .codex-group-task-tracker li[data-status="blocked"] .codex-group-task-dot { background:#f0ae84; }
   html[data-codex-connection-required],html[data-codex-connection-required] body { overflow:hidden !important; }
   [data-codex-onboarding] { position:fixed; inset:0; z-index:2147483647; display:grid; place-items:center; overflow:auto; padding:clamp(20px,5vw,56px); background:rgba(11,11,11,.94); backdrop-filter:blur(12px); color:#f5f5f5; animation:codex-connect-enter 320ms cubic-bezier(.16,1,.3,1) both; }
   .codex-first-run-dialog { width:min(860px,100%); display:grid; gap:22px; }
@@ -3265,7 +3434,10 @@ style.textContent = `
     .codex-route-badge,.codex-route-badge.is-vendor,.codex-route-badge.is-unavailable,.codex-official-state { justify-self:start; max-width:100%; text-align:start; }
     .codex-official-actions>button { width:100%; }
     .codex-chat-approval { width:calc(100% - 16px); margin-inline:8px; }
+    .codex-group-task-tracker { width:calc(100% - 16px); margin-inline:8px; }
     .codex-chat-approval-heading { display:grid; }
+    .codex-group-task-tracker>header { display:grid; }
+    .codex-group-task-actions { justify-content:space-between; }
     .codex-chat-approval-actions button { flex:1; }
     .codex-provider-grid,.codex-onboarding-computers,.codex-onboarding-summary { grid-template-columns:1fr; }
     .codex-onboarding-detail,.codex-onboarding-footer { align-items:stretch; flex-direction:column; }

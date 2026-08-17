@@ -19,6 +19,7 @@ $brandIcon = Join-Path $toolsRoot 'assets\codex-bot.ico'
 $proxyExe = Join-Path $toolsRoot 'cliproxyapi\cli-proxy-api.exe'
 $officialComputerClient = Join-Path $toolsRoot 'src\official-computer-client.cjs'
 $officialComputerHelper = Join-Path $toolsRoot 'src\official-computer-helper.cjs'
+$groupTaskTracker = Join-Path $toolsRoot 'src\group-task-tracker.cjs'
 $noVncPackage = Join-Path $toolsRoot 'node_modules\@novnc\novnc\package.json'
 $webSocketPackage = Join-Path $toolsRoot 'node_modules\ws\package.json'
 $runtimeVerifier = Join-Path $toolsRoot 'integrity\Verify-GrokBotRuntime.ps1'
@@ -27,7 +28,7 @@ $disableAlwaysOn = Join-Path $toolsRoot 'runtime\Disable-Always-On.ps1'
 $enableAlwaysOn = Join-Path $toolsRoot 'runtime\Enable-Always-On.ps1'
 $managedRuntimeDebugLog = Join-Path $appRoot 'debug.log'
 
-foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandIcon, $proxyExe, $officialComputerClient, $officialComputerHelper, $noVncPackage, $webSocketPackage, $runtimeVerifier, $runtimeManifest, $disableAlwaysOn, $enableAlwaysOn)) {
+foreach ($required in @($vendorExe, $sourceAsar, $patcher, $brandScript, $brandIcon, $proxyExe, $officialComputerClient, $officialComputerHelper, $groupTaskTracker, $noVncPackage, $webSocketPackage, $runtimeVerifier, $runtimeManifest, $disableAlwaysOn, $enableAlwaysOn)) {
     if (-not (Test-Path -LiteralPath $required)) { throw "Installer input is missing: $required" }
 }
 

@@ -12,6 +12,9 @@ const connectionManager = require(path.join(__dirname, "codex-connection.cjs"));
 const officialComputer = require(
   path.join(__dirname, "official-computer-client.cjs"),
 );
+const groupTaskTracker = require(
+  path.join(__dirname, "group-task-tracker.cjs"),
+);
 
 const STATE_ROOT =
   process.env.CODEX_BOT_STATE_ROOT ||
@@ -725,6 +728,26 @@ function startViewServer({
         });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/group-tasks") {
+        for (const key of url.searchParams.keys()) {
+          if (key !== "groupId")
+            throw requestError("Unknown group-task query field.", 400);
+        }
+        const groupIds = url.searchParams.getAll("groupId");
+        if (groupIds.length !== 1)
+          throw requestError("One group id is required.", 400);
+        const task = groupTaskTracker.latestTask(groupIds[0]);
+        sendJson(response, 200, { task });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/group-tasks") {
+        const body = await readJson(request);
+        requireExactBodyKeys(body, ["action", "groupId"]);
+        if (body.action !== "clear")
+          throw requestError("Unknown group-task action.", 400);
+        sendJson(response, 200, { ok: groupTaskTracker.clear(body.groupId) });
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/codex/settings") {
         if (
           !/^application\/json(?:\s*;|$)/i.test(
@@ -1228,6 +1251,7 @@ module.exports = {
   createExecutor,
   serializeAction,
   manager: providerManager,
+  groupTaskTracker,
   privateManager: manager,
   officialComputer,
   openOfficialLoginInDefaultBrowser,

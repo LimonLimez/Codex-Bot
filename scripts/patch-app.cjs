@@ -351,6 +351,34 @@ function verifyBrowserSeatLifecycleSource(hostSource) {
   );
 }
 
+function verifyClosedSessionDeletionSource(hostSource) {
+  const runDeleteAgents = sourceRegion(
+    hostSource,
+    "  async runDeleteAgents(ids) {",
+    "  // Stops a to-be-deleted agent's in-flight work before its data is removed.",
+    "agent session cleanup before deletion",
+  );
+  const openSession = runDeleteAgents.indexOf(
+    "const openSession = this.tm.sessions.liveSessions.get(id);",
+  );
+  const dispose = runDeleteAgents.indexOf(
+    "await openSession.agentStore.dispose();",
+  );
+  const removeLive = runDeleteAgents.indexOf(
+    "this.tm.sessions.liveSessions.delete(id);",
+  );
+  const deleteOnDisk = runDeleteAgents.indexOf(
+    "await this.tm.sessionStore.deleteSession(id);",
+  );
+  assertPatchInvariant(
+    openSession >= 0 &&
+      dispose > openSession &&
+      removeLive > dispose &&
+      deleteOnDisk > removeLive,
+    "a non-active bot closes its open database handle before its session directory is deleted",
+  );
+}
+
 function verifyHostComputerSeatRoutingSource(hostSource) {
   const execute = sourceRegion(
     hostSource,
@@ -468,6 +496,39 @@ function verifyComputerResultEvidenceSource(hostSource) {
   );
 }
 
+function verifyParallelGroupDispatchSource(hostSource) {
+  assertPatchInvariant(
+    hostSource.includes("groupId: session.id") &&
+      hostSource.includes("groupTaskTracker"),
+    "group turns receive the local task-tracker bridge",
+  );
+  assertPatchInvariant(
+    hostSource.includes("this.deps.taskTracker?.begin({") &&
+      hostSource.includes(
+        "this.deps.taskTracker?.complete(this.deps.groupId, task?.id)",
+      ),
+    "group task lifecycle is recorded from start through completion",
+  );
+  assertPatchInvariant(
+    hostSource.includes("await Promise.all(speakerIds.map(runMember))"),
+    "the opening group wave dispatches member work in parallel",
+  );
+  assertPatchInvariant(
+    hostSource.includes("round === 0") &&
+      hostSource.includes(
+        "for (const memberId of speakerIds) ordered.push(await runMember(memberId));",
+      ),
+    "later group rounds remain ordered for teammate follow-ups",
+  );
+  assertPatchInvariant(
+    hostSource.includes('"working"') &&
+      hostSource.includes('"complete"') &&
+      hostSource.includes('"passed"') &&
+      hostSource.includes('"blocked"'),
+    "each parallel member has an explicit tracker state",
+  );
+}
+
 function verifyLocalExecComputerIsolationSource(localExecSource) {
   const manager = uniqueFunctionRegion(
     localExecSource,
@@ -553,6 +614,7 @@ function verifyHostLocalOnlySource(hostSource) {
   verifyBrowserSeatLifecycleSource(hostSource);
   verifyHostComputerSeatRoutingSource(hostSource);
   verifyCoworkerHostBehaviorSource(hostSource);
+  verifyParallelGroupDispatchSource(hostSource);
 }
 
 function patchRendererComposerIdentitySource(rendererSource) {
@@ -1452,6 +1514,130 @@ try {
 
   text = replaceOnce(
     text,
+    `      isSharedRoom: groupConfig?.sharedRoomId != null,
+      resolveMembers: (ids) => this.resolveGroupMembers(ids, remoteMembers),`,
+    `      isSharedRoom: groupConfig?.sharedRoomId != null,
+      groupId: session.id,
+      taskTracker: process.env.GROK_BOT_WINDOWS_COMPUTER_BRIDGE
+        ? require(process.env.GROK_BOT_WINDOWS_COMPUTER_BRIDGE).groupTaskTracker
+        : null,
+      resolveMembers: (ids) => this.resolveGroupMembers(ids, remoteMembers),`,
+    "group task tracker host bridge",
+  );
+  text = replaceOnce(
+    text,
+    `    let totalMessages = 0;
+    for (let round = 0; round < GROUP_MAX_ROUNDS; round++) {
+      if (!this.deps.isCurrent()) return;
+      const responderIds = resolveResponders(members, this.deps.readHistory()).map(
+        (member) => member.id
+      );
+      let messagesThisRound = 0;
+      for (const memberId of orderRoundSpeakers(responderIds, round)) {
+        if (totalMessages >= GROUP_MAX_MEMBER_TURNS) return;
+        if (!this.deps.isCurrent()) return;
+        const member = memberById.get(memberId);
+        if (member == null) continue;
+        const sent = await this.runOneTurn(args.group, member, members);
+        let hitCap = false;
+        for (const content of sent) {
+          this.deps.postMemberMessage(member, content);
+          totalMessages++;
+          messagesThisRound++;
+          if (totalMessages >= GROUP_MAX_MEMBER_TURNS) {
+            hitCap = true;
+            break;
+          }
+        }
+        this.deps.finalizeMemberTurn?.(member);
+        if (hitCap) return;
+      }
+      if (messagesThisRound === 0) return;
+    }`,
+    `    let totalMessages = 0;
+    const historyForTask = this.deps.readHistory();
+    const latestTaskEntry = [...historyForTask].reverse().find((entry) => entry?.role === "user");
+    const task = this.deps.taskTracker?.begin({
+      groupId: this.deps.groupId,
+      groupName: args.group.name,
+      summary: typeof latestTaskEntry?.content === "string" ? latestTaskEntry.content : "Working on the latest group request",
+      members,
+    });
+    try {
+      for (let round = 0; round < GROUP_MAX_ROUNDS; round++) {
+        if (!this.deps.isCurrent()) return;
+        const responderIds = resolveResponders(members, this.deps.readHistory()).map(
+          (member) => member.id
+        );
+        const speakerIds = orderRoundSpeakers(responderIds, round).slice(
+          0,
+          Math.max(0, GROUP_MAX_MEMBER_TURNS - totalMessages),
+        );
+        let messagesThisRound = 0;
+        const runMember = async (memberId) => {
+          if (!this.deps.isCurrent()) return { member: null, sent: [] };
+          const member = memberById.get(memberId);
+          if (member == null) return { member: null, sent: [] };
+          this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "working");
+          try {
+            const sent = await this.runOneTurn(args.group, member, members);
+            this.deps.taskTracker?.updateMember(
+              this.deps.groupId,
+              task?.id,
+              member.id,
+              sent.some((content) => !isPassContent(content)) ? "complete" : "passed",
+            );
+            return { member, sent };
+          } catch (error) {
+            this.deps.taskTracker?.updateMember(this.deps.groupId, task?.id, member.id, "blocked");
+            return { member, sent: [] };
+          }
+        };
+        // The opening wave is independent work. Dispatch it together so one
+        // slow researcher does not make every teammate wait; later rounds stay
+        // ordered so teammates can react to the visible first-pass findings.
+        const turns = round === 0
+          ? await Promise.all(speakerIds.map(runMember))
+          : await (async () => {
+              const ordered = [];
+              for (const memberId of speakerIds) ordered.push(await runMember(memberId));
+              return ordered;
+            })();
+        for (const { member, sent } of turns) {
+          if (member == null) continue;
+          let hitCap = false;
+          for (const content of sent) {
+            this.deps.postMemberMessage(member, content);
+            totalMessages++;
+            messagesThisRound++;
+            if (totalMessages >= GROUP_MAX_MEMBER_TURNS) {
+              hitCap = true;
+              break;
+            }
+          }
+          this.deps.finalizeMemberTurn?.(member);
+          if (hitCap) return;
+        }
+        if (messagesThisRound === 0) return;
+      }
+    } finally {
+      this.deps.taskTracker?.complete(this.deps.groupId, task?.id);
+    }`,
+    "parallel group opening dispatch",
+  );
+
+  text = replaceOnce(
+    text,
+    "      this.tm.runnerRegistry.runners.delete(id);\n      this.tm.sessions.liveSessions.delete(id);",
+    `      const openSession = this.tm.sessions.liveSessions.get(id);
+      if (openSession != null) await openSession.agentStore.dispose();
+      this.tm.runnerRegistry.runners.delete(id);
+      this.tm.sessions.liveSessions.delete(id);`,
+    "close non-active agent session before deleting its database",
+  );
+
+  text = replaceOnce(
+    text,
     "  start() {\n    const cached3 = loadCachedBootstrap(this.options.getCacheDir());",
     '  start() {\n    if (process.env.GROK_BOT_LOCAL_ONLY === "1") {\n      this.refreshSnapshot();\n      return;\n    }\n    const cached3 = loadCachedBootstrap(this.options.getCacheDir());',
     "host experiment startup isolation",
@@ -1737,8 +1923,10 @@ try {
   );
   verifyCoworkerHostBehaviorSource(text);
   verifyBrowserSeatLifecycleSource(text);
+  verifyClosedSessionDeletionSource(text);
   verifyHostComputerSeatRoutingSource(text);
   verifyComputerResultEvidenceSource(text);
+  verifyParallelGroupDispatchSource(text);
 
   fs.writeFileSync(file, text, "utf8");
 }
@@ -2278,8 +2466,10 @@ module.exports = {
   replaceFunction,
   verifyCoworkerHostBehaviorSource,
   verifyBrowserSeatLifecycleSource,
+  verifyClosedSessionDeletionSource,
   verifyHostComputerSeatRoutingSource,
   verifyComputerResultEvidenceSource,
+  verifyParallelGroupDispatchSource,
   verifyHostAgentIdentitySource,
   verifyHostLocalOnlySource,
   verifyLocalExecComputerIsolationSource,
