@@ -35,9 +35,11 @@ test("batch delete removes every requested selection and rehomes a deleted activ
   const { filePath, store } = await fixture(t);
   await store.write(selection(BOT_A, 1));
   await store.write(selection(BOT_B, 2));
+  assert.equal(await store.readActiveBotId(), BOT_B);
 
   const deleted = await store.deleteBots({ botIds: [BOT_A, BOT_B], successorBotId: BOT_C });
   assert.deepEqual(deleted, { activeBotId: BOT_C });
+  assert.equal(await store.readActiveBotId(), BOT_C);
   assert.equal(Object.isFrozen(deleted), true);
   assert.equal(await store.read(BOT_A), null);
   assert.equal(await store.read(BOT_B), null);

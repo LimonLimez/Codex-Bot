@@ -156,6 +156,7 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/bridge/runtime-config.cjs",
         "dist/codex/bridge/server.cjs",
         "dist/codex/computer/computer-target-router.cjs",
+        "dist/codex/desktop/bot-deletion-coordinator.cjs",
         "dist/codex/desktop/cliproxy-inference-transport.cjs",
         "dist/codex/desktop/cliproxy-manager.cjs",
         "dist/codex/desktop/codex-account-controller.cjs",

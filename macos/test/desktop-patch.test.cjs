@@ -65,6 +65,7 @@ test("desktop packaging includes every direct inference runtime module in the au
   const { ALLOWED_MUTATIONS } = require(path.join(__dirname, "..", "scripts", "patch-app.cjs"));
   const required = [
     "bridge/inference-socket-client.cjs",
+    "desktop/bot-deletion-coordinator.cjs",
     "desktop/cliproxy-inference-transport.cjs",
     "desktop/codex-account-controller.cjs",
     "desktop/codex-app-server-manager.cjs",

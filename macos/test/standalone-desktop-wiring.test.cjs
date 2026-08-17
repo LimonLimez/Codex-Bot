@@ -82,6 +82,7 @@ function manualCleanupClock() {
 test("patching keeps the native Grok shell and does not stage the replacement standalone renderer", (t) => {
   const { ASSETS, patchRenderer, patchRendererIndexSource } = require(rendererPatchPath);
   const { DESKTOP_FILES, patchPreloadSource } = require(desktopPatchPath);
+  assert.equal(DESKTOP_FILES.includes("desktop/bot-deletion-coordinator.cjs"), true);
   assert.equal(DESKTOP_FILES.includes("desktop/standalone-conversation-controller.cjs"), true);
   assert.equal(DESKTOP_FILES.includes("desktop/standalone-conversation-ipc.cjs"), true);
   assert.equal(DESKTOP_FILES.includes("desktop/standalone-conversation-store.cjs"), true);
@@ -219,7 +220,8 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   const { LOCAL_DESKTOP_FRAME_CHANNELS } = require("../src/desktop/local-desktop-frame-ipc.cjs");
   const { OPENBOT_NATIVE_COORDINATOR_CHANNELS } = require("../src/desktop/openbot-native-coordinator-ipc.cjs");
   const handlers = new Map();
-  const sender = { isDestroyed: () => false, send() {} };
+  const senderFrame = { processId: 31, routingId: 47, isDestroyed: () => false };
+  const sender = { mainFrame: senderFrame, isDestroyed: () => false, send() {} };
   const window = { isDestroyed: () => false, webContents: sender };
   const electron = {
     app: { once() {} },
@@ -268,7 +270,7 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   for (const channel of Object.values(STANDALONE_IPC_CHANNELS)) assert.equal(handlers.has(channel), true);
   for (const channel of Object.values(LOCAL_DESKTOP_FRAME_CHANNELS)) assert.equal(handlers.has(channel), true);
   assert.equal(handlers.has(OPENBOT_NATIVE_COORDINATOR_CHANNELS.request), true);
-  assert.deepEqual(await handlers.get(STANDALONE_IPC_CHANNELS.list)({ sender }, BOT_A), []);
+  assert.deepEqual(await handlers.get(STANDALONE_IPC_CHANNELS.list)({ sender, senderFrame }, BOT_A), []);
   await assert.rejects(handlers.get(STANDALONE_IPC_CHANNELS.list)({ sender: {} }, BOT_A), {
     code: "OPENBOT_CONVERSATION_OPERATION_FAILED",
   });

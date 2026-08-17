@@ -5,6 +5,7 @@ const path = require("node:path");
 const { replaceUnique } = require("./anchors.cjs");
 
 const DESKTOP_FILES = Object.freeze([
+  "desktop/bot-deletion-coordinator.cjs",
   "desktop/cliproxy-manager.cjs",
   "desktop/cliproxy-inference-transport.cjs",
   "desktop/codex-account-controller.cjs",

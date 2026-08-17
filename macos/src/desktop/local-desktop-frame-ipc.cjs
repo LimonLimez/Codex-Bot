@@ -123,6 +123,7 @@ function installLocalDesktopFrameIpc({
   electron,
   manager,
   computerBoundary,
+  ready = null,
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
 } = {}) {
@@ -132,7 +133,9 @@ function installLocalDesktopFrameIpc({
     || !manager || typeof manager.open !== "function" || typeof manager.captureDisplayFrame !== "function"
     || typeof manager.ownsWindow !== "function"
     || !computerBoundary || typeof computerBoundary.read !== "function"
+    || (ready !== null && (!ready || typeof ready.then !== "function"))
     || typeof setIntervalFn !== "function" || typeof clearIntervalFn !== "function") throw failure();
+  const readiness = ready === null ? Promise.resolve() : Promise.resolve(ready);
   let disposed = false;
   const subscriptions = new Map();
   const senderViews = new Map();
@@ -232,9 +235,14 @@ function installLocalDesktopFrameIpc({
     electron.ipcMain.handle(channel, async (event, value) => {
       try {
         if (disposed) throw failure();
-        const sender = currentSender(event);
-        if (!sender) throw failure();
-        return await operation(sender, value);
+        const view = currentSender(event);
+        if (!view) throw failure();
+        await readiness;
+        if (disposed) throw failure();
+        const readyView = currentSender(event);
+        if (!readyView || readyView.sender !== view.sender
+          || !sameFrame(readyView.senderFrame, view.senderFrame)) throw failure();
+        return await operation(readyView, value);
       } catch { throw failure(); }
     });
     registered.push(channel);

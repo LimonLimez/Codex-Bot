@@ -7,6 +7,12 @@ const test = require("node:test");
 
 const ipcPath = path.join(__dirname, "..", "src", "desktop", "openbot-native-coordinator-ipc.cjs");
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 class FakePort extends EventEmitter {
   constructor(name) {
     super();
@@ -177,5 +183,59 @@ test("native coordinator IPC disposal removes only its handler and disposes ever
   assert.equal(fixture.handlers.has(OPENBOT_NATIVE_COORDINATOR_CHANNELS.request), false);
   assert.equal(fixture.handlers.get("vendor:sibling"), sibling);
   assert.equal(fixture.bound[0].disposed, 1);
+  assert.equal(fixture.coordinator.disposed, 1);
+});
+
+test("native coordinator IPC holds port creation and revalidates the exact frame after readiness", async () => {
+  const {
+    OPENBOT_NATIVE_COORDINATOR_CHANNELS,
+    installOpenBotNativeCoordinatorIpc,
+  } = require(ipcPath);
+  const fixture = harness();
+  const gate = deferred();
+  const installed = installOpenBotNativeCoordinatorIpc({
+    electron: fixture.electron,
+    coordinator: fixture.coordinator,
+    localDesktopManager: fixture.localDesktopManager,
+    ready: gate.promise,
+  });
+  const pending = fixture.handlers.get(OPENBOT_NATIVE_COORDINATOR_CHANNELS.request)(fixture.event);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.channels.length, 0);
+  assert.equal(fixture.bound.length, 0);
+  assert.equal(fixture.delivered.length, 0);
+  fixture.event.senderFrame = {
+    ...fixture.event.senderFrame,
+    routingId: 74,
+  };
+  gate.resolve();
+  await assert.rejects(pending, { code: "OPENBOT_NATIVE_COORDINATOR_OPERATION_FAILED" });
+  assert.equal(fixture.channels.length, 0);
+  assert.equal(fixture.bound.length, 0);
+  assert.equal(fixture.delivered.length, 0);
+  await installed.dispose();
+});
+
+test("native coordinator IPC disposal while readiness is pending prevents late port delivery", async () => {
+  const {
+    OPENBOT_NATIVE_COORDINATOR_CHANNELS,
+    installOpenBotNativeCoordinatorIpc,
+  } = require(ipcPath);
+  const fixture = harness();
+  const gate = deferred();
+  const installed = installOpenBotNativeCoordinatorIpc({
+    electron: fixture.electron,
+    coordinator: fixture.coordinator,
+    localDesktopManager: fixture.localDesktopManager,
+    ready: gate.promise,
+  });
+  const pending = fixture.handlers.get(OPENBOT_NATIVE_COORDINATOR_CHANNELS.request)(fixture.event);
+  await new Promise((resolve) => setImmediate(resolve));
+  await installed.dispose();
+  gate.resolve();
+  await assert.rejects(pending, { code: "OPENBOT_NATIVE_COORDINATOR_OPERATION_FAILED" });
+  assert.equal(fixture.channels.length, 0);
+  assert.equal(fixture.bound.length, 0);
+  assert.equal(fixture.delivered.length, 0);
   assert.equal(fixture.coordinator.disposed, 1);
 });

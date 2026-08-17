@@ -131,6 +131,7 @@ test("installer stages only the exact exported patcher source script and asset c
     "bridge/runtime-config.cjs",
     "bridge/server.cjs",
     "computer/computer-target-router.cjs",
+    "desktop/bot-deletion-coordinator.cjs",
     "desktop/cliproxy-inference-transport.cjs",
     "desktop/cliproxy-manager.cjs",
     "desktop/codex-account-controller.cjs",

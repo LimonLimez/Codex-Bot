@@ -194,6 +194,13 @@ class ModelSelectionStore {
     });
   }
 
+  readActiveBotId() {
+    return this.#enqueue(async () => {
+      const state = await this.#readState();
+      return state.activeBotId;
+    });
+  }
+
   selectBot(botId) {
     const normalizedBotId = normalizeBotId(botId);
     return this.#mutate((state) => {

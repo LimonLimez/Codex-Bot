@@ -7,6 +7,7 @@ const test = require("node:test");
 const MODULE_PATH = "../src/desktop/openbot-native-coordinator.cjs";
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
+const BOT_C = "bot-33333333-3333-4333-8333-333333333333";
 
 function bot(botId = BOT_A, overrides = {}) {
   return Object.freeze({
@@ -212,6 +213,12 @@ async function waitFor(predicate, message = "condition was not reached") {
   assert.fail(message);
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
 async function request(port, requestId, method, args = {}) {
   port.receive({ kind: "request", requestId, method, args });
   await waitFor(() => port.frames.some((frame) => frame.kind === "reply" && frame.requestId === requestId));
@@ -234,7 +241,14 @@ test("protocol v1 hello becomes ready and proactively publishes exact native age
   const coordinator = new OpenBotNativeCoordinator({
     botRuntimeController: bots,
     conversationController: conversations,
-    deleteBots: async (ids) => bots.remove(ids),
+    deleteBots: async (ids) => {
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([...bots.bots.keys()]),
+        activeBotId: bots.bots.has(BOT_A) ? BOT_A : null,
+      });
+    },
   });
   t.after(() => coordinator.dispose());
   const port = new PortHarness();
@@ -284,6 +298,27 @@ test("protocol v1 hello becomes ready and proactively publishes exact native age
     },
   });
   assert.equal(port.closed, 0);
+});
+
+test("native startup restores the durable selected agent instead of selecting the first roster row", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness([bot(BOT_A), bot(BOT_B), bot(BOT_C)]),
+    conversationController: new ConversationHarness(),
+    async readActiveAgentId() { return BOT_C; },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const roster = port.frames.find((frame) => frame.family === "agents").payload;
+  assert.equal(roster.activeAgentId, BOT_C);
+  assert.deepEqual(roster.agents.map((entry) => [entry.id, entry.isActive]), [
+    [BOT_A, false],
+    [BOT_B, false],
+    [BOT_C, true],
+  ]);
 });
 
 test("native cancel suppresses only its exact in-flight reply and keeps the coordinator session alive", async (t) => {
@@ -338,7 +373,14 @@ test("native roster requests preserve correlation and route create, rename, prof
   const coordinator = new OpenBotNativeCoordinator({
     botRuntimeController: bots,
     conversationController: conversations,
-    deleteBots: async (ids) => bots.remove(ids),
+    deleteBots: async (ids) => {
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([...bots.bots.keys()]),
+        activeBotId: bots.bots.has(BOT_A) ? BOT_A : null,
+      });
+    },
   });
   t.after(() => coordinator.dispose());
   const port = new PortHarness();
@@ -421,6 +463,558 @@ test("native roster requests preserve correlation and route create, rename, prof
     outcome: { status: "ok", value: { transcript: [] } },
   });
   assert.deepEqual((await request(port, "r-list-3", "listAgents")).outcome.value.map((entry) => entry.id), [BOT_A]);
+  assert.equal((await request(port, "r-list-4", "listAgents")).outcome.value[0].isActive, true);
+});
+
+test("native deletion adopts the authoritative active bot for background, active, and last-bot removal", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const scenarios = [
+    {
+      name: "background",
+      seed: [bot(BOT_A), bot(BOT_B)],
+      select: BOT_B,
+      deleted: BOT_A,
+      activeBotId: BOT_B,
+      expected: [[BOT_B, true]],
+    },
+    {
+      name: "active",
+      seed: [bot(BOT_A), bot(BOT_B), bot(BOT_C)],
+      select: BOT_B,
+      deleted: BOT_B,
+      activeBotId: BOT_C,
+      expected: [[BOT_A, false], [BOT_C, true]],
+    },
+    {
+      name: "last",
+      seed: [bot(BOT_A)],
+      select: BOT_A,
+      deleted: BOT_A,
+      activeBotId: null,
+      expected: [],
+    },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async () => {
+      const bots = new BotControllerHarness(scenario.seed);
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: bots,
+        conversationController: new ConversationHarness(),
+        async onSelectAgent() {},
+        async deleteBots(ids) {
+          bots.remove(ids);
+          return Object.freeze({
+            deletedBotIds: Object.freeze([...ids]),
+            survivingBotIds: Object.freeze([...bots.bots.keys()]),
+            activeBotId: scenario.activeBotId,
+          });
+        },
+      });
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      await request(port, `select-${scenario.name}`, "openAgentTail", { id: scenario.select, limit: 1 });
+      assert.equal((await request(port, `delete-${scenario.name}`, "deleteAgents", {
+        ids: [scenario.deleted],
+      })).outcome.status, "ok");
+      const listed = await request(port, `list-${scenario.name}`, "listAgents");
+      assert.deepEqual(listed.outcome.value.map((entry) => [entry.id, entry.isActive]), scenario.expected);
+      coordinator.dispose();
+    });
+  }
+});
+
+test("native deletion rejects a non-authoritative cleanup outcome before mutating its selection", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    async deleteBots() {
+      return Object.freeze({
+        deletedBotIds: Object.freeze([BOT_A]),
+        survivingBotIds: Object.freeze([BOT_A, BOT_B]),
+        activeBotId: BOT_A,
+      });
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const reply = await request(port, "delete-invalid-outcome", "deleteAgents", { ids: [BOT_A] });
+  assert.deepEqual(reply.outcome, {
+    status: "failed",
+    failure: {
+      code: "source/transport-failure",
+      message: "OpenBot native deleteAgents failed.",
+    },
+  });
+  const listed = await request(port, "list-after-invalid-outcome", "listAgents");
+  assert.deepEqual(listed.outcome.value.map((entry) => [entry.id, entry.isActive]), [
+    [BOT_A, true],
+    [BOT_B, false],
+  ]);
+});
+
+test("a rejected deletion restores the durable active bot after a transient claimed-roster fallback", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const deleteEntered = deferred();
+  const releaseDelete = deferred();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    async readActiveAgentId() { return BOT_A; },
+    async deleteBots() {
+      deleteEntered.resolve();
+      await releaseDelete.promise;
+      throw new Error("durable deletion rejected");
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const deleting = request(port, "delete-rejected-active", "deleteAgents", { ids: [BOT_A] });
+  await deleteEntered.promise;
+  const duringDeletion = await request(port, "list-claimed-active", "listAgents");
+  assert.deepEqual(duringDeletion.outcome.value.map((entry) => [entry.id, entry.isActive]), [
+    [BOT_B, true],
+  ]);
+  releaseDelete.resolve();
+  assert.equal((await deleting).outcome.status, "failed");
+
+  const afterRollback = await request(port, "list-restored-active", "listAgents");
+  assert.deepEqual(afterRollback.outcome.value.map((entry) => [entry.id, entry.isActive]), [
+    [BOT_A, true],
+    [BOT_B, false],
+  ]);
+});
+
+test("a newer durable cross-bot selection wins when an older deletion is rejected", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const deleteEntered = deferred();
+  const releaseDelete = deferred();
+  let durableActiveBotId = BOT_A;
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    async readActiveAgentId() { return durableActiveBotId; },
+    async onSelectAgent(botId) { durableActiveBotId = botId; },
+    async deleteBots() {
+      deleteEntered.resolve();
+      await releaseDelete.promise;
+      throw new Error("durable deletion rejected");
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const deleting = request(port, "delete-rejected-before-new-selection", "deleteAgents", {
+    ids: [BOT_A],
+  });
+  await deleteEntered.promise;
+  assert.equal((await request(port, "open-newer-selection-before-rejection", "openAgentTail", {
+    id: BOT_B,
+    limit: 1,
+  })).outcome.status, "ok");
+  assert.equal(durableActiveBotId, BOT_B);
+  releaseDelete.resolve();
+  assert.equal((await deleting).outcome.status, "failed");
+
+  const listed = await request(port, "list-newer-selection-after-rejection", "listAgents");
+  assert.deepEqual(listed.outcome.value.map((entry) => [entry.id, entry.isActive]), [
+    [BOT_A, false],
+    [BOT_B, true],
+  ]);
+});
+
+test("native deletion purges deleted-bot prompt acceptance and ignores its late operation events", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const conversations = new ConversationHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: conversations,
+    async deleteBots(ids) {
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([BOT_B]),
+        activeBotId: BOT_B,
+      });
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  assert.equal((await request(port, "send-before-delete", "sendPrompt", {
+    agentId: BOT_A,
+    prompt: "Delete this bot after the durable echo.",
+    clientNonce: "nonce-delete-purge",
+    directAddressedAcceptance: true,
+  })).outcome.status, "ok");
+  assert.equal((await request(port, "acceptance-before-delete", "promptAcceptanceStatus", {
+    accountSlot: "host",
+    clientNonce: "nonce-delete-purge",
+  })).outcome.value.outcome, "found");
+  assert.equal((await request(port, "delete-after-send", "deleteAgents", {
+    ids: [BOT_A],
+  })).outcome.status, "ok");
+  assert.deepEqual((await request(port, "acceptance-after-delete", "promptAcceptanceStatus", {
+    accountSlot: "host",
+    clientNonce: "nonce-delete-purge",
+  })).outcome.value, { outcome: "not-found" });
+
+  const transcriptFrames = () => port.frames.filter((frame) => frame.kind === "event"
+    && frame.family === "transcript").length;
+  const beforeLateEvent = transcriptFrames();
+  const [conversationId] = conversations.records.keys();
+  conversations.emit("event", {
+    type: "text-delta",
+    botId: BOT_A,
+    conversationId,
+    invocationId: "invocation-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    generation: 7,
+    text: "late deleted output",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(transcriptFrames(), beforeLateEvent);
+});
+
+test("native deletion fences a terminal read already in flight before it can publish a deleted transcript", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const conversations = new ConversationHarness();
+  const finishReadEntered = deferred();
+  const releaseFinishRead = deferred();
+  const originalRead = conversations.read.bind(conversations);
+  let holdFinishRead = false;
+  conversations.read = async (requestValue) => {
+    if (holdFinishRead && requestValue.botId === BOT_A) {
+      holdFinishRead = false;
+      finishReadEntered.resolve();
+      await releaseFinishRead.promise;
+    }
+    return originalRead(requestValue);
+  };
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: conversations,
+    async deleteBots(ids) {
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([BOT_B]),
+        activeBotId: BOT_B,
+      });
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  assert.equal((await request(port, "finish-send", "sendPrompt", {
+    agentId: BOT_A,
+    prompt: "Finish after deletion.",
+    clientNonce: "nonce-held-finish",
+    directAddressedAcceptance: true,
+  })).outcome.status, "ok");
+  const [conversationId] = conversations.records.keys();
+  holdFinishRead = true;
+  conversations.complete(conversationId, "must never publish after deletion");
+  await finishReadEntered.promise;
+  assert.equal((await request(port, "finish-delete", "deleteAgents", { ids: [BOT_A] })).outcome.status, "ok");
+  const transcriptsAfterDelete = port.frames.filter((frame) => frame.family === "transcript").length;
+  releaseFinishRead.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(port.frames.filter((frame) => frame.family === "transcript").length, transcriptsAfterDelete);
+});
+
+test("native deletion invalidates a held stale roster publication without blocking a current roster", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const staleListEntered = deferred();
+  const releaseStaleList = deferred();
+  const originalList = bots.listBots.bind(bots);
+  let listCalls = 0;
+  bots.listBots = async () => {
+    listCalls += 1;
+    if (listCalls !== 1) return originalList();
+    const stale = await originalList();
+    staleListEntered.resolve();
+    await releaseStaleList.promise;
+    return stale;
+  };
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    async deleteBots(ids) {
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([BOT_B]),
+        activeBotId: BOT_B,
+      });
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await staleListEntered.promise;
+  assert.equal((await request(port, "stale-list-delete", "deleteAgents", { ids: [BOT_A] })).outcome.status, "ok");
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"
+    && frame.payload.agents.length === 1 && frame.payload.agents[0].id === BOT_B));
+  const afterCurrentRoster = port.frames.length;
+  releaseStaleList.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  const lateRosters = port.frames.slice(afterCurrentRoster).filter((frame) => frame.family === "agents");
+  assert.equal(lateRosters.some((frame) => frame.payload.agents.some((agent) => agent.id === BOT_A)), false);
+});
+
+test("native deletion synchronously fences a held send while preserving cross-bot work", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const conversations = new ConversationHarness();
+  const sendEntered = deferred();
+  const releaseSend = deferred();
+  const deleteEntered = deferred();
+  const releaseDelete = deferred();
+  const originalSend = conversations.send.bind(conversations);
+  conversations.send = async (requestValue) => {
+    if (requestValue.botId === BOT_A) {
+      sendEntered.resolve();
+      await releaseSend.promise;
+    }
+    return originalSend(requestValue);
+  };
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: conversations,
+    async deleteBots(ids) {
+      deleteEntered.resolve();
+      await releaseDelete.promise;
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([BOT_B]),
+        activeBotId: BOT_B,
+      });
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const heldSend = request(port, "held-send-a", "sendPrompt", {
+    agentId: BOT_A,
+    prompt: "Do not survive deletion.",
+    clientNonce: "nonce-held-send-a",
+    directAddressedAcceptance: true,
+  });
+  await sendEntered.promise;
+  const heldDelete = request(port, "held-delete-a", "deleteAgents", { ids: [BOT_A] });
+  await deleteEntered.promise;
+  assert.equal((await request(port, "cross-bot-send", "sendPrompt", {
+    agentId: BOT_B,
+    prompt: "Cross-bot work stays live.",
+    clientNonce: "nonce-cross-bot-send",
+    directAddressedAcceptance: true,
+  })).outcome.status, "ok");
+  releaseSend.resolve();
+  const heldSendReply = await heldSend;
+  releaseDelete.resolve();
+  assert.equal((await heldDelete).outcome.status, "ok");
+  assert.equal(heldSendReply.outcome.status, "failed");
+  assert.deepEqual((await request(port, "held-send-status", "promptAcceptanceStatus", {
+    accountSlot: "host",
+    clientNonce: "nonce-held-send-a",
+  })).outcome.value, { outcome: "not-found" });
+});
+
+test("a rejected deletion drops only invalidated target streams from subsequent transcript tails", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B)]);
+  const conversations = new ConversationHarness();
+  const deleteEntered = deferred();
+  const releaseDelete = deferred();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: conversations,
+    async deleteBots() {
+      deleteEntered.resolve();
+      await releaseDelete.promise;
+      throw new Error("durable deletion rejected");
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  assert.equal((await request(port, "stream-a-send", "sendPrompt", {
+    agentId: BOT_A,
+    prompt: "Keep the durable A prompt only.",
+    clientNonce: "nonce-rejected-delete-a",
+    directAddressedAcceptance: true,
+  })).outcome.status, "ok");
+  assert.equal((await request(port, "stream-b-send", "sendPrompt", {
+    agentId: BOT_B,
+    prompt: "Keep the live B stream.",
+    clientNonce: "nonce-rejected-delete-b",
+    directAddressedAcceptance: true,
+  })).outcome.status, "ok");
+  const recordA = [...conversations.records.values()].find((record) => record.botId === BOT_A);
+  const recordB = [...conversations.records.values()].find((record) => record.botId === BOT_B);
+  conversations.emit("event", {
+    type: "text-delta",
+    botId: BOT_A,
+    conversationId: recordA.conversationId,
+    invocationId: "invocation-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    generation: 7,
+    text: "stale A stream",
+  });
+  conversations.emit("event", {
+    type: "text-delta",
+    botId: BOT_B,
+    conversationId: recordB.conversationId,
+    invocationId: "invocation-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    generation: 7,
+    text: "current B stream",
+  });
+  await waitFor(() => port.frames.some((frame) => frame.family === "transcript"
+    && frame.payload.entry?.content === "current B stream"));
+
+  const deleting = request(port, "stream-delete-rejected", "deleteAgents", { ids: [BOT_A] });
+  await deleteEntered.promise;
+  releaseDelete.resolve();
+  assert.equal((await deleting).outcome.status, "failed");
+
+  const tailA = await request(port, "stream-tail-a-after-rollback", "getAgentTranscriptTail", {
+    id: BOT_A,
+    limit: 500,
+  });
+  assert.deepEqual(tailA.outcome.value.entries.map((entry) => [
+    entry.role,
+    entry.content,
+    entry.isStreaming,
+  ]), [["user", "Keep the durable A prompt only.", false]]);
+  const tailB = await request(port, "stream-tail-b-after-rollback", "getAgentTranscriptTail", {
+    id: BOT_B,
+    limit: 500,
+  });
+  assert.deepEqual(tailB.outcome.value.entries.map((entry) => [
+    entry.role,
+    entry.content,
+    entry.isStreaming,
+  ]), [
+    ["user", "Keep the live B stream.", false],
+    ["assistant", "current B stream", true],
+  ]);
+});
+
+test("a newer cross-bot native selection wins over a stale deletion successor", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B), bot(BOT_C)]);
+  const deleteEntered = deferred();
+  const releaseDelete = deferred();
+  const selected = [];
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    async readActiveAgentId() { return BOT_C; },
+    async onSelectAgent(id) { selected.push(id); },
+    async deleteBots(ids) {
+      deleteEntered.resolve();
+      await releaseDelete.promise;
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([BOT_B, BOT_C]),
+        activeBotId: BOT_C,
+      });
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const deleting = request(port, "newer-selection-delete", "deleteAgents", { ids: [BOT_A] });
+  await deleteEntered.promise;
+  assert.equal((await request(port, "newer-selection-open", "openAgentTail", {
+    id: BOT_B,
+    limit: 1,
+  })).outcome.status, "ok");
+  assert.deepEqual(selected, [BOT_B]);
+  releaseDelete.resolve();
+  assert.equal((await deleting).outcome.status, "ok");
+  const listed = await request(port, "newer-selection-list", "listAgents");
+  assert.deepEqual(listed.outcome.value.map((entry) => [entry.id, entry.isActive]), [
+    [BOT_B, true],
+    [BOT_C, false],
+  ]);
+});
+
+test("a cross-bot send during deletion cannot override the durable active successor", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness([bot(BOT_A), bot(BOT_B), bot(BOT_C)]);
+  const deleteEntered = deferred();
+  const releaseDelete = deferred();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    async readActiveAgentId() { return BOT_C; },
+    async deleteBots(ids) {
+      deleteEntered.resolve();
+      await releaseDelete.promise;
+      bots.remove(ids);
+      return Object.freeze({
+        deletedBotIds: Object.freeze([...ids]),
+        survivingBotIds: Object.freeze([BOT_B, BOT_C]),
+        activeBotId: BOT_C,
+      });
+    },
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const deleting = request(port, "send-race-delete", "deleteAgents", { ids: [BOT_A] });
+  await deleteEntered.promise;
+  assert.equal((await request(port, "send-race-prompt", "sendPrompt", {
+    agentId: BOT_B,
+    prompt: "Background work must not select this bot.",
+    clientNonce: "nonce-send-during-delete",
+    directAddressedAcceptance: true,
+  })).outcome.status, "ok");
+  releaseDelete.resolve();
+  assert.equal((await deleting).outcome.status, "ok");
+
+  const listed = await request(port, "send-race-list", "listAgents");
+  assert.deepEqual(listed.outcome.value.map((entry) => [entry.id, entry.isActive]), [
+    [BOT_B, false],
+    [BOT_C, true],
+  ]);
 });
 
 test("one durable conversation per bot backs native tails, nonce echo, streaming deltas, and terminal snapshots", async (t) => {

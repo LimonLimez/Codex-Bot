@@ -33,6 +33,7 @@ function installOpenBotNativeCoordinatorIpc({
   electron,
   coordinator,
   localDesktopManager = null,
+  ready = null,
 } = {}) {
   if (!electron?.ipcMain || typeof electron.ipcMain.handle !== "function"
     || typeof electron.ipcMain.removeHandler !== "function"
@@ -40,10 +41,12 @@ function installOpenBotNativeCoordinatorIpc({
     || !electron.BrowserWindow || typeof electron.BrowserWindow.fromWebContents !== "function"
     || !coordinator || typeof coordinator.bindPort !== "function"
     || typeof coordinator.dispose !== "function"
+    || (ready !== null && (!ready || typeof ready.then !== "function"))
     || (localDesktopManager !== null && typeof localDesktopManager?.ownsWindow !== "function")) {
     throw failure();
   }
 
+  const readiness = ready === null ? Promise.resolve() : Promise.resolve(ready);
   let disposed = false;
   let disposePromise = null;
   const sessions = new Map();
@@ -90,10 +93,15 @@ function installOpenBotNativeCoordinatorIpc({
     return session.teardown;
   }
 
-  function onRequest(event) {
+  async function onRequest(event) {
     if (disposed) throw failure();
     const view = currentSender(event);
     if (!view) throw failure();
+    try { await readiness; } catch { throw failure(); }
+    if (disposed) throw failure();
+    const readyView = currentSender(event);
+    if (!readyView || readyView.sender !== view.sender
+      || !sameFrame(readyView.senderFrame, view.senderFrame)) throw failure();
 
     const previous = sessions.get(view.sender);
     if (previous) closeSession(previous);

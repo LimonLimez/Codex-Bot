@@ -195,9 +195,25 @@ function cancelRequest(value) {
   });
 }
 
-function installStandaloneConversationIpc({ electron, controller } = {}) {
+function sameFrame(left, right) {
+  try {
+    const leftProcessId = left?.processId;
+    const leftRoutingId = left?.routingId;
+    const rightProcessId = right?.processId;
+    const rightRoutingId = right?.routingId;
+    return Number.isSafeInteger(leftProcessId) && leftProcessId >= 0
+      && Number.isSafeInteger(leftRoutingId) && leftRoutingId >= 0
+      && Number.isSafeInteger(rightProcessId) && rightProcessId >= 0
+      && Number.isSafeInteger(rightRoutingId) && rightRoutingId >= 0
+      && leftProcessId === rightProcessId && leftRoutingId === rightRoutingId;
+  } catch { return false; }
+}
+
+function installStandaloneConversationIpc({ electron, controller, ready = null } = {}) {
   if (!electron?.ipcMain || !electron?.BrowserWindow || !controller || types.isProxy(controller)
-    || ["list", "create", "read", "send", "cancel", "on", "off"].some((name) => typeof controller[name] !== "function")) throw failure();
+    || ["list", "create", "read", "send", "cancel", "on", "off"].some((name) => typeof controller[name] !== "function")
+    || (ready !== null && (!ready || typeof ready.then !== "function"))) throw failure();
+  const readiness = ready === null ? Promise.resolve() : Promise.resolve(ready);
   let disposed = false;
   const registered = [];
   const subscriptions = new Map();
@@ -214,6 +230,14 @@ function installStandaloneConversationIpc({ electron, controller } = {}) {
       const window = electron.BrowserWindow.fromWebContents(event.sender);
       return window && !window.isDestroyed() && window.webContents === event.sender
         && !event.sender.isDestroyed() ? event.sender : null;
+    } catch { return null; }
+  }
+  function currentMainFrame(event, sender) {
+    try {
+      const senderFrame = event?.senderFrame;
+      if (!senderFrame || !sameFrame(sender?.mainFrame, senderFrame)
+        || typeof senderFrame.isDestroyed !== "function" || senderFrame.isDestroyed()) return null;
+      return senderFrame;
     } catch { return null; }
   }
   function cancelOwnedInvocation(invocation, owner, detach = true) {
@@ -278,7 +302,17 @@ function installStandaloneConversationIpc({ electron, controller } = {}) {
     electron.ipcMain.handle(channel, async (event, value) => {
       const sender = currentSender(event);
       if (disposed || !sender) throw failure();
-      try { return await operation(sender, value); } catch { throw failure(); }
+      const senderFrame = ready === null ? null : currentMainFrame(event, sender);
+      if (ready !== null && !senderFrame) throw failure();
+      try {
+        await readiness;
+        if (disposed || currentSender(event) !== sender) throw failure();
+        if (senderFrame) {
+          const currentFrame = currentMainFrame(event, sender);
+          if (!currentFrame || !sameFrame(currentFrame, senderFrame)) throw failure();
+        }
+        return await operation(sender, value);
+      } catch { throw failure(); }
     });
     registered.push(channel);
   }

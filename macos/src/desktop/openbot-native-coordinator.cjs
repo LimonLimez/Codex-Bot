@@ -213,6 +213,38 @@ function denseArray(value, maximum) {
   return [...value];
 }
 
+function deletionOutcome(rawValue, expectedBotIds) {
+  const value = cloneFrameData(rawValue);
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+    || Object.keys(value).sort().join(",") !== "activeBotId,deletedBotIds,survivingBotIds") {
+    throw new TypeError("invalid deletion outcome");
+  }
+  const normalizeIds = (rawIds, maximum) => {
+    const ids = denseArray(rawIds, maximum);
+    if (ids.some((id) => typeof id !== "string" || !BOT_ID.test(id))
+      || new Set(ids).size !== ids.length) throw new TypeError("invalid deletion outcome");
+    return ids;
+  };
+  const deletedBotIds = normalizeIds(value.deletedBotIds, MAX_AGENT_IDS);
+  const survivingBotIds = normalizeIds(value.survivingBotIds, MAX_AGENTS);
+  const activeBotId = value.activeBotId;
+  const deleted = new Set(deletedBotIds);
+  if (deletedBotIds.length !== expectedBotIds.length
+    || expectedBotIds.some((id) => !deleted.has(id))
+    || survivingBotIds.some((id) => deleted.has(id))
+    || (activeBotId !== null
+      && (typeof activeBotId !== "string" || !BOT_ID.test(activeBotId)
+        || !survivingBotIds.includes(activeBotId)))) {
+    throw new TypeError("invalid deletion outcome");
+  }
+  return Object.freeze({
+    deletedBotIds: Object.freeze(deletedBotIds),
+    survivingBotIds: Object.freeze(survivingBotIds),
+    activeBotId,
+  });
+}
+
 function timestampMs(value) {
   if (typeof value !== "string") throw new TypeError("invalid timestamp");
   const parsed = Date.parse(value);
@@ -325,6 +357,7 @@ class OpenBotNativeCoordinator {
   #conversations;
   #deleteBots;
   #onSelectAgent;
+  #readActiveAgentId;
   #now;
   #bindings = new Set();
   #conversationIds = new Map();
@@ -334,7 +367,14 @@ class OpenBotNativeCoordinator {
   #operations = new Map();
   #pendingOperations = new Map();
   #unread = new Map();
+  #botEpochs = new Map();
+  #deletionClaims = new Map();
+  #deletedBots = new Set();
+  #rosterEpoch = 0;
   #activeAgentId = "";
+  #activeRevision = 0;
+  #activeAgentInitialized = false;
+  #activeAgentPromise = null;
   #disposed = false;
   #botListener;
   #conversationListener;
@@ -344,6 +384,7 @@ class OpenBotNativeCoordinator {
     conversationController,
     deleteBots = null,
     onSelectAgent = null,
+    readActiveAgentId = null,
     now = Date.now,
   } = {}) {
     if (!botRuntimeController
@@ -367,13 +408,20 @@ class OpenBotNativeCoordinator {
     if (onSelectAgent !== null && typeof onSelectAgent !== "function") {
       throw new TypeError("OpenBot native coordinator onSelectAgent must be a function.");
     }
+    if (readActiveAgentId !== null && typeof readActiveAgentId !== "function") {
+      throw new TypeError("OpenBot native coordinator readActiveAgentId must be a function.");
+    }
     if (typeof now !== "function") throw new TypeError("OpenBot native coordinator now must be a function.");
     this.#bots = botRuntimeController;
     this.#conversations = conversationController;
     this.#deleteBots = deleteBots;
     this.#onSelectAgent = onSelectAgent;
+    this.#readActiveAgentId = readActiveAgentId;
     this.#now = now;
-    this.#botListener = () => { void this.#publishAgentsToAll(); };
+    this.#botListener = () => {
+      this.#advanceRosterEpoch();
+      void this.#publishAgentsToAll();
+    };
     this.#conversationListener = (event) => { this.#receiveConversationEvent(event); };
     this.#bots.on("bot-changed", this.#botListener);
     this.#conversations.on("event", this.#conversationListener);
@@ -583,6 +631,112 @@ class OpenBotNativeCoordinator {
     exactRecord(args, new Set(), new Set());
   }
 
+  #advanceRosterEpoch() {
+    if (!Number.isSafeInteger(this.#rosterEpoch + 1)) throw new TypeError("native roster epoch exhausted");
+    this.#rosterEpoch += 1;
+  }
+
+  #setActiveAgentId(id, { durableSelection = false } = {}) {
+    if (durableSelection) {
+      const nextRevision = this.#activeRevision + 1;
+      if (!Number.isSafeInteger(nextRevision)) throw new TypeError("native active epoch exhausted");
+      this.#activeRevision = nextRevision;
+    }
+    this.#activeAgentId = id;
+  }
+
+  async #restoreActiveAgent() {
+    if (this.#activeAgentInitialized) return;
+    if (this.#activeAgentPromise) return this.#activeAgentPromise;
+    const operation = (async () => {
+      let activeAgentId = null;
+      if (this.#readActiveAgentId) activeAgentId = await this.#readActiveAgentId();
+      if (this.#disposed) throw new TypeError("native coordinator disposed");
+      if (activeAgentId !== null && (typeof activeAgentId !== "string" || !BOT_ID.test(activeAgentId))) {
+        throw new TypeError("invalid durable active bot");
+      }
+      if (!this.#activeAgentInitialized) {
+        this.#setActiveAgentId(activeAgentId ?? "");
+        this.#activeAgentInitialized = true;
+      }
+    })();
+    this.#activeAgentPromise = operation;
+    try { await operation; } finally {
+      if (this.#activeAgentPromise === operation) this.#activeAgentPromise = null;
+    }
+  }
+
+  #advanceBotEpoch(id) {
+    const epoch = (this.#botEpochs.get(id) ?? 0) + 1;
+    if (!Number.isSafeInteger(epoch)) throw new TypeError("native bot epoch exhausted");
+    this.#botEpochs.set(id, epoch);
+    return epoch;
+  }
+
+  #captureBot(id) {
+    if (this.#disposed || this.#deletedBots.has(id) || this.#deletionClaims.has(id)) {
+      throw new TypeError("native bot is unavailable");
+    }
+    return Object.freeze({ id, epoch: this.#botEpochs.get(id) ?? 0 });
+  }
+
+  #botIsCurrent(token) {
+    return Boolean(token && !this.#disposed && !this.#deletedBots.has(token.id)
+      && !this.#deletionClaims.has(token.id)
+      && (this.#botEpochs.get(token.id) ?? 0) === token.epoch);
+  }
+
+  #assertBotCurrent(token) {
+    if (!this.#botIsCurrent(token)) throw new TypeError("stale native bot operation");
+  }
+
+  #beginDeletion(ids) {
+    if (ids.some((id) => this.#deletedBots.has(id) || this.#deletionClaims.has(id))) {
+      throw new TypeError("native bot deletion is unavailable");
+    }
+    const claim = Object.freeze({
+      activeAgentId: this.#activeAgentId,
+      activeRevision: this.#activeRevision,
+    });
+    for (const id of ids) {
+      this.#advanceBotEpoch(id);
+      this.#deletionClaims.set(id, claim);
+    }
+    this.#purgeVolatileBotOperations(ids);
+    this.#advanceRosterEpoch();
+    return claim;
+  }
+
+  #purgeVolatileBotOperations(ids) {
+    const targets = new Set(ids);
+    for (const [key, operation] of this.#operations) {
+      if (!targets.has(operation?.botId)) continue;
+      operation.finishing = true;
+      if (this.#operations.get(key) === operation) this.#operations.delete(key);
+    }
+    for (const [conversationId, pending] of this.#pendingOperations) {
+      if (!targets.has(pending?.botId)) continue;
+      if (pending.operation) pending.operation.finishing = true;
+      if (this.#pendingOperations.get(conversationId) === pending) {
+        this.#pendingOperations.delete(conversationId);
+      }
+    }
+  }
+
+  #releaseDeletion(ids, claim, { deleted }) {
+    for (const id of ids) {
+      if (this.#deletionClaims.get(id) !== claim) throw new TypeError("stale native deletion claim");
+    }
+    for (const id of ids) {
+      this.#deletionClaims.delete(id);
+      if (deleted) {
+        this.#deletedBots.add(id);
+        this.#botEpochs.delete(id);
+      }
+    }
+    this.#advanceRosterEpoch();
+  }
+
   #emptySearch(rawArgs) {
     const args = exactRecord(rawArgs, new Set(["query"]));
     boundedString(args.query, MAX_TEXT_BYTES, { allowEmpty: true });
@@ -601,7 +755,11 @@ class OpenBotNativeCoordinator {
   async #localBotFromIdArgs(rawArgs) {
     const args = exactRecord(rawArgs, new Set(["id"]));
     const id = botId(args.id);
+    const token = this.#captureBot(id);
+    const rosterEpoch = this.#rosterEpoch;
     const values = await this.#bots.listBots();
+    this.#assertBotCurrent(token);
+    if (this.#rosterEpoch !== rosterEpoch) throw new TypeError("stale native roster");
     if (!Array.isArray(values) || values.length > MAX_AGENTS) throw new TypeError("invalid bot list");
     const value = values.find((candidate) => candidate?.botId === id);
     if (!value) throw new TypeError("missing bot");
@@ -624,11 +782,17 @@ class OpenBotNativeCoordinator {
   }
 
   async #agentRows() {
+    await this.#restoreActiveAgent();
+    const rosterEpoch = this.#rosterEpoch;
     const values = await this.#bots.listBots();
+    if (this.#disposed || this.#rosterEpoch !== rosterEpoch) throw new TypeError("stale native roster");
     if (!Array.isArray(values) || values.length > MAX_AGENTS) throw new TypeError("invalid bot list");
-    const rows = values.map((value) => agentRow(value, this.#unread.get(value.botId)));
-    if (this.#activeAgentId && !rows.some((row) => row.id === this.#activeAgentId)) this.#activeAgentId = "";
-    if (!this.#activeAgentId) this.#activeAgentId = rows[0]?.id ?? "";
+    const rows = values
+      .filter((value) => !this.#deletedBots.has(value?.botId) && !this.#deletionClaims.has(value?.botId))
+      .map((value) => agentRow(value, this.#unread.get(value.botId)));
+    if (this.#rosterEpoch !== rosterEpoch) throw new TypeError("stale native roster");
+    if (this.#activeAgentId && !rows.some((row) => row.id === this.#activeAgentId)) this.#setActiveAgentId("");
+    if (!this.#activeAgentId) this.#setActiveAgentId(rows[0]?.id ?? "");
     for (const row of rows) row.isActive = row.id === this.#activeAgentId;
     return rows;
   }
@@ -653,9 +817,12 @@ class OpenBotNativeCoordinator {
       description,
     };
     let created = await this.#bots.createBot({ appearance, notifications: true });
-    created = await this.#bots.renameBot(botId(created.botId), name);
+    const id = botId(created.botId);
+    const token = this.#captureBot(id);
+    created = await this.#bots.renameBot(id, name);
+    this.#assertBotCurrent(token);
     const row = agentRow(created, false);
-    this.#activeAgentId = row.id;
+    this.#setActiveAgentId(row.id);
     row.isActive = true;
     void this.#publishAgentsToAll();
     return { agent: row, transcript: [] };
@@ -664,6 +831,7 @@ class OpenBotNativeCoordinator {
   async #updateAgent(rawArgs) {
     const args = exactRecord(rawArgs, new Set(["id", "profile"]));
     const id = botId(args.id);
+    const token = this.#captureBot(id);
     const profile = exactRecord(args.profile, new Set([
       "name", "description", "title", "avatarShape", "avatarColor",
     ]), new Set());
@@ -673,6 +841,7 @@ class OpenBotNativeCoordinator {
     let updated = null;
     if (Object.hasOwn(profile, "name")) {
       updated = await this.#bots.renameBot(id, boundedString(profile.name, 160));
+      this.#assertBotCurrent(token);
     }
     const appearance = {};
     if (Object.hasOwn(profile, "description")) {
@@ -685,10 +854,15 @@ class OpenBotNativeCoordinator {
     if (Object.hasOwn(profile, "avatarColor")) appearance.color = appearanceId(profile.avatarColor);
     if (Object.keys(appearance).length > 0) {
       updated = await this.#bots.updateProfile(id, { appearance });
+      this.#assertBotCurrent(token);
     }
-    if (!updated && typeof this.#bots.readBot === "function") updated = await this.#bots.readBot(id);
+    if (!updated && typeof this.#bots.readBot === "function") {
+      updated = await this.#bots.readBot(id);
+      this.#assertBotCurrent(token);
+    }
     if (!updated) {
       updated = (await this.#bots.listBots()).find((candidate) => candidate.botId === id);
+      this.#assertBotCurrent(token);
     }
     if (!updated) throw new TypeError("missing updated bot");
     const row = agentRow(updated, this.#unread.get(id));
@@ -706,12 +880,48 @@ class OpenBotNativeCoordinator {
     if (!this.#deleteBots) {
       throw capabilityUnavailable("deleteAgents");
     }
-    await this.#deleteBots(Object.freeze([...ids]));
+    const claim = this.#beginDeletion(ids);
+    let outcome;
+    try {
+      outcome = deletionOutcome(
+        await this.#deleteBots(Object.freeze([...ids])),
+        ids,
+      );
+      this.#releaseDeletion(ids, claim, { deleted: true });
+    } catch (error) {
+      this.#releaseDeletion(ids, claim, { deleted: false });
+      if (this.#activeRevision === claim.activeRevision) {
+        this.#setActiveAgentId(claim.activeAgentId);
+      }
+      void this.#publishAgentsToAll();
+      throw error;
+    }
+    const deletedIds = new Set(outcome.deletedBotIds);
+    const noncePrefixes = outcome.deletedBotIds.map((id) => `${id}\0`);
+    for (const key of this.#clientNonces.keys()) {
+      if (noncePrefixes.some((prefix) => key.startsWith(prefix))) this.#clientNonces.delete(key);
+    }
+    for (const [clientNonce, acceptance] of this.#acceptances) {
+      if (deletedIds.has(acceptance?.record?.agentId)) this.#acceptances.delete(clientNonce);
+    }
+    for (const [key, operation] of this.#operations) {
+      if (!deletedIds.has(operation?.botId)) continue;
+      operation.finishing = true;
+      this.#operations.delete(key);
+    }
+    for (const [conversationId, pending] of this.#pendingOperations) {
+      if (!deletedIds.has(pending?.botId)) continue;
+      if (pending.operation) pending.operation.finishing = true;
+      this.#pendingOperations.delete(conversationId);
+    }
     for (const id of ids) {
       this.#unread.delete(id);
       this.#conversationIds.delete(id);
       this.#conversationPromises.delete(id);
-      if (this.#activeAgentId === id) this.#activeAgentId = "";
+    }
+    if (this.#activeRevision === claim.activeRevision
+      || !outcome.survivingBotIds.includes(this.#activeAgentId)) {
+      this.#setActiveAgentId(outcome.activeBotId ?? "");
     }
     void this.#publishAgentsToAll();
     return { transcript: [] };
@@ -720,10 +930,12 @@ class OpenBotNativeCoordinator {
   async #setAgentUnread(rawArgs) {
     const args = exactRecord(rawArgs, new Set(["id", "isUnread"]));
     const id = botId(args.id);
+    const token = this.#captureBot(id);
     if (typeof args.isUnread !== "boolean") {
       throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
     }
     const rows = await this.#agentRows();
+    this.#assertBotCurrent(token);
     if (!rows.some((row) => row.id === id)) throw new TypeError("missing bot");
     this.#unread.set(id, args.isUnread);
     void this.#publishAgentsToAll();
@@ -733,41 +945,63 @@ class OpenBotNativeCoordinator {
   async #kickstartAgent(rawArgs) {
     const args = exactRecord(rawArgs, new Set(["id"]));
     const id = botId(args.id);
+    const token = this.#captureBot(id);
     const rows = await this.#agentRows();
+    this.#assertBotCurrent(token);
     if (!rows.some((row) => row.id === id)) throw new TypeError("missing bot");
     return { isIntroductionInFlight: false };
   }
 
-  async #ensureConversation(id) {
+  async #ensureConversation(id, token = this.#captureBot(id)) {
+    this.#assertBotCurrent(token);
     const known = this.#conversationIds.get(id);
     if (known) return known;
     const pending = this.#conversationPromises.get(id);
-    if (pending) return pending;
-    const operation = (async () => {
+    if (pending && pending.token.epoch === token.epoch) {
+      const conversationId = await pending.promise;
+      this.#assertBotCurrent(token);
+      return conversationId;
+    }
+    if (pending && this.#conversationPromises.get(id) === pending) this.#conversationPromises.delete(id);
+    const entry = { token, promise: null };
+    entry.promise = (async () => {
       const rows = await this.#agentRows();
+      this.#assertBotCurrent(token);
       if (!rows.some((row) => row.id === id)) throw new TypeError("missing bot");
       const listed = await this.#conversations.list(id);
+      this.#assertBotCurrent(token);
       if (!Array.isArray(listed) || listed.length > MAX_CONVERSATIONS) throw new TypeError("invalid conversations");
       const summaries = listed.map((entry) => validateConversationSummary(entry, id));
-      const selected = summaries[0] ?? validateConversationSummary(
-        await this.#conversations.create({ botId: id }),
-        id,
-      );
+      let selected = summaries[0];
+      if (!selected) {
+        selected = validateConversationSummary(
+          await this.#conversations.create({ botId: id }),
+          id,
+        );
+        this.#assertBotCurrent(token);
+      }
+      this.#assertBotCurrent(token);
       this.#conversationIds.set(id, selected.conversationId);
       return selected.conversationId;
     })();
-    this.#conversationPromises.set(id, operation);
-    try { return await operation; } finally {
-      if (this.#conversationPromises.get(id) === operation) this.#conversationPromises.delete(id);
+    this.#conversationPromises.set(id, entry);
+    try {
+      const conversationId = await entry.promise;
+      this.#assertBotCurrent(token);
+      return conversationId;
+    } finally {
+      if (this.#conversationPromises.get(id) === entry) this.#conversationPromises.delete(id);
     }
   }
 
-  async #readConversation(id, conversationId) {
-    return validateConversationRecord(
+  async #readConversation(id, conversationId, token = null) {
+    const record = validateConversationRecord(
       await this.#conversations.read({ botId: id, conversationId }),
       id,
       conversationId,
     );
+    if (token) this.#assertBotCurrent(token);
+    return record;
   }
 
   #messageEntry(id, message, streaming = false) {
@@ -804,17 +1038,24 @@ class OpenBotNativeCoordinator {
   async #tail(rawArgs, opening) {
     const args = exactRecord(rawArgs, new Set(["id", "limit", "beforeSeq"]), new Set(["id", "limit"]));
     const id = botId(args.id);
+    const token = this.#captureBot(id);
     if (!Number.isSafeInteger(args.limit) || args.limit < 1 || args.limit > MAX_TAIL_LIMIT
       || args.beforeSeq !== undefined
         && (!Number.isSafeInteger(args.beforeSeq) || args.beforeSeq < 1 || args.beforeSeq > MAX_MESSAGES + 1)) {
       throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
     }
-    if (opening && this.#onSelectAgent) await this.#onSelectAgent(id);
-    const conversationId = await this.#ensureConversation(id);
-    const record = await this.#readConversation(id, conversationId);
+    if (opening && this.#onSelectAgent) {
+      await this.#onSelectAgent(id);
+      this.#assertBotCurrent(token);
+    }
+    const conversationId = await this.#ensureConversation(id, token);
+    this.#assertBotCurrent(token);
+    const record = await this.#readConversation(id, conversationId, token);
+    this.#assertBotCurrent(token);
     const all = this.#conversationEntries(id, record);
-    const live = [...this.#operations.values()].find((candidate) => candidate.botId === id
-      && candidate.conversationId === conversationId && candidate.started && !candidate.finishing);
+    const live = [...this.#operations].find(([key, candidate]) => candidate.botId === id
+      && candidate.conversationId === conversationId && candidate.started && !candidate.finishing
+      && this.#botIsCurrent(candidate.token) && this.#operations.get(key) === candidate)?.[1];
     if (live) {
       all.push({
         kind: "message",
@@ -829,7 +1070,8 @@ class OpenBotNativeCoordinator {
     const start = Math.max(0, end - args.limit);
     const entries = all.slice(start, end);
     if (opening) {
-      this.#activeAgentId = id;
+      this.#assertBotCurrent(token);
+      this.#setActiveAgentId(id, { durableSelection: this.#onSelectAgent !== null });
       this.#unread.set(id, false);
       void this.#publishAgentsToAll();
     }
@@ -842,6 +1084,7 @@ class OpenBotNativeCoordinator {
       "composedAtMs", "attachmentPaths", "attachmentNames", "traceparent", "enterEpochMs",
     ]), new Set(["agentId", "prompt", "clientNonce", "directAddressedAcceptance"]));
     const id = botId(args.agentId);
+    const token = this.#captureBot(id);
     const prompt = boundedString(args.prompt, MAX_TEXT_BYTES);
     const clientNonce = boundedString(args.clientNonce, MAX_CLIENT_NONCE_BYTES);
     if (args.directAddressedAcceptance !== true) {
@@ -883,11 +1126,13 @@ class OpenBotNativeCoordinator {
     });
     const existingAcceptance = this.#acceptances.get(clientNonce)
       ?? await this.#durableAcceptance(clientNonce);
+    this.#assertBotCurrent(token);
     if (existingAcceptance) {
       if (existingAcceptance.record.inputDigest !== inputDigest) {
         throw coordinatorFailure("send/nonce-digest-mismatch", "OpenBot prompt nonce does not match its original input.");
       }
       await existingAcceptance.completion;
+      this.#assertBotCurrent(token);
       if (existingAcceptance.record.status === "accepted") return { accepted: true };
       throw coordinatorFailure(
         existingAcceptance.record.rejectionCode ?? "source/transport-failure",
@@ -908,15 +1153,16 @@ class OpenBotNativeCoordinator {
         rejectionCode: null,
       },
     };
+    this.#assertBotCurrent(token);
     this.#acceptances.set(clientNonce, acceptance);
     let conversationId = null;
     let pending = null;
     try {
-      conversationId = await this.#ensureConversation(id);
-      this.#activeAgentId = id;
-      const before = await this.#readConversation(id, conversationId);
+      conversationId = await this.#ensureConversation(id, token);
+      this.#assertBotCurrent(token);
+      const before = await this.#readConversation(id, conversationId, token);
       const priorIds = new Set(before.messages.map((message) => message.messageId));
-      pending = { botId: id, conversationId, buffer: [], ready: false, operation: null };
+      pending = { botId: id, conversationId, token, buffer: [], ready: false, operation: null };
       this.#pendingOperations.set(conversationId, pending);
       const accepted = await this.#conversations.send({
         botId: id,
@@ -925,23 +1171,26 @@ class OpenBotNativeCoordinator {
         clientNonce,
         inputDigest,
       });
+      this.#assertBotCurrent(token);
       if (!accepted || typeof accepted !== "object" || accepted.botId !== id
         || accepted.conversationId !== conversationId || !INVOCATION_ID.test(accepted.invocationId)) {
         throw new TypeError("invalid send result");
       }
-      const record = await this.#readConversation(id, conversationId);
+      const record = await this.#readConversation(id, conversationId, token);
       const addedUsers = record.messages.filter((message) => !priorIds.has(message.messageId)
         && message.role === "user" && message.text === prompt);
       const echoed = addedUsers.at(-1);
       if (!echoed || echoed.clientNonce !== clientNonce || echoed.inputDigest !== inputDigest) {
         throw new TypeError("missing durable prompt echo");
       }
+      this.#assertBotCurrent(token);
       this.#clientNonces.set(`${id}\0${echoed.messageId}`, clientNonce);
       acceptance.record.status = "accepted";
       acceptance.record.acceptedAtMs = timestampMs(echoed.createdAt);
       acceptance.record.echoEntryId = echoed.messageId;
       const operation = {
         botId: id,
+        token,
         conversationId,
         invocationId: accepted.invocationId,
         streamId: `stream-${accepted.invocationId}`,
@@ -952,6 +1201,7 @@ class OpenBotNativeCoordinator {
       };
       pending.operation = operation;
       pending.ready = true;
+      this.#assertBotCurrent(token);
       this.#operations.set(`${conversationId}\0${accepted.invocationId}`, operation);
       this.#broadcastEvent("transcript", {
         type: "appended",
@@ -962,10 +1212,17 @@ class OpenBotNativeCoordinator {
       settleAcceptance();
       return { accepted: true };
     } catch (error) {
+      if (!this.#botIsCurrent(token)) {
+        acceptance.record.status = "rejected";
+        acceptance.record.rejectionCode = "source/transport-failure";
+        if (this.#acceptances.get(clientNonce) === acceptance) this.#acceptances.delete(clientNonce);
+        settleAcceptance();
+        throw error;
+      }
       let echoed = null;
       if (conversationId) {
         try {
-          const record = await this.#readConversation(id, conversationId);
+          const record = await this.#readConversation(id, conversationId, token);
           const matches = record.messages.filter((message) => message?.role === "user"
             && message.text === prompt && message.clientNonce === clientNonce
             && message.inputDigest === inputDigest);
@@ -975,6 +1232,13 @@ class OpenBotNativeCoordinator {
         } catch {
           echoed = null;
         }
+      }
+      if (!this.#botIsCurrent(token)) {
+        acceptance.record.status = "rejected";
+        acceptance.record.rejectionCode = "source/transport-failure";
+        if (this.#acceptances.get(clientNonce) === acceptance) this.#acceptances.delete(clientNonce);
+        settleAcceptance();
+        throw error;
       }
       if (echoed) {
         this.#clientNonces.set(`${id}\0${echoed.messageId}`, clientNonce);
@@ -1007,7 +1271,10 @@ class OpenBotNativeCoordinator {
       throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
     }
     const clientNonce = boundedString(args.clientNonce, MAX_CLIENT_NONCE_BYTES);
-    const acceptance = this.#acceptances.get(clientNonce)
+    let acceptance = this.#acceptances.get(clientNonce);
+    if (acceptance && (this.#deletedBots.has(acceptance.record.agentId)
+      || this.#deletionClaims.has(acceptance.record.agentId))) acceptance = null;
+    acceptance = acceptance
       ?? await this.#durableAcceptance(clientNonce);
     return acceptance
       ? { outcome: "found", record: { ...acceptance.record } }
@@ -1018,11 +1285,13 @@ class OpenBotNativeCoordinator {
     let found = null;
     const rows = await this.#agentRows();
     for (const row of rows) {
+      const token = this.#captureBot(row.id);
       const listed = await this.#conversations.list(row.id);
+      this.#assertBotCurrent(token);
       if (!Array.isArray(listed) || listed.length > MAX_CONVERSATIONS) throw new TypeError("invalid conversations");
       for (const value of listed) {
         const summary = validateConversationSummary(value, row.id);
-        const record = await this.#readConversation(row.id, summary.conversationId);
+        const record = await this.#readConversation(row.id, summary.conversationId, token);
         for (const message of record.messages) {
           if (message?.clientNonce !== clientNonce) continue;
           if (found || message.role !== "user" || typeof message.inputDigest !== "string"
@@ -1045,7 +1314,11 @@ class OpenBotNativeCoordinator {
         }
       }
     }
-    if (found) this.#acceptances.set(clientNonce, found);
+    if (found) {
+      const token = this.#captureBot(found.record.agentId);
+      this.#assertBotCurrent(token);
+      this.#acceptances.set(clientNonce, found);
+    }
     return found;
   }
 
@@ -1062,6 +1335,12 @@ class OpenBotNativeCoordinator {
       || typeof rawEvent.conversationId !== "string") return;
     const pending = this.#pendingOperations.get(rawEvent.conversationId);
     if (pending && !pending.ready) {
+      if (!this.#botIsCurrent(pending.token)) {
+        if (this.#pendingOperations.get(rawEvent.conversationId) === pending) {
+          this.#pendingOperations.delete(rawEvent.conversationId);
+        }
+        return;
+      }
       if (pending.buffer.length < 1024) pending.buffer.push(rawEvent);
       return;
     }
@@ -1069,11 +1348,13 @@ class OpenBotNativeCoordinator {
     const operation = typeof invocationId === "string"
       ? this.#operations.get(`${rawEvent.conversationId}\0${invocationId}`)
       : null;
-    if (!operation) return;
+    if (!operation || !this.#botIsCurrent(operation.token)) return;
     this.#routeOperationEvent(operation, rawEvent);
   }
 
   #routeOperationEvent(operation, event) {
+    const key = `${operation.conversationId}\0${operation.invocationId}`;
+    if (!this.#botIsCurrent(operation.token) || this.#operations.get(key) !== operation) return;
     if (event.type === "text-delta") {
       this.#emitTextDelta(operation, event.text);
       return;
@@ -1082,7 +1363,9 @@ class OpenBotNativeCoordinator {
   }
 
   #emitTextDelta(operation, delta) {
-    if (operation.finishing || typeof delta !== "string" || delta.includes("\0")) return;
+    const key = `${operation.conversationId}\0${operation.invocationId}`;
+    if (!this.#botIsCurrent(operation.token) || this.#operations.get(key) !== operation
+      || operation.finishing || typeof delta !== "string" || delta.includes("\0")) return;
     if (utf8Bytes(operation.text + delta) > MAX_TEXT_BYTES) {
       operation.finishing = true;
       this.#operations.delete(`${operation.conversationId}\0${operation.invocationId}`);
@@ -1106,11 +1389,17 @@ class OpenBotNativeCoordinator {
   }
 
   async #finishOperation(operation) {
-    if (operation.finishing) return;
+    const key = `${operation.conversationId}\0${operation.invocationId}`;
+    if (operation.finishing || !this.#botIsCurrent(operation.token)
+      || this.#operations.get(key) !== operation) return;
     operation.finishing = true;
     try {
-      const record = await this.#readConversation(operation.botId, operation.conversationId);
-      if (this.#disposed) return;
+      const record = await this.#readConversation(
+        operation.botId,
+        operation.conversationId,
+        operation.token,
+      );
+      if (!this.#botIsCurrent(operation.token) || this.#operations.get(key) !== operation) return;
       this.#broadcastEvent("transcript", {
         type: "snapshot",
         activeAgentId: operation.botId,
@@ -1119,7 +1408,7 @@ class OpenBotNativeCoordinator {
     } catch {
       // The durable controller remains authoritative; no speculative terminal frame is emitted.
     } finally {
-      this.#operations.delete(`${operation.conversationId}\0${operation.invocationId}`);
+      if (this.#operations.get(key) === operation) this.#operations.delete(key);
     }
   }
 
@@ -1205,9 +1494,14 @@ class OpenBotNativeCoordinator {
     this.#conversationIds.clear();
     this.#conversationPromises.clear();
     this.#clientNonces.clear();
+    this.#acceptances.clear();
     this.#operations.clear();
     this.#pendingOperations.clear();
     this.#unread.clear();
+    this.#botEpochs.clear();
+    this.#deletionClaims.clear();
+    this.#deletedBots.clear();
+    this.#activeAgentPromise = null;
   }
 }
 

@@ -53,6 +53,7 @@ function fixture({
   survivingBots = [{ botId: BOT_C }],
   anchorFailure = null,
   anchorOutcome = null,
+  modelActiveBotId = BOT_C,
 } = {}) {
   const order = [];
   let pending = [...receipts];
@@ -65,6 +66,7 @@ function fixture({
     survivingBotIds: Object.freeze([BOT_C]),
     activeBotId: BOT_C,
   });
+  let activeBotId = modelActiveBotId;
   const botRuntimeController = {
     async deleteBots(botIds) {
       order.push(`anchor:${botIds.join(",")}`);
@@ -109,9 +111,11 @@ function fixture({
     },
   };
   const modelSelectionStore = {
+    async readActiveBotId() { return activeBotId; },
     async deleteBots({ botIds, successorBotId }) {
       order.push(`models:${botIds.join(",")}:${successorBotId}`);
-      return { activeBotId: successorBotId };
+      if (botIds.includes(activeBotId)) activeBotId = successorBotId;
+      return { activeBotId };
     },
   };
   const deleteConversationBindings = (file, botIds) => {
@@ -156,6 +160,46 @@ test("live deletion anchors once then replays every exact owner before completin
     `bindings:${BINDINGS_FILE}:${BOT_A},${BOT_B}`,
     `complete:${DELETION_A}`,
   ]);
+});
+
+test("background deletion keeps the durable model-selected active bot instead of the first survivor", async () => {
+  const value = fixture({
+    receipts: [pendingReceipt({
+      botIds: Object.freeze([BOT_A]),
+      localProfiles: Object.freeze([Object.freeze({ botId: BOT_A, profileId: LOCAL_A })]),
+    })],
+    survivingBots: [{ botId: BOT_B }, { botId: BOT_C }],
+    modelActiveBotId: BOT_C,
+    anchorOutcome: Object.freeze({
+      deletedBotIds: Object.freeze([BOT_A]),
+      survivingBotIds: Object.freeze([BOT_B, BOT_C]),
+      activeBotId: BOT_B,
+    }),
+  });
+
+  assert.deepEqual(await value.coordinator.deleteBots([BOT_A]), {
+    deletedBotIds: [BOT_A],
+    survivingBotIds: [BOT_B, BOT_C],
+    activeBotId: BOT_C,
+  });
+  assert.equal(value.order.includes(`models:${BOT_A}:${BOT_C}`), true);
+});
+
+test("pending deletion replay uses the surviving durable model-selected bot as cleanup successor", async () => {
+  const value = fixture({
+    receipts: [pendingReceipt({
+      botIds: Object.freeze([BOT_A]),
+      localProfiles: Object.freeze([]),
+    })],
+    survivingBots: [{ botId: BOT_B }, { botId: BOT_C }],
+    modelActiveBotId: BOT_C,
+  });
+
+  assert.deepEqual(await value.coordinator.reconcilePending(), {
+    completedDeletionIds: [DELETION_A],
+    pendingDeletionIds: [],
+  });
+  assert.equal(value.order.includes(`models:${BOT_A}:${BOT_C}`), true);
 });
 
 test("a pre-anchor failure reaches no cleanup while a post-anchor failure returns committed success", async () => {

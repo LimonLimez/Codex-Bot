@@ -226,6 +226,7 @@ class BotDeletionCoordinator {
       || !computerTargetRouter || typeof computerTargetRouter.deleteBot !== "function"
       || !computerBoundary || typeof computerBoundary.deleteBot !== "function"
       || !modelSelectionStore || typeof modelSelectionStore.deleteBots !== "function"
+      || typeof modelSelectionStore.readActiveBotId !== "function"
       || typeof conversationBindingsFile !== "string" || !path.isAbsolute(conversationBindingsFile)
       || conversationBindingsFile.includes("\0")
       || typeof deleteConversationBindings !== "function") {
@@ -291,13 +292,20 @@ class BotDeletionCoordinator {
   async #deleteLive(botIds) {
     let result;
     let receiptState;
+    let preferredActiveBotId;
+    try { preferredActiveBotId = await this.#readActiveBotId(); }
+    catch { throw coordinatorError("Active bot selection is unavailable."); }
     try {
-      result = normalizeOutcome(await this.#botRuntimeController.deleteBots([...botIds]), botIds);
+      result = normalizeOutcome(await this.#botRuntimeController.deleteBots([...botIds], {
+        preferredActiveBotId,
+      }), botIds);
     } catch {
       try { receiptState = await this.#findReceipt(botIds); }
       catch { throw coordinatorError("Bot deletion could not be committed."); }
       try {
-        result = normalizeOutcome(await this.#botRuntimeController.deleteBots([...botIds]), botIds);
+        result = normalizeOutcome(await this.#botRuntimeController.deleteBots([...botIds], {
+          preferredActiveBotId,
+        }), botIds);
       } catch {
         throw coordinatorError("Committed bot deletion could not be finalized.");
       }
@@ -306,12 +314,28 @@ class BotDeletionCoordinator {
     if (result.survivingBotIds.some((botId) => receiptState.pendingBotIds.has(botId))) {
       throw coordinatorError("Bot deletion successor is unavailable.");
     }
+    const cleanupSuccessor = preferredActiveBotId !== null
+      && result.survivingBotIds.includes(preferredActiveBotId)
+      ? preferredActiveBotId
+      : result.activeBotId;
     try {
-      await this.#cleanupReceipt(receiptState.receipt, result.activeBotId);
+      await this.#cleanupReceipt(receiptState.receipt, cleanupSuccessor);
     } catch {
       // The bot is already durably absent. Its tombstone remains for exact replay.
     }
-    return result;
+    let selectedActiveBotId = cleanupSuccessor;
+    try {
+      const current = await this.#readActiveBotId();
+      if (current !== null && result.survivingBotIds.includes(current)) selectedActiveBotId = current;
+      else if (result.survivingBotIds.length === 0) selectedActiveBotId = null;
+    } catch {
+      // The anchored result remains the last validated successor if selection cannot be re-read.
+    }
+    return normalizeOutcome({
+      deletedBotIds: [...result.deletedBotIds],
+      survivingBotIds: [...result.survivingBotIds],
+      activeBotId: selectedActiveBotId,
+    }, botIds);
   }
 
   async #reconcile() {
@@ -328,7 +352,12 @@ class BotDeletionCoordinator {
     if (survivingBotIds.some((botId) => pendingBotIds.has(botId))) {
       return summary([], receipts.map((receipt) => receipt.deletionId));
     }
-    const successorBotId = survivingBotIds[0] ?? null;
+    let selectedActiveBotId;
+    try { selectedActiveBotId = await this.#readActiveBotId(); }
+    catch { return summary([], receipts.map((receipt) => receipt.deletionId)); }
+    const successorBotId = selectedActiveBotId !== null && survivingBotIds.includes(selectedActiveBotId)
+      ? selectedActiveBotId
+      : (survivingBotIds[0] ?? null);
     const completed = [];
     const pending = [];
     for (const receipt of receipts) {
@@ -352,6 +381,11 @@ class BotDeletionCoordinator {
       receipt: matches[0],
       pendingBotIds: new Set(receipts.flatMap((receipt) => receipt.botIds)),
     };
+  }
+
+  async #readActiveBotId() {
+    const value = await this.#modelSelectionStore.readActiveBotId();
+    return value === null ? null : normalizeBotId(value);
   }
 
   #cleanupReceipt(receipt, successorBotId) {

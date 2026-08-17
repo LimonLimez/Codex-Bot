@@ -139,6 +139,51 @@ test("standalone IPC rejects hostile controller results before renderer publicat
   installed.dispose();
 });
 
+test("standalone IPC rejects a request when its exact main frame navigates during readiness", async () => {
+  const { STANDALONE_IPC_CHANNELS, installStandaloneConversationIpc } = require(ipcPath);
+  const handlers = new Map();
+  const readiness = deferred();
+  let calls = 0;
+  const originalFrame = {
+    processId: 17,
+    routingId: 1,
+    isDestroyed: () => false,
+  };
+  const sender = {
+    mainFrame: originalFrame,
+    isDestroyed: () => false,
+    send() {},
+  };
+  const window = { isDestroyed: () => false, webContents: sender };
+  class Controller extends EventEmitter {
+    list() { calls += 1; return []; }
+    create() { calls += 1; throw new Error("must remain fenced"); }
+    read() { calls += 1; throw new Error("must remain fenced"); }
+    send() { calls += 1; throw new Error("must remain fenced"); }
+    cancel() { calls += 1; throw new Error("must remain fenced"); }
+  }
+  const installed = installStandaloneConversationIpc({
+    controller: new Controller(),
+    ready: readiness.promise,
+    electron: {
+      ipcMain: {
+        handle(channel, handler) { handlers.set(channel, handler); },
+        removeHandler(channel) { handlers.delete(channel); },
+      },
+      BrowserWindow: { fromWebContents: () => window, getAllWindows: () => [window] },
+    },
+  });
+  const event = { sender, senderFrame: originalFrame };
+  const pending = handlers.get(STANDALONE_IPC_CHANNELS.list)(event, BOT_A);
+  const rejected = assert.rejects(pending, { code: "OPENBOT_CONVERSATION_OPERATION_FAILED" });
+  await new Promise((resolve) => setImmediate(resolve));
+  sender.mainFrame = { processId: 17, routingId: 2, isDestroyed: () => false };
+  readiness.resolve();
+  await rejected;
+  assert.equal(calls, 0);
+  await installed.dispose();
+});
+
 test("destroying one sender awaits cancellation of only its exact owned invocation", async () => {
   const { STANDALONE_IPC_CHANNELS, installStandaloneConversationIpc } = require(ipcPath);
   const handlers = new Map();

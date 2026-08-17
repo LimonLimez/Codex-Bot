@@ -13,7 +13,9 @@ const { CodexDirectInferenceTransport } = require("./codex-direct-inference-tran
 const { CLIProxyInferenceTransport } = require("./cliproxy-inference-transport.cjs");
 const { InferenceBridgeServer } = require("./inference-bridge-server.cjs");
 const { InferenceProviderRouter } = require("./inference-provider-router.cjs");
+const { BotDeletionCoordinator } = require("./bot-deletion-coordinator.cjs");
 const { BOT_ID, ModelSelectionStore } = require("./model-selection-store.cjs");
+const { deleteConversationBindings } = require("../bridge/runtime-config.cjs");
 const {
   acceptanceAppDataIntent,
   prepareOpenBotUserData,
@@ -731,6 +733,32 @@ function createStandaloneComputerComposition({
   });
 }
 
+function createBotDeletionCoordinator({
+  controller,
+  store,
+  conversations,
+  computerTargetRouter,
+  computerBoundary,
+  selectionStore,
+  conversationBindingsPath,
+  CoordinatorClass = BotDeletionCoordinator,
+  deleteBindings = deleteConversationBindings,
+} = {}) {
+  if (typeof CoordinatorClass !== "function" || typeof deleteBindings !== "function") {
+    throw sanitizedFailure();
+  }
+  return new CoordinatorClass({
+    botRuntimeController: controller,
+    botStore: store,
+    conversationController: conversations,
+    computerTargetRouter,
+    computerBoundary,
+    modelSelectionStore: selectionStore,
+    conversationBindingsFile: conversationBindingsPath,
+    deleteConversationBindings: deleteBindings,
+  });
+}
+
 function productionDependencies(electron) {
   prepareProductionUserData(electron);
   const stateRoot = path.join(electron.app.getPath("userData"), "codex-bot");
@@ -758,10 +786,21 @@ function productionDependencies(electron) {
     toolBridge: computer.toolBridge,
     computerTargetRouter: computer.targetRouter,
   });
-  const nativeCoordinatorFactory = ({ onSelectAgent }) => new OpenBotNativeCoordinator({
+  const botDeletionCoordinator = createBotDeletionCoordinator({
+    controller,
+    store: botStore,
+    conversations: inferenceBridge.conversations,
+    computerTargetRouter: computer.targetRouter,
+    computerBoundary: computer.boundary,
+    selectionStore,
+    conversationBindingsPath,
+  });
+  const nativeCoordinatorFactory = ({ onSelectAgent, deleteBots, readActiveAgentId }) => new OpenBotNativeCoordinator({
     botRuntimeController: controller,
     conversationController: inferenceBridge.conversations,
+    deleteBots,
     onSelectAgent,
+    readActiveAgentId,
   });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
@@ -770,9 +809,9 @@ function productionDependencies(electron) {
   delete process.env.CODEX_BOT_CLIPROXY_TOKEN;
   delete process.env.CODEX_BOT_INFERENCE_ENDPOINT;
   delete process.env.CODEX_BOT_INFERENCE_CAPABILITY;
-  void controller.reconcile().catch(() => {});
   return {
     accountController,
+    botDeletionCoordinator,
     codexManager,
     computerBoundary: computer.boundary,
     computerTargetRouter: computer.targetRouter,
@@ -825,10 +864,12 @@ function installDesktopRuntime(electron, injected = {}) {
   const standaloneConversations = dependencies.standaloneConversations
     || inferenceBridge?.conversations
     || null;
-  const nativeCoordinator = dependencies.nativeCoordinator
-    || (typeof dependencies.nativeCoordinatorFactory === "function"
-      ? dependencies.nativeCoordinatorFactory({ onSelectAgent: selectNativeAgent })
-      : null);
+  const botDeletionCoordinator = dependencies.botDeletionCoordinator || null;
+  if (botDeletionCoordinator !== null
+    && (!botDeletionCoordinator || typeof botDeletionCoordinator !== "object"
+      || typeof botDeletionCoordinator.reconcilePending !== "function"
+      || typeof botDeletionCoordinator.deleteBots !== "function"
+      || typeof botDeletionCoordinator.dispose !== "function")) throw sanitizedFailure();
   const computerBoundary = dependencies.computerBoundary || Object.freeze({
     async selectMode() { throw sanitizedComputerFailure(); },
     async read() { throw sanitizedComputerFailure(); },
@@ -851,21 +892,57 @@ function installDesktopRuntime(electron, injected = {}) {
   let quitHandoffSettled = false;
   let quitDeadlineHandle = null;
   let disposed = false;
+  let activeIdentityMutation = Promise.resolve();
+  const startupReady = botDeletionCoordinator === null
+    ? Promise.resolve()
+    : Promise.resolve().then(() => botDeletionCoordinator.reconcilePending());
+  void startupReady.catch(() => {});
+  const nativeCoordinator = dependencies.nativeCoordinator
+    || (typeof dependencies.nativeCoordinatorFactory === "function"
+      ? dependencies.nativeCoordinatorFactory({
+        onSelectAgent: selectNativeAgent,
+        deleteBots: botDeletionCoordinator === null ? null : deleteNativeBots,
+        readActiveAgentId: typeof selectionStore.readActiveBotId === "function"
+          ? () => selectionStore.readActiveBotId()
+          : null,
+      })
+      : null);
   const standaloneIpc = standaloneConversations
-    ? installStandaloneConversationIpc({ electron, controller: standaloneConversations })
+    ? installStandaloneConversationIpc({
+      electron,
+      controller: standaloneConversations,
+      ready: startupReady,
+    })
     : null;
   const localFrameIpc = localDesktopManager
-    ? installLocalDesktopFrameIpc({ electron, manager: localDesktopManager, computerBoundary })
+    ? installLocalDesktopFrameIpc({
+      electron,
+      manager: localDesktopManager,
+      computerBoundary,
+      ready: startupReady,
+    })
     : null;
   const nativeCoordinatorIpc = nativeCoordinator
-    ? installOpenBotNativeCoordinatorIpc({ electron, coordinator: nativeCoordinator, localDesktopManager })
+    ? installOpenBotNativeCoordinatorIpc({
+      electron,
+      coordinator: nativeCoordinator,
+      localDesktopManager,
+      ready: startupReady,
+    })
     : null;
   void accountController.start().catch(() => {});
+  void startupReady.then(() => {
+    if (disposed || typeof controller.reconcile !== "function") return;
+    return controller.reconcile();
+  }).catch(() => {});
   if (inferenceBridge && typeof inferenceBridge.start === "function") {
-    void Promise.resolve()
-      .then(() => inferenceBridge.start())
+    void startupReady
+      .then(() => {
+        if (disposed) return null;
+        return inferenceBridge.start();
+      })
       .then((session) => {
-        if (disposed) return;
+        if (disposed || session === null) return;
         setInferenceBridgeEnvironment(session);
       })
       .catch(() => {
@@ -900,17 +977,44 @@ function installDesktopRuntime(electron, injected = {}) {
     }
   }
 
-  async function selectNativeAgent(botId) {
-    if (disposed || typeof botId !== "string") throw sanitizedFailure();
-    const bot = await controller.readBot(botId);
-    if (disposed || !bot || bot.botId !== botId || typeof selectionStore.selectBot !== "function") {
+  function serializeActiveIdentityMutation(operation) {
+    const current = activeIdentityMutation.then(operation, operation);
+    activeIdentityMutation = current.catch(() => {});
+    return current;
+  }
+
+  function selectNativeAgent(botId) {
+    return serializeActiveIdentityMutation(async () => {
+      if (disposed || typeof botId !== "string") throw sanitizedFailure();
+      const bot = await controller.readBot(botId);
+      if (disposed || !bot || bot.botId !== botId || typeof selectionStore.selectBot !== "function") {
+        throw sanitizedFailure();
+      }
+      await currentModelSelection(botId);
+      if (disposed) throw sanitizedFailure();
+      await selectionStore.selectBot(botId);
+      if (disposed) throw sanitizedFailure();
+      broadcastRuntimeEvent(Object.freeze({ type: "active-bot-changed", botId }));
+    });
+  }
+
+  async function deleteNativeBots(botIds) {
+    try {
+      await startupReady;
+      return await serializeActiveIdentityMutation(async () => {
+        if (disposed || botDeletionCoordinator === null) throw sanitizedFailure();
+        const outcome = await botDeletionCoordinator.deleteBots(botIds);
+        if (typeof outcome.activeBotId === "string") {
+          broadcastRuntimeEvent(Object.freeze({
+            type: "active-bot-changed",
+            botId: outcome.activeBotId,
+          }));
+        }
+        return outcome;
+      });
+    } catch {
       throw sanitizedFailure();
     }
-    await currentModelSelection(botId);
-    if (disposed) throw sanitizedFailure();
-    await selectionStore.selectBot(botId);
-    if (disposed) throw sanitizedFailure();
-    broadcastRuntimeEvent(Object.freeze({ type: "active-bot-changed", botId }));
   }
 
   function broadcastChannel(channel, value) {
@@ -934,10 +1038,47 @@ function installDesktopRuntime(electron, injected = {}) {
     } catch { return false; }
   }
 
+  function sameMainFrame(left, right) {
+    try {
+      const leftProcessId = left?.processId;
+      const leftRoutingId = left?.routingId;
+      const rightProcessId = right?.processId;
+      const rightRoutingId = right?.routingId;
+      return Number.isSafeInteger(leftProcessId) && leftProcessId >= 0
+        && Number.isSafeInteger(leftRoutingId) && leftRoutingId >= 0
+        && Number.isSafeInteger(rightProcessId) && rightProcessId >= 0
+        && Number.isSafeInteger(rightRoutingId) && rightRoutingId >= 0
+        && leftProcessId === rightProcessId && leftRoutingId === rightRoutingId;
+    } catch { return false; }
+  }
+
+  function currentWindowView(event) {
+    try {
+      const sender = event?.sender;
+      const senderFrame = event?.senderFrame;
+      if (!currentWindowSender(event) || !senderFrame || !sameMainFrame(sender?.mainFrame, senderFrame)
+        || typeof senderFrame.isDestroyed !== "function" || senderFrame.isDestroyed()) return null;
+      return Object.freeze({ sender, senderFrame });
+    } catch { return null; }
+  }
+
   function handle(channel, operation, { requireCurrentWindow = false, computer = false } = {}) {
     electron.ipcMain.handle(channel, async (event, ...args) => {
       if (disposed) throw computer ? sanitizedComputerFailure() : sanitizedFailure();
+      const view = botDeletionCoordinator === null ? null : currentWindowView(event);
+      if (botDeletionCoordinator !== null && !view) {
+        throw computer ? sanitizedComputerFailure() : sanitizedFailure();
+      }
       try {
+        await startupReady;
+        if (disposed) throw computer ? sanitizedComputerFailure() : sanitizedFailure();
+        if (view) {
+          const current = currentWindowView(event);
+          if (!current || current.sender !== view.sender
+            || !sameMainFrame(current.senderFrame, view.senderFrame)) {
+            throw computer ? sanitizedComputerFailure() : sanitizedFailure();
+          }
+        }
         if (requireCurrentWindow && !currentWindowSender(event)) throw sanitizedComputerFailure();
         const result = await operation(...args);
         return computer ? computerPublic(result) : result;
@@ -1148,35 +1289,41 @@ function installDesktopRuntime(electron, injected = {}) {
     return bot;
   });
   handle(IPC_CHANNELS.retryRuntime, (botId) => controller.retryRuntime(botId));
-  handle(IPC_CHANNELS.selectBot, async (botId) => {
+  handle(IPC_CHANNELS.selectBot, (botId) => serializeActiveIdentityMutation(async () => {
     const bot = await controller.readBot(botId);
-    if (!bot) throw sanitizedFailure();
+    if (!bot || bot.botId !== botId) throw sanitizedFailure();
     const selection = await currentModelSelection(bot.botId);
     await selectionStore.selectBot(bot.botId);
     return selection;
-  });
-  handle(IPC_CHANNELS.readModel, (botId) => currentModelSelection(botId));
-  handle(IPC_CHANNELS.selectModel, async (rawSelection) => {
+  }));
+  handle(IPC_CHANNELS.readModel, (botId) => serializeActiveIdentityMutation(async () => {
+    const bot = await controller.readBot(botId);
+    if (!bot || bot.botId !== botId) throw sanitizedFailure();
+    return currentModelSelection(bot.botId);
+  }));
+  handle(IPC_CHANNELS.selectModel, (rawSelection) => {
     const requested = selectionRequest(rawSelection);
-    const selectWithinBarrier = async () => {
-      const previousReceipt = profileSetupReceipts.get(requested.botId);
-      const pendingReceipt = Object.freeze({
-        renamed: previousReceipt?.renamed === true,
-        profiled: previousReceipt?.profiled === true,
-        model: null,
-        catalogGeneration: null,
-      });
-      profileSetupReceipts.set(requested.botId, pendingReceipt);
-      const bot = await controller.readBot(requested.botId);
-      if (!bot) throw sanitizedFailure();
-      const catalog = accountController.catalogState();
-      const selected = await selectionStore.writeNext(resolveModelSelection(requested, catalog));
-      await markModelForSetup(bot, selected, catalog, pendingReceipt);
-      return selected;
-    };
-    return typeof standaloneConversations?.withModelSelectionMutation === "function"
-      ? standaloneConversations.withModelSelectionMutation(requested.botId, selectWithinBarrier)
-      : selectWithinBarrier();
+    return serializeActiveIdentityMutation(async () => {
+      const selectWithinBarrier = async () => {
+        const previousReceipt = profileSetupReceipts.get(requested.botId);
+        const pendingReceipt = Object.freeze({
+          renamed: previousReceipt?.renamed === true,
+          profiled: previousReceipt?.profiled === true,
+          model: null,
+          catalogGeneration: null,
+        });
+        profileSetupReceipts.set(requested.botId, pendingReceipt);
+        const bot = await controller.readBot(requested.botId);
+        if (!bot || bot.botId !== requested.botId) throw sanitizedFailure();
+        const catalog = accountController.catalogState();
+        const selected = await selectionStore.writeNext(resolveModelSelection(requested, catalog));
+        await markModelForSetup(bot, selected, catalog, pendingReceipt);
+        return selected;
+      };
+      return typeof standaloneConversations?.withModelSelectionMutation === "function"
+        ? standaloneConversations.withModelSelectionMutation(requested.botId, selectWithinBarrier)
+        : selectWithinBarrier();
+    });
   });
   handle(IPC_CHANNELS.computerSelectMode, async (value) => {
     const request = computerModeRequest(value);
@@ -1274,14 +1421,28 @@ function installDesktopRuntime(electron, injected = {}) {
       capture(() => { delete process.env.CODEX_BOT_INFERENCE_ENDPOINT; });
       capture(() => { delete process.env.CODEX_BOT_INFERENCE_CAPABILITY; });
       capture(() => standaloneIpc?.dispose?.());
-      capture(() => standaloneConversations?.dispose?.());
-      capture(() => computerBoundary.dispose?.());
-      capture(() => computerTargetRouter?.dispose?.());
-      capture(() => accountController.dispose());
-      capture(() => inferenceBridge?.dispose?.());
-      capture(() => codexManager.stop());
-      capture(() => sidecarManager.stop());
-      capture(() => controller.dispose());
+      const disposeOwners = () => {
+        const owners = [];
+        const captureOwner = (effect) => {
+          try { owners.push(Promise.resolve(effect()).catch(() => {})); } catch {}
+        };
+        captureOwner(() => standaloneConversations?.dispose?.());
+        captureOwner(() => computerBoundary.dispose?.());
+        captureOwner(() => computerTargetRouter?.dispose?.());
+        captureOwner(() => accountController.dispose());
+        captureOwner(() => inferenceBridge?.dispose?.());
+        captureOwner(() => codexManager.stop());
+        captureOwner(() => sidecarManager.stop());
+        captureOwner(() => controller.dispose());
+        return Promise.all(owners).then(() => undefined);
+      };
+      if (botDeletionCoordinator === null) capture(disposeOwners);
+      else {
+        capture(async () => {
+          try { await botDeletionCoordinator.dispose(); } catch {}
+          await disposeOwners();
+        });
+      }
       const finishDispose = () => {
         try {
           disposeComplete = true;
@@ -1351,6 +1512,7 @@ module.exports = {
   COMPUTER_PERMISSION_CHANNEL,
   IPC_CHANNELS,
   RUNTIME_EVENT_CHANNEL,
+  createBotDeletionCoordinator,
   createDirectCodexManager,
   createInferenceBridgeRuntime,
   createLazySidecarManager,
