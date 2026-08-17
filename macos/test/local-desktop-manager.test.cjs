@@ -243,6 +243,7 @@ async function fixture(t, overrides = {}) {
     request: mock.fn(async (_request, effect) => effect(Buffer.from("private-bookmark"))),
     cancelTask: mock.fn(),
     cancelBot: mock.fn(),
+    deleteBot: mock.fn(async () => {}),
   };
   const { LocalDesktopManager } = require(managerPath);
   const manager = new LocalDesktopManager({
@@ -465,6 +466,7 @@ test("disposing a task removes its exact pending consent and leaves sibling cons
       pending.reject(error);
     }),
     cancelBot: mock.fn(),
+    deleteBot: mock.fn(async () => {}),
   };
   const { helpers, manager } = await fixture(t, { permissionBroker });
   const session = await manager.open(localComputer());
@@ -606,8 +608,8 @@ test("close delete and disposal remove only exact bot resources and reject hosti
   assert.equal(windows[1].destroyed, false);
   assert.equal(helpers[0].disposed, true);
   await manager.deleteBot(BOT_A);
-  assert.equal(permissionBroker.cancelBot.mock.callCount(), 2);
-  assert.deepEqual(permissionBroker.cancelBot.mock.calls.map((call) => call.arguments), [[BOT_A], [BOT_A]]);
+  assert.deepEqual(permissionBroker.cancelBot.mock.calls.map((call) => call.arguments), [[BOT_A]]);
+  assert.deepEqual(permissionBroker.deleteBot.mock.calls.map((call) => call.arguments), [[BOT_A]]);
   assert.equal(sessions.get(a.partition).clearStorageData.mock.callCount(), 1);
   await assert.rejects(fs.stat(path.join(root, "openbot-local", LOCAL_A.slice("local-".length))), /ENOENT/);
   assert.equal((await fs.stat(path.join(root, "openbot-local", LOCAL_B.slice("local-".length)))).isDirectory(), true);
@@ -616,4 +618,414 @@ test("close delete and disposal remove only exact bot resources and reject hosti
   assert.equal(windows[1].destroyed, true);
   assert.equal(helpers[1].disposed, true);
   await assert.rejects(manager.capture(identity(b)), /disposed/i);
+});
+
+test("deleteBot removes an exact validated profile after restart and never touches its sibling", async (t) => {
+  const { manager, permissionBroker, root, sessions } = await fixture(t);
+  const localRoot = path.join(root, "openbot-local");
+  const profileA = path.join(localRoot, LOCAL_A.slice("local-".length));
+  const profileB = path.join(localRoot, LOCAL_B.slice("local-".length));
+  await fs.mkdir(path.join(profileA, "workspace"), { recursive: true, mode: 0o700 });
+  await fs.mkdir(path.join(profileB, "workspace"), { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(profileA, "private.txt"), "private-a");
+  await fs.writeFile(path.join(profileB, "keep.txt"), "keep-b");
+
+  await manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A });
+
+  assert.deepEqual(permissionBroker.deleteBot.mock.calls.map((call) => call.arguments), [[BOT_A]]);
+  const partitionA = `persist:openbot-local-${LOCAL_A.slice("local-".length)}`;
+  assert.equal(sessions.get(partitionA).clearStorageData.mock.callCount(), 1);
+  await assert.rejects(fs.lstat(profileA), /ENOENT/);
+  assert.equal((await fs.lstat(profileB)).isDirectory(), true);
+  assert.equal(await fs.readFile(path.join(profileB, "keep.txt"), "utf8"), "keep-b");
+});
+
+test("deleteBot synchronously fences and coalesces while draining live work without touching another bot", async (t) => {
+  const deletionEntered = deferred();
+  const releaseDeletion = deferred();
+  const permissionBroker = {
+    request: mock.fn(async (_request, effect) => effect(Buffer.from("private-bookmark"))),
+    cancelTask: mock.fn(),
+    cancelBot: mock.fn(),
+    deleteBot: mock.fn(async (botId) => {
+      assert.equal(botId, BOT_A);
+      deletionEntered.resolve();
+      await releaseDeletion.promise;
+    }),
+  };
+  t.after(() => releaseDeletion.resolve());
+  const { helpers, manager, root, sessions, windows } = await fixture(t, { permissionBroker });
+  const a = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  const b = await manager.open(localComputer(BOT_B, LOCAL_B, 1));
+  await manager.navigate({ ...identity(a), url: "https://example.com/a" });
+  await manager.navigate({ ...identity(b), url: "https://example.com/b" });
+  const captureGate = deferred();
+  windows[0].webContents.capturePageImpl = () => captureGate.promise;
+  const lateCapture = manager.capture(identity(a)).catch((error) => error);
+  const lateRun = manager.run(action(a)).catch((error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+  const requestId = helpers[0].messages[0].requestId;
+  const results = [];
+  const frames = [];
+  manager.on("result", (value) => results.push(value));
+  manager.on("frame", (value) => frames.push(value));
+
+  const request = Object.freeze({ botId: BOT_A, localProfileId: LOCAL_A });
+  const deletion = manager.deleteBot(request);
+  const sameDeletion = manager.deleteBot({ ...request });
+  assert.equal(sameDeletion, deletion);
+  assert.equal(manager.deleteBot(BOT_A), deletion, "legacy exact-bot retry must share the fence");
+  await assert.rejects(
+    manager.open(localComputer(BOT_A, LOCAL_A, 2)),
+    (error) => error?.code === "OPENBOT_LOCAL_BOT_DELETING",
+  );
+  await assert.rejects(
+    manager.capture(identity(a)),
+    (error) => error?.code === "OPENBOT_LOCAL_BOT_DELETING",
+  );
+
+  for (let attempt = 0; attempt < 50 && helpers[0].cancellations.length === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(helpers[0].cancellations, [requestId]);
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 0);
+  helpers[0].reply({
+    requestId,
+    ok: true,
+    value: { exitCode: 0, stdout: "late-private-result", stderr: "" },
+  });
+  await deletionEntered.promise;
+  const runFailure = await lateRun;
+  assert.match(runFailure.code, /CANCELLED|DELETING|STALE/);
+  assert.deepEqual(results, []);
+  releaseDeletion.resolve();
+  await Promise.all([deletion, sameDeletion]);
+  assert.equal(manager.deleteBot({ ...request }), deletion);
+
+  captureGate.resolve(nativeImage({ bytes: Buffer.from("late-private-frame") }));
+  const captureFailure = await lateCapture;
+  assert.match(captureFailure.code, /DELETING|STALE/);
+  assert.deepEqual(frames, []);
+  assert.equal(windows[0].destroyed, true);
+  assert.equal(windows[1].destroyed, false);
+  assert.equal(helpers[0].disposed, true);
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 1);
+  assert.equal(sessions.get(a.partition).clearStorageData.mock.callCount(), 1);
+  await assert.rejects(
+    fs.lstat(path.join(root, "openbot-local", LOCAL_A.slice("local-".length))),
+    /ENOENT/,
+  );
+
+  const frameB = await manager.capture(identity(b));
+  assert.equal(frameB.botId, BOT_B);
+  assert.equal(frames.length, 1);
+});
+
+test("deleteBot neutralizes a late open before it can publish or retain private resources", async (t) => {
+  const helperEntered = deferred();
+  const releaseHelper = deferred();
+  const createdHelpers = [];
+  t.after(() => releaseHelper.resolve());
+  const { manager, permissionBroker, root, sessions, windows } = await fixture(t, {
+    helperFactory: async () => {
+      const helper = new FakeHelperTransport();
+      createdHelpers.push(helper);
+      helperEntered.resolve();
+      await releaseHelper.promise;
+      return helper;
+    },
+  });
+  const opening = manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
+  await helperEntered.promise;
+
+  const deletion = manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A });
+  releaseHelper.resolve();
+  const openFailure = await opening;
+  assert.equal(openFailure.code, "OPENBOT_LOCAL_BOT_DELETING");
+  await deletion;
+
+  assert.equal(createdHelpers[0].disposed, true);
+  assert.equal(windows[0].destroyed, true);
+  assert.deepEqual(permissionBroker.deleteBot.mock.calls.map((call) => call.arguments), [[BOT_A]]);
+  const partition = `persist:openbot-local-${LOCAL_A.slice("local-".length)}`;
+  assert.equal(sessions.get(partition).clearStorageData.mock.callCount(), 1);
+  await assert.rejects(
+    fs.lstat(path.join(root, "openbot-local", LOCAL_A.slice("local-".length))),
+    /ENOENT/,
+  );
+  await assert.rejects(
+    manager.open(localComputer(BOT_A, LOCAL_A, 2)),
+    (error) => error?.code === "OPENBOT_LOCAL_BOT_DELETING",
+  );
+});
+
+test("deleteBot refuses mismatched cached identities and hostile exact requests before cleanup", async (t) => {
+  const { manager, permissionBroker, root, sessions } = await fixture(t);
+  const cached = await manager.open(localComputer(BOT_A, LOCAL_B, 1));
+  const cachedPath = path.join(root, "openbot-local", LOCAL_B.slice("local-".length));
+
+  await assert.rejects(
+    manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A }),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_REFUSED",
+  );
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 0);
+  assert.equal(sessions.get(cached.partition).clearStorageData.mock.callCount(), 0);
+  assert.equal((await fs.lstat(cachedPath)).isDirectory(), true);
+  await assert.rejects(
+    manager.capture(identity(cached)),
+    (error) => error?.code === "OPENBOT_LOCAL_BOT_DELETING",
+  );
+
+  let getterCalls = 0;
+  const accessor = { botId: BOT_B };
+  Object.defineProperty(accessor, "localProfileId", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return LOCAL_B;
+    },
+  });
+  const hostile = new Proxy({}, { ownKeys() { throw new Error("private-profile-path"); } });
+  let unsupportedOwnKeysCalls = 0;
+  const unsupported = {
+    botId: BOT_B,
+    localProfileId: LOCAL_B,
+    extra: new Proxy({}, {
+      ownKeys() {
+        unsupportedOwnKeysCalls += 1;
+        throw new Error("unsupported nested data must not be traversed");
+      },
+    }),
+  };
+  for (const value of [
+    { botId: BOT_B, localProfileId: LOCAL_B, extra: true },
+    unsupported,
+    accessor,
+    hostile,
+  ]) {
+    let rejection;
+    assert.doesNotThrow(() => { rejection = manager.deleteBot(value); });
+    assert.equal(typeof rejection?.then, "function");
+    await assert.rejects(rejection, /plain data|unsupported/i);
+  }
+  assert.equal(getterCalls, 0);
+  assert.equal(unsupportedOwnKeysCalls, 0);
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 0);
+});
+
+test("one bot cannot open or delete another bot's claimed local profile", async (t) => {
+  const { manager, permissionBroker, root, sessions, windows } = await fixture(t);
+  const b = await manager.open(localComputer(BOT_B, LOCAL_B, 1));
+  const profileB = path.join(root, "openbot-local", LOCAL_B.slice("local-".length));
+  await fs.writeFile(path.join(profileB, "keep.txt"), "keep-b");
+
+  await assert.rejects(
+    manager.open(localComputer(BOT_A, LOCAL_B, 1)),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_REFUSED",
+  );
+  await assert.rejects(
+    manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_B }),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_REFUSED",
+  );
+
+  assert.equal(windows[0].destroyed, false);
+  assert.equal(sessions.get(b.partition).clearStorageData.mock.callCount(), 0);
+  assert.equal(await fs.readFile(path.join(profileB, "keep.txt"), "utf8"), "keep-b");
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 0);
+  assert.equal(b.botId, BOT_B);
+});
+
+test("an exact cold-profile deletion claims ownership before any cross-bot open can race it", async (t) => {
+  const deletionEntered = deferred();
+  const releaseDeletion = deferred();
+  const permissionBroker = {
+    request: mock.fn(async (_request, effect) => effect(Buffer.from("private-bookmark"))),
+    cancelTask: mock.fn(),
+    cancelBot: mock.fn(),
+    deleteBot: mock.fn(async () => {
+      deletionEntered.resolve();
+      await releaseDeletion.promise;
+    }),
+  };
+  const { manager, root } = await fixture(t, { permissionBroker });
+  const profilePath = path.join(root, "openbot-local", LOCAL_A.slice("local-".length));
+  await fs.mkdir(path.join(profilePath, "workspace"), { recursive: true, mode: 0o700 });
+
+  const deletion = manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A });
+  await deletionEntered.promise;
+  const openingError = await manager.open(localComputer(BOT_B, LOCAL_A, 1))
+    .then(() => null, (error) => error);
+  releaseDeletion.resolve();
+  await deletion;
+
+  assert.equal(openingError?.code, "OPENBOT_LOCAL_CLEANUP_REFUSED");
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 1);
+  await assert.rejects(
+    manager.open(localComputer(BOT_B, LOCAL_A, 2)),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_REFUSED",
+  );
+});
+
+test("deleteBot refuses a symlink or non-directory and retries the exact fenced cleanup safely", async (t) => {
+  const { manager, permissionBroker, root, sessions } = await fixture(t);
+  const localRoot = path.join(root, "openbot-local");
+  const profileA = path.join(localRoot, LOCAL_A.slice("local-".length));
+  const profileB = path.join(localRoot, LOCAL_B.slice("local-".length));
+  const outside = path.join(root, "outside-profile");
+  await fs.mkdir(localRoot, { recursive: true, mode: 0o700 });
+  await fs.mkdir(outside, { mode: 0o700 });
+  await fs.writeFile(path.join(outside, "keep.txt"), "outside-keep");
+  await fs.symlink(outside, profileA);
+
+  const exact = { botId: BOT_A, localProfileId: LOCAL_A };
+  await assert.rejects(
+    manager.deleteBot(exact),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_REFUSED",
+  );
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 0);
+  assert.equal(await fs.readFile(path.join(outside, "keep.txt"), "utf8"), "outside-keep");
+  await assert.rejects(
+    manager.open(localComputer(BOT_A, LOCAL_A, 1)),
+    (error) => error?.code === "OPENBOT_LOCAL_BOT_DELETING",
+  );
+
+  await fs.unlink(profileA);
+  await fs.mkdir(path.join(profileA, "workspace"), { recursive: true, mode: 0o700 });
+  await manager.deleteBot(exact);
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 1);
+  const partitionA = `persist:openbot-local-${LOCAL_A.slice("local-".length)}`;
+  assert.equal(sessions.get(partitionA).clearStorageData.mock.callCount(), 1);
+  await assert.rejects(fs.lstat(profileA), /ENOENT/);
+  assert.equal(await fs.readFile(path.join(outside, "keep.txt"), "utf8"), "outside-keep");
+
+  await fs.writeFile(profileB, "not-a-directory");
+  await assert.rejects(
+    manager.deleteBot({ botId: BOT_B, localProfileId: LOCAL_B }),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_REFUSED",
+  );
+  assert.equal(await fs.readFile(profileB, "utf8"), "not-a-directory");
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 1);
+});
+
+test("deleteBot cannot follow a swapped local-profile root outside the private state directory", async (t) => {
+  const { manager, root } = await fixture(t);
+  const profileUuid = LOCAL_A.slice("local-".length);
+  const localRoot = path.join(root, "openbot-local");
+  const checkedRoot = path.join(root, "openbot-local-checked");
+  const profilePath = path.join(localRoot, profileUuid);
+  const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-local-outside-"));
+  const outsideProfile = path.join(outsideRoot, profileUuid);
+  await fs.mkdir(path.join(profilePath, "workspace"), { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(profilePath, "original.txt"), "original-profile");
+  await fs.mkdir(outsideProfile, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(outsideProfile, "outside.txt"), "outside-profile");
+
+  const originalLstat = fs.lstat;
+  let profileChecks = 0;
+  fs.lstat = async (...args) => {
+    const result = await originalLstat(...args);
+    if (args[0] === profilePath) {
+      profileChecks += 1;
+      if (profileChecks === 2) {
+        await fs.rename(localRoot, checkedRoot);
+        await fs.symlink(outsideRoot, localRoot);
+      }
+    }
+    return result;
+  };
+  t.after(async () => {
+    fs.lstat = originalLstat;
+    try { await fs.unlink(localRoot); } catch {}
+    try { await fs.rename(checkedRoot, localRoot); } catch {}
+    await fs.rm(outsideRoot, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A }),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_REFUSED",
+  );
+  assert.equal(profileChecks, 2);
+  assert.equal(await fs.readFile(path.join(outsideProfile, "outside.txt"), "utf8"), "outside-profile");
+  assert.equal(await fs.readFile(path.join(checkedRoot, profileUuid, "original.txt"), "utf8"), "original-profile");
+});
+
+test("a failed permission deletion stays fenced and the exact retry converges idempotently", async (t) => {
+  let attempts = 0;
+  const permissionBroker = {
+    request: mock.fn(async (_request, effect) => effect(Buffer.from("private-bookmark"))),
+    cancelTask: mock.fn(),
+    cancelBot: mock.fn(),
+    deleteBot: mock.fn(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("private-permission-store-path");
+    }),
+  };
+  const { manager, root, sessions } = await fixture(t, { permissionBroker });
+  const profile = path.join(root, "openbot-local", LOCAL_A.slice("local-".length));
+  await fs.mkdir(path.join(profile, "workspace"), { recursive: true, mode: 0o700 });
+  const exact = { botId: BOT_A, localProfileId: LOCAL_A };
+
+  await assert.rejects(
+    manager.deleteBot(exact),
+    (error) => error?.code === "OPENBOT_LOCAL_CLEANUP_FAILED"
+      && !/private-permission-store-path/.test(String(error)),
+  );
+  await assert.rejects(
+    manager.open(localComputer(BOT_A, LOCAL_A, 1)),
+    (error) => error?.code === "OPENBOT_LOCAL_BOT_DELETING",
+  );
+  assert.equal((await fs.lstat(profile)).isDirectory(), true);
+
+  const retry = manager.deleteBot(exact);
+  await retry;
+  assert.equal(manager.deleteBot({ ...exact }), retry);
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 2);
+  const partition = `persist:openbot-local-${LOCAL_A.slice("local-".length)}`;
+  assert.equal(sessions.get(partition).clearStorageData.mock.callCount(), 1);
+  await assert.rejects(fs.lstat(profile), /ENOENT/);
+});
+
+test("manager construction requires durable permission deletion support", async (t) => {
+  await assert.rejects(
+    fixture(t, {
+      permissionBroker: {
+        request: async () => {},
+        cancelTask() {},
+        cancelBot() {},
+      },
+    }),
+    /permission broker/i,
+  );
+});
+
+test("manager disposal awaits an already-started exact bot deletion and its profile cleanup", async (t) => {
+  const deletionEntered = deferred();
+  const releaseDeletion = deferred();
+  const permissionBroker = {
+    request: mock.fn(async (_request, effect) => effect(Buffer.from("private-bookmark"))),
+    cancelTask: mock.fn(),
+    cancelBot: mock.fn(),
+    deleteBot: mock.fn(async () => {
+      deletionEntered.resolve();
+      await releaseDeletion.promise;
+    }),
+  };
+  const { manager, root } = await fixture(t, { permissionBroker });
+  const profilePath = path.join(root, "openbot-local", LOCAL_A.slice("local-".length));
+  await fs.mkdir(path.join(profilePath, "workspace"), { recursive: true, mode: 0o700 });
+  const deletionOutcome = manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A })
+    .then(() => null, (error) => error);
+  await deletionEntered.promise;
+
+  let disposeSettled = false;
+  const disposing = manager.dispose().then(() => { disposeSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledBeforeDeletion = disposeSettled;
+  releaseDeletion.resolve();
+
+  assert.equal(await deletionOutcome, null);
+  await disposing;
+  assert.equal(settledBeforeDeletion, false);
+  await assert.rejects(fs.lstat(profilePath), /ENOENT/);
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 1);
 });

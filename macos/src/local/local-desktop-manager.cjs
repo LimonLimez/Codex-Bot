@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const childProcess = require("node:child_process");
 const fs = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
@@ -37,6 +38,7 @@ const ACTION_FIELDS = new Set([
 const IDENTITY_FIELDS = new Set(["botId", "targetId", "targetGeneration"]);
 const NAVIGATION_FIELDS = new Set([...IDENTITY_FIELDS, "url"]);
 const DISPOSE_TASK_FIELDS = new Set(["botId", "taskId"]);
+const DELETE_BOT_FIELDS = new Set(["botId", "localProfileId"]);
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const EXTERNAL_RESOURCE_CAPABILITIES = new Set([
   "filesystem.read",
@@ -46,6 +48,23 @@ const EXTERNAL_RESOURCE_CAPABILITIES = new Set([
   "screen.capture",
 ]);
 const SECURED_BROWSER_SESSIONS = new WeakSet();
+const PROFILE_REMOVE_SCRIPT = String.raw`set -efu
+expected_root=$1
+expected_profile=$2
+profile_name=$3
+case "$profile_name" in
+  ????????-????-????-????-????????????) ;;
+  *) exit 64 ;;
+esac
+case "$profile_name" in *[!0123456789abcdef-]*) exit 64 ;; esac
+actual_root=$(/usr/bin/stat -f '%d:%i:%FB' .) || exit 65
+[ "$actual_root" = "$expected_root" ] || exit 66
+[ ! -L "./$profile_name" ] || exit 67
+[ -d "./$profile_name" ] || exit 67
+actual_profile=$(/usr/bin/stat -f '%d:%i:%FB' "./$profile_name") || exit 67
+[ "$actual_profile" = "$expected_profile" ] || exit 68
+exec /bin/rm -Rfx "./$profile_name"`;
+const PROFILE_REMOVE_REFUSAL_CODES = new Set([64, 66, 67, 68]);
 
 class LocalDesktopError extends Error {
   constructor(message, code) {
@@ -225,6 +244,97 @@ function normalizeDisposeTask(value) {
   return { botId: normalizeBotId(input.botId), taskId: input.taskId };
 }
 
+function normalizeDeleteBot(value) {
+  if (typeof value === "string") {
+    return { botId: normalizeBotId(value), localProfileId: null, profileUuid: null, legacy: true };
+  }
+  let array;
+  let prototype;
+  let descriptors;
+  try {
+    array = Array.isArray(value);
+    if (value && typeof value === "object" && !array) {
+      prototype = Object.getPrototypeOf(value);
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    }
+  } catch {
+    throw new TypeError("Local Desktop deletion must contain plain data values only.");
+  }
+  if (!value || typeof value !== "object" || array
+    || (prototype !== Object.prototype && prototype !== null)) {
+    throw new TypeError("Local Desktop deletion must be a plain object.");
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new TypeError("Local Desktop deletion cannot contain symbols.");
+  }
+  for (const key of keys) {
+    if (DANGEROUS_KEYS.has(key) || !DELETE_BOT_FIELDS.has(key)) {
+      throw new Error("Local Desktop deletion contains an unsupported field.");
+    }
+  }
+  for (const key of DELETE_BOT_FIELDS) {
+    if (!hasOwn(descriptors, key)) throw new Error(`Local Desktop deletion is missing ${key}.`);
+    if (!("value" in descriptors[key])) {
+      throw new TypeError("Local Desktop deletion must contain plain data values only.");
+    }
+  }
+  const target = normalizeTargetId(descriptors.localProfileId.value);
+  return {
+    botId: normalizeBotId(descriptors.botId.value),
+    localProfileId: target.targetId,
+    profileUuid: target.uuid,
+    legacy: false,
+  };
+}
+
+function botDeletingError() {
+  return desktopError("Local Desktop data for this bot is being deleted.", "OPENBOT_LOCAL_BOT_DELETING");
+}
+
+function cleanupRefusedError() {
+  return desktopError("Local profile cleanup was refused.", "OPENBOT_LOCAL_CLEANUP_REFUSED");
+}
+
+function cleanupFailedError() {
+  return desktopError("Local profile cleanup failed.", "OPENBOT_LOCAL_CLEANUP_FAILED");
+}
+
+function directoryIdentity(stat) {
+  const seconds = stat.birthtimeNs / 1_000_000_000n;
+  const nanoseconds = String(stat.birthtimeNs % 1_000_000_000n).padStart(9, "0");
+  return `${stat.dev}:${stat.ino}:${seconds}.${nanoseconds}`;
+}
+
+function removeBoundProfile({ root, rootIdentity, profileIdentity, profileUuid }) {
+  return new Promise((resolve, reject) => {
+    try {
+      childProcess.execFile(
+        "/bin/sh",
+        ["-c", PROFILE_REMOVE_SCRIPT, "openbot-profile-cleanup", rootIdentity, profileIdentity, profileUuid],
+        {
+          cwd: root,
+          env: { LC_ALL: "C" },
+          encoding: "utf8",
+          timeout: 5_000,
+          killSignal: "SIGKILL",
+          maxBuffer: 1_024,
+        },
+        (error) => {
+          if (!error) {
+            resolve();
+            return;
+          }
+          if (PROFILE_REMOVE_REFUSAL_CODES.has(error.code)) reject(cleanupRefusedError());
+          else reject(cleanupFailedError());
+        },
+      );
+    } catch {
+      reject(cleanupFailedError());
+    }
+  });
+}
+
 function safeHttpsUrl(value) {
   if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_URL_BYTES || value.includes("\0")) {
     throw desktopError("Local navigation URL is invalid.", "OPENBOT_LOCAL_NAVIGATION_INVALID");
@@ -295,7 +405,9 @@ class LocalDesktopManager extends EventEmitter {
   #helperTimeoutMs;
   #entries = new Map();
   #profiles = new Map();
+  #profileOwners = new Map();
   #queues = new Map();
+  #deletions = new Map();
   #windows = new WeakSet();
   #disposePromise = null;
   #disposed = false;
@@ -317,7 +429,8 @@ class LocalDesktopManager extends EventEmitter {
     }
     if (!permissionBroker || typeof permissionBroker.request !== "function"
       || typeof permissionBroker.cancelTask !== "function"
-      || typeof permissionBroker.cancelBot !== "function") {
+      || typeof permissionBroker.cancelBot !== "function"
+      || typeof permissionBroker.deleteBot !== "function") {
       throw new TypeError("Local Desktop manager requires a permission broker.");
     }
     if (typeof helperFactory !== "function" || typeof randomUUID !== "function"
@@ -351,14 +464,16 @@ class LocalDesktopManager extends EventEmitter {
   async open(value) {
     this.#assertActive();
     const computer = normalizeComputer(value);
+    this.#assertBotAvailable(computer.botId);
+    this.#claimProfile(computer.botId, computer.targetId);
     return this.#enqueue(computer.botId, async () => {
-      this.#assertActive();
+      this.#assertBotAvailable(computer.botId);
       const existing = this.#entries.get(computer.botId);
       if (existing && this.#sameIdentity(existing, computer)) return publicSession(existing);
       if (existing) await this.#closeEntry(existing, true);
 
       const profilePath = await this.#ensureProfile(computer.profileUuid);
-      this.#assertActive();
+      this.#assertBotAvailable(computer.botId);
       const partition = `persist:openbot-local-${computer.profileUuid}`;
       const browserSession = this.#electron.session.fromPartition(partition);
       this.#secureSession(browserSession);
@@ -386,7 +501,7 @@ class LocalDesktopManager extends EventEmitter {
           targetGeneration: computer.targetGeneration,
           workspacePath: profilePath.workspacePath,
         }));
-        this.#assertActive();
+        this.#assertBotAvailable(computer.botId);
         const entry = {
           ...computer,
           partition,
@@ -428,6 +543,7 @@ class LocalDesktopManager extends EventEmitter {
           try { helperTransport?.dispose?.(); } catch {}
         }
         try { if (!window.isDestroyed?.()) window.destroy(); } catch {}
+        this.#assertBotAvailable(computer.botId);
         if (error instanceof LocalDesktopError) throw error;
         throw desktopError("Local Desktop could not start.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
       }
@@ -598,40 +714,212 @@ class LocalDesktopManager extends EventEmitter {
 
   async close(botId) {
     const normalizedBotId = normalizeBotId(botId);
+    this.#assertBotAvailable(normalizedBotId);
     return this.#enqueue(normalizedBotId, async () => {
+      this.#assertBotAvailable(normalizedBotId);
       const entry = this.#entries.get(normalizedBotId);
       if (entry) await this.#closeEntry(entry, true);
       else this.#permissionBroker.cancelBot(normalizedBotId);
     });
   }
 
-  async deleteBot(botId) {
-    const normalizedBotId = normalizeBotId(botId);
-    return this.#enqueue(normalizedBotId, async () => {
-      const entry = this.#entries.get(normalizedBotId);
-      if (entry) await this.#closeEntry(entry, true);
-      else this.#permissionBroker.cancelBot(normalizedBotId);
-      const profile = this.#profiles.get(normalizedBotId);
-      if (!profile) return;
-      this.#profiles.delete(normalizedBotId);
-      try { await profile.browserSession.clearStorageData(); } catch {}
-      const expectedRoot = path.join(this.#userDataPath, "openbot-local");
-      if (path.dirname(profile.profilePath) !== expectedRoot) {
-        throw desktopError("Local profile cleanup was refused.", "OPENBOT_LOCAL_CLEANUP_REFUSED");
+  deleteBot(value) {
+    let request;
+    let state;
+    try {
+      this.#assertActive();
+      request = normalizeDeleteBot(value);
+      state = this.#deletions.get(request.botId);
+      if (state) {
+        if (!request.legacy && state.localProfileId !== request.localProfileId) {
+          throw cleanupRefusedError();
+        }
+        if (state.completed) return state.completedPromise;
+        if (state.inFlight) return state.inFlight;
+      } else {
+        let identity = request;
+        if (request.legacy) {
+          const profile = this.#profiles.get(request.botId);
+          if (profile) {
+            const target = normalizeTargetId(profile.targetId);
+            identity = {
+              ...request,
+              localProfileId: target.targetId,
+              profileUuid: target.uuid,
+            };
+          }
+        }
+        if (identity.localProfileId !== null) {
+          this.#claimProfile(identity.botId, identity.localProfileId);
+        }
+        state = {
+          botId: identity.botId,
+          localProfileId: identity.localProfileId,
+          profileUuid: identity.profileUuid,
+          completed: false,
+          completedPromise: null,
+          inFlight: null,
+        };
+        this.#deletions.set(request.botId, state);
       }
-      await fs.rm(profile.profilePath, { recursive: true, force: true });
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    const olderQueue = this.#queues.get(request.botId) || null;
+    const attempt = this.#deleteBotAttempt(state, olderQueue);
+    let shared;
+    shared = attempt.then((result) => {
+      state.completed = true;
+      state.completedPromise = shared;
+      return result;
+    }).finally(() => {
+      if (state.inFlight === shared) state.inFlight = null;
     });
+    state.inFlight = shared;
+    return shared;
+  }
+
+  async #deleteBotAttempt(state, olderQueue) {
+    try {
+      if (olderQueue) await Promise.allSettled([olderQueue]);
+      this.#assertDeletionActive(state);
+      const cleanup = this.#deletionCleanupIdentity(state);
+      if (cleanup) await this.#inspectDeletionPath(cleanup.profilePath);
+      this.#assertDeletionActive(state);
+
+      const entry = this.#entries.get(state.botId);
+      if (entry) await this.#closeEntry(entry, true);
+      this.#assertDeletionActive(state);
+      await this.#permissionBroker.deleteBot(state.botId);
+      this.#assertDeletionActive(state);
+
+      if (cleanup) {
+        const browserSession = this.#electron.session.fromPartition(cleanup.partition);
+        if (!browserSession || typeof browserSession.clearStorageData !== "function") {
+          throw cleanupFailedError();
+        }
+        await browserSession.clearStorageData();
+        this.#assertDeletionActive(state);
+        const inspected = await this.#inspectDeletionPath(cleanup.profilePath);
+        this.#assertDeletionActive(state);
+        if (inspected) {
+          await removeBoundProfile(inspected);
+          await this.#verifyDeletionResult(inspected);
+        }
+        this.#assertDeletionActive(state);
+      }
+
+      const profile = this.#profiles.get(state.botId);
+      if (profile && (!cleanup || profile === cleanup.cachedProfile)) {
+        this.#profiles.delete(state.botId);
+      }
+    } catch (error) {
+      if (error instanceof LocalDesktopError) throw error;
+      this.#assertDeletionActive(state);
+      throw cleanupFailedError();
+    }
+  }
+
+  #deletionCleanupIdentity(state) {
+    const entry = this.#entries.get(state.botId) || null;
+    const profile = this.#profiles.get(state.botId) || null;
+    if (state.localProfileId === null) {
+      if (entry || profile) throw cleanupRefusedError();
+      return null;
+    }
+    const claimedOwner = this.#profileOwner(state.localProfileId);
+    if (claimedOwner !== null && claimedOwner !== state.botId) throw cleanupRefusedError();
+    const root = path.join(this.#userDataPath, "openbot-local");
+    const profilePath = path.join(root, state.profileUuid);
+    const workspacePath = path.join(profilePath, "workspace");
+    const partition = `persist:openbot-local-${state.profileUuid}`;
+    if (path.dirname(profilePath) !== root || path.basename(profilePath) !== state.profileUuid) {
+      throw cleanupRefusedError();
+    }
+    for (const cached of [entry, profile]) {
+      if (!cached) continue;
+      if (cached.botId !== state.botId
+        || cached.targetId !== state.localProfileId
+        || cached.profileUuid !== state.profileUuid
+        || cached.partition !== partition
+        || cached.profilePath !== profilePath
+        || cached.workspacePath !== workspacePath) {
+        throw cleanupRefusedError();
+      }
+    }
+    return { cachedProfile: profile, partition, profilePath };
+  }
+
+  async #inspectDeletionPath(profilePath) {
+    const root = path.join(this.#userDataPath, "openbot-local");
+    let rootStat;
+    try {
+      rootStat = await fs.lstat(root, { bigint: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
+      || rootStat.uid !== BigInt(process.getuid()) || (rootStat.mode & 0o777n) !== 0o700n) {
+      throw cleanupRefusedError();
+    }
+    let profileStat;
+    try {
+      profileStat = await fs.lstat(profilePath, { bigint: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+    if (!profileStat.isDirectory() || profileStat.isSymbolicLink()
+      || profileStat.uid !== BigInt(process.getuid()) || (profileStat.mode & 0o777n) !== 0o700n) {
+      throw cleanupRefusedError();
+    }
+    return {
+      root,
+      rootIdentity: directoryIdentity(rootStat),
+      profileIdentity: directoryIdentity(profileStat),
+      profilePath,
+      profileUuid: path.basename(profilePath),
+    };
+  }
+
+  async #verifyDeletionResult(inspection) {
+    let rootStat;
+    try {
+      rootStat = await fs.lstat(inspection.root, { bigint: true });
+    } catch {
+      throw cleanupRefusedError();
+    }
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()
+      || directoryIdentity(rootStat) !== inspection.rootIdentity) {
+      throw cleanupRefusedError();
+    }
+    try {
+      await fs.lstat(inspection.profilePath, { bigint: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw cleanupRefusedError();
+    }
+    throw cleanupRefusedError();
   }
 
   dispose() {
     if (this.#disposePromise) return this.#disposePromise;
     if (this.#disposed) return Promise.resolve();
+    const deletions = [...this.#deletions.values()]
+      .map((state) => state.inFlight)
+      .filter((operation) => operation && typeof operation.then === "function");
     this.#disposed = true;
     const entries = [...this.#entries.values()];
     this.#disposePromise = (async () => {
-      await Promise.all(entries.map((entry) => this.#closeEntry(entry, true)));
+      await Promise.allSettled([
+        ...entries.map((entry) => this.#closeEntry(entry, true)),
+        ...deletions,
+      ]);
       this.#entries.clear();
       this.#queues.clear();
+      this.#profileOwners.clear();
       this.removeAllListeners();
     })();
     return this.#disposePromise;
@@ -644,7 +932,7 @@ class LocalDesktopManager extends EventEmitter {
   }
 
   #requiredEntry(identity, expected = null) {
-    this.#assertActive();
+    this.#assertBotAvailable(identity.botId);
     const entry = this.#entries.get(identity.botId);
     if (!entry || (expected && entry !== expected) || !this.#sameIdentity(entry, identity)
       || entry.window.isDestroyed?.()) {
@@ -658,6 +946,34 @@ class LocalDesktopManager extends EventEmitter {
     if (operation.cancelled || entry.operations.get(operation.requestId) !== operation) {
       throw desktopError("Local Desktop task was cancelled.", "OPENBOT_LOCAL_TASK_CANCELLED");
     }
+  }
+
+  #assertBotAvailable(botId) {
+    this.#assertActive();
+    if (this.#deletions.has(botId)) throw botDeletingError();
+  }
+
+  #profileOwner(targetId) {
+    const claimed = this.#profileOwners.get(targetId);
+    if (claimed) return claimed;
+    for (const collection of [this.#entries, this.#profiles]) {
+      for (const [botId, value] of collection) {
+        if (value?.targetId !== targetId) continue;
+        this.#profileOwners.set(targetId, botId);
+        return botId;
+      }
+    }
+    return null;
+  }
+
+  #claimProfile(botId, targetId) {
+    const owner = this.#profileOwner(targetId);
+    if (owner !== null && owner !== botId) throw cleanupRefusedError();
+    this.#profileOwners.set(targetId, botId);
+  }
+
+  #assertDeletionActive(state) {
+    if (this.#deletions.get(state.botId) !== state) throw cleanupRefusedError();
   }
 
   #closeEntry(entry, cancelPermissions) {
