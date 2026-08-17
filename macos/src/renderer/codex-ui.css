@@ -145,6 +145,13 @@ body.light {
 
 .codex-computer-grants[hidden] { display: none; }
 
+.codex-native-controls {
+  display: grid;
+  gap: 4px;
+  padding: 0 0 8px;
+  border-bottom: 1px solid var(--codex-border);
+}
+
 .codex-computer-grants-title {
   margin: 0;
   color: var(--codex-muted);
@@ -152,7 +159,7 @@ body.light {
   font-weight: 600;
 }
 
-.codex-bot-controls .codex-computer-grants-list {
+:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grants-list {
   display: grid;
   gap: 4px;
   margin: 0;
@@ -162,7 +169,7 @@ body.light {
   color: inherit;
 }
 
-.codex-bot-controls .codex-computer-grant {
+:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 7px;
@@ -174,9 +181,9 @@ body.light {
   color: inherit;
 }
 
-.codex-bot-controls .codex-computer-grant-copy,
-.codex-bot-controls .codex-computer-grant-label,
-.codex-bot-controls .codex-computer-grant-capability {
+:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-copy,
+:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-label,
+:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-capability {
   display: block;
   min-width: 0;
   margin: 0;
@@ -185,7 +192,7 @@ body.light {
   background: transparent;
 }
 
-.codex-bot-controls .codex-computer-grant-label {
+:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-label {
   overflow: hidden;
   color: var(--codex-text);
   font-size: 10px;
@@ -193,7 +200,7 @@ body.light {
   white-space: nowrap;
 }
 
-.codex-bot-controls .codex-computer-grant-capability {
+:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-capability {
   margin-top: 1px;
   color: var(--codex-muted);
   font-size: 9px;

@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -28,11 +29,189 @@ const STOCK_INDEX = `<!doctype html>
 </html>
 `;
 
+const STOCK_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardingRunId:t,completeOnboarding:s}=RFn();return n?p.jsxs(p.Fragment,{children:[p.jsx(Upe,{}),p.jsx(ggt,{})]}):e==="checking"?null:p.jsx(TDn,{chrome:JHn,children:e==="onboarding"?p.jsx(qFn,{onComplete:s,presentation:KUn},t):p.jsx(BHn,{})})}';
+const STOCK_SEND_JOURNAL_DEFINITION = 'const Bgt={slice:"send-journal",schemaVersion:2,scope:"client-persisted",accountSensitive:!0}';
+const STOCK_SEND_JOURNAL_PERSIST_GATE = 'L=()=>{if(S==null)return Promise.resolve($Ke);';
+const STOCK_SEND_JOURNAL_RESTORE_GATE = 'restore:async he=>{if(S=he,E||he==null)return;';
+const STOCK_COORDINATOR_FACTORY = 'const Whe=VKn({portBridge:HKn()}),UPe=wKn()';
+const STOCK_RECONNECT_GATE = 'bt=()=>{if(!(Ge||t.get().status!=="ready"||s==null)){';
+const STOCK_FOCUS_GATE = 'mt=()=>{if(Ge||t.get().status!=="ready"||s==null)return;';
+const STOCK_COMPOSER_ACCOUNT_GATE = ':s?f!=null?W._(mbn(f)):i.length>0?U({id:"I/1BxG"}):C??W._(dht):U({id:"622+sP"})';
+const STOCK_ROSTER_CONNECT_GATE = 'Ve!=null&&F.connect()';
+const STOCK_ACCOUNT_SCOPED_CONNECT_GATE = 'for(const it of Ee)(Ve!=null||!Me.has(it))&&it.connect?.()';
+const STOCK_POST_RESTORE_GATE = 'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())';
+const STOCK_IDENTITY_PORT_GATE = 'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null})';
+const STOCK_CURSOR_IDENTITY = 'resolveAccountSlot:()=>jHn(()=>fm.getCursorAuthStatus())';
+const STOCK_ACCOUNT_SLOT_GETTER = 'get accountSlot(){return s}';
+const STOCK_CLIENT_RESTORE = 'if(await j.write({accountSlot:null,value:Ve}),!Ye()||(await B.restore(Ve),!Ye())||(await q.restore(Ve),!Ye())||(await K.restore(Ve),!Ye())||(await F.restore(Ve),!Ye())||(await ne.restore(Ve),!Ye())||(await Z.restore(Ve),!Ye())||(await ke.restore(Ve),!Ye()))return;';
+const STOCK_AUTH_OBSERVER = 'function Nt($e){if($e.kind==="logging-in"||!Je||Ge)return;const Ye=bde($e);$e.kind==="logged-in"&&Ye==null||t.get().status==="ready"&&Ye===s||(n.onIdentityRestoreBegin?.(),ot={assertedSlot:Ye},xt())}';
+const SYNTHETIC_VENDOR_RENDERER = [
+  'const before=p.jsx(DHn,{children:"kept"});',
+  STOCK_NATIVE_SHELL_GATE,
+  STOCK_SEND_JOURNAL_DEFINITION,
+  STOCK_SEND_JOURNAL_PERSIST_GATE,
+  'o.write({accountSlot:S,value:P()})};',
+  STOCK_SEND_JOURNAL_RESTORE_GATE,
+  'o.read(he)};',
+  STOCK_COORDINATOR_FACTORY,
+  STOCK_CURSOR_IDENTITY,
+  STOCK_RECONNECT_GATE,
+  'F.noteReconnect()}};',
+  STOCK_FOCUS_GATE,
+  'F.noteWindowFocus()};',
+  STOCK_COMPOSER_ACCOUNT_GATE,
+  STOCK_CLIENT_RESTORE,
+  STOCK_ROSTER_CONNECT_GATE,
+  STOCK_ACCOUNT_SCOPED_CONNECT_GATE,
+  STOCK_POST_RESTORE_GATE,
+  STOCK_ACCOUNT_SLOT_GETTER,
+  STOCK_AUTH_OBSERVER,
+  STOCK_IDENTITY_PORT_GATE,
+  'const after="kept";',
+].join("");
+
+function sha256Text(source) {
+  return crypto.createHash("sha256").update(source, "utf8").digest("hex");
+}
+
 function tempRoot(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-renderer-patch-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
 }
+
+function writeSyntheticRendererTree(root, { index = STOCK_INDEX, asset = SYNTHETIC_VENDOR_RENDERER } = {}) {
+  fs.mkdirSync(path.join(root, "dist", "renderer", "assets"), { recursive: true });
+  fs.writeFileSync(path.join(root, "dist", "renderer", "index.html"), index);
+  if (asset !== null) {
+    fs.writeFileSync(
+      path.join(root, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+      asset,
+    );
+  }
+}
+
+test("the explicit local protocol bypasses only the native onboarding child", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+  assert.equal(patched.startsWith('const before=p.jsx(DHn,{children:"kept"});function MHn(){'), true);
+  assert.equal(patched.endsWith('const after="kept";'), true);
+  assert.match(patched, /function MHn\(\)\{const n=wLt\(\),\{phase:e,onboardingRunId:t,completeOnboarding:s\}=RFn\(\);return n\?p\.jsxs/);
+  assert.match(patched, /:e==="checking"\?null:p\.jsx\(TDn,\{chrome:JHn,children:/);
+  assert.match(
+    patched,
+    /children:e==="onboarding"&&!\(window\.openbotProtocol\?\.schemaVersion===1&&window\.openbotProtocol\?\.mode==="local-protocol"\)\?p\.jsx\(qFn,\{onComplete:s,presentation:KUn\},t\):p\.jsx\(BHn,\{\}\)/,
+  );
+  for (const preserved of ["DHn", "wLt()", "RFn()", 'e==="checking"', "TDn", "JHn", "BHn"]) {
+    assert.equal(
+      (patched.match(new RegExp(preserved.replace(/[()]/g, "\\$&"), "g")) ?? []).length,
+      (SYNTHETIC_VENDOR_RENDERER.match(new RegExp(preserved.replace(/[()]/g, "\\$&"), "g")) ?? []).length,
+      preserved,
+    );
+  }
+  assert.equal((patched.match(/mode==="local-protocol"/g) ?? []).length, 2);
+  assert.doesNotMatch(patched, /window\.openbotProtocol[^}]+Upe|window\.openbotProtocol[^}]+checking/);
+});
+
+test("the explicit local coordinator survives a null Cursor identity without unlocking account-only modules", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  assert.equal(
+    (patched.match(/const hasLocalCoordinator=\(\)=>window\.openbotProtocol\?\.schemaVersion===1&&window\.openbotProtocol\?\.mode==="local-protocol"/g) ?? []).length,
+    1,
+  );
+  assert.match(
+    patched,
+    /onIdentityRestoreComplete:\(\{accountSlot:n\}\)=>Whe\.completeIdentityChange\(\{acceptPort:n!=null\|\|hasLocalCoordinator\(\)\}\)/,
+  );
+  assert.match(
+    patched,
+    /,Bgt=\{slice:"send-journal",schemaVersion:2,scope:"client-persisted",accountSensitive:!0\}/,
+  );
+  assert.match(patched, new RegExp(STOCK_SEND_JOURNAL_PERSIST_GATE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(patched, new RegExp(STOCK_SEND_JOURNAL_RESTORE_GATE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(
+    patched,
+    /const openbotPersistenceSlot=Ve\?\?\(hasLocalCoordinator\(\)\?"openbot-local-v1":null\);if\(await j\.write\(\{accountSlot:null,value:Ve\}\),!Ye\(\)\|\|\(await B\.restore\(openbotPersistenceSlot\),!Ye\(\)\)\|\|\(await q\.restore\(openbotPersistenceSlot\),!Ye\(\)\)\|\|\(await K\.restore\(openbotPersistenceSlot\),!Ye\(\)\)\|\|\(await F\.restore\(openbotPersistenceSlot\),!Ye\(\)\)\|\|\(await ne\.restore\(openbotPersistenceSlot\),!Ye\(\)\)\|\|\(await Z\.restore\(openbotPersistenceSlot\),!Ye\(\)\)\|\|\(await ke\.restore\(openbotPersistenceSlot\),!Ye\(\)\)\)return;/,
+  );
+  assert.match(
+    patched,
+    /bt=\(\)=>\{if\(!\(Ge\|\|t\.get\(\)\.status!=="ready"\|\|\(s==null&&!hasLocalCoordinator\(\)\)\)\)\{/,
+  );
+  assert.match(
+    patched,
+    /mt=\(\)=>\{if\(Ge\|\|t\.get\(\)\.status!=="ready"\|\|\(s==null&&!hasLocalCoordinator\(\)\)\)return;/,
+  );
+  assert.match(patched, /\(Ve!=null\|\|hasLocalCoordinator\(\)\)&&F\.connect\(\)/);
+  assert.match(
+    patched,
+    /:\(s\|\|hasLocalCoordinator\(\)\)\?f!=null\?W\._\(mbn\(f\)\):i\.length>0\?U\(\{id:"I\/1BxG"\}\):C\?\?W\._\(dht\):U\(\{id:"622\+sP"\}\)/,
+  );
+  assert.match(
+    patched,
+    /\(Ve!=null\|\|hasLocalCoordinator\(\)\)&&\(B\.loadPinnedAgentsFromBox\(\),q\.loadFromBox\(\),ke\.reconcileWithHost\(\)\)/,
+  );
+
+  // Cursor remains truthfully signed out: the identity resolver/getter and the
+  // vendor account-scoped module gate stay byte-identical.
+  for (const preserved of [
+    STOCK_CURSOR_IDENTITY,
+    STOCK_ACCOUNT_SLOT_GETTER,
+    STOCK_ACCOUNT_SCOPED_CONNECT_GATE,
+    STOCK_AUTH_OBSERVER,
+  ]) {
+    assert.equal((patched.match(new RegExp(preserved.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length, 1);
+  }
+  assert.equal((patched.match(/openbot-local-v1/g) ?? []).length, 1);
+  assert.doesNotMatch(patched, /(?:accountSlot|assertedSlot|s=)\s*[:=]\s*"openbot-local-v1"/);
+});
+
+test("the pinned native renderer patch fails closed on hash drift and every ambiguous anchor", async (t) => {
+  const { patchVendorRendererSource } = require(patchPath);
+  assert.throws(
+    () => patchVendorRendererSource(SYNTHETIC_VENDOR_RENDERER, "0".repeat(64)),
+    /renderer.*hash|hash.*renderer/i,
+  );
+  const missing = 'const renderer="drifted";';
+  assert.throws(
+    () => patchVendorRendererSource(missing, sha256Text(missing)),
+    /anchor.*not found|not found.*anchor/i,
+  );
+  const requiredAnchors = [
+    ["native shell", STOCK_NATIVE_SHELL_GATE],
+    ["local capability", STOCK_SEND_JOURNAL_DEFINITION],
+    ["reconnect", STOCK_RECONNECT_GATE],
+    ["focus", STOCK_FOCUS_GATE],
+    ["composer", STOCK_COMPOSER_ACCOUNT_GATE],
+    ["client restore", STOCK_CLIENT_RESTORE],
+    ["roster connect", STOCK_ROSTER_CONNECT_GATE],
+    ["post restore", STOCK_POST_RESTORE_GATE],
+    ["identity port", STOCK_IDENTITY_PORT_GATE],
+  ];
+  for (const [label, anchor] of requiredAnchors) {
+    await t.test(`${label} missing`, () => {
+      const changed = SYNTHETIC_VENDOR_RENDERER.replace(anchor, "");
+      assert.throws(
+        () => patchVendorRendererSource(changed, sha256Text(changed)),
+        /anchor.*not found|not found.*anchor/i,
+      );
+    });
+    await t.test(`${label} ambiguous`, () => {
+      const changed = `${SYNTHETIC_VENDOR_RENDERER}${anchor}`;
+      assert.throws(
+        () => patchVendorRendererSource(changed, sha256Text(changed)),
+        /anchor.*ambiguous|ambiguous.*anchor/i,
+      );
+    });
+  }
+});
 
 test("stock renderer index receives one self-hosted Codex control layer", () => {
   const { patchRendererIndexSource } = require(patchPath);
@@ -57,9 +236,8 @@ test("stock renderer index receives one self-hosted Codex control layer", () => 
 test("renderer patch copies only the reviewed control assets into a synthetic stock tree", (t) => {
   const { patchRenderer } = require(patchPath);
   const root = tempRoot(t);
-  fs.mkdirSync(path.join(root, "dist", "renderer"), { recursive: true });
-  fs.writeFileSync(path.join(root, "dist", "renderer", "index.html"), STOCK_INDEX);
-  patchRenderer(root);
+  writeSyntheticRendererTree(root);
+  patchRenderer(root, { expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER) });
   const target = path.join(root, "dist", "renderer", "codex");
   assert.deepEqual(fs.readdirSync(target).sort(), [
     "bot-runtime-ui.js",
@@ -67,8 +245,6 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
     "model-controls.js",
     "openbot-local-desktop-view.css",
     "openbot-local-desktop-view.js",
-    "openbot-standalone-shell.css",
-    "openbot-standalone-shell.js",
     "reasoning-control.js",
   ]);
   for (const file of fs.readdirSync(target)) {
@@ -77,6 +253,48 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
       fs.readFileSync(path.join(macRoot, "src", "renderer", file)),
     );
   }
+  const vendorRenderer = fs.readFileSync(
+    path.join(root, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+    "utf8",
+  );
+  assert.match(vendorRenderer, /window\.openbotProtocol\?\.schemaVersion===1/);
+  assert.doesNotMatch(vendorRenderer, new RegExp(STOCK_NATIVE_SHELL_GATE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("renderer patch pins the reviewed asset path, hash, and unique script reference", async (t) => {
+  const { patchRenderer } = require(patchPath);
+  await t.test("missing asset", () => {
+    const root = tempRoot(t);
+    writeSyntheticRendererTree(root, { asset: null });
+    assert.throws(
+      () => patchRenderer(root, { expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER) }),
+      /renderer.*asset|asset.*renderer/i,
+    );
+  });
+  await t.test("drifted asset hash", () => {
+    const root = tempRoot(t);
+    writeSyntheticRendererTree(root);
+    assert.throws(() => patchRenderer(root), /renderer.*hash|hash.*renderer/i);
+  });
+  await t.test("missing script reference", () => {
+    const root = tempRoot(t);
+    writeSyntheticRendererTree(root, {
+      index: STOCK_INDEX.replace("./assets/index-CphCyQnY.js", "./assets/index-other.js"),
+    });
+    assert.throws(
+      () => patchRenderer(root, { expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER) }),
+      /script.*not found|not found.*script/i,
+    );
+  });
+  await t.test("duplicate script reference", () => {
+    const root = tempRoot(t);
+    const script = '    <script type="module" crossorigin src="./assets/index-CphCyQnY.js"></script>\n';
+    writeSyntheticRendererTree(root, { index: STOCK_INDEX.replace(script, `${script}${script}`) });
+    assert.throws(
+      () => patchRenderer(root, { expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER) }),
+      /script.*ambiguous|ambiguous.*script/i,
+    );
+  });
 });
 
 test("approved CSS docks management in the sidebar and opens native Power from the composer trigger", () => {

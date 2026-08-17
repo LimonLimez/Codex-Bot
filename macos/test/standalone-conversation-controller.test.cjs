@@ -369,7 +369,13 @@ test("durable text transcripts survive a fresh controller without storing stream
   const terminal = new Promise((resolve) => first.on("event", (event) => {
     if (event.type === "completed") resolve(event);
   }));
-  await first.send({ botId: BOT_A, conversationId: created.conversationId, text: "Remember this." });
+  await first.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Remember this.",
+    clientNonce: "native-nonce-123",
+    inputDigest: "1".repeat(64),
+  });
   await terminal;
   first.dispose();
 
@@ -387,6 +393,9 @@ test("durable text transcripts survive a fresh controller without storing stream
     { role: "user", text: "Remember this." },
     { role: "assistant", text: "Durable reply." },
   ]);
+  assert.equal(restored.messages[0].clientNonce, "native-nonce-123");
+  assert.equal(restored.messages[0].inputDigest, "1".repeat(64));
+  assert.equal(Object.hasOwn(restored.messages[1], "clientNonce"), false);
   second.dispose();
 });
 

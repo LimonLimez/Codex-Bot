@@ -3213,6 +3213,38 @@ test("provider connection uses only the fixed CLIProxyAPI provider facade", asyn
   assert.deepEqual(calls, ["claude"]);
 });
 
+test("native coordinator selection switches the active bot before model and Computer controls update", async () => {
+  const { createBotUiController } = require(uiPath);
+  let runtimeListener;
+  const selections = [];
+  const selectionFor = (botId) => Object.freeze({
+    botId,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation: selections.length,
+  });
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot(botId) { selections.push(botId); return selectionFor(botId); },
+      onEvent(listener) { runtimeListener = listener; return () => {}; },
+    },
+  });
+  await controller.initialize();
+  assert.equal(controller.snapshot().activeBotId, BOT_A);
+  runtimeListener(Object.freeze({ type: "active-bot-changed", botId: BOT_B }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.snapshot().activeBotId, BOT_B);
+  assert.deepEqual(selections, [BOT_A, BOT_B]);
+  controller.dispose();
+});
+
 test("official Codex sign-in never starts CLIProxy while optional providers remain explicit", async () => {
   const { createBotUiController } = require(uiPath);
   const calls = [];
@@ -3427,6 +3459,7 @@ function createMountedUiHarness({
   botsFacade = null,
   computerFacade = null,
   runtimeFacade = null,
+  nativeProtocol = false,
 }) {
   const { mount } = require(uiPath);
   class MountElement extends FakeElement {
@@ -3480,6 +3513,9 @@ function createMountedUiHarness({
   let generation = initialSelection.generation;
   const selected = [];
   const windowRef = {
+    ...(nativeProtocol ? {
+      openbotProtocol: Object.freeze({ schemaVersion: 1, mode: "local-protocol" }),
+    } : {}),
     codexBots: botsFacade ?? {
       async list() { return [bot(BOT_A, "A", "ready")]; },
       onChanged() { return () => {}; },
@@ -3528,6 +3564,46 @@ function createMountedUiHarness({
     selected,
   };
 }
+
+test("native protocol mode preserves the Grok shell and mounts only Power plus owned dialogs", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.mounted.panel.parentElement, null);
+  assert.equal(harness.documentRef.sidebar.children.includes(harness.mounted.panel), false);
+  assert.equal(harness.mounted.modelDock.parentElement, harness.documentRef.composer);
+  for (const className of ["codex-new-bot-setup", "codex-computer-setup", "codex-permission-sheet"]) {
+    const dialog = harness.findPanel(className);
+    assert.equal(dialog.parentElement, harness.documentRef.body, className);
+    assert.equal(dialog.tagName, "DIALOG");
+  }
+  assert.equal(harness.find("codex-provider-select").tagName, "SELECT");
+  assert.equal(harness.find("codex-power-input").tagName, "INPUT");
+});
 
 test("mounted async provider completion never mutates detached controls after disposal", async () => {
   const catalog = Object.freeze({

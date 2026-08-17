@@ -1309,6 +1309,11 @@
       unsubscribe = typeof candidate === "function" ? candidate : null;
       if (runtimeFacade && typeof runtimeFacade.onEvent === "function") {
         const runtimeCandidate = runtimeFacade.onEvent((event) => {
+          if (!disposed && event?.type === "active-bot-changed"
+            && typeof event.botId === "string" && bots.has(event.botId)) {
+            requestBotSelection(event.botId);
+            return;
+          }
           if (
             disposed ||
             !event ||
@@ -1886,6 +1891,7 @@
     }
     const sidebarSelectors = [
       "[data-codex-bot-sidebar-host]",
+      'aside[aria-label="Bots"]',
       '[data-testid*="sidebar" i]',
       '[aria-label*="sidebar" i]',
       "nav[aria-label]",
@@ -2041,6 +2047,8 @@
     if (!documentRef?.body || documentRef.getElementById("codex-bot-controls")) return null;
     const facade = windowRef.codexBots;
     if (!facade || !MODEL_CONTROLS || typeof POWER_CONTROL?.PowerControlState !== "function") return null;
+    const nativeProtocolMode = windowRef.openbotProtocol?.schemaVersion === 1
+      && windowRef.openbotProtocol?.mode === "local-protocol";
     const panel = element(documentRef, "aside", "codex-bot-controls");
     panel.id = "codex-bot-controls";
     panel.dataset.codexMountState = "pending";
@@ -2350,15 +2358,30 @@
       computerSetup,
       permissionSheet,
     );
-    popover.append(panelStack, compactControls, reasoningView.label, reasoningView.instructions);
+    const nativeControls = element(documentRef, "section", "codex-native-controls");
+    if (nativeProtocolMode) {
+      nativeControls.append(providerRow, statusRow, computerRow, computerGrants);
+      popover.append(
+        nativeControls,
+        panelStack,
+        compactControls,
+        reasoningView.label,
+        reasoningView.instructions,
+      );
+    } else popover.append(panelStack, compactControls, reasoningView.label, reasoningView.instructions);
     modelDock.append(modelTrigger, popover);
-    documentRef.body.append(panel, modelDock);
+    if (nativeProtocolMode) {
+      documentRef.body.append(newBotSetup, computerSetup, permissionSheet, modelDock);
+      panel.dataset.codexMountState = "native-shell";
+    } else documentRef.body.append(panel, modelDock);
 
     let mountDisposed = false;
     function attachToProductHosts() {
       if (mountDisposed) return;
       const { sidebarHost, composerHost } = findUiMounts(documentRef);
-      if (sidebarHost) {
+      if (nativeProtocolMode) {
+        panel.dataset.codexMountState = "native-shell";
+      } else if (sidebarHost) {
         if (panel.parentElement !== sidebarHost) sidebarHost.append(panel);
         panel.dataset.codexMountState = "mounted";
       } else {
@@ -3023,6 +3046,9 @@
         warningTimer = null;
         warningScope = null;
         controller.dispose();
+        newBotSetup.remove?.();
+        computerSetup.remove?.();
+        permissionSheet.remove?.();
         panel.remove?.();
         modelDock.remove?.();
       },

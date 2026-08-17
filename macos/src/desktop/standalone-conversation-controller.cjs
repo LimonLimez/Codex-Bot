@@ -83,6 +83,19 @@ function boundedText(value) {
   return value;
 }
 
+function normalizedClientNonce(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.trim().length === 0 || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > 512) throw failure();
+  return value;
+}
+
+function normalizedInputDigest(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) throw failure();
+  return value;
+}
+
 function denseArray(value, maximum) {
   if (!Array.isArray(value) || types.isProxy(value)) throw failure();
   let descriptors;
@@ -107,17 +120,26 @@ function timestamp(value) {
 }
 
 function persistedMessage(value) {
-  const message = ownData(value, new Set(["messageId", "role", "text", "createdAt"]));
+  const message = ownData(
+    value,
+    new Set(["messageId", "role", "text", "createdAt", "clientNonce", "inputDigest"]),
+    new Set(["messageId", "role", "text", "createdAt"]),
+  );
   if (typeof message.messageId !== "string"
     || !/^message-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(message.messageId)
     || !new Set(["user", "assistant"]).has(message.role)
     || typeof message.text !== "string" || message.text.includes("\0")
     || Buffer.byteLength(message.text, "utf8") > MAX_TEXT_BYTES) throw failure();
+  const clientNonce = normalizedClientNonce(message.clientNonce);
+  const inputDigest = normalizedInputDigest(message.inputDigest);
+  if ((clientNonce === undefined) !== (inputDigest === undefined)
+    || clientNonce !== undefined && message.role !== "user") throw failure();
   return publicValue({
     messageId: message.messageId,
     role: message.role,
     text: message.text,
     createdAt: timestamp(message.createdAt),
+    ...(clientNonce === undefined ? {} : { clientNonce, inputDigest }),
   });
 }
 
@@ -673,13 +695,16 @@ class StandaloneConversationController extends EventEmitter {
     this.#available();
     const request = ownData(
       rawRequest,
-      new Set(["botId", "conversationId", "text", "attachments"]),
+      new Set(["botId", "conversationId", "text", "attachments", "clientNonce", "inputDigest"]),
       new Set(["botId", "conversationId", "text"]),
     );
     if (request.attachments !== undefined) throw failure();
     const owner = normalizedBotId(request.botId);
     const conversationId = normalizedConversationId(request.conversationId);
     const text = boundedText(request.text);
+    const clientNonce = normalizedClientNonce(request.clientNonce);
+    const inputDigest = normalizedInputDigest(request.inputDigest);
+    if ((clientNonce === undefined) !== (inputDigest === undefined)) throw failure();
     const reservationKey = `${owner}\0${conversationId}`;
     if (this.#selectionMutations.has(owner)) throw failure("OPENBOT_CONVERSATION_STALE");
     if (this.#reservations.has(reservationKey) || this.#active.has(conversationId)) throw failure();
@@ -724,6 +749,7 @@ class StandaloneConversationController extends EventEmitter {
       role: "user",
       text,
       createdAt,
+      ...(clientNonce === undefined ? {} : { clientNonce, inputDigest }),
     });
     const invocationId = safeId(this.#makeId, "invocation");
     const taskId = `standalone-${invocationId.slice("invocation-".length)}`;

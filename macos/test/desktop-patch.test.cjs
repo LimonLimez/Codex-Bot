@@ -8,7 +8,7 @@ const test = require("node:test");
 const patchPath = path.join(__dirname, "..", "src", "patch", "desktop.cjs");
 
 const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;const mainFeature='kept';\n";
-const STOCK_PRELOAD = "const stock='kept';s.contextBridge.exposeInMainWorld(\"desktop\",Q);s.contextBridge.exposeInMainWorld(\"coordinatorPort\",X);s.ipcRenderer.on(\"sand:coordinator-port\",e=>{});\n";
+const STOCK_PRELOAD = "const stock='kept';const L=M({invokeRequest:()=>{s.ipcRenderer.invoke(\"sand:coordinator-port-request\")}});s.contextBridge.exposeInMainWorld(\"desktop\",Q);s.contextBridge.exposeInMainWorld(\"coordinatorPort\",X);s.ipcRenderer.on(\"sand:coordinator-port\",e=>{});\n";
 
 test("desktop patch adds isolated main/preload facades without changing stock exports", () => {
   const { patchMainSource, patchPreloadSource } = require(patchPath);
@@ -19,6 +19,15 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(main, /mainFeature='kept'/);
   assert.match(preload, /exposeInMainWorld\("desktop",Q\)/);
   assert.match(preload, /exposeInMainWorld\("coordinatorPort",X\)/);
+  assert.match(preload, /invoke\("openbot:coordinator-port-request"\)/);
+  assert.match(preload, /ipcRenderer\.on\("openbot:coordinator-port"/);
+  assert.match(
+    preload,
+    /exposeInMainWorld\("openbotProtocol",Object\.freeze\(\{schemaVersion:1,mode:"local-protocol"\}\)\)/,
+  );
+  assert.doesNotMatch(preload, /invoke\("sand:coordinator-port-request"\)/);
+  assert.doesNotMatch(preload, /ipcRenderer\.on\("sand:coordinator-port"/);
+  assert.doesNotMatch(preload, /getCursorAuthStatus\s*[:=]/);
   assert.match(preload, /exposeInMainWorld\("codexBots"/);
   assert.match(preload, /exposeInMainWorld\("codexRuntime"/);
   assert.match(preload, /exposeInMainWorld\("codexAccount"/);
@@ -64,6 +73,8 @@ test("desktop packaging includes every direct inference runtime module in the au
     "desktop/inference-bridge-server.cjs",
     "desktop/inference-provider-router.cjs",
     "desktop/local-desktop-frame-ipc.cjs",
+    "desktop/openbot-native-coordinator-ipc.cjs",
+    "desktop/openbot-native-coordinator.cjs",
     "computer/computer-target-router.cjs",
     "local/local-computer-boundary.cjs",
     "local/local-computer-runtime.cjs",

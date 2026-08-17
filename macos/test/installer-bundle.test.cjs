@@ -141,6 +141,8 @@ test("installer stages only the exact exported patcher source script and asset c
     "desktop/inference-provider-router.cjs",
     "desktop/local-desktop-frame-ipc.cjs",
     "desktop/model-selection-store.cjs",
+    "desktop/openbot-native-coordinator-ipc.cjs",
+    "desktop/openbot-native-coordinator.cjs",
     "desktop/openbot-user-data.cjs",
     "desktop/runtime.cjs",
     "desktop/standalone-conversation-controller.cjs",
@@ -166,8 +168,6 @@ test("installer stages only the exact exported patcher source script and asset c
     "renderer/model-controls.js",
     "renderer/openbot-local-desktop-view.css",
     "renderer/openbot-local-desktop-view.js",
-    "renderer/openbot-standalone-shell.css",
-    "renderer/openbot-standalone-shell.js",
     "renderer/reasoning-control.js",
   ]);
 

@@ -11,6 +11,24 @@ const asar = require("@electron/asar");
 const macRoot = path.resolve(__dirname, "..");
 const patcherPath = path.join(macRoot, "scripts", "patch-app.cjs");
 const anchorsPath = path.join(macRoot, "src", "patch", "anchors.cjs");
+const rendererPatchPath = path.join(macRoot, "src", "patch", "renderer.cjs");
+const STOCK_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardingRunId:t,completeOnboarding:s}=RFn();return n?p.jsxs(p.Fragment,{children:[p.jsx(Upe,{}),p.jsx(ggt,{})]}):e==="checking"?null:p.jsx(TDn,{chrome:JHn,children:e==="onboarding"?p.jsx(qFn,{onComplete:s,presentation:KUn},t):p.jsx(BHn,{})})}';
+const STOCK_LOCAL_IDENTITY_ANCHORS = [
+  'const Bgt={slice:"send-journal",schemaVersion:2,scope:"client-persisted",accountSensitive:!0}',
+  'bt=()=>{if(!(Ge||t.get().status!=="ready"||s==null)){',
+  'mt=()=>{if(Ge||t.get().status!=="ready"||s==null)return;',
+  ':s?f!=null?W._(mbn(f)):i.length>0?U({id:"I/1BxG"}):C??W._(dht):U({id:"622+sP"})',
+  'if(await j.write({accountSlot:null,value:Ve}),!Ye()||(await B.restore(Ve),!Ye())||(await q.restore(Ve),!Ye())||(await K.restore(Ve),!Ye())||(await F.restore(Ve),!Ye())||(await ne.restore(Ve),!Ye())||(await Z.restore(Ve),!Ye())||(await ke.restore(Ve),!Ye()))return;',
+  'Ve!=null&&F.connect()',
+  'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())',
+  'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null})',
+].join(";");
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}const after="kept";`;
+const SYNTHETIC_VENDOR_RENDERER_SHA256 = crypto
+  .createHash("sha256")
+  .update(SYNTHETIC_VENDOR_RENDERER, "utf8")
+  .digest("hex");
+const rendererPatch = require(rendererPatchPath);
 
 function sha256File(file) {
   return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -38,7 +56,7 @@ async function syntheticAsar(t, overrides = {}) {
   fs.mkdirSync(path.join(tree, "dist", "electron-main"), { recursive: true });
   fs.mkdirSync(path.join(tree, "dist", "host"), { recursive: true });
   fs.mkdirSync(path.join(tree, "dist", "native"), { recursive: true });
-  fs.mkdirSync(path.join(tree, "dist", "renderer"), { recursive: true });
+  fs.mkdirSync(path.join(tree, "dist", "renderer", "assets"), { recursive: true });
   fs.writeFileSync(
     path.join(tree, "package.json"),
     `${JSON.stringify(
@@ -57,7 +75,7 @@ async function syntheticAsar(t, overrides = {}) {
   );
   fs.writeFileSync(
     path.join(tree, "dist", "electron-preload", "preload.cjs"),
-    'const stock="kept";s.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>{});\n',
+    'const stock="kept";const L=M({invokeRequest:()=>{s.ipcRenderer.invoke("sand:coordinator-port-request")}});s.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>{});\n',
   );
   fs.writeFileSync(
     path.join(tree, "dist", "electron-main", "main.cjs"),
@@ -71,6 +89,10 @@ async function syntheticAsar(t, overrides = {}) {
     path.join(tree, "dist", "renderer", "index.html"),
     '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>Grok Bot</title>\n    <script type="module" crossorigin src="./assets/index-CphCyQnY.js"></script>\n    <link rel="stylesheet" crossorigin href="./assets/index-DTIy1z2L.css">\n  </head>\n  <body>\n    <div id="root"></div>\n  </body>\n</html>\n',
   );
+  fs.writeFileSync(
+    path.join(tree, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+    SYNTHETIC_VENDOR_RENDERER,
+  );
   const nativeBytes = Buffer.from("synthetic native helper\n");
   const nativePath = path.join(tree, "dist", "native", "sand-helper");
   fs.writeFileSync(nativePath, nativeBytes, { mode: 0o755 });
@@ -82,6 +104,14 @@ async function syntheticAsar(t, overrides = {}) {
 
 function loadPatcher() {
   delete require.cache[require.resolve(patcherPath)];
+  require.cache[require.resolve(rendererPatchPath)].exports = {
+    ...rendererPatch,
+    patchRenderer(extractedRoot) {
+      return rendererPatch.patchRenderer(extractedRoot, {
+        expectedVendorRendererSha256: SYNTHETIC_VENDOR_RENDERER_SHA256,
+      });
+    },
+  };
   return require(patcherPath);
 }
 
@@ -136,6 +166,8 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/codex/desktop/inference-provider-router.cjs",
         "dist/codex/desktop/local-desktop-frame-ipc.cjs",
         "dist/codex/desktop/model-selection-store.cjs",
+        "dist/codex/desktop/openbot-native-coordinator-ipc.cjs",
+        "dist/codex/desktop/openbot-native-coordinator.cjs",
         "dist/codex/desktop/openbot-user-data.cjs",
         "dist/codex/desktop/runtime.cjs",
         "dist/codex/desktop/standalone-conversation-controller.cjs",
@@ -173,13 +205,12 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
         "dist/electron-main/main.cjs",
         "dist/electron-preload/preload.cjs",
         "dist/host/host-main.cjs",
+        "dist/renderer/assets/index-CphCyQnY.js",
         "dist/renderer/codex/bot-runtime-ui.js",
         "dist/renderer/codex/codex-ui.css",
         "dist/renderer/codex/model-controls.js",
         "dist/renderer/codex/openbot-local-desktop-view.css",
         "dist/renderer/codex/openbot-local-desktop-view.js",
-        "dist/renderer/codex/openbot-standalone-shell.css",
-        "dist/renderer/codex/openbot-standalone-shell.js",
         "dist/renderer/codex/reasoning-control.js",
         "dist/renderer/index.html",
         "package.json",
@@ -283,6 +314,13 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
       patchedHost.indexOf("function T4i(t){"),
     ),
     /getAccessToken|SAND_AGENT_MOCK_RESPONSE|Qdi\(/,
+  );
+  assert.match(
+    fs.readFileSync(
+      path.join(extracted, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+      "utf8",
+    ),
+    /window\.openbotProtocol\?\.schemaVersion===1/,
   );
   assert.deepEqual(
     fs.readFileSync(

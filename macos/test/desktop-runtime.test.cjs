@@ -1145,6 +1145,49 @@ test("selecting a bot retains its local model generation across remote runtime c
   await installed.dispose();
 });
 
+test("a temporarily unavailable official catalog never rewrites a stored Direct Codex bot to CLIProxy", async () => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  const retained = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 7,
+    generation: 11,
+  });
+  let writes = 0;
+  const selectionStore = {
+    async read() { return retained; },
+    async writeNext() { writes += 1; throw new Error("stored Direct Codex selection must not be rewritten"); },
+    async selectBot(botId) { assert.equal(botId, BOT_A); return botId; },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { getAllWindows: () => [] },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: {
+      on() {}, off() {}, dispose() {},
+      async readBot(botId) { return botId === BOT_A ? { botId } : null; },
+    },
+    selectionStore,
+    accountController: accountWithCatalog(Object.freeze({
+      generation: 8,
+      status: "loading",
+      models: Object.freeze([]),
+    })),
+  });
+  assert.equal(await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A), retained);
+  assert.equal(writes, 0);
+  await installed.dispose();
+});
+
 test("selecting a stored bot durably owns the next unbound inference conversation", async (t) => {
   const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
   const { ModelSelectionStore } = require(selectionPath);

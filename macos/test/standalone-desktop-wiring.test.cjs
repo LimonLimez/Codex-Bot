@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -13,17 +14,34 @@ const desktopPatchPath = path.join(macRoot, "src", "patch", "desktop.cjs");
 const rendererPatchPath = path.join(macRoot, "src", "patch", "renderer.cjs");
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 
-const STOCK_PRELOAD = 'const stock="kept";s.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>{});\n';
+const STOCK_PRELOAD = 'const stock="kept";const L=M({invokeRequest:()=>{s.ipcRenderer.invoke("sand:coordinator-port-request")}});s.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>{});\n';
 const STOCK_INDEX = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Grok Bot</title>
+    <script type="module" crossorigin src="./assets/index-CphCyQnY.js"></script>
   </head>
   <body><div id="root"></div></body>
 </html>
 `;
+const STOCK_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardingRunId:t,completeOnboarding:s}=RFn();return n?p.jsxs(p.Fragment,{children:[p.jsx(Upe,{}),p.jsx(ggt,{})]}):e==="checking"?null:p.jsx(TDn,{chrome:JHn,children:e==="onboarding"?p.jsx(qFn,{onComplete:s,presentation:KUn},t):p.jsx(BHn,{})})}';
+const STOCK_LOCAL_IDENTITY_ANCHORS = [
+  'const Bgt={slice:"send-journal",schemaVersion:2,scope:"client-persisted",accountSensitive:!0}',
+  'bt=()=>{if(!(Ge||t.get().status!=="ready"||s==null)){',
+  'mt=()=>{if(Ge||t.get().status!=="ready"||s==null)return;',
+  ':s?f!=null?W._(mbn(f)):i.length>0?U({id:"I/1BxG"}):C??W._(dht):U({id:"622+sP"})',
+  'if(await j.write({accountSlot:null,value:Ve}),!Ye()||(await B.restore(Ve),!Ye())||(await q.restore(Ve),!Ye())||(await K.restore(Ve),!Ye())||(await F.restore(Ve),!Ye())||(await ne.restore(Ve),!Ye())||(await Z.restore(Ve),!Ye())||(await ke.restore(Ve),!Ye()))return;',
+  'Ve!=null&&F.connect()',
+  'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())',
+  'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null})',
+].join(";");
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}const after="kept";`;
+
+function sha256Text(source) {
+  return crypto.createHash("sha256").update(source, "utf8").digest("hex");
+}
 
 function tempRoot(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-standalone-wiring-"));
@@ -61,7 +79,7 @@ function manualCleanupClock() {
   });
 }
 
-test("patching stages the standalone assets and loads host selection before bot controls", (t) => {
+test("patching keeps the native Grok shell and does not stage the replacement standalone renderer", (t) => {
   const { ASSETS, patchRenderer, patchRendererIndexSource } = require(rendererPatchPath);
   const { DESKTOP_FILES, patchPreloadSource } = require(desktopPatchPath);
   assert.equal(DESKTOP_FILES.includes("desktop/standalone-conversation-controller.cjs"), true);
@@ -79,37 +97,39 @@ test("patching stages the standalone assets and loads host selection before bot 
   }
   const index = patchRendererIndexSource(STOCK_INDEX);
   const desktopView = index.indexOf("./codex/openbot-local-desktop-view.js");
-  const standalone = index.indexOf("./codex/openbot-standalone-shell.js");
   const controls = index.indexOf("./codex/bot-runtime-ui.js");
-  assert.ok(desktopView >= 0 && standalone > desktopView && controls > standalone);
+  assert.ok(desktopView >= 0 && controls > desktopView);
   assert.match(index, /\.\/codex\/openbot-local-desktop-view\.css/);
-  assert.match(index, /\.\/codex\/openbot-standalone-shell\.css/);
+  assert.doesNotMatch(index, /openbot-standalone-shell/);
   assert.deepEqual(ASSETS, [
     "bot-runtime-ui.js",
     "codex-ui.css",
     "model-controls.js",
     "openbot-local-desktop-view.css",
     "openbot-local-desktop-view.js",
-    "openbot-standalone-shell.css",
-    "openbot-standalone-shell.js",
     "reasoning-control.js",
   ]);
 
   const root = tempRoot(t);
-  fs.mkdirSync(path.join(root, "dist", "renderer"), { recursive: true });
+  fs.mkdirSync(path.join(root, "dist", "renderer", "assets"), { recursive: true });
   fs.writeFileSync(path.join(root, "dist", "renderer", "index.html"), STOCK_INDEX);
-  patchRenderer(root);
+  fs.writeFileSync(
+    path.join(root, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+    SYNTHETIC_VENDOR_RENDERER,
+  );
+  patchRenderer(root, { expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER) });
   const staged = path.join(root, "dist", "renderer", "codex");
   assert.deepEqual(fs.readdirSync(staged).sort(), ASSETS);
   for (const asset of [
     "openbot-local-desktop-view.css", "openbot-local-desktop-view.js",
-    "openbot-standalone-shell.css", "openbot-standalone-shell.js",
   ]) {
     assert.deepEqual(
       fs.readFileSync(path.join(staged, asset)),
       fs.readFileSync(path.join(macRoot, "src", "renderer", asset)),
     );
   }
+  assert.equal(fs.existsSync(path.join(staged, "openbot-standalone-shell.js")), false);
+  assert.equal(fs.existsSync(path.join(staged, "openbot-standalone-shell.css")), false);
 });
 
 test("the inference factory gives standalone and preserved host one router", () => {
@@ -197,11 +217,13 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   const { installDesktopRuntime } = require(runtimePath);
   const { STANDALONE_IPC_CHANNELS } = require("../src/desktop/standalone-conversation-ipc.cjs");
   const { LOCAL_DESKTOP_FRAME_CHANNELS } = require("../src/desktop/local-desktop-frame-ipc.cjs");
+  const { OPENBOT_NATIVE_COORDINATOR_CHANNELS } = require("../src/desktop/openbot-native-coordinator-ipc.cjs");
   const handlers = new Map();
   const sender = { isDestroyed: () => false, send() {} };
   const window = { isDestroyed: () => false, webContents: sender };
   const electron = {
     app: { once() {} },
+    MessageChannelMain: class {},
     ipcMain: {
       handle(channel, handler) { handlers.set(channel, handler); },
       removeHandler(channel) { handlers.delete(channel); },
@@ -220,11 +242,20 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
     dispose() { this.disposed = true; }
   }
   const standaloneConversations = new Conversations();
+  const nativeCoordinator = {
+    disposed: 0,
+    bindPort() { return () => {}; },
+    dispose() { this.disposed += 1; },
+  };
   let targetDisposed = 0;
   const installed = installDesktopRuntime(electron, {
-    controller: { on() {}, off() {}, dispose() {} },
+    controller: {
+      on() {}, off() {}, dispose() {},
+      async readBot(botId) { return botId === BOT_A ? { botId } : null; },
+    },
     selectionStore: {},
     standaloneConversations,
+    nativeCoordinator,
     localDesktopManager: {
       ownsWindow() { return false; }, async open() {}, async captureDisplayFrame() { throw new Error("unused"); },
     },
@@ -236,6 +267,7 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   });
   for (const channel of Object.values(STANDALONE_IPC_CHANNELS)) assert.equal(handlers.has(channel), true);
   for (const channel of Object.values(LOCAL_DESKTOP_FRAME_CHANNELS)) assert.equal(handlers.has(channel), true);
+  assert.equal(handlers.has(OPENBOT_NATIVE_COORDINATOR_CHANNELS.request), true);
   assert.deepEqual(await handlers.get(STANDALONE_IPC_CHANNELS.list)({ sender }, BOT_A), []);
   await assert.rejects(handlers.get(STANDALONE_IPC_CHANNELS.list)({ sender: {} }, BOT_A), {
     code: "OPENBOT_CONVERSATION_OPERATION_FAILED",
@@ -243,8 +275,85 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   await installed.dispose();
   for (const channel of Object.values(STANDALONE_IPC_CHANNELS)) assert.equal(handlers.has(channel), false);
   for (const channel of Object.values(LOCAL_DESKTOP_FRAME_CHANNELS)) assert.equal(handlers.has(channel), false);
+  assert.equal(handlers.has(OPENBOT_NATIVE_COORDINATOR_CHANNELS.request), false);
   assert.equal(standaloneConversations.disposed, true);
+  assert.equal(nativeCoordinator.disposed, 1);
   assert.equal(targetDisposed, 1);
+});
+
+test("native Grok bot selection switches the shared OpenBot bot and publishes one runtime event", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const handlers = new Map();
+  const sent = [];
+  const selected = [];
+  const ensured = [];
+  let factoryOptions = null;
+  const nativeCoordinator = {
+    bindPort() { return () => {}; },
+    dispose() {},
+  };
+  const sender = { isDestroyed: () => false, send(channel, value) { sent.push([channel, value]); } };
+  const window = { isDestroyed: () => false, webContents: sender };
+  const electron = {
+    app: { once() {} },
+    MessageChannelMain: class {},
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(value) { return value === sender ? window : null; },
+      getAllWindows() { return [window]; },
+    },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: {
+      on() {}, off() {}, dispose() {},
+      async readBot(botId) { return botId === BOT_A ? { botId } : null; },
+    },
+    selectionStore: {
+      async read() { return null; },
+      async ensure(botId, selection) {
+        ensured.push([botId, selection]);
+        return Object.freeze({ ...selection, generation: 1 });
+      },
+      async selectBot(botId) { selected.push(botId); },
+    },
+    nativeCoordinatorFactory(options) {
+      factoryOptions = options;
+      return nativeCoordinator;
+    },
+    accountController: {
+      async start() {},
+      accountState() { return {}; },
+      catalogState() {
+        return Object.freeze({
+          generation: 7,
+          status: "unavailable",
+          models: Object.freeze([]),
+        });
+      },
+      on() {}, off() {}, dispose() {},
+    },
+  });
+  assert.equal(typeof factoryOptions?.onSelectAgent, "function");
+  await factoryOptions.onSelectAgent(BOT_A);
+  assert.equal(ensured.length, 1);
+  assert.equal(ensured[0][0], BOT_A);
+  assert.deepEqual(ensured[0][1], {
+    botId: BOT_A,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+  });
+  assert.deepEqual(selected, [BOT_A]);
+  assert.deepEqual(sent, [["codex-runtime:event", {
+    type: "active-bot-changed",
+    botId: BOT_A,
+  }]]);
+  await installed.dispose();
 });
 
 test("desktop runtime starts every owner before awaiting standalone and Local Desktop cancellation", async () => {

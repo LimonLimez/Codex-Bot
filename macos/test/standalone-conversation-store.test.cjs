@@ -61,6 +61,32 @@ test("standalone transcript store is atomic private durable and exact-bot", asyn
   assert.doesNotMatch(await fs.readFile(filePath, "utf8"), /endpoint|credential|token|bookmark|\/Users\//i);
 });
 
+test("native prompt nonces survive reopen while schema v1 transcripts migrate without inventing acceptance", async (t) => {
+  const { filePath, store } = await fixture(t);
+  const withNonce = record({
+    messages: [{
+      ...record().messages[0],
+      clientNonce: "native-nonce-123",
+      inputDigest: "1".repeat(64),
+    }],
+  });
+  await store.create(withNonce);
+  const reopened = new StandaloneConversationStore({ filePath });
+  assert.equal((await reopened.read(BOT_A, CONVERSATION)).messages[0].clientNonce, "native-nonce-123");
+  assert.equal((await reopened.read(BOT_A, CONVERSATION)).messages[0].inputDigest, "1".repeat(64));
+  assert.equal(JSON.parse(await fs.readFile(filePath, "utf8")).schemaVersion, 2);
+
+  await fs.writeFile(filePath, `${JSON.stringify({
+    schemaVersion: 1,
+    conversations: [record()],
+  })}\n`, { mode: 0o600 });
+  const legacy = new StandaloneConversationStore({ filePath });
+  const legacyMessage = (await legacy.read(BOT_A, CONVERSATION)).messages[0];
+  assert.equal(Object.hasOwn(legacyMessage, "clientNonce"), false);
+  await legacy.replace(record({ updatedAt: "2026-08-16T12:02:00.000Z" }));
+  assert.equal(JSON.parse(await fs.readFile(filePath, "utf8")).schemaVersion, 2);
+});
+
 test("corruption hostile records and write failure stay sanitized and fail closed", async (t) => {
   const { filePath, store } = await fixture(t);
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });

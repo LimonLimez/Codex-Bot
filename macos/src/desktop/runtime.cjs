@@ -26,6 +26,8 @@ const {
 } = require("./standalone-conversation-controller.cjs");
 const { installStandaloneConversationIpc } = require("./standalone-conversation-ipc.cjs");
 const { installLocalDesktopFrameIpc } = require("./local-desktop-frame-ipc.cjs");
+const { OpenBotNativeCoordinator } = require("./openbot-native-coordinator.cjs");
+const { installOpenBotNativeCoordinatorIpc } = require("./openbot-native-coordinator-ipc.cjs");
 const { StandaloneConversationStore } = require("./standalone-conversation-store.cjs");
 const { StandaloneSubagentRunner } = require("./standalone-subagent-runner.cjs");
 const { ComputerTargetRouter } = require("../computer/computer-target-router.cjs");
@@ -453,6 +455,14 @@ function selectionMatchesCatalog(value, catalog) {
 }
 
 function defaultModelSelection(botId, catalog) {
+  if (catalog?.status !== "ready") {
+    return resolveModelSelection({
+      botId,
+      model: "claude-fable-5",
+      reasoningEffort: "medium",
+      serviceTier: null,
+    }, catalog);
+  }
   const models = catalogModels(catalog);
   const model = models.find((entry) => entry?.isDefault === true) ?? models[0];
   return resolveModelSelection({
@@ -748,6 +758,11 @@ function productionDependencies(electron) {
     toolBridge: computer.toolBridge,
     computerTargetRouter: computer.targetRouter,
   });
+  const nativeCoordinatorFactory = ({ onSelectAgent }) => new OpenBotNativeCoordinator({
+    botRuntimeController: controller,
+    conversationController: inferenceBridge.conversations,
+    onSelectAgent,
+  });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
   process.env.CODEX_BOT_MODEL_SELECTIONS = modelSelectionsPath;
@@ -764,6 +779,7 @@ function productionDependencies(electron) {
     localDesktopManager: computer.localManager,
     controller,
     inferenceBridge,
+    nativeCoordinatorFactory,
     standaloneConversations: inferenceBridge.conversations,
     selectionStore,
     sidecarManager,
@@ -809,6 +825,10 @@ function installDesktopRuntime(electron, injected = {}) {
   const standaloneConversations = dependencies.standaloneConversations
     || inferenceBridge?.conversations
     || null;
+  const nativeCoordinator = dependencies.nativeCoordinator
+    || (typeof dependencies.nativeCoordinatorFactory === "function"
+      ? dependencies.nativeCoordinatorFactory({ onSelectAgent: selectNativeAgent })
+      : null);
   const computerBoundary = dependencies.computerBoundary || Object.freeze({
     async selectMode() { throw sanitizedComputerFailure(); },
     async read() { throw sanitizedComputerFailure(); },
@@ -836,6 +856,9 @@ function installDesktopRuntime(electron, injected = {}) {
     : null;
   const localFrameIpc = localDesktopManager
     ? installLocalDesktopFrameIpc({ electron, manager: localDesktopManager, computerBoundary })
+    : null;
+  const nativeCoordinatorIpc = nativeCoordinator
+    ? installOpenBotNativeCoordinatorIpc({ electron, coordinator: nativeCoordinator, localDesktopManager })
     : null;
   void accountController.start().catch(() => {});
   if (inferenceBridge && typeof inferenceBridge.start === "function") {
@@ -877,6 +900,19 @@ function installDesktopRuntime(electron, injected = {}) {
     }
   }
 
+  async function selectNativeAgent(botId) {
+    if (disposed || typeof botId !== "string") throw sanitizedFailure();
+    const bot = await controller.readBot(botId);
+    if (disposed || !bot || bot.botId !== botId || typeof selectionStore.selectBot !== "function") {
+      throw sanitizedFailure();
+    }
+    await currentModelSelection(botId);
+    if (disposed) throw sanitizedFailure();
+    await selectionStore.selectBot(botId);
+    if (disposed) throw sanitizedFailure();
+    broadcastRuntimeEvent(Object.freeze({ type: "active-bot-changed", botId }));
+  }
+
   function broadcastChannel(channel, value) {
     if (!value || typeof value !== "object") return;
     for (const window of electron.BrowserWindow.getAllWindows()) {
@@ -915,6 +951,7 @@ function installDesktopRuntime(electron, injected = {}) {
   async function currentModelSelection(botId) {
     const catalog = accountController.catalogState();
     const current = await selectionStore.read(botId);
+    if (current && catalog?.status !== "ready") return current;
     if (current && selectionMatchesCatalog(current, catalog)) return current;
     let requested;
     if (current) {
@@ -1231,6 +1268,7 @@ function installDesktopRuntime(electron, injected = {}) {
       capture(() => computerBoundary.off?.("changed", onComputerChanged));
       capture(() => computerBoundary.off?.("permission-requested", onComputerPermission));
       capture(() => localFrameIpc?.dispose());
+      capture(() => nativeCoordinatorIpc?.dispose?.());
       capture(() => { delete process.env.CODEX_BOT_CLIPROXY_URL; });
       capture(() => { delete process.env.CODEX_BOT_CLIPROXY_TOKEN; });
       capture(() => { delete process.env.CODEX_BOT_INFERENCE_ENDPOINT; });

@@ -5,7 +5,8 @@ const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { types } = require("node:util");
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 const MAX_CONVERSATIONS = 256;
 const MAX_MESSAGES = 512;
 const MAX_TEXT_BYTES = 64 * 1024;
@@ -14,7 +15,8 @@ const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 const CONVERSATION_ID = /^conversation-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MESSAGE_ID = /^message-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const RECORD_FIELDS = new Set(["botId", "conversationId", "createdAt", "updatedAt", "messages"]);
-const MESSAGE_FIELDS = new Set(["messageId", "role", "text", "createdAt"]);
+const MESSAGE_FIELDS = new Set(["messageId", "role", "text", "createdAt", "clientNonce", "inputDigest"]);
+const LEGACY_MESSAGE_FIELDS = new Set(["messageId", "role", "text", "createdAt"]);
 
 class StandaloneConversationStoreError extends Error {
   constructor() {
@@ -32,7 +34,7 @@ class StandaloneConversationStoreError extends Error {
 
 function fail() { throw new StandaloneConversationStoreError(); }
 
-function ownData(value, fields) {
+function ownData(value, fields, required = fields) {
   if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) fail();
   let prototype;
   let descriptors;
@@ -43,7 +45,7 @@ function ownData(value, fields) {
   if (prototype !== Object.prototype && prototype !== null
     || Reflect.ownKeys(descriptors).some((key) => typeof key !== "string" || !fields.has(key)
       || !("value" in descriptors[key]))
-    || [...fields].some((key) => !descriptors[key])) fail();
+    || [...required].some((key) => !descriptors[key])) fail();
   return Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value]));
 }
 
@@ -70,28 +72,38 @@ function timestamp(value) {
   return value;
 }
 
-function message(value) {
-  const raw = ownData(value, MESSAGE_FIELDS);
+function message(value, { legacy = false } = {}) {
+  const raw = ownData(value, legacy ? LEGACY_MESSAGE_FIELDS : MESSAGE_FIELDS, LEGACY_MESSAGE_FIELDS);
   if (typeof raw.messageId !== "string" || !MESSAGE_ID.test(raw.messageId)
     || !new Set(["user", "assistant"]).has(raw.role)
     || typeof raw.text !== "string" || raw.text.includes("\0")
     || Buffer.byteLength(raw.text, "utf8") > MAX_TEXT_BYTES) fail();
+  if ((raw.clientNonce === undefined) !== (raw.inputDigest === undefined)) fail();
+  if (raw.clientNonce !== undefined
+    && (raw.role !== "user" || typeof raw.clientNonce !== "string"
+      || raw.clientNonce.trim().length === 0 || raw.clientNonce.includes("\0")
+      || Buffer.byteLength(raw.clientNonce, "utf8") > 512
+      || typeof raw.inputDigest !== "string" || !/^[0-9a-f]{64}$/.test(raw.inputDigest))) fail();
   return {
     messageId: raw.messageId,
     role: raw.role,
     text: raw.text,
     createdAt: timestamp(raw.createdAt),
+    ...(raw.clientNonce === undefined ? {} : {
+      clientNonce: raw.clientNonce,
+      inputDigest: raw.inputDigest,
+    }),
   };
 }
 
-function record(value) {
+function record(value, { legacy = false } = {}) {
   const raw = ownData(value, RECORD_FIELDS);
   if (typeof raw.botId !== "string" || !BOT_ID.test(raw.botId)
     || typeof raw.conversationId !== "string" || !CONVERSATION_ID.test(raw.conversationId)) fail();
   const createdAt = timestamp(raw.createdAt);
   const updatedAt = timestamp(raw.updatedAt);
   if (updatedAt < createdAt) fail();
-  const messages = denseArray(raw.messages, MAX_MESSAGES).map(message);
+  const messages = denseArray(raw.messages, MAX_MESSAGES).map((entry) => message(entry, { legacy }));
   return { botId: raw.botId, conversationId: raw.conversationId, createdAt, updatedAt, messages };
 }
 
@@ -115,8 +127,10 @@ function conversationId(value) {
 
 function normalizeState(value) {
   const state = ownData(value, new Set(["schemaVersion", "conversations"]));
-  if (state.schemaVersion !== SCHEMA_VERSION) fail();
-  const conversations = denseArray(state.conversations, MAX_CONVERSATIONS).map(record);
+  if (state.schemaVersion !== SCHEMA_VERSION && state.schemaVersion !== LEGACY_SCHEMA_VERSION) fail();
+  const legacy = state.schemaVersion === LEGACY_SCHEMA_VERSION;
+  const conversations = denseArray(state.conversations, MAX_CONVERSATIONS)
+    .map((entry) => record(entry, { legacy }));
   const owners = new Set();
   for (const entry of conversations) {
     if (owners.has(entry.conversationId)) fail();
