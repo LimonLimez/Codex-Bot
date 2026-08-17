@@ -723,6 +723,128 @@ test("a durable native prompt echo stays accepted when inference startup fails b
   second.dispose();
 });
 
+test("signed-out native local reads return exact Grok 0.20 absence shapes", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const avatarDataUrl = "data:image/png;base64,AA==";
+  const bots = new BotControllerHarness([bot(BOT_A, {
+    appearance: Object.freeze({
+      shape: "blob",
+      color: "blue",
+      image: avatarDataUrl,
+      title: "",
+      description: "A direct Codex bot.",
+    }),
+  })]);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  const objectReads = [
+    ["searchAgents", { query: "Alpha" }, []],
+    ["searchMedia", { query: "" }, []],
+    ["getAgentAvatar", { id: BOT_A }, {
+      dataUrl: avatarDataUrl,
+      version: "2026-08-16T12:01:00.000Z",
+    }],
+    ["getConversationOutline", { id: BOT_A }, []],
+    ["getCloudAgentInfo", { bcId: "cloud-agent-1", includeFiles: false }, null],
+    ["getForeverBoxStatus", { id: BOT_A }, null],
+    ["getAgentChannels", { id: BOT_A }, { manifests: [], connections: [] }],
+    ["getAgentWorkflows", { id: BOT_A }, []],
+    ["getAgentAutomations", { id: BOT_A }, []],
+    ["getSubagents", { id: BOT_A }, []],
+    ["getAsyncTasks", { id: BOT_A }, []],
+  ];
+  for (const [index, [method, args, value]] of objectReads.entries()) {
+    const requestId = `r-local-object-${index}`;
+    assert.deepEqual(await request(port, requestId, method, args), {
+      kind: "reply",
+      requestId,
+      outcome: { status: "ok", value },
+    });
+  }
+
+  const noArgumentReads = [
+    ["getTeachRecordingStatus", {
+      state: "idle",
+      agentId: null,
+      startedAtMs: null,
+      maxDurationMs: 600_000,
+    }],
+    ["getTrays", []],
+    ["getBoxSecretsStatus", { keys: [], isApplied: false, lastAppliedAtMs: null }],
+    ["getSharingState", {
+      isEnabled: false,
+      selfAuthId: null,
+      pendingJoinRequests: [],
+      rooms: [],
+      typingUsers: [],
+    }],
+    ["skillsCatalog", []],
+    ["syncPluginSkills", []],
+    ["listAllAutomations", []],
+    ["isAgentNetworkEnabled", false],
+    ["isGlobalSearchEnabled", false],
+    ["isEgressTunnelAvailable", false],
+  ];
+  for (const [index, [method, value]] of noArgumentReads.entries()) {
+    const requestId = `r-local-none-${index}`;
+    assert.deepEqual(await request(port, requestId, method), {
+      kind: "reply",
+      requestId,
+      outcome: { status: "ok", value },
+    });
+  }
+});
+
+test("signed-out local reads reject malformed arguments while remote mutations stay unavailable", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: new BotControllerHarness(),
+    conversationController: new ConversationHarness(),
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+
+  for (const [requestId, method, args] of [
+    ["r-search-malformed", "searchAgents", { query: 7 }],
+    ["r-agent-read-malformed", "getAgentWorkflows", {}],
+    ["r-none-malformed", "skillsCatalog", { unexpected: true }],
+    ["r-cloud-malformed", "getCloudAgentInfo", { bcId: "cloud-agent-1", includeFiles: "no" }],
+  ]) {
+    assert.deepEqual((await request(port, requestId, method, args)).outcome, {
+      status: "failed",
+      failure: {
+        code: "source/malformed-request",
+        message: "Malformed OpenBot native request.",
+      },
+    });
+  }
+
+  for (const [requestId, method, args] of [
+    ["r-ensure-box", "ensureForeverBox", { id: BOT_A }],
+    ["r-connect-channel", "connectChannel", { id: BOT_A, manifestId: "slack" }],
+    ["r-create-room", "createRoomFromAgent", { id: BOT_A }],
+  ]) {
+    assert.deepEqual((await request(port, requestId, method, args)).outcome, {
+      status: "failed",
+      failure: {
+        code: "source/capability-unavailable",
+        message: `unknown gateway method: ${method}`,
+      },
+    });
+  }
+});
+
 test("malformed, duplicate, and oversized frames close only their port while unsupported methods fail explicitly", async (t) => {
   const { OpenBotNativeCoordinator } = require(MODULE_PATH);
   const bots = new BotControllerHarness();
@@ -748,7 +870,7 @@ test("malformed, duplicate, and oversized frames close only their port while uns
   const unbind = coordinator.bindPort(port);
   port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
   await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
-  const unsupported = await request(port, "r-unsupported", "getTrays");
+  const unsupported = await request(port, "r-unsupported", "ensureForeverBox", { id: BOT_A });
   assert.deepEqual(unsupported, {
     kind: "reply",
     requestId: "r-unsupported",
@@ -756,7 +878,7 @@ test("malformed, duplicate, and oversized frames close only their port while uns
       status: "failed",
       failure: {
         code: "source/capability-unavailable",
-        message: "unknown gateway method: getTrays",
+        message: "unknown gateway method: ensureForeverBox",
       },
     },
   });

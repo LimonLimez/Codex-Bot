@@ -23,13 +23,43 @@ const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const APPEARANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const DANGEROUS_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const TERMINAL_EVENTS = new Set(["completed", "failed", "cancelled"]);
+const EMPTY_AGENT_ARRAY_READ_METHODS = new Set([
+  "getAgentWorkflows",
+  "getConversationOutline",
+  "getSubagents",
+  "getAsyncTasks",
+  "getAgentAutomations",
+]);
+const EMPTY_NONE_ARRAY_READ_METHODS = new Set([
+  "skillsCatalog",
+  "syncPluginSkills",
+  "getTrays",
+  "listAllAutomations",
+]);
+const FALSE_NONE_READ_METHODS = new Set([
+  "isAgentNetworkEnabled",
+  "isGlobalSearchEnabled",
+  "isEgressTunnelAvailable",
+]);
 const SUPPORTED_METHODS = new Set([
   "listAgents",
   "countAgents",
+  "searchAgents",
+  "searchMedia",
   "createAgent",
   "updateAgent",
   "deleteAgents",
   "kickstartAgent",
+  "getCloudAgentInfo",
+  "getAgentAvatar",
+  ...EMPTY_AGENT_ARRAY_READ_METHODS,
+  ...EMPTY_NONE_ARRAY_READ_METHODS,
+  "getForeverBoxStatus",
+  "getTeachRecordingStatus",
+  "getAgentChannels",
+  "getBoxSecretsStatus",
+  ...FALSE_NONE_READ_METHODS,
+  "getSharingState",
   "openAgentTail",
   "getAgentTranscriptTail",
   "sendPrompt",
@@ -496,10 +526,50 @@ class OpenBotNativeCoordinator {
       this.#noneArgs(args);
       return (await this.#agentRows()).length;
     }
+    if (method === "searchAgents" || method === "searchMedia") {
+      return this.#emptySearch(args);
+    }
     if (method === "createAgent") return this.#createAgent(args);
     if (method === "updateAgent") return this.#updateAgent(args);
     if (method === "deleteAgents") return this.#deleteAgents(args);
     if (method === "kickstartAgent") return this.#kickstartAgent(args);
+    if (method === "getCloudAgentInfo") return this.#cloudAgentInfo(args);
+    if (method === "getAgentAvatar") return this.#agentAvatar(args);
+    if (EMPTY_AGENT_ARRAY_READ_METHODS.has(method)) return this.#emptyAgentArray(args);
+    if (EMPTY_NONE_ARRAY_READ_METHODS.has(method)) {
+      this.#noneArgs(args);
+      return [];
+    }
+    if (method === "getForeverBoxStatus") {
+      await this.#localBotFromIdArgs(args);
+      return null;
+    }
+    if (method === "getTeachRecordingStatus") {
+      this.#noneArgs(args);
+      return { state: "idle", agentId: null, startedAtMs: null, maxDurationMs: 600_000 };
+    }
+    if (method === "getAgentChannels") {
+      await this.#localBotFromIdArgs(args);
+      return { manifests: [], connections: [] };
+    }
+    if (method === "getBoxSecretsStatus") {
+      this.#noneArgs(args);
+      return { keys: [], isApplied: false, lastAppliedAtMs: null };
+    }
+    if (FALSE_NONE_READ_METHODS.has(method)) {
+      this.#noneArgs(args);
+      return false;
+    }
+    if (method === "getSharingState") {
+      this.#noneArgs(args);
+      return {
+        isEnabled: false,
+        selfAuthId: null,
+        pendingJoinRequests: [],
+        rooms: [],
+        typingUsers: [],
+      };
+    }
     if (method === "setAgentUnread") return this.#setAgentUnread(args);
     if (method === "openAgentTail" || method === "getAgentTranscriptTail") {
       return this.#tail(args, method === "openAgentTail");
@@ -511,6 +581,46 @@ class OpenBotNativeCoordinator {
 
   #noneArgs(args) {
     exactRecord(args, new Set(), new Set());
+  }
+
+  #emptySearch(rawArgs) {
+    const args = exactRecord(rawArgs, new Set(["query"]));
+    boundedString(args.query, MAX_TEXT_BYTES, { allowEmpty: true });
+    return [];
+  }
+
+  #cloudAgentInfo(rawArgs) {
+    const args = exactRecord(rawArgs, new Set(["bcId", "includeFiles"]));
+    boundedString(args.bcId, 512);
+    if (typeof args.includeFiles !== "boolean") {
+      throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+    }
+    return null;
+  }
+
+  async #localBotFromIdArgs(rawArgs) {
+    const args = exactRecord(rawArgs, new Set(["id"]));
+    const id = botId(args.id);
+    const values = await this.#bots.listBots();
+    if (!Array.isArray(values) || values.length > MAX_AGENTS) throw new TypeError("invalid bot list");
+    const value = values.find((candidate) => candidate?.botId === id);
+    if (!value) throw new TypeError("missing bot");
+    return validateBot(value);
+  }
+
+  async #agentAvatar(rawArgs) {
+    const localBot = await this.#localBotFromIdArgs(rawArgs);
+    const image = localBot.appearance.image;
+    return {
+      dataUrl: typeof image === "string" && image.length > 0 && utf8Bytes(image) <= MAX_TEXT_BYTES
+        ? image : null,
+      version: localBot.updatedAt,
+    };
+  }
+
+  async #emptyAgentArray(rawArgs) {
+    await this.#localBotFromIdArgs(rawArgs);
+    return [];
   }
 
   async #agentRows() {
