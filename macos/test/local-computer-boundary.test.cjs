@@ -16,6 +16,16 @@ const UUIDS = [
   "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 ];
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolveValue, rejectValue) => {
+    resolve = resolveValue;
+    reject = rejectValue;
+  });
+  return { promise, resolve, reject };
+}
+
 function computer(overrides = {}) {
   return {
     mode: "not-now",
@@ -61,6 +71,7 @@ function fixture(overrides = {}) {
     state: "ready",
   }));
   manager.close = mock.fn(async () => {});
+  manager.deleteBot = mock.fn(async () => {});
   manager.dispose = mock.fn();
   const broker = new EventEmitter();
   broker.decide = mock.fn(async () => "private-helper-result");
@@ -308,4 +319,191 @@ test("persistence failures close new helpers and restore an authoritative old lo
   assert.equal(second.manager.close.mock.callCount(), 1);
   assert.equal(second.manager.open.mock.callCount(), 1);
   assert.deepEqual(second.manager.open.mock.calls[0].arguments[0], previous);
+});
+
+test("deleteBot synchronously fences one bot, drains its older selection, and delegates exact cleanup once", async () => {
+  let releaseOpen;
+  const heldOpen = new Promise((resolve) => { releaseOpen = resolve; });
+  const { boundary, manager } = fixture({
+    manager: { open: mock.fn(async () => heldOpen) },
+  });
+  const selecting = boundary.selectMode({ botId: BOT_A, mode: "local" })
+    .then(() => null, (error) => error);
+  while (manager.open.mock.callCount() === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  const request = Object.freeze({ botId: BOT_A, localProfileId: LOCAL_A });
+  const deleting = boundary.deleteBot(request);
+  assert.equal(boundary.deleteBot({ ...request }), deleting);
+  await assert.rejects(boundary.read(BOT_A), (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETING");
+  await assert.rejects(
+    boundary.listPermissionRequests(BOT_A),
+    (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETING",
+  );
+  assert.equal(manager.deleteBot.mock.callCount(), 0);
+
+  releaseOpen({ state: "ready" });
+  assert.equal((await selecting)?.code, "OPENBOT_COMPUTER_BOT_DELETING");
+  await deleting;
+
+  assert.deepEqual(manager.deleteBot.mock.calls.map((call) => call.arguments), [[request]]);
+  assert.equal(boundary.deleteBot({ ...request }), deleting);
+  await assert.rejects(
+    boundary.selectMode({ botId: BOT_A, mode: "not-now" }),
+    (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETING",
+  );
+});
+
+test("boundary disposal awaits an active exact bot cleanup before disposing shared owners", async () => {
+  let releaseDelete;
+  const heldDelete = new Promise((resolve) => { releaseDelete = resolve; });
+  const order = [];
+  const { boundary, broker, manager } = fixture({
+    manager: {
+      deleteBot: mock.fn(async () => {
+        order.push("delete-start");
+        await heldDelete;
+        order.push("delete-done");
+      }),
+      dispose: mock.fn(async () => { order.push("manager-dispose"); }),
+    },
+    broker: { dispose: mock.fn(async () => { order.push("broker-dispose"); }) },
+  });
+  const deleting = boundary.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A });
+  while (manager.deleteBot.mock.callCount() === 0) await new Promise((resolve) => setImmediate(resolve));
+
+  let settled = false;
+  const disposing = boundary.dispose().then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.deepEqual(order, ["delete-start"]);
+
+  releaseDelete();
+  await Promise.all([deleting, disposing]);
+  assert.deepEqual(order, ["delete-start", "delete-done", "manager-dispose", "broker-dispose"]);
+  assert.equal(manager.dispose.mock.callCount(), 1);
+  assert.equal(broker.dispose.mock.callCount(), 1);
+});
+
+test("a null-profile deletion still purges manager-owned grants and dominates a held bot read", async () => {
+  let readEntered;
+  let releaseRead;
+  const entered = new Promise((resolve) => { readEntered = resolve; });
+  const held = new Promise((resolve) => { releaseRead = resolve; });
+  const { boundary, manager } = fixture({
+    store: {
+      read: mock.fn(async () => {
+        readEntered();
+        await held;
+        return null;
+      }),
+    },
+  });
+  const reading = boundary.read(BOT_A).then(() => null, (error) => error);
+  await entered;
+
+  await boundary.deleteBot({ botId: BOT_A, localProfileId: null });
+  releaseRead();
+
+  assert.equal((await reading)?.code, "OPENBOT_COMPUTER_BOT_DELETING");
+  assert.deepEqual(manager.deleteBot.mock.calls.map((call) => call.arguments), [[BOT_A]]);
+});
+
+test("deletion dominates late Computer selection and permission dependency failures", async () => {
+  const closeGate = deferred();
+  const closeFixture = fixture({
+    manager: { close: mock.fn(() => closeGate.promise) },
+  });
+  const selecting = closeFixture.boundary.selectMode({ botId: BOT_A, mode: "cursor" })
+    .then(() => null, (error) => error);
+  while (closeFixture.manager.close.mock.callCount() === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const deletingSelection = closeFixture.boundary.deleteBot({
+    botId: BOT_A,
+    localProfileId: null,
+  });
+  closeGate.reject(new Error("CLOSE_BOOM"));
+  assert.equal((await selecting)?.code, "OPENBOT_COMPUTER_BOT_DELETING");
+  await deletingSelection;
+
+  const cases = [
+    {
+      dependency: "decide",
+      start(boundary) {
+        return boundary.decidePermission({
+          requestId: "permission-dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+          botId: BOT_A,
+          targetId: LOCAL_A,
+          targetGeneration: 1,
+          decision: "once",
+        });
+      },
+    },
+    { dependency: "list", start: (boundary) => boundary.listPermissions(BOT_A) },
+    { dependency: "listPending", start: (boundary) => boundary.listPermissionRequests(BOT_A) },
+    {
+      dependency: "revoke",
+      start: (boundary) => boundary.revokePermission({ botId: BOT_A, grantId: GRANT_A }),
+    },
+  ];
+  for (const item of cases) {
+    const gate = deferred();
+    const fixtureValue = fixture({
+      broker: { [item.dependency]: mock.fn(() => gate.promise) },
+    });
+    const pending = item.start(fixtureValue.boundary).then(() => null, (error) => error);
+    await fixtureValue.boundary.deleteBot({ botId: BOT_A, localProfileId: null });
+    gate.reject(new Error(`${item.dependency.toUpperCase()}_BOOM`));
+    assert.equal((await pending)?.code, "OPENBOT_COMPUTER_BOT_DELETING", item.dependency);
+  }
+});
+
+test("deleteBot publishes its exact shared promise before cleanup can synchronously reenter", async () => {
+  const request = Object.freeze({ botId: BOT_A, localProfileId: LOCAL_A });
+  let boundary;
+  let reentered;
+  let didReenter = false;
+  const fixtureValue = fixture({
+    manager: {
+      deleteBot: mock.fn(() => {
+        if (!didReenter) {
+          didReenter = true;
+          reentered = boundary.deleteBot(request);
+        }
+        return Promise.resolve();
+      }),
+    },
+  });
+  boundary = fixtureValue.boundary;
+
+  const deleting = boundary.deleteBot(request);
+  while (!reentered) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(reentered, deleting);
+  await deleting;
+  assert.equal(fixtureValue.manager.deleteBot.mock.callCount(), 1);
+});
+
+test("a changed listener that deletes the bot stops local selection before opening its desktop", async () => {
+  const fixtureValue = fixture();
+  let deleting;
+  fixtureValue.boundary.on("changed", (state) => {
+    if (deleting) return;
+    deleting = fixtureValue.boundary.deleteBot({
+      botId: state.botId,
+      localProfileId: state.computer.localProfileId,
+    });
+  });
+
+  await assert.rejects(
+    fixtureValue.boundary.selectMode({ botId: BOT_A, mode: "local" }),
+    (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETING",
+  );
+  await deleting;
+
+  assert.equal(fixtureValue.manager.open.mock.callCount(), 0);
+  assert.deepEqual(
+    fixtureValue.manager.deleteBot.mock.calls.map((call) => call.arguments),
+    [[{ botId: BOT_A, localProfileId: LOCAL_A }]],
+  );
 });

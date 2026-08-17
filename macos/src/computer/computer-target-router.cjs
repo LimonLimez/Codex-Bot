@@ -53,6 +53,10 @@ function targetError(message, code) {
   return new ComputerTargetError(message, code);
 }
 
+function deletedBotError() {
+  return targetError("Computer data for this bot was deleted.", "OPENBOT_COMPUTER_BOT_DELETED");
+}
+
 function clonePlain(value, state = { seen: new Set(), nodes: 0, bytes: 0 }, depth = 0) {
   state.nodes += 1;
   if (state.nodes > MAX_NODES || state.bytes > MAX_MESSAGE_BYTES) {
@@ -285,6 +289,7 @@ class ComputerTargetRouter {
   #sessions = new Map();
   #tasks = new Map();
   #taskEpochs = new Map();
+  #deletedBots = new Map();
   #disposed = false;
 
   constructor({ store, localManager } = {}) {
@@ -302,6 +307,7 @@ class ComputerTargetRouter {
   async resolve(value, rawSignal = null) {
     this.#assertActive();
     const request = normalizeResolve(value);
+    this.#assertBotAvailable(request.botId);
     const signal = optionalAbortSignal(rawSignal);
     const epochKey = botTaskKey(request);
     const epoch = this.#taskEpochs.get(epochKey) ?? 0;
@@ -328,15 +334,26 @@ class ComputerTargetRouter {
     try {
       this.#assertTaskEpoch(epochKey, epoch);
       const record = await wait(Promise.resolve().then(() => this.#store.read(request.botId)));
-      this.#assertActive();
+      this.#assertBotAvailable(request.botId);
       this.#assertTaskEpoch(epochKey, epoch);
       const identity = currentIdentity(record, request.botId);
-      await wait(this.#openLocal(record, identity));
-      this.#assertActive();
+      try {
+        await wait(this.#openLocal(record, identity));
+      } catch (error) {
+        this.#assertBotAvailable(request.botId);
+        throw error;
+      }
+      this.#assertBotAvailable(request.botId);
       this.#assertTaskEpoch(epochKey, epoch);
-      const currentRecord = await wait(Promise.resolve().then(() => this.#store.read(request.botId)));
+      let currentRecord;
+      try {
+        currentRecord = await wait(Promise.resolve().then(() => this.#store.read(request.botId)));
+      } catch (error) {
+        this.#assertBotAvailable(request.botId);
+        throw error;
+      }
+      this.#assertBotAvailable(request.botId);
       const current = currentIdentity(currentRecord, request.botId);
-      this.#assertActive();
       this.#assertTaskEpoch(epochKey, epoch);
       if (!sameIdentity(identity, current)) {
         throw targetError("Computer target changed.", "OPENBOT_COMPUTER_TARGET_STALE");
@@ -356,8 +373,16 @@ class ComputerTargetRouter {
   async assertTaskCurrent(value) {
     this.#assertActive();
     const expected = normalizeTaskCurrent(value);
-    const current = currentIdentity(await this.#store.read(expected.botId), expected.botId);
-    this.#assertActive();
+    this.#assertBotAvailable(expected.botId);
+    let record;
+    try {
+      record = await this.#store.read(expected.botId);
+    } catch (error) {
+      this.#assertBotAvailable(expected.botId);
+      throw error;
+    }
+    this.#assertBotAvailable(expected.botId);
+    const current = currentIdentity(record, expected.botId);
     const task = this.#tasks.get(taskKey(expected));
     if (expected.mode !== current.mode || expected.targetId !== current.targetId
       || expected.targetGeneration !== current.targetGeneration || !task
@@ -369,6 +394,7 @@ class ComputerTargetRouter {
   async run(value) {
     this.#assertActive();
     const action = normalizeAction(value);
+    this.#assertBotAvailable(action.botId);
     const epochKey = botTaskKey(action);
     const epoch = this.#taskEpochs.get(epochKey) ?? 0;
     await this.assertTaskCurrent({
@@ -379,7 +405,7 @@ class ComputerTargetRouter {
       targetGeneration: action.targetGeneration,
       workspaceId: action.workspaceId,
     });
-    this.#assertActive();
+    this.#assertBotAvailable(action.botId);
     this.#assertTaskEpoch(epochKey, epoch);
     const target = Object.freeze({
       mode: action.mode,
@@ -393,28 +419,40 @@ class ComputerTargetRouter {
       targetGeneration: action.targetGeneration,
     };
     let result;
-    if (action.operation === "browser.navigate" && action.capability === action.operation) {
-      const argumentsValue = exactRequest(action.arguments, new Set(["url"]));
-      result = await this.#localManager.navigate({ ...identity, url: argumentsValue.url });
-    } else if (action.operation === "browser.capture" && action.capability === action.operation) {
-      exactRequest(action.arguments, new Set());
-      result = await this.#localManager.capture(identity);
-    } else {
-      result = await this.#localManager.run({
-        ...identity,
-        taskId: action.taskId,
-        capability: action.capability,
-        operation: action.operation,
-        arguments: action.arguments,
-        resourceId: action.resourceId,
-        resourceLabel: action.resourceLabel,
-        reason: action.reason,
-      });
+    try {
+      if (action.operation === "browser.navigate" && action.capability === action.operation) {
+        const argumentsValue = exactRequest(action.arguments, new Set(["url"]));
+        result = await this.#localManager.navigate({ ...identity, url: argumentsValue.url });
+      } else if (action.operation === "browser.capture" && action.capability === action.operation) {
+        exactRequest(action.arguments, new Set());
+        result = await this.#localManager.capture(identity);
+      } else {
+        result = await this.#localManager.run({
+          ...identity,
+          taskId: action.taskId,
+          capability: action.capability,
+          operation: action.operation,
+          arguments: action.arguments,
+          resourceId: action.resourceId,
+          resourceLabel: action.resourceLabel,
+          reason: action.reason,
+        });
+      }
+    } catch (error) {
+      this.#assertBotAvailable(action.botId);
+      throw error;
     }
-    this.#assertActive();
+    this.#assertBotAvailable(action.botId);
     this.#assertTaskEpoch(epochKey, epoch);
-    const current = currentIdentity(await this.#store.read(action.botId), action.botId);
-    this.#assertActive();
+    let record;
+    try {
+      record = await this.#store.read(action.botId);
+    } catch (error) {
+      this.#assertBotAvailable(action.botId);
+      throw error;
+    }
+    this.#assertBotAvailable(action.botId);
+    const current = currentIdentity(record, action.botId);
     this.#assertTaskEpoch(epochKey, epoch);
     if (!sameIdentity(target, current)) {
       throw targetError("Computer target changed.", "OPENBOT_COMPUTER_TARGET_STALE");
@@ -425,12 +463,44 @@ class ComputerTargetRouter {
   async disposeTask(value) {
     this.#assertActive();
     const request = normalizeDispose(value);
+    this.#assertBotAvailable(request.botId);
     const epochKey = botTaskKey(request);
     this.#taskEpochs.set(epochKey, (this.#taskEpochs.get(epochKey) ?? 0) + 1);
     this.#tasks.delete(taskKey(request));
     if (typeof this.#localManager.disposeTask === "function") {
-      await this.#localManager.disposeTask(request);
+      try {
+        await this.#localManager.disposeTask(request);
+      } catch (error) {
+        this.#assertBotAvailable(request.botId);
+        throw error;
+      }
     }
+    this.#assertBotAvailable(request.botId);
+  }
+
+  deleteBot(value) {
+    let normalizedBotId;
+    try {
+      this.#assertActive();
+      normalizedBotId = botId(value);
+      const existing = this.#deletedBots.get(normalizedBotId);
+      if (existing) return existing;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    const completed = Promise.resolve();
+    this.#deletedBots.set(normalizedBotId, completed);
+    this.#sessions.delete(normalizedBotId);
+    const prefix = `${normalizedBotId}\0`;
+    for (const key of [...this.#tasks.keys()]) {
+      if (key.startsWith(prefix)) this.#tasks.delete(key);
+    }
+    for (const key of [...this.#taskEpochs.keys()]) {
+      if (!key.startsWith(prefix)) continue;
+      this.#taskEpochs.set(key, (this.#taskEpochs.get(key) ?? 0) + 1);
+    }
+    return completed;
   }
 
   dispose() {
@@ -439,6 +509,7 @@ class ComputerTargetRouter {
     this.#sessions.clear();
     this.#tasks.clear();
     this.#taskEpochs.clear();
+    this.#deletedBots.clear();
   }
 
   async #openLocal(record, identity) {
@@ -464,6 +535,11 @@ class ComputerTargetRouter {
     if ((this.#taskEpochs.get(key) ?? 0) !== epoch) {
       throw targetError("Computer task was disposed.", "OPENBOT_COMPUTER_TASK_DISPOSED");
     }
+  }
+
+  #assertBotAvailable(botIdValue) {
+    this.#assertActive();
+    if (this.#deletedBots.has(botIdValue)) throw deletedBotError();
   }
 
   #assertActive() {

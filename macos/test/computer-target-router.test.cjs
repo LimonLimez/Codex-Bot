@@ -42,6 +42,7 @@ function fixture(initial = [localBot()]) {
   const captures = [];
   const disposed = [];
   let releaseRun = null;
+  let releaseDisposeTask = null;
   let readCount = 0;
   let pauseReadAt = null;
   let releaseRead = null;
@@ -70,7 +71,10 @@ function fixture(initial = [localBot()]) {
       captures.push(value);
       return Object.freeze({ frameId: "frame-a" });
     },
-    async disposeTask(value) { disposed.push(value); },
+    async disposeTask(value) {
+      disposed.push(value);
+      if (releaseDisposeTask) await new Promise((resolve) => { releaseDisposeTask = resolve; });
+    },
   };
   const store = {
     async read(botId) {
@@ -89,7 +93,17 @@ function fixture(initial = [localBot()]) {
     disposed,
     router,
     pauseNextRun() { releaseRun = () => {}; },
-    releaseRun() { releaseRun?.(); },
+    releaseRun() {
+      const release = releaseRun;
+      releaseRun = null;
+      release?.();
+    },
+    pauseNextDisposeTask() { releaseDisposeTask = () => {}; },
+    releaseDisposeTask() {
+      const release = releaseDisposeTask;
+      releaseDisposeTask = null;
+      release?.();
+    },
     pauseReadAt(value) { pauseReadAt = value; },
     releaseRead() { releaseRead?.(); },
   };
@@ -383,4 +397,75 @@ test("task disposal during the final current-target read suppresses the complete
   fixtureValue.releaseRead();
 
   await assert.rejects(pending, /disposed|changed|stale/i);
+});
+
+test("deleteBot permanently fences every task and session for one bot without invoking local cleanup", async () => {
+  const fixtureValue = fixture([localBot(BOT_A, LOCAL_A, 4), localBot(BOT_B, LOCAL_B, 2)]);
+  const parent = await fixtureValue.router.resolve(resolveInput("parent"));
+  await fixtureValue.router.resolve(resolveInput("child-1"));
+  const other = await fixtureValue.router.resolve({
+    botId: BOT_B,
+    conversationId: "thread-b",
+    taskId: "parent",
+  });
+  fixtureValue.pauseNextRun();
+  const late = fixtureValue.router.run(action(parent));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const deleting = fixtureValue.router.deleteBot(BOT_A);
+  assert.equal(fixtureValue.router.deleteBot(BOT_A), deleting);
+  await deleting;
+  fixtureValue.releaseRun();
+
+  await assert.rejects(late, (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETED");
+  await assert.rejects(
+    fixtureValue.router.resolve(resolveInput("new-task")),
+    (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETED",
+  );
+  await assert.rejects(
+    fixtureValue.router.disposeTask({ botId: BOT_A, taskId: "child-1" }),
+    (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETED",
+  );
+
+  const otherResult = await fixtureValue.router.run(action(other, {
+    botId: BOT_B,
+    conversationId: "thread-b",
+    targetId: LOCAL_B,
+    targetGeneration: 2,
+    workspaceId: other.workspaceId,
+  }));
+  assert.deepEqual(otherResult, { exitCode: 0 });
+  assert.equal(fixtureValue.disposed.length, 0);
+  assert.deepEqual(fixtureValue.openCalls.map((record) => record.botId), [BOT_A, BOT_B]);
+});
+
+test("bot deletion dominates a missing record released from the final target read", async () => {
+  const fixtureValue = fixture();
+  const target = await fixtureValue.router.resolve(resolveInput("child-delete"));
+  fixtureValue.pauseReadAt(4);
+  const pending = fixtureValue.router.run(action(target, { taskId: "child-delete" }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixtureValue.effects.length, 1);
+
+  await fixtureValue.router.deleteBot(BOT_A);
+  fixtureValue.records.delete(BOT_A);
+  fixtureValue.releaseRead();
+
+  await assert.rejects(pending, (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETED");
+});
+
+test("bot deletion dominates a held task disposal acknowledgement", async () => {
+  const fixtureValue = fixture();
+  await fixtureValue.router.resolve(resolveInput("child-dispose"));
+  fixtureValue.pauseNextDisposeTask();
+  const disposing = fixtureValue.router.disposeTask({
+    botId: BOT_A,
+    taskId: "child-dispose",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await fixtureValue.router.deleteBot(BOT_A);
+  fixtureValue.releaseDisposeTask();
+
+  await assert.rejects(disposing, (error) => error?.code === "OPENBOT_COMPUTER_BOT_DELETED");
 });

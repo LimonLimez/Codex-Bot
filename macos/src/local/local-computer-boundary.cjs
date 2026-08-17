@@ -15,6 +15,7 @@ const DECISION_FIELDS = new Set([
   "requestId", "botId", "targetId", "targetGeneration", "decision",
 ]);
 const REVOKE_FIELDS = new Set(["botId", "grantId"]);
+const DELETE_FIELDS = new Set(["botId", "localProfileId"]);
 
 class LocalComputerBoundaryError extends Error {
   constructor(message, code) {
@@ -106,6 +107,18 @@ function normalizeRevoke(value) {
     throw boundaryError("Permission grant is invalid.", "OPENBOT_COMPUTER_REQUEST_INVALID");
   }
   return { botId: normalizeBotId(input.botId), grantId: input.grantId.toLowerCase() };
+}
+
+function normalizeDeletion(value) {
+  const input = clonePlainObject(value, DELETE_FIELDS, "Computer deletion");
+  if (input.localProfileId !== null
+    && (typeof input.localProfileId !== "string" || !TARGET_ID_PATTERN.test(input.localProfileId))) {
+    throw boundaryError("Computer deletion is invalid.", "OPENBOT_COMPUTER_REQUEST_INVALID");
+  }
+  return Object.freeze({
+    botId: normalizeBotId(input.botId),
+    localProfileId: input.localProfileId === null ? null : input.localProfileId.toLowerCase(),
+  });
 }
 
 function timestamp(now) {
@@ -200,6 +213,7 @@ class LocalComputerBoundary extends EventEmitter {
   #now;
   #randomUUID;
   #queues = new Map();
+  #deletions = new Map();
   #disposePromise = null;
   #disposed = false;
   #onPermission;
@@ -208,7 +222,7 @@ class LocalComputerBoundary extends EventEmitter {
     super();
     if (!store || typeof store.read !== "function" || typeof store.updateComputer !== "function"
       || !manager || typeof manager.open !== "function" || typeof manager.close !== "function"
-      || typeof manager.dispose !== "function"
+      || typeof manager.deleteBot !== "function" || typeof manager.dispose !== "function"
       || !broker || typeof broker.decide !== "function" || typeof broker.list !== "function"
       || typeof broker.listPending !== "function"
       || typeof broker.revoke !== "function" || typeof broker.dispose !== "function"
@@ -242,17 +256,18 @@ class LocalComputerBoundary extends EventEmitter {
   async selectMode(value) {
     this.#assertActive();
     const request = normalizeModeRequest(value);
+    this.#assertBotAvailable(request.botId);
     return this.#enqueue(request.botId, async () => {
-      this.#assertActive();
+      this.#assertBotAvailable(request.botId);
       const record = await this.#requiredBot(request.botId);
-      this.#assertActive();
+      this.#assertBotAvailable(request.botId);
       const generation = record.computer.generation + 1;
       if (!Number.isSafeInteger(generation)) {
         throw boundaryError("Computer generation is exhausted.", "OPENBOT_COMPUTER_GENERATION_EXHAUSTED");
       }
       if (request.mode === "local") return this.#selectLocal(record, generation);
-      await this.#manager.close(request.botId);
-      this.#assertActive();
+      await this.#awaitBotEffect(request.botId, () => this.#manager.close(request.botId));
+      this.#assertBotAvailable(request.botId);
       const next = request.mode === "cursor"
         ? {
           mode: "cursor",
@@ -284,46 +299,105 @@ class LocalComputerBoundary extends EventEmitter {
   }
 
   async read(botId) {
-    this.#assertActive();
-    return publicState(await this.#requiredBot(normalizeBotId(botId)));
+    const normalizedBotId = normalizeBotId(botId);
+    this.#assertBotAvailable(normalizedBotId);
+    const record = await this.#requiredBot(normalizedBotId);
+    this.#assertBotAvailable(normalizedBotId);
+    return publicState(record);
   }
 
   async decidePermission(value) {
     this.#assertActive();
     const decision = normalizeDecision(value);
-    await this.#broker.decide(decision);
-    this.#assertActive();
+    this.#assertBotAvailable(decision.botId);
+    await this.#awaitBotEffect(decision.botId, () => this.#broker.decide(decision));
+    this.#assertBotAvailable(decision.botId);
     return this.listPermissions(decision.botId);
   }
 
   async listPermissions(botId) {
-    this.#assertActive();
     const normalizedBotId = normalizeBotId(botId);
-    return publicPermissions(normalizedBotId, await this.#broker.list(normalizedBotId));
+    this.#assertBotAvailable(normalizedBotId);
+    const permissions = await this.#awaitBotEffect(
+      normalizedBotId,
+      () => this.#broker.list(normalizedBotId),
+    );
+    this.#assertBotAvailable(normalizedBotId);
+    return publicPermissions(normalizedBotId, permissions);
   }
 
   async listPermissionRequests(botId) {
-    this.#assertActive();
     const normalizedBotId = normalizeBotId(botId);
-    return publicPermissionRequests(normalizedBotId, await this.#broker.listPending(normalizedBotId));
+    this.#assertBotAvailable(normalizedBotId);
+    const requests = await this.#awaitBotEffect(
+      normalizedBotId,
+      () => this.#broker.listPending(normalizedBotId),
+    );
+    this.#assertBotAvailable(normalizedBotId);
+    return publicPermissionRequests(normalizedBotId, requests);
   }
 
   async revokePermission(value) {
     this.#assertActive();
     const revoke = normalizeRevoke(value);
-    await this.#broker.revoke(revoke);
-    this.#assertActive();
+    this.#assertBotAvailable(revoke.botId);
+    await this.#awaitBotEffect(revoke.botId, () => this.#broker.revoke(revoke));
+    this.#assertBotAvailable(revoke.botId);
     return this.listPermissions(revoke.botId);
+  }
+
+  deleteBot(value) {
+    let request;
+    let state;
+    try {
+      this.#assertActive();
+      request = normalizeDeletion(value);
+      state = this.#deletions.get(request.botId);
+      if (state) {
+        if (state.request.localProfileId !== request.localProfileId) {
+          throw boundaryError("Computer deletion does not match.", "OPENBOT_COMPUTER_DELETE_REFUSED");
+        }
+        if (state.completed) return state.completedPromise;
+        if (state.inFlight) return state.inFlight;
+      } else {
+        state = {
+          request,
+          completed: false,
+          completedPromise: null,
+          inFlight: null,
+        };
+        this.#deletions.set(request.botId, state);
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    const olderQueue = this.#queues.get(request.botId) || null;
+    const attempt = Promise.resolve().then(() => this.#deleteBotAttempt(state, olderQueue));
+    let shared;
+    shared = attempt.then((result) => {
+      state.completed = true;
+      state.completedPromise = shared;
+      return result;
+    }).finally(() => {
+      if (state.inFlight === shared) state.inFlight = null;
+    });
+    state.inFlight = shared;
+    return shared;
   }
 
   dispose() {
     if (this.#disposePromise) return this.#disposePromise;
     if (this.#disposed) return Promise.resolve();
+    const deletions = [...this.#deletions.values()]
+      .map((state) => state.inFlight)
+      .filter((operation) => operation && typeof operation.then === "function");
     this.#disposed = true;
     this.#broker.off?.("request", this.#onPermission);
     this.#queues.clear();
     this.removeAllListeners();
     this.#disposePromise = (async () => {
+      await Promise.allSettled(deletions);
       try { await this.#manager.dispose(); } catch {}
       try { await this.#broker.dispose(); } catch {}
     })();
@@ -351,7 +425,7 @@ class LocalComputerBoundary extends EventEmitter {
     try {
       await this.#manager.open({ ...record, computer: ready });
       opened = true;
-      this.#assertActive();
+      this.#assertBotAvailable(record.botId);
       const current = await this.#requiredBot(record.botId);
       if (!sameComputer(current.computer, persistedStarting.computer)
         || current.computer.state !== "starting") {
@@ -360,6 +434,7 @@ class LocalComputerBoundary extends EventEmitter {
       }
       return await this.#persistAndPublish(record.botId, ready);
     } catch (error) {
+      this.#assertBotAvailable(record.botId);
       if (error instanceof LocalComputerBoundaryError && error.code === "OPENBOT_COMPUTER_SUPERSEDED") throw error;
       if (opened) {
         try { await this.#manager.close(record.botId); } catch {}
@@ -381,8 +456,10 @@ class LocalComputerBoundary extends EventEmitter {
   async #requiredBot(botId) {
     let record;
     try { record = await this.#store.read(botId); } catch {
+      this.#assertBotAvailable(botId);
       throw boundaryError("Computer state is unavailable.", "OPENBOT_COMPUTER_UNAVAILABLE");
     }
+    this.#assertBotAvailable(botId);
     if (!record || record.botId !== botId || !record.computer) {
       throw boundaryError("Computer state is unavailable.", "OPENBOT_COMPUTER_UNAVAILABLE");
     }
@@ -390,14 +467,16 @@ class LocalComputerBoundary extends EventEmitter {
   }
 
   async #persistAndPublish(botId, computer) {
-    this.#assertActive();
+    this.#assertBotAvailable(botId);
     let record;
     try { record = await this.#store.updateComputer(botId, computer); } catch {
+      this.#assertBotAvailable(botId);
       throw boundaryError("Computer state could not be saved.", "OPENBOT_COMPUTER_PERSIST_FAILED");
     }
-    this.#assertActive();
+    this.#assertBotAvailable(botId);
     const state = publicState(record);
     this.emit("changed", state);
+    this.#assertBotAvailable(botId);
     return state;
   }
 
@@ -410,6 +489,43 @@ class LocalComputerBoundary extends EventEmitter {
       if (this.#queues.get(botId) === tail) this.#queues.delete(botId);
     });
     return result;
+  }
+
+  async #deleteBotAttempt(state, olderQueue) {
+    try {
+      if (olderQueue) await Promise.allSettled([olderQueue]);
+      this.#assertDeletionCurrent(state);
+      await this.#manager.deleteBot(state.request.localProfileId === null
+        ? state.request.botId
+        : state.request);
+      this.#assertDeletionCurrent(state);
+    } catch (error) {
+      if (error instanceof LocalComputerBoundaryError) throw error;
+      this.#assertDeletionCurrent(state);
+      throw boundaryError("Computer data could not be deleted.", "OPENBOT_COMPUTER_DELETE_FAILED");
+    }
+  }
+
+  async #awaitBotEffect(botId, operation) {
+    try {
+      return await operation();
+    } catch (error) {
+      this.#assertBotAvailable(botId);
+      throw error;
+    }
+  }
+
+  #assertDeletionCurrent(state) {
+    if (this.#deletions.get(state.request.botId) !== state) {
+      throw boundaryError("Computer deletion does not match.", "OPENBOT_COMPUTER_DELETE_REFUSED");
+    }
+  }
+
+  #assertBotAvailable(botId) {
+    this.#assertActive();
+    if (this.#deletions.has(botId)) {
+      throw boundaryError("Computer data for this bot is being deleted.", "OPENBOT_COMPUTER_BOT_DELETING");
+    }
   }
 
   #assertActive() {
