@@ -10,6 +10,7 @@ const CONVERSATION_ID = /^conversation-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-
 const INVOCATION_ID = /^invocation-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_CONVERSATIONS = 256;
+const MAX_DELETE_BOTS = 256;
 const MAX_MESSAGES = 512;
 const MAX_TEXT_BYTES = 64 * 1024;
 const MAX_TOOL_ROUNDS = 8;
@@ -489,6 +490,16 @@ function fullConversation(record) {
   });
 }
 
+function deletedConversationResult(value) {
+  const result = ownData(value, new Set(["deletedConversationIds"]));
+  const deletedConversationIds = denseArray(
+    result.deletedConversationIds,
+    MAX_CONVERSATIONS,
+  ).map(normalizedConversationId);
+  if (new Set(deletedConversationIds).size !== deletedConversationIds.length) throw failure();
+  return publicValue({ deletedConversationIds });
+}
+
 function disposeMergedSource(session) {
   if (!session.fulfilled) return Promise.resolve();
   if (!session.disposePromise) {
@@ -606,6 +617,9 @@ class StandaloneConversationController extends EventEmitter {
   #reservationCompletions = new Map();
   #selectionMutations = new Map();
   #botEpochs = new Map();
+  #deleteClaims = new Map();
+  #deleteOperations = new Map();
+  #durableMutationTails = new Map();
   #disposePromise = null;
   #disposed = false;
 
@@ -622,7 +636,7 @@ class StandaloneConversationController extends EventEmitter {
     if (!options.router || typeof options.router !== "object" || types.isProxy(options.router)
       || typeof options.router.stream !== "function" || typeof options.readSelection !== "function"
       || (options.store !== undefined && (!options.store || typeof options.store !== "object"
-        || types.isProxy(options.store) || ["list", "read", "create", "replace"]
+        || types.isProxy(options.store) || ["list", "read", "create", "replace", "deleteBots"]
           .some((name) => typeof options.store[name] !== "function")))
       || (options.toolBridge !== undefined && (!options.toolBridge || typeof options.toolBridge !== "object"
         || types.isProxy(options.toolBridge) || typeof options.toolBridge.open !== "function"))
@@ -655,7 +669,11 @@ class StandaloneConversationController extends EventEmitter {
   list(rawBotId) {
     this.#available();
     const botId = normalizedBotId(rawBotId);
-    if (this.#store) return this.#listDurable(botId);
+    const botEpoch = this.#botEpochs.get(botId) ?? 0;
+    if (this.#store) {
+      this.#assertBotFence(botId, botEpoch);
+      return this.#listDurable(botId, botEpoch);
+    }
     return Object.freeze([...this.#conversations.values()]
       .filter((record) => record.botId === botId)
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
@@ -666,6 +684,8 @@ class StandaloneConversationController extends EventEmitter {
     this.#available();
     const request = ownData(rawRequest, new Set(["botId"]));
     const botId = normalizedBotId(request.botId);
+    if (this.#deleteClaims.has(botId)) throw failure("OPENBOT_CONVERSATION_STALE");
+    const botEpoch = this.#botEpochs.get(botId) ?? 0;
     if (this.#conversations.size >= MAX_CONVERSATIONS) throw failure();
     const timestamp = this.#timestamp();
     const conversationId = safeId(this.#makeId, "conversation");
@@ -677,7 +697,7 @@ class StandaloneConversationController extends EventEmitter {
       status: "idle",
       messages: [],
     };
-    if (this.#store) return this.#createDurable(record);
+    if (this.#store) return this.#createDurable(record, botEpoch);
     this.#conversations.set(conversationId, record);
     const value = summary(record);
     this.emit("changed", value);
@@ -687,8 +707,52 @@ class StandaloneConversationController extends EventEmitter {
   read(rawRequest) {
     this.#available();
     const request = ownData(rawRequest, new Set(["botId", "conversationId"]));
-    if (this.#store) return this.#readDurable(request);
+    if (this.#store) {
+      const botId = normalizedBotId(request.botId);
+      const conversationId = normalizedConversationId(request.conversationId);
+      const botEpoch = this.#botEpochs.get(botId) ?? 0;
+      this.#assertBotFence(botId, botEpoch);
+      return this.#readDurable({ botId, conversationId }, botEpoch);
+    }
     return fullConversation(this.#record(request));
+  }
+
+  deleteBots(rawRequest) {
+    this.#available();
+    if (!this.#store) throw failure();
+    const request = ownData(rawRequest, new Set(["botIds"]));
+    const botIds = denseArray(request.botIds, MAX_DELETE_BOTS).map(normalizedBotId);
+    if (botIds.length === 0 || new Set(botIds).size !== botIds.length) throw failure();
+    const operationKey = botIds.join("\0");
+    const existing = this.#deleteOperations.get(operationKey);
+    if (existing) return existing;
+    for (const botId of botIds) {
+      const owner = this.#deleteClaims.get(botId);
+      if (owner !== undefined && owner !== operationKey) throw failure();
+    }
+    for (const botId of botIds) {
+      if (this.#deleteClaims.has(botId)) continue;
+      this.#deleteClaims.set(botId, operationKey);
+      this.#botEpochs.set(botId, (this.#botEpochs.get(botId) ?? 0) + 1);
+    }
+
+    let resolveOperation;
+    let rejectOperation;
+    const operation = new Promise((resolve, reject) => {
+      resolveOperation = resolve;
+      rejectOperation = reject;
+    });
+    this.#deleteOperations.set(operationKey, operation);
+    void this.#performDeleteBots(botIds).then(
+      resolveOperation,
+      () => {
+        if (this.#deleteOperations.get(operationKey) === operation) {
+          this.#deleteOperations.delete(operationKey);
+        }
+        rejectOperation(failure());
+      },
+    );
+    return operation;
   }
 
   async send(rawRequest) {
@@ -706,7 +770,9 @@ class StandaloneConversationController extends EventEmitter {
     const inputDigest = normalizedInputDigest(request.inputDigest);
     if ((clientNonce === undefined) !== (inputDigest === undefined)) throw failure();
     const reservationKey = `${owner}\0${conversationId}`;
-    if (this.#selectionMutations.has(owner)) throw failure("OPENBOT_CONVERSATION_STALE");
+    if (this.#selectionMutations.has(owner) || this.#deleteClaims.has(owner)) {
+      throw failure("OPENBOT_CONVERSATION_STALE");
+    }
     if (this.#reservations.has(reservationKey) || this.#active.has(conversationId)) throw failure();
     const botEpoch = this.#botEpochs.get(owner) ?? 0;
     let settleReservation;
@@ -734,7 +800,7 @@ class StandaloneConversationController extends EventEmitter {
     let transferred = false;
     try {
     let record = this.#store
-      ? await this.#requiredDurableRecord({ botId: owner, conversationId })
+      ? await this.#requiredDurableRecord({ botId: owner, conversationId }, botEpoch)
       : this.#record({ botId: owner, conversationId });
     this.#assertBotFence(owner, botEpoch);
     if (record.messages.length >= MAX_MESSAGES - 1) throw failure();
@@ -761,12 +827,12 @@ class StandaloneConversationController extends EventEmitter {
       messages: [...record.messages, user],
     };
     if (this.#store) {
-      try { await this.#store.replace(durableValue(nextRecord)); } catch { throw failure(); }
+      try { await this.#replaceDurable(nextRecord); } catch { throw failure(); }
       try {
         this.#assertBotFence(owner, botEpoch);
       } catch (error) {
         const idleRecord = { ...nextRecord, status: "idle", updatedAt: this.#timestamp() };
-        try { await this.#store.replace(durableValue(idleRecord)); } catch { throw failure(); }
+        try { await this.#replaceDurable(idleRecord); } catch { throw failure(); }
         this.#conversations.set(idleRecord.conversationId, idleRecord);
         throw error;
       }
@@ -818,7 +884,7 @@ class StandaloneConversationController extends EventEmitter {
         record.status = "idle";
         record.updatedAt = this.#timestamp();
         if (this.#store) {
-          try { await this.#store.replace(durableValue(record)); } catch { throw failure(); }
+          try { await this.#replaceDurable(record); } catch { throw failure(); }
         }
         this.#conversations.set(record.conversationId, record);
         if (error?.code === "OPENBOT_CONVERSATION_STALE"
@@ -857,8 +923,10 @@ class StandaloneConversationController extends EventEmitter {
     try {
       result = await this.#startRound(operation);
     } catch (error) {
-      this.#active.delete(record.conversationId);
       try { await disposeToolSession(); } catch {}
+      if (this.#active.get(record.conversationId) === operation) {
+        this.#active.delete(record.conversationId);
+      }
       if (operation.cancelled) throw failure("OPENBOT_CONVERSATION_CANCELLED");
       record.status = "idle";
       record.updatedAt = this.#timestamp();
@@ -892,6 +960,7 @@ class StandaloneConversationController extends EventEmitter {
     this.#available();
     const botId = normalizedBotId(rawBotId);
     if (typeof operation !== "function" || types.isProxy(operation)) throw failure();
+    if (this.#deleteClaims.has(botId)) throw failure("OPENBOT_CONVERSATION_STALE");
     this.#botEpochs.set(botId, (this.#botEpochs.get(botId) ?? 0) + 1);
     const previous = this.#selectionMutations.get(botId) ?? Promise.resolve();
     const result = previous.then(async () => {
@@ -949,7 +1018,7 @@ class StandaloneConversationController extends EventEmitter {
       operation.record.status = "idle";
       operation.record.updatedAt = this.#timestamp();
       if (this.#store) {
-        try { await this.#store.replace(durableValue(operation.record)); } catch { throw failure(); }
+        try { await this.#replaceDurable(operation.record); } catch { throw failure(); }
       }
       this.#conversations.set(operation.record.conversationId, operation.record);
       this.emit("changed", summary(operation.record));
@@ -1124,8 +1193,8 @@ class StandaloneConversationController extends EventEmitter {
       completedRecord.status = "idle";
       completedRecord.updatedAt = this.#timestamp();
       if (this.#store) {
-        try { await this.#store.replace(durableValue(completedRecord)); } catch { throw failure(); }
-        this.#available();
+        try { await this.#replaceDurable(completedRecord); } catch { throw failure(); }
+        this.#assertBotFence(completedRecord.botId, operation.botEpoch);
       }
       operation.record = completedRecord;
       this.#conversations.set(completedRecord.conversationId, completedRecord);
@@ -1274,16 +1343,65 @@ class StandaloneConversationController extends EventEmitter {
 
   #assertBotFence(botId, epoch) {
     this.#available();
-    if (this.#selectionMutations.has(botId) || (this.#botEpochs.get(botId) ?? 0) !== epoch) {
+    if (this.#selectionMutations.has(botId) || this.#deleteClaims.has(botId)
+      || (this.#botEpochs.get(botId) ?? 0) !== epoch) {
       throw failure("OPENBOT_CONVERSATION_STALE");
     }
   }
 
-  async #listDurable(botId) {
+  async #performDeleteBots(botIds) {
+    const targets = new Set(botIds);
+    const active = [...this.#active.values()]
+      .filter((candidate) => targets.has(candidate.record.botId));
+    const reservations = [...this.#reservationCompletions.values()]
+      .filter((candidate) => targets.has(candidate.botId));
+    await Promise.all([
+      ...active.map((candidate) => this.#cancelActiveOperation(candidate)),
+      ...reservations.map((candidate) => this.#cancelOpeningReservation(
+        candidate,
+        "OPENBOT_CONVERSATION_STALE",
+      )),
+    ]);
+    await Promise.all(botIds.map(
+      (botId) => this.#durableMutationTails.get(botId) ?? Promise.resolve(),
+    ));
+    this.#available();
+    let result;
+    try {
+      result = deletedConversationResult(await this.#store.deleteBots(publicValue({ botIds })));
+    } catch { throw failure(); }
+    this.#available();
+    for (const [conversationId, record] of this.#conversations) {
+      if (targets.has(record.botId)) this.#conversations.delete(conversationId);
+    }
+    return result;
+  }
+
+  #replaceDurable(record) {
+    return this.#mutateDurable(
+      record.botId,
+      () => this.#store.replace(durableValue(record)),
+    );
+  }
+
+  #mutateDurable(botId, mutation) {
+    const previous = this.#durableMutationTails.get(botId) ?? Promise.resolve();
+    const result = previous.then(mutation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.#durableMutationTails.set(botId, tail);
+    void tail.then(() => {
+      if (this.#durableMutationTails.get(botId) === tail) {
+        this.#durableMutationTails.delete(botId);
+      }
+    });
+    return result;
+  }
+
+  async #listDurable(botId, botEpoch) {
     let values;
     try { values = denseArray(await this.#store.list(botId), MAX_CONVERSATIONS); }
     catch { throw failure(); }
-    this.#available();
+    this.#assertBotFence(botId, botEpoch);
     const records = values.map(persistedRecord);
     if (records.some((record) => record.botId !== botId)) throw failure();
     for (const record of records) this.#conversations.set(record.conversationId, record);
@@ -1292,26 +1410,31 @@ class StandaloneConversationController extends EventEmitter {
       .map(summary));
   }
 
-  async #createDurable(record) {
-    try { await this.#store.create(durableValue(record)); } catch { throw failure(); }
-    this.#available();
+  async #createDurable(record, botEpoch) {
+    try {
+      await this.#mutateDurable(
+        record.botId,
+        () => this.#store.create(durableValue(record)),
+      );
+    } catch { throw failure(); }
+    this.#assertBotFence(record.botId, botEpoch);
     this.#conversations.set(record.conversationId, record);
     const value = summary(record);
     this.emit("changed", value);
     return value;
   }
 
-  async #readDurable(request) {
-    const record = await this.#requiredDurableRecord(request);
+  async #readDurable(request, botEpoch) {
+    const record = await this.#requiredDurableRecord(request, botEpoch);
     return fullConversation(record);
   }
 
-  async #requiredDurableRecord(rawRequest) {
+  async #requiredDurableRecord(rawRequest, botEpoch) {
     const owner = normalizedBotId(rawRequest.botId);
     const conversationId = normalizedConversationId(rawRequest.conversationId);
     let value;
     try { value = await this.#store.read(owner, conversationId); } catch { throw failure(); }
-    this.#available();
+    this.#assertBotFence(owner, botEpoch);
     if (value == null) throw failure();
     const record = persistedRecord(value);
     if (record.botId !== owner || record.conversationId !== conversationId) throw failure();

@@ -67,6 +67,16 @@ function manualCleanupClock() {
   });
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return Object.freeze({ promise, reject, resolve });
+}
+
 function memoryStore(seed = []) {
   const values = new Map(seed.map((entry) => [entry.conversationId, structuredClone(entry)]));
   const snapshot = (value) => Object.freeze(structuredClone(value));
@@ -86,6 +96,14 @@ function memoryStore(seed = []) {
       if (!current || current.botId !== value.botId) throw new Error("missing");
       values.set(value.conversationId, structuredClone(value));
       return snapshot(value);
+    },
+    async deleteBots({ botIds }) {
+      const targets = new Set(botIds);
+      const deletedConversationIds = [...values.values()]
+        .filter((entry) => targets.has(entry.botId))
+        .map((entry) => entry.conversationId);
+      for (const conversationId of deletedConversationIds) values.delete(conversationId);
+      return Object.freeze({ deletedConversationIds: Object.freeze(deletedConversationIds) });
     },
   };
 }
@@ -397,6 +415,548 @@ test("durable text transcripts survive a fresh controller without storing stream
   assert.equal(restored.messages[0].inputDigest, "1".repeat(64));
   assert.equal(Object.hasOwn(restored.messages[1], "clientNonce"), false);
   second.dispose();
+});
+
+test("batch delete rejects hostile non-canonical bot sets before fencing or durable effects", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  let deleteCalls = 0;
+  const controller = new StandaloneConversationController({
+    router: { async stream(request) { return directResult(request); } },
+    store: {
+      ...base,
+      async deleteBots(request) {
+        deleteCalls += 1;
+        return base.deleteBots(request);
+      },
+    },
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const created = await controller.create({ botId: BOT_A });
+  const sparse = [];
+  sparse.length = 1;
+  let accessorReads = 0;
+  const accessor = Object.defineProperty({}, "botIds", {
+    enumerable: true,
+    get() { accessorReads += 1; return [BOT_A]; },
+  });
+  for (const request of [
+    { botIds: [] },
+    { botIds: [BOT_A, BOT_A] },
+    { botIds: sparse },
+    { botIds: [BOT_A.toUpperCase()] },
+    { botIds: [BOT_A], extra: true },
+    accessor,
+    new Proxy({}, { ownKeys() { throw new Error("private /Users/person token"); } }),
+  ]) {
+    assert.throws(() => controller.deleteBots(request), (error) => {
+      assert.equal(error.code, "OPENBOT_CONVERSATION_OPERATION_FAILED");
+      assert.doesNotMatch(String(error.stack), /private|Users|token/);
+      return true;
+    });
+  }
+  assert.equal(accessorReads, 0);
+  assert.equal(deleteCalls, 0);
+
+  const terminal = await terminalEvent(controller, () => controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Invalid deletion did not fence this bot.",
+  }));
+  assert.equal(terminal.event.type, "completed");
+  assert.equal(deleteCalls, 0);
+  await controller.dispose();
+});
+
+test("batch delete fences before its first await and queues behind every target durable replace", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  const firstReplace = deferred();
+  const firstReplaceEntered = deferred();
+  const order = [];
+  let replaceCount = 0;
+  let deleteCalls = 0;
+  const store = {
+    ...base,
+    async replace(value) {
+      replaceCount += 1;
+      const call = replaceCount;
+      order.push(`replace-${call}-start`);
+      if (call === 1) {
+        firstReplaceEntered.resolve();
+        await firstReplace.promise;
+      }
+      const result = await base.replace(value);
+      order.push(`replace-${call}-end`);
+      return result;
+    },
+    async deleteBots(request) {
+      deleteCalls += 1;
+      order.push("delete");
+      return base.deleteBots(request);
+    },
+  };
+  const controller = new StandaloneConversationController({
+    router: { async stream() { throw new Error("fenced reservation must not stream"); } },
+    store,
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const created = await controller.create({ botId: BOT_A });
+  const sending = controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Fence this pending durable replace.",
+  });
+  await firstReplaceEntered.promise;
+
+  const deleting = controller.deleteBots({ botIds: [BOT_A] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deleteCalls, 0);
+  firstReplace.resolve();
+
+  await assert.rejects(sending, { code: "OPENBOT_CONVERSATION_STALE" });
+  const deleted = await deleting;
+  assert.deepEqual(deleted, { deletedConversationIds: [created.conversationId] });
+  assert.equal(Object.isFrozen(deleted), true);
+  assert.equal(Object.isFrozen(deleted.deletedConversationIds), true);
+  assert.deepEqual(order, [
+    "replace-1-start",
+    "replace-1-end",
+    "replace-2-start",
+    "replace-2-end",
+    "delete",
+  ]);
+  assert.equal(deleteCalls, 1);
+  assert.throws(
+    () => controller.read({ botId: BOT_A, conversationId: created.conversationId }),
+    { code: "OPENBOT_CONVERSATION_STALE" },
+  );
+  await assert.rejects(controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Deleted bots stay fenced.",
+  }), { code: "OPENBOT_CONVERSATION_STALE" });
+  await controller.dispose();
+});
+
+test("batch delete suppresses a terminal result behind an already-started durable replace", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  const terminalReplaceEntered = deferred();
+  const terminalReplaceGate = deferred();
+  const terminalEvents = [];
+  let replaceCalls = 0;
+  let deleteCalls = 0;
+  const controller = new StandaloneConversationController({
+    router: {
+      async stream(request) {
+        return directResult(request, [
+          { type: "text-delta", textDelta: "terminal text" },
+          { type: "finish", finishReason: "stop", usage: {} },
+        ]);
+      },
+    },
+    store: {
+      ...base,
+      async replace(value) {
+        replaceCalls += 1;
+        if (replaceCalls === 2) {
+          terminalReplaceEntered.resolve();
+          await terminalReplaceGate.promise;
+        }
+        return base.replace(value);
+      },
+      async deleteBots(request) {
+        deleteCalls += 1;
+        return base.deleteBots(request);
+      },
+    },
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  controller.on("event", (event) => {
+    if (new Set(["cancelled", "completed", "failed"]).has(event.type)) {
+      terminalEvents.push(event.type);
+    }
+  });
+  const created = await controller.create({ botId: BOT_A });
+  await controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Delete while completion is becoming durable.",
+  });
+  await terminalReplaceEntered.promise;
+
+  const deleting = controller.deleteBots({ botIds: [BOT_A] });
+  assert.deepEqual(terminalEvents, []);
+  terminalReplaceGate.resolve();
+  assert.deepEqual(await deleting, { deletedConversationIds: [created.conversationId] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(terminalEvents, ["cancelled"]);
+  assert.equal(deleteCalls, 1);
+  await controller.dispose();
+});
+
+test("batch delete waits for initial-stream failure tool teardown before durable deletion", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  const disposeEntered = deferred();
+  const disposeGate = deferred();
+  const order = [];
+  const terminalEvents = [];
+  let disposeCalls = 0;
+  const controller = new StandaloneConversationController({
+    router: {
+      async stream() { throw new Error("initial stream failed"); },
+    },
+    store: {
+      ...base,
+      async deleteBots(request) {
+        order.push("delete");
+        return base.deleteBots(request);
+      },
+    },
+    toolBridge: {
+      async open(identity) {
+        return Object.freeze({
+          ...identity,
+          definitions: Object.freeze([]),
+          async dispatch() { throw new Error("unused"); },
+          async dispose() {
+            disposeCalls += 1;
+            order.push("dispose-start");
+            disposeEntered.resolve();
+            await disposeGate.promise;
+            order.push("dispose-end");
+          },
+        });
+      },
+    },
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  controller.on("event", (event) => {
+    if (new Set(["cancelled", "completed", "failed"]).has(event.type)) {
+      terminalEvents.push(event.type);
+    }
+  });
+  const created = await controller.create({ botId: BOT_A });
+  const sending = controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Fail the initial stream while tools close.",
+  });
+  void sending.catch(() => {});
+  await disposeEntered.promise;
+
+  let deletionSettled = false;
+  const deleting = controller.deleteBots({ botIds: [BOT_A] })
+    .then((value) => { deletionSettled = true; return value; });
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledBeforeDisposal = deletionSettled;
+  disposeGate.resolve();
+
+  await assert.rejects(sending, { code: "OPENBOT_CONVERSATION_CANCELLED" });
+  assert.deepEqual(await deleting, { deletedConversationIds: [created.conversationId] });
+  assert.equal(settledBeforeDisposal, false);
+  assert.equal(disposeCalls, 1);
+  assert.deepEqual(terminalEvents, ["cancelled"]);
+  assert.ok(order.indexOf("dispose-end") < order.indexOf("delete"));
+  await controller.dispose();
+});
+
+test("batch delete awaits target stream, tool, and subagent cancellation while another bot continues", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  const streamGates = new Map([[BOT_A, deferred()], [BOT_B, deferred()]]);
+  const toolDisposeGates = new Map([[BOT_A, deferred()], [BOT_B, deferred()]]);
+  const signals = new Map();
+  const disposeStarted = [];
+  const disposed = [];
+  const events = [];
+  let deleteCalls = 0;
+  const controller = new StandaloneConversationController({
+    router: {
+      async stream(request) {
+        const botId = request.selection.botId;
+        signals.set(botId, request.signal);
+        return {
+          fullStream: (async function* () {
+            await streamGates.get(botId).promise;
+            yield { type: "text-delta", textDelta: `late-${botId}` };
+            yield { type: "finish", finishReason: "stop", usage: {} };
+          })(),
+        };
+      },
+    },
+    store: {
+      ...base,
+      async deleteBots(request) {
+        deleteCalls += 1;
+        assert.deepEqual(disposed, [`subagent:${BOT_A}`, `tool:${BOT_A}`]);
+        return base.deleteBots(request);
+      },
+    },
+    toolBridge: {
+      async open(identity) {
+        return Object.freeze({
+          ...identity,
+          definitions: Object.freeze([]),
+          async dispatch() { throw new Error("unused"); },
+          async dispose() {
+            disposeStarted.push(`tool:${identity.botId}`);
+            await toolDisposeGates.get(identity.botId).promise;
+            disposed.push(`tool:${identity.botId}`);
+          },
+        });
+      },
+    },
+    subagentRunner: {
+      async open(identity) {
+        return Object.freeze({
+          botId: identity.botId,
+          conversationId: identity.conversationId,
+          taskId: identity.taskId,
+          definitions: Object.freeze([]),
+          async dispatch() { throw new Error("unused"); },
+          async dispose() { disposed.push(`subagent:${identity.botId}`); },
+        });
+      },
+      async dispose() {},
+    },
+    async readSelection(botId) { return selection({ botId }); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  controller.on("event", (event) => events.push(event));
+  const a = await controller.create({ botId: BOT_A });
+  const b = await controller.create({ botId: BOT_B });
+  const acceptedA = await controller.send({ botId: BOT_A, conversationId: a.conversationId, text: "A" });
+  const acceptedB = await controller.send({ botId: BOT_B, conversationId: b.conversationId, text: "B" });
+
+  let deletionSettled = false;
+  const deleting = controller.deleteBots({ botIds: [BOT_A] })
+    .then((value) => { deletionSettled = true; return value; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(signals.get(BOT_A).aborted, true);
+  assert.equal(signals.get(BOT_B).aborted, false);
+  assert.deepEqual(disposeStarted, [`tool:${BOT_A}`]);
+  assert.deepEqual(disposed, [`subagent:${BOT_A}`]);
+  assert.equal(deletionSettled, false);
+  assert.equal(deleteCalls, 0);
+
+  toolDisposeGates.get(BOT_A).resolve();
+  assert.deepEqual(await deleting, { deletedConversationIds: [a.conversationId] });
+  assert.equal(deleteCalls, 1);
+  assert.equal((await controller.read({ botId: BOT_B, conversationId: b.conversationId })).status, "streaming");
+
+  streamGates.get(BOT_A).resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.filter(({ botId }) => botId === BOT_A).map(({ type }) => type), ["cancelled"]);
+  assert.doesNotMatch(JSON.stringify(events), /late-bot-11111111/);
+
+  const cancelB = controller.cancel({
+    botId: BOT_B,
+    conversationId: b.conversationId,
+    invocationId: acceptedB.invocationId,
+  });
+  toolDisposeGates.get(BOT_B).resolve();
+  await cancelB;
+  streamGates.get(BOT_B).resolve();
+  assert.equal(signals.get(BOT_B).aborted, true);
+  assert.equal(acceptedA.status, "streaming");
+  await controller.dispose();
+});
+
+test("failed batch delete keeps a late opening session fenced and exact retry converges", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  const openEntered = deferred();
+  const openGate = deferred();
+  const order = [];
+  let deleteCalls = 0;
+  let openSignal = null;
+  let streams = 0;
+  const controller = new StandaloneConversationController({
+    router: {
+      async stream() {
+        streams += 1;
+        throw new Error("deleted opening reservation must not stream");
+      },
+    },
+    store: {
+      ...base,
+      async deleteBots(request) {
+        deleteCalls += 1;
+        order.push(`delete-${deleteCalls}`);
+        const result = await base.deleteBots(request);
+        if (deleteCalls === 1) throw new Error("post-commit durability uncertain");
+        return result;
+      },
+    },
+    toolBridge: {
+      async open(identity, signal) {
+        openSignal = signal;
+        openEntered.resolve();
+        await openGate.promise;
+        return Object.freeze({
+          ...identity,
+          definitions: Object.freeze([]),
+          async dispatch() { throw new Error("unused"); },
+          async dispose() { order.push("dispose-late-open"); },
+        });
+      },
+    },
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const created = await controller.create({ botId: BOT_A });
+  const sending = controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Open is still pending.",
+  });
+  await openEntered.promise;
+
+  const firstDelete = controller.deleteBots({ botIds: [BOT_A] });
+  assert.equal(controller.deleteBots({ botIds: [BOT_A] }), firstDelete);
+  assert.equal(openSignal.aborted, true);
+  openGate.resolve();
+  await assert.rejects(sending, { code: "OPENBOT_CONVERSATION_STALE" });
+  await assert.rejects(firstDelete, { code: "OPENBOT_CONVERSATION_OPERATION_FAILED" });
+  assert.deepEqual(order, ["dispose-late-open", "delete-1"]);
+  assert.equal(streams, 0);
+  await assert.rejects(controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Failure must not reopen the fence.",
+  }), { code: "OPENBOT_CONVERSATION_STALE" });
+  assert.throws(
+    () => controller.deleteBots({ botIds: [BOT_A, BOT_B] }),
+    { code: "OPENBOT_CONVERSATION_OPERATION_FAILED" },
+  );
+  assert.equal(deleteCalls, 1);
+
+  assert.deepEqual(await controller.deleteBots({ botIds: [BOT_A] }), {
+    deletedConversationIds: [],
+  });
+  assert.equal(deleteCalls, 2);
+  assert.throws(
+    () => controller.read({ botId: BOT_A, conversationId: created.conversationId }),
+    { code: "OPENBOT_CONVERSATION_STALE" },
+  );
+  assert.equal(order.filter((entry) => entry === "dispose-late-open").length, 1);
+  await controller.dispose();
+});
+
+test("batch delete rejects pre-delete durable list and read results that arrive after purge", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  const listEntered = deferred();
+  const readEntered = deferred();
+  const releaseReads = deferred();
+  let holdReads = false;
+  const store = {
+    ...base,
+    async list(botId) {
+      const snapshot = await base.list(botId);
+      if (holdReads) {
+        listEntered.resolve();
+        await releaseReads.promise;
+      }
+      return snapshot;
+    },
+    async read(botId, conversationId) {
+      const snapshot = await base.read(botId, conversationId);
+      if (holdReads) {
+        readEntered.resolve();
+        await releaseReads.promise;
+      }
+      return snapshot;
+    },
+  };
+  const controller = new StandaloneConversationController({
+    router: { async stream(request) { return directResult(request); } },
+    store,
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const created = await controller.create({ botId: BOT_A });
+  holdReads = true;
+  const listing = controller.list(BOT_A).catch((error) => error);
+  const reading = controller.read({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+  }).catch((error) => error);
+  await Promise.all([listEntered.promise, readEntered.promise]);
+
+  assert.deepEqual(await controller.deleteBots({ botIds: [BOT_A] }), {
+    deletedConversationIds: [created.conversationId],
+  });
+  releaseReads.resolve();
+  assert.equal((await listing).code, "OPENBOT_CONVERSATION_STALE");
+  assert.equal((await reading).code, "OPENBOT_CONVERSATION_STALE");
+  holdReads = false;
+  assert.equal(await base.read(BOT_A, created.conversationId), null);
+  assert.throws(
+    () => controller.read({ botId: BOT_A, conversationId: created.conversationId }),
+    { code: "OPENBOT_CONVERSATION_STALE" },
+  );
+  await controller.dispose();
+});
+
+test("batch delete drains a pre-delete durable create and suppresses its late cache and event", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  const createEntered = deferred();
+  const releaseCreate = deferred();
+  const changed = [];
+  const store = {
+    ...base,
+    async create(value) {
+      createEntered.resolve();
+      await releaseCreate.promise;
+      return base.create(value);
+    },
+  };
+  const controller = new StandaloneConversationController({
+    router: { async stream(request) { return directResult(request); } },
+    store,
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  controller.on("changed", (value) => changed.push(value));
+  const creating = controller.create({ botId: BOT_A });
+  await createEntered.promise;
+
+  let deletionSettled = false;
+  const deleting = controller.deleteBots({ botIds: [BOT_A] })
+    .then((value) => { deletionSettled = true; return value; });
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledBeforeCreate = deletionSettled;
+  releaseCreate.resolve();
+
+  await assert.rejects(creating, { code: "OPENBOT_CONVERSATION_STALE" });
+  const deleted = await deleting;
+  assert.equal(settledBeforeCreate, false);
+  assert.equal(deleted.deletedConversationIds.length, 1);
+  assert.deepEqual(changed, []);
+  assert.deepEqual(await base.list(BOT_A), []);
+  assert.throws(
+    () => controller.list(BOT_A),
+    { code: "OPENBOT_CONVERSATION_STALE" },
+  );
+  await controller.dispose();
 });
 
 test("reviewed tools execute one bounded loop and the exact catalog survives every inference round", async () => {
@@ -1710,6 +2270,7 @@ test("reviewed shell remains behind deny and one-shot decisions and forbids reme
     },
     async remember() { throw new Error("shell access must not be remembered"); },
     async revoke() { throw new Error("no shell grant exists"); },
+    async deleteBot() {},
     async listPublic() { return Object.freeze([]); },
   };
   const requestIds = [...UUIDS, "99999999-9999-4999-8999-999999999999"];
