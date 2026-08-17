@@ -27,6 +27,7 @@ const CONFIG_KEYS = Object.freeze([
   "reasoningEffort",
 ]);
 const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const MAX_CONVERSATION_BINDING_DELETE_BOTS = 4096;
 const INFERENCE_CAPABILITY = /^[a-f0-9]{64}$/;
 const SERVICE_TIER = /^[a-z][a-z0-9_-]{0,31}$/;
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
@@ -255,6 +256,67 @@ function writeConversationBindings(file, state) {
   }
 }
 
+function normalizeConversationBindingDeleteBotIds(value) {
+  let isArray;
+  let prototype;
+  let lengthDescriptor;
+  try {
+    isArray = Array.isArray(value);
+    if (isArray) {
+      prototype = Object.getPrototypeOf(value);
+      lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    }
+  } catch {
+    fail();
+  }
+  if (!isArray || prototype !== Array.prototype) fail();
+  const length = lengthDescriptor?.value;
+  if (!Object.hasOwn(lengthDescriptor || {}, "value")
+    || !Number.isSafeInteger(length)
+    || length < 0
+    || length > MAX_CONVERSATION_BINDING_DELETE_BOTS) {
+    fail();
+  }
+  let descriptors;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    fail();
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.length !== length + 1
+    || keys.some((key) => typeof key !== "string")
+    || !Object.hasOwn(descriptors, "length")) {
+    fail();
+  }
+  const botIds = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor || !Object.hasOwn(descriptor, "value")) fail();
+    const botId = descriptor.value;
+    if (typeof botId !== "string"
+      || !botId.startsWith("bot-")
+      || !BOT_UUID.test(botId.slice(4))) {
+      fail();
+    }
+    botIds.push(botId);
+  }
+  if (new Set(botIds).size !== botIds.length) fail();
+  return botIds;
+}
+
+function deleteConversationBindings(file, botIds) {
+  const targets = new Set(normalizeConversationBindingDeleteBotIds(botIds));
+  const state = readConversationBindings(file);
+  let changed = false;
+  for (const conversationId of Object.keys(state.bindings)) {
+    if (!targets.has(state.bindings[conversationId])) continue;
+    delete state.bindings[conversationId];
+    changed = true;
+  }
+  if (changed) writeConversationBindings(file, state);
+}
+
 function selectedBotId(environment, registry, options) {
   const conversationId = options?.conversationId;
   if (conversationId == null) return registry.activeBotId;
@@ -262,7 +324,12 @@ function selectedBotId(environment, registry, options) {
   const file = environment.CODEX_BOT_CONVERSATION_BINDINGS;
   const state = readConversationBindings(file);
   const retained = state.bindings[conversationId];
-  if (retained) return retained;
+  if (retained && Object.hasOwn(registry.selections, retained)) return retained;
+  const activeSelection = registry.selections[registry.activeBotId];
+  if (!Object.hasOwn(registry.selections, registry.activeBotId)
+    || !activeSelection || typeof activeSelection !== "object" || Array.isArray(activeSelection)) {
+    fail();
+  }
   state.bindings[conversationId] = registry.activeBotId;
   writeConversationBindings(file, state);
   return registry.activeBotId;
@@ -339,6 +406,7 @@ function generateCredential() {
 module.exports = {
   BridgeConfigError,
   createRuntimeConfig,
+  deleteConversationBindings,
   generateCredential,
   loadRuntimeConfig,
 };

@@ -20,6 +20,7 @@ const modelCatalogPath = path.join(
 
 const BOT_ID = "11111111-1111-4111-8111-111111111111";
 const BOT_ID_B = "22222222-2222-4222-8222-222222222222";
+const BOT_ID_C = "33333333-3333-4333-8333-333333333333";
 const TOKEN = "runtime-secret-".padEnd(48, "x");
 
 function temporaryRegistry(t) {
@@ -411,4 +412,157 @@ test("stock Grok conversations stay bound to their original bot across active-bo
   assert.match(persisted, new RegExp(`"stock-conversation-b": "bot-${BOT_ID_B}"`));
   assert.doesNotMatch(persisted, /43123|runtime-secret|endpoint|credential|model/i);
   assert.equal(fs.statSync(bindings).mode & 0o077, 0);
+});
+
+test("conversation binding deletion atomically removes every target and leaves survivors byte-stable on retry", (t) => {
+  const { deleteConversationBindings } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  const bindings = path.join(path.dirname(registry), "conversation-bindings.v1.json");
+  fs.writeFileSync(bindings, `${JSON.stringify({
+    schemaVersion: 1,
+    bindings: {
+      "delete-a-1": `bot-${BOT_ID}`,
+      "survive-c": `bot-${BOT_ID_C}`,
+      "delete-b": `bot-${BOT_ID_B}`,
+      "delete-a-2": `bot-${BOT_ID}`,
+    },
+  }, null, 2)}\n`, { mode: 0o600 });
+  const originalRename = fs.renameSync;
+  let bindingRenames = 0;
+  fs.renameSync = (source, destination) => {
+    if (destination === bindings) {
+      bindingRenames += 1;
+      assert.match(path.basename(source), /^\.conversation-bindings\.v1\.json\..+\.tmp$/);
+      assert.equal(fs.statSync(source).mode & 0o077, 0);
+    }
+    return originalRename(source, destination);
+  };
+  t.after(() => { fs.renameSync = originalRename; });
+
+  deleteConversationBindings(bindings, [`bot-${BOT_ID}`, `bot-${BOT_ID_B}`]);
+  assert.equal(bindingRenames, 1);
+  const first = fs.readFileSync(bindings, "utf8");
+  assert.deepEqual(JSON.parse(first), {
+    schemaVersion: 1,
+    bindings: { "survive-c": `bot-${BOT_ID_C}` },
+  });
+  assert.equal(fs.statSync(bindings).mode & 0o077, 0);
+  assert.doesNotMatch(first, /runtime-secret|credential|endpoint|token/i);
+
+  deleteConversationBindings(bindings, [`bot-${BOT_ID}`, `bot-${BOT_ID_B}`]);
+  assert.equal(bindingRenames, 1);
+  assert.equal(fs.readFileSync(bindings, "utf8"), first);
+});
+
+test("conversation binding deletion validates a bounded dense canonical ID batch without invoking hostile values", (t) => {
+  const { deleteConversationBindings } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  const bindings = path.join(path.dirname(registry), "conversation-bindings.v1.json");
+  const initial = `${JSON.stringify({
+    schemaVersion: 1,
+    bindings: { retained: `bot-${BOT_ID_C}` },
+  })}\n`;
+  fs.writeFileSync(bindings, initial, { mode: 0o600 });
+  const invalid = [
+    null,
+    [`bot-${BOT_ID}`, `bot-${BOT_ID}`],
+    [`BOT-${BOT_ID}`],
+    ["bot-AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"],
+    Object.assign([`bot-${BOT_ID}`], { extra: true }),
+  ];
+  const sparse = [];
+  sparse.length = 2;
+  sparse[0] = `bot-${BOT_ID}`;
+  invalid.push(sparse);
+  let getterCalls = 0;
+  const accessor = [];
+  Object.defineProperty(accessor, "0", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return `bot-${BOT_ID}`;
+    },
+  });
+  accessor.length = 1;
+  invalid.push(accessor);
+  const oversized = [];
+  Object.defineProperty(oversized, "0", {
+    enumerable: true,
+    get() {
+      getterCalls += 1;
+      return `bot-${BOT_ID}`;
+    },
+  });
+  oversized.length = 4097;
+  invalid.push(oversized);
+  let oversizedOwnKeysCalls = 0;
+  const oversizedProxyTarget = [];
+  oversizedProxyTarget.length = 4097;
+  invalid.push(new Proxy(oversizedProxyTarget, {
+    ownKeys() {
+      oversizedOwnKeysCalls += 1;
+      throw new Error("oversized input must be rejected before ownKeys traversal");
+    },
+  }));
+  const revoked = Proxy.revocable([`bot-${BOT_ID}`], {});
+  revoked.revoke();
+  invalid.push(revoked.proxy);
+
+  for (const value of invalid) {
+    assert.throws(
+      () => deleteConversationBindings(bindings, value),
+      { code: "CODEX_BRIDGE_CONFIG_INVALID" },
+    );
+  }
+  assert.equal(getterCalls, 0);
+  assert.equal(oversizedOwnKeysCalls, 0);
+  assert.equal(fs.readFileSync(bindings, "utf8"), initial);
+});
+
+test("a deleted conversation selection repairs to the authoritative active bot without resurrecting it", (t) => {
+  const { loadRuntimeConfig } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  const bindings = path.join(path.dirname(registry), "conversation-bindings.v1.json");
+  const writeRegistry = (activeBotId) => fs.writeFileSync(registry, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId,
+    selections: {
+      [`bot-${BOT_ID_B}`]: {
+        model: "gpt-5.6-terra", reasoningEffort: "high", generation: 41, updatedAt: null,
+      },
+      [`bot-${BOT_ID_C}`]: {
+        model: "gpt-5.6-sol", reasoningEffort: "max", generation: 42, updatedAt: null,
+      },
+    },
+  })}\n`, { mode: 0o600 });
+  fs.writeFileSync(bindings, `${JSON.stringify({
+    schemaVersion: 1,
+    bindings: {
+      deleted: `bot-${BOT_ID}`,
+      survivor: `bot-${BOT_ID_C}`,
+    },
+  })}\n`, { mode: 0o600 });
+  const environment = {
+    CODEX_BOT_MODEL_SELECTIONS: registry,
+    CODEX_BOT_CONVERSATION_BINDINGS: bindings,
+    CODEX_BOT_CLIPROXY_URL: "http://127.0.0.1:43123/v1",
+    CODEX_BOT_CLIPROXY_TOKEN: TOKEN,
+  };
+
+  writeRegistry(`bot-${BOT_ID_B}`);
+  const repaired = loadRuntimeConfig(environment, { conversationId: "deleted" });
+  assert.equal(repaired.botId, BOT_ID_B);
+  assert.equal(repaired.generation, 41);
+  assert.deepEqual(JSON.parse(fs.readFileSync(bindings, "utf8")), {
+    schemaVersion: 1,
+    bindings: {
+      deleted: `bot-${BOT_ID_B}`,
+      survivor: `bot-${BOT_ID_C}`,
+    },
+  });
+  assert.doesNotMatch(fs.readFileSync(registry, "utf8"), new RegExp(BOT_ID));
+
+  writeRegistry(`bot-${BOT_ID_C}`);
+  assert.equal(loadRuntimeConfig(environment, { conversationId: "deleted" }).botId, BOT_ID_B);
+  assert.equal(loadRuntimeConfig(environment, { conversationId: "survivor" }).botId, BOT_ID_C);
 });
