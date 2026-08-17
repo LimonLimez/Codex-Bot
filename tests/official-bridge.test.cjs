@@ -411,9 +411,9 @@ test("helper results are allowlisted before anything reaches the renderer", asyn
     refreshToken: SECRET_SENTINEL,
   });
   official.captureSeat = async () => ({
-    screenshotBase64:
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl7sAAAAASUVORK5CYII=",
-    mimeType: "image/png",
+    screenshotBase64: "/9j/AAAAAAAAAP/Z",
+    mimeType: "image/jpeg",
+    frameSequence: 19,
     width: 1280,
     height: 800,
     cursorPosition: { x: 4, y: 5 },
@@ -470,6 +470,8 @@ test("helper results are allowlisted before anything reaches the renderer", asyn
   assert.equal(frame.value.url, "official-computer://shared-primary");
   assert.equal(frame.value.title, "Official vendor cloud computer");
   assert.equal(frame.value.profileId, "official-cloud-primary");
+  assert.equal(frame.value.mimeType, "image/jpeg");
+  assert.equal(frame.value.frameSequence, 19);
 
   const input = await request("/api/input", {
     body: {

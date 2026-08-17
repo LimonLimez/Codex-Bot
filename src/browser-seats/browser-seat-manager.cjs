@@ -23,6 +23,8 @@ const { CHROMIUM_HARDENING_ARGS, installBrowserPageHardening } = require(
 
 const WIDTH = 1280;
 const HEIGHT = 800;
+const LIVE_VIEW_FRAME_INTERVAL_MS = 1000 / 30;
+const LIVE_VIEW_JPEG_QUALITY = 60;
 const MAX_ACTIVE = Math.max(
   1,
   Math.min(3, Number(process.env.GROK_BOT_BROWSER_SEAT_LIMIT || 3)),
@@ -545,10 +547,103 @@ function attachPage(seat, page) {
   });
   page.on("close", () =>
     setImmediate(() => {
+      void stopPageScreencast(seat, page);
       if (!seat.closing && activeSeats.get(seat.key) === seat)
         writeSessionState(seat);
     }),
   );
+  startPageScreencast(seat, page);
+}
+
+function startPageScreencast(seat, page) {
+  if (seat.screencasts.has(page)) return;
+  let resolveFirstFrame;
+  const state = {
+    session: null,
+    latestFrame: null,
+    sequence: 0,
+    lastAcceptedAt: 0,
+    firstFrame: new Promise((resolve) => {
+      resolveFirstFrame = resolve;
+    }),
+  };
+  seat.screencasts.set(page, state);
+  void (async () => {
+    const session = await seat.context.newCDPSession(page);
+    if (page.isClosed() || seat.closing) {
+      await session.detach().catch(() => {});
+      return;
+    }
+    state.session = session;
+    session.on("Page.screencastFrame", (event) => {
+      void session
+        .send("Page.screencastFrameAck", { sessionId: event.sessionId })
+        .catch(() => {});
+      const now = performance.now();
+      if (
+        state.latestFrame &&
+        now - state.lastAcceptedAt < LIVE_VIEW_FRAME_INTERVAL_MS
+      ) {
+        return;
+      }
+      state.lastAcceptedAt = now;
+      state.sequence += 1;
+      state.latestFrame = String(event.data || "");
+      resolveFirstFrame?.();
+      resolveFirstFrame = null;
+    });
+    await session.send("Page.startScreencast", {
+      format: "jpeg",
+      quality: LIVE_VIEW_JPEG_QUALITY,
+      maxWidth: WIDTH,
+      maxHeight: HEIGHT,
+      everyNthFrame: 1,
+    });
+  })().catch((error) => {
+    resolveFirstFrame?.();
+    resolveFirstFrame = null;
+    log("screencast_start_error", {
+      profileId: seat.profileId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
+async function stopPageScreencast(seat, page) {
+  const state = seat.screencasts.get(page);
+  if (!state) return;
+  seat.screencasts.delete(page);
+  if (!state.session) return;
+  await state.session.send("Page.stopScreencast").catch(() => {});
+  await state.session.detach().catch(() => {});
+}
+
+async function latestSeatFrame(seat, page) {
+  const state = seat.screencasts.get(page);
+  if (state && !state.latestFrame) {
+    await Promise.race([
+      state.firstFrame,
+      new Promise((resolve) => setTimeout(resolve, 250)),
+    ]);
+  }
+  if (state?.latestFrame) {
+    return {
+      screenshotBase64: state.latestFrame,
+      mimeType: "image/jpeg",
+      frameSequence: state.sequence,
+    };
+  }
+  const screenshot = await page.screenshot({
+    type: "jpeg",
+    quality: LIVE_VIEW_JPEG_QUALITY,
+    animations: "disabled",
+    caret: "hide",
+  });
+  return {
+    screenshotBase64: screenshot.toString("base64"),
+    mimeType: "image/jpeg",
+    frameSequence: 0,
+  };
 }
 
 function resolveChrome() {
@@ -775,6 +870,7 @@ async function launchSeat(key) {
       restoringSession: true,
       closing: false,
       closePromise: null,
+      screencasts: new Map(),
     };
     context.on("page", (page) => {
       seat.page = page;
@@ -1456,11 +1552,7 @@ async function captureSeat(key) {
   const run = seat.queue.then(async () => {
     const page = await currentPage(seat);
     assertSafePageForCapture(page);
-    const screenshot = await page.screenshot({
-      type: "png",
-      animations: "disabled",
-      caret: "hide",
-    });
+    const frame = await latestSeatFrame(seat, page);
     assertSafePageForCapture(page);
     const title = await page
       .title()
@@ -1469,7 +1561,7 @@ async function captureSeat(key) {
     seat.lastUsed = Date.now();
     writeSessionState(seat);
     return {
-      screenshotBase64: screenshot.toString("base64"),
+      ...frame,
       cursorPosition: seat.cursor,
       url: page.url(),
       title,
@@ -1537,6 +1629,7 @@ module.exports = {
   immutableActionSnapshot,
   approvalOriginForPage,
   approvalContextForActions,
+  latestSeatFrame,
   pageLooksLikeChallenge,
   pendingApprovalForSeat,
   pendingApprovals,
@@ -1549,5 +1642,6 @@ module.exports = {
   controlStatusForSeat,
   WIDTH,
   HEIGHT,
+  LIVE_VIEW_FRAME_INTERVAL_MS,
   MAX_ACTIVE,
 };

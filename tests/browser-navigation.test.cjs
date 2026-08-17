@@ -64,6 +64,35 @@ test("browser verification detection requires a concrete challenge signal", () =
   );
 });
 
+test("private live view serves the latest native screencast frame at a 30 FPS target", async () => {
+  let screenshotCalls = 0;
+  const page = {
+    screenshot: async () => {
+      screenshotCalls += 1;
+      return Buffer.from("fallback");
+    },
+  };
+  const seat = {
+    screencasts: new Map([
+      [
+        page,
+        {
+          latestFrame: Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString("base64"),
+          sequence: 42,
+        },
+      ],
+    ]),
+  };
+
+  assert.ok(Math.abs(manager.LIVE_VIEW_FRAME_INTERVAL_MS - 1000 / 30) < 0.01);
+  assert.deepEqual(await manager.latestSeatFrame(seat, page), {
+    screenshotBase64: "/9j/2Q==",
+    mimeType: "image/jpeg",
+    frameSequence: 42,
+  });
+  assert.equal(screenshotCalls, 0);
+});
+
 test("isolated browser navigation preserves public HTTP and HTTPS destinations", () => {
   for (const target of [
     "https://www.canva.com/design/",

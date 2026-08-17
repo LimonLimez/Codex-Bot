@@ -154,7 +154,7 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
       const A = GBSeatProvider(x) ?? v;
       if (o && v && A !== v) await X();
       ((aI.current = A),
-        s(`data:image/png;base64,${x.screenshotBase64}`),
+        s(`data:${x.mimeType || "image/png"};base64,${x.screenshotBase64}`),
         i({ ...x, provider: A }),
         document.activeElement !== m.current && u(x.url ?? ""));
     } catch (a) {
@@ -183,11 +183,11 @@ function GBLiveSeat({ agentId: n, subjectLabel: e }) {
   T.useEffect(() => {
     let a = !0;
     g();
-    const v = setInterval(() => a && g(), 850);
+    const v = setInterval(() => a && g(), o ? 1000 / 30 : 250);
     return () => {
       ((a = !1), clearInterval(v));
     };
-  }, [g]);
+  }, [g, o]);
   T.useEffect(() => {
     j();
     return () => {};

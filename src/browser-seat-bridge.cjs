@@ -278,16 +278,43 @@ function normalizePngBase64(value, message) {
   return screenshotBase64;
 }
 
+function normalizeLiveFrameBase64(value, mimeType) {
+  const screenshotBase64 = String(value || "");
+  if (
+    screenshotBase64.length < 12 ||
+    screenshotBase64.length > 32 * 1024 * 1024 ||
+    !/^[A-Za-z0-9+/]+={0,2}$/.test(screenshotBase64)
+  ) {
+    throw requestError("The computer provider returned an invalid frame.", 502);
+  }
+  const signature = Buffer.from(screenshotBase64.slice(0, 24), "base64");
+  if (
+    mimeType === "image/jpeg" &&
+    signature.length >= 3 &&
+    signature[0] === 0xff &&
+    signature[1] === 0xd8 &&
+    signature[2] === 0xff
+  ) {
+    return { screenshotBase64, mimeType };
+  }
+  return {
+    screenshotBase64: normalizePngBase64(
+      screenshotBase64,
+      "The computer provider returned an invalid PNG frame.",
+    ),
+    mimeType: "image/png",
+  };
+}
+
 function normalizeFrame(value, provider) {
-  const screenshotBase64 = normalizePngBase64(
+  const frame = normalizeLiveFrameBase64(
     value?.screenshotBase64,
-    "The computer provider returned an invalid PNG frame.",
+    String(value?.mimeType || "image/png"),
   );
   const metadata = normalizeProviderMetadata(value, provider);
   const generation = Number(value?.generation);
   return Object.freeze({
-    screenshotBase64,
-    mimeType: "image/png",
+    ...frame,
     width: manager.WIDTH,
     height: manager.HEIGHT,
     cursorPosition: normalizeCursor(value?.cursorPosition),
@@ -296,6 +323,11 @@ function normalizeFrame(value, provider) {
     pageTextPreview: normalizePageTextPreview(value?.bodyPreview),
     generation:
       Number.isSafeInteger(generation) && generation >= 0 ? generation : 0,
+    frameSequence:
+      Number.isSafeInteger(Number(value?.frameSequence)) &&
+      Number(value.frameSequence) >= 0
+        ? Number(value.frameSequence)
+        : 0,
   });
 }
 

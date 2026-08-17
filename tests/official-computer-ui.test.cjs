@@ -1461,3 +1461,13 @@ test("private live view leaves approval decisions to the chat-adjacent permissio
   assert.equal(liveSeat.includes("/api/approval?seatKey="), false);
   assert.match(liveSeat, /Computer approvals belong beside the conversation/);
 });
+
+test("takeover renders negotiated frames on an overlap-safe 30 FPS loop", () => {
+  assert.match(liveSeat, /x\.mimeType \|\| "image\/png"/);
+  assert.match(
+    liveSeat,
+    /setInterval\(\(\) => a && g\(\), o \? 1000 \/ 30 : 250\)/,
+  );
+  assert.match(liveSeat, /if \(aF\.current\) return/);
+  assert.doesNotMatch(liveSeat, /setInterval\(\(\) => a && g\(\), 850\)/);
+});
