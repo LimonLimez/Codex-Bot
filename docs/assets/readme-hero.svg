@@ -1,9 +1,46 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
-  <title id="title">Open Bot</title><desc id="desc">A local-first digital coworker for Windows.</desc>
-  <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#17110e"/><stop offset="1" stop-color="#080808"/></linearGradient><radialGradient id="glow"><stop stop-color="#ff8a00" stop-opacity=".28"/><stop offset="1" stop-color="#ff8a00" stop-opacity="0"/></radialGradient></defs>
-  <rect width="1200" height="420" rx="28" fill="url(#bg)"/><circle cx="970" cy="80" r="360" fill="url(#glow)"/>
-  <g transform="translate(92 86)"><path d="M70 0c38 0 70 31 70 70v34c0 38-32 70-70 70S0 142 0 104V70C0 31 32 0 70 0Z" fill="#ff8900"/><circle cx="48" cy="70" r="8" fill="#14110f"/><circle cx="92" cy="70" r="8" fill="#14110f"/><path d="M47 113c15 11 32 11 47 0" fill="none" stroke="#14110f" stroke-width="8" stroke-linecap="round"/><path d="M108 16c20 8 31 25 31 46-22-2-39-13-48-33 4-6 10-10 17-13Z" fill="#ffd08a"/></g>
-  <text x="285" y="145" fill="#fff" font-family="Segoe UI,Arial,sans-serif" font-size="74" font-weight="750">Open Bot</text><text x="288" y="202" fill="#c8c4bf" font-family="Segoe UI,Arial,sans-serif" font-size="25">Your coworkers. Your models. Your computer.</text>
-  <g font-family="Segoe UI,Arial,sans-serif" font-size="17" font-weight="600"><g transform="translate(288 248)"><rect width="170" height="46" rx="23" fill="#27231f"/><circle cx="25" cy="23" r="7" fill="#ff8900"/><text x="44" y="29" fill="#f5f2ee">Multi-provider</text></g><g transform="translate(472 248)"><rect width="151" height="46" rx="23" fill="#27231f"/><circle cx="25" cy="23" r="7" fill="#4ac29a"/><text x="44" y="29" fill="#f5f2ee">Local-first</text></g><g transform="translate(637 248)"><rect width="170" height="46" rx="23" fill="#27231f"/><circle cx="25" cy="23" r="7" fill="#6ea8ff"/><text x="44" y="29" fill="#f5f2ee">Computer use</text></g><g transform="translate(821 248)"><rect width="180" height="46" rx="23" fill="#27231f"/><circle cx="25" cy="23" r="7" fill="#bd8cff"/><text x="44" y="29" fill="#f5f2ee">Always on</text></g></g>
-  <text x="288" y="352" fill="#8d8984" font-family="Segoe UI,Arial,sans-serif" font-size="16">Independent • open source • Windows</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">Open Bot — a team of AI coworkers at one desk</title>
+  <desc id="desc">A dark desktop workspace with a coworker roster, a collaborative conversation, and a live private browser.</desc>
+  <defs>
+    <clipPath id="shell"><rect x="44" y="44" width="1112" height="432" rx="18"/></clipPath>
+    <filter id="shadow" x="-15%" y="-20%" width="130%" height="150%"><feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000" flood-opacity=".38"/></filter>
+  </defs>
+  <rect width="1200" height="520" fill="#0a0a0b"/>
+  <path d="M0 408C216 344 356 456 558 407c197-48 311-187 642-116v229H0Z" fill="#111113"/>
+  <g filter="url(#shadow)">
+    <rect x="44" y="44" width="1112" height="432" rx="18" fill="#151517" stroke="#343438"/>
+    <g clip-path="url(#shell)">
+      <rect x="44" y="44" width="1112" height="42" fill="#1d1d20"/>
+      <circle cx="66" cy="65" r="5" fill="#ff6b5f"/><circle cx="84" cy="65" r="5" fill="#f2bd4e"/><circle cx="102" cy="65" r="5" fill="#48c78e"/>
+      <text x="600" y="70" text-anchor="middle" fill="#a7a7ad" font-family="Segoe UI,Arial,sans-serif" font-size="13" font-weight="600">OPEN BOT</text>
+      <rect x="44" y="86" width="230" height="390" fill="#101012"/>
+      <path d="M274 86v390" stroke="#303034"/>
+      <text x="68" y="119" fill="#f3f3f5" font-family="Segoe UI,Arial,sans-serif" font-size="19" font-weight="700">Your team</text>
+      <rect x="64" y="137" width="190" height="38" rx="9" fill="#1d1d20"/>
+      <circle cx="82" cy="156" r="7" fill="none" stroke="#7c7c84" stroke-width="2"/><path d="m87 161 5 5" stroke="#7c7c84" stroke-width="2" stroke-linecap="round"/>
+      <text x="101" y="161" fill="#9a9aa2" font-family="Segoe UI,Arial,sans-serif" font-size="13">Search coworkers</text>
+      <g font-family="Segoe UI,Arial,sans-serif">
+        <rect x="58" y="190" width="202" height="68" rx="12" fill="#242427"/>
+        <circle cx="87" cy="216" r="16" fill="#ff9417"/><path d="M80 217c5-8 10-8 15 0" fill="none" stroke="#171719" stroke-width="3" stroke-linecap="round"/><circle cx="98" cy="204" r="4" fill="#ffd18c"/>
+        <text x="113" y="212" fill="#fff" font-size="14" font-weight="700">Operations Lead</text><text x="113" y="233" fill="#a5a5ac" font-size="12">Coordinating the launch…</text><circle cx="244" cy="208" r="4" fill="#48c78e"/>
+        <circle cx="87" cy="286" r="16" fill="#21b899"/><circle cx="98" cy="274" r="4" fill="#8aead5"/><text x="113" y="282" fill="#e9e9ec" font-size="14" font-weight="650">Researcher</text><text x="113" y="303" fill="#9a9aa2" font-size="12">3 sources verified</text>
+        <circle cx="87" cy="356" r="16" fill="#8a62e8"/><circle cx="98" cy="344" r="4" fill="#c9b7ff"/><text x="113" y="352" fill="#e9e9ec" font-size="14" font-weight="650">Site Builder</text><text x="113" y="373" fill="#9a9aa2" font-size="12">Browser active</text>
+      </g>
+      <rect x="274" y="86" width="546" height="390" fill="#171719"/>
+      <text x="304" y="122" fill="#f5f5f7" font-family="Segoe UI,Arial,sans-serif" font-size="17" font-weight="700">Launch room</text><text x="405" y="122" fill="#9a9aa2" font-family="Segoe UI,Arial,sans-serif" font-size="12">3 coworkers</text><path d="M294 142h506" stroke="#2c2c30"/>
+      <g font-family="Segoe UI,Arial,sans-serif">
+        <circle cx="320" cy="183" r="13" fill="#ff9417"/><text x="344" y="178" fill="#a9a9b0" font-size="11" font-weight="700">OPERATIONS LEAD</text><rect x="344" y="187" width="380" height="54" rx="13" fill="#2a2a2e"/><text x="361" y="210" fill="#f4f4f6" font-size="13">Researcher, confirm the market evidence.</text><text x="361" y="228" fill="#b9b9c0" font-size="13">Site Builder, keep the release page ready.</text>
+        <circle cx="320" cy="274" r="13" fill="#21b899"/><text x="344" y="269" fill="#a9a9b0" font-size="11" font-weight="700">RESEARCHER</text><rect x="344" y="278" width="356" height="52" rx="13" fill="#242427"/><text x="361" y="300" fill="#f4f4f6" font-size="13">Verified. Three primary sources agree.</text><text x="361" y="318" fill="#75dbc4" font-size="12">Messaged Operations Lead</text>
+        <rect x="464" y="359" width="319" height="47" rx="16" fill="#f1f1f2"/><text x="483" y="387" fill="#151517" font-size="13">Ship the update and monitor the rollout.</text>
+      </g>
+      <rect x="304" y="431" width="486" height="36" rx="18" fill="#202023" stroke="#37373c"/><circle cx="326" cy="449" r="12" fill="#303034"/><path d="M321 449h10m-5-5v10" stroke="#a7a7ae" stroke-width="1.5" stroke-linecap="round"/><text x="347" y="454" fill="#9a9aa2" font-family="Segoe UI,Arial,sans-serif" font-size="12">Message the launch room</text>
+      <rect x="820" y="86" width="336" height="390" fill="#101012"/>
+      <text x="844" y="122" fill="#f3f3f5" font-family="Segoe UI,Arial,sans-serif" font-size="15" font-weight="700">Site Builder’s computer</text>
+      <rect x="842" y="143" width="292" height="188" rx="11" fill="#242427" stroke="#39393e"/><rect x="852" y="153" width="272" height="22" rx="6" fill="#313136"/><circle cx="864" cy="164" r="3" fill="#ff7168"/><circle cx="875" cy="164" r="3" fill="#f4c04f"/><circle cx="886" cy="164" r="3" fill="#4acb91"/><rect x="898" y="158" width="164" height="12" rx="6" fill="#1c1c1f"/>
+      <rect x="852" y="184" width="74" height="137" fill="#1d1d20"/><rect x="936" y="187" width="91" height="10" rx="3" fill="#ececef"/><rect x="936" y="205" width="148" height="6" rx="3" fill="#66666e"/><rect x="936" y="219" width="129" height="6" rx="3" fill="#4d4d54"/><rect x="936" y="247" width="78" height="53" rx="6" fill="#ff9417"/><rect x="1023" y="247" width="79" height="53" rx="6" fill="#21b899"/>
+      <rect x="854" y="343" width="91" height="30" rx="15" fill="#f3f3f5"/><text x="873" y="363" fill="#111113" font-family="Segoe UI,Arial,sans-serif" font-size="11" font-weight="700">Take control</text><circle cx="1117" cy="357" r="4" fill="#48c78e"/><text x="1084" y="361" fill="#a7a7ad" font-family="Segoe UI,Arial,sans-serif" font-size="11">LIVE</text>
+      <text x="842" y="409" fill="#9a9aa2" font-family="Segoe UI,Arial,sans-serif" font-size="11">PRIVATE BROWSER · 30 FPS</text><text x="842" y="437" fill="#b8b8be" font-family="Segoe UI,Arial,sans-serif" font-size="12">Visible work. Explicit control.</text>
+    </g>
+  </g>
+  <text x="44" y="28" fill="#f4f4f5" font-family="Segoe UI,Arial,sans-serif" font-size="16" font-weight="700">OPEN BOT</text><text x="1138" y="28" text-anchor="end" fill="#a7a7ad" font-family="Segoe UI,Arial,sans-serif" font-size="12">YOUR MODELS · VISIBLE WORK · EXPLICIT CONTROL</text>
 </svg>
