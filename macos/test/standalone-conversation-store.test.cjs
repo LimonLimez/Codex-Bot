@@ -9,7 +9,10 @@ const test = require("node:test");
 const { StandaloneConversationStore } = require("../src/desktop/standalone-conversation-store.cjs");
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
+const BOT_C = "bot-33333333-3333-4333-8333-333333333333";
 const CONVERSATION = "conversation-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const CONVERSATION_B = "conversation-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const CONVERSATION_C = "conversation-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
 function record(overrides = {}) {
   return {
@@ -154,4 +157,92 @@ test("a reopened transcript repairs mode 0644 to exactly 0600 before reading", a
   assert.equal((await reopened.read(BOT_A, CONVERSATION)).messages[0].text, "Persist me.");
   assert.equal(reads, 1);
   assert.equal((await fs.stat(filePath)).mode & 0o777, 0o600);
+});
+
+test("batch delete atomically removes every requested bot transcript and is idempotent", async (t) => {
+  const { store } = await fixture(t);
+  await store.create(record());
+  await store.create(record({ botId: BOT_B, conversationId: CONVERSATION_B }));
+  await store.create(record({ botId: BOT_C, conversationId: CONVERSATION_C }));
+
+  const deleted = await store.deleteBots({ botIds: [BOT_A, BOT_B] });
+  assert.deepEqual(deleted, {
+    deletedConversationIds: [CONVERSATION, CONVERSATION_B],
+  });
+  assert.equal(Object.isFrozen(deleted), true);
+  assert.equal(Object.isFrozen(deleted.deletedConversationIds), true);
+  assert.deepEqual(await store.list(BOT_A), []);
+  assert.deepEqual(await store.list(BOT_B), []);
+  assert.deepEqual((await store.list(BOT_C)).map(({ conversationId }) => conversationId), [CONVERSATION_C]);
+  assert.deepEqual(await store.deleteBots({ botIds: [BOT_A, BOT_B] }), {
+    deletedConversationIds: [],
+  });
+});
+
+test("batch delete rejects malformed dense-set requests without touching durable bytes", async (t) => {
+  const { filePath, store } = await fixture(t);
+  await store.create(record());
+  const before = await fs.readFile(filePath);
+  const sparse = [];
+  sparse.length = 1;
+  let accessorReads = 0;
+  const hostile = Object.defineProperty({}, "botIds", {
+    enumerable: true,
+    get() { accessorReads += 1; return [BOT_A]; },
+  });
+
+  for (const request of [
+    { botIds: [] },
+    { botIds: [BOT_A, BOT_A] },
+    { botIds: sparse },
+    { botIds: ["bot-invalid"] },
+    { botIds: [BOT_A], extra: true },
+    hostile,
+  ]) {
+    await assert.rejects(store.deleteBots(request), { code: "OPENBOT_CONVERSATION_STORE_FAILED" });
+  }
+  assert.equal(accessorReads, 0);
+  assert.deepEqual(await fs.readFile(filePath), before);
+});
+
+test("batch delete is atomic before commit and retry-safe when commit success is uncertain", async (t) => {
+  const { filePath, store } = await fixture(t);
+  await store.create(record());
+  await store.create(record({ botId: BOT_B, conversationId: CONVERSATION_B }));
+  const before = await fs.readFile(filePath);
+  const precommitFailure = new StandaloneConversationStore({
+    filePath,
+    fs: {
+      ...fs,
+      async open() { throw new Error("precommit write failed"); },
+    },
+  });
+  await assert.rejects(precommitFailure.deleteBots({ botIds: [BOT_A] }), {
+    code: "OPENBOT_CONVERSATION_STORE_FAILED",
+  });
+  assert.deepEqual(await fs.readFile(filePath), before);
+
+  let failCommittedChmod = true;
+  const committedUncertain = new StandaloneConversationStore({
+    filePath,
+    fs: {
+      ...fs,
+      async chmod(target, mode) {
+        if (target === filePath && failCommittedChmod) {
+          failCommittedChmod = false;
+          throw new Error("post-rename durability uncertain");
+        }
+        return fs.chmod(target, mode);
+      },
+    },
+  });
+  await assert.rejects(committedUncertain.deleteBots({ botIds: [BOT_A] }), {
+    code: "OPENBOT_CONVERSATION_STORE_FAILED",
+  });
+  const reopened = new StandaloneConversationStore({ filePath });
+  assert.deepEqual(await reopened.list(BOT_A), []);
+  assert.deepEqual((await reopened.list(BOT_B)).map(({ conversationId }) => conversationId), [CONVERSATION_B]);
+  assert.deepEqual(await committedUncertain.deleteBots({ botIds: [BOT_A] }), {
+    deletedConversationIds: [],
+  });
 });

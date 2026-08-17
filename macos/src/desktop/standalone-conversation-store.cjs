@@ -8,6 +8,7 @@ const { types } = require("node:util");
 const SCHEMA_VERSION = 2;
 const LEGACY_SCHEMA_VERSION = 1;
 const MAX_CONVERSATIONS = 256;
+const MAX_BOT_IDS = 256;
 const MAX_MESSAGES = 512;
 const MAX_TEXT_BYTES = 64 * 1024;
 const MAX_FILE_BYTES = 24 * 1024 * 1024;
@@ -17,6 +18,7 @@ const MESSAGE_ID = /^message-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9
 const RECORD_FIELDS = new Set(["botId", "conversationId", "createdAt", "updatedAt", "messages"]);
 const MESSAGE_FIELDS = new Set(["messageId", "role", "text", "createdAt", "clientNonce", "inputDigest"]);
 const LEGACY_MESSAGE_FIELDS = new Set(["messageId", "role", "text", "createdAt"]);
+const DELETE_FIELDS = new Set(["botIds"]);
 
 class StandaloneConversationStoreError extends Error {
   constructor() {
@@ -120,6 +122,13 @@ function botId(value) {
   return value;
 }
 
+function deleteRequest(value) {
+  const request = ownData(value, DELETE_FIELDS);
+  const botIds = denseArray(request.botIds, MAX_BOT_IDS).map(botId);
+  if (botIds.length === 0 || new Set(botIds).size !== botIds.length) fail();
+  return { botIds };
+}
+
 function conversationId(value) {
   if (typeof value !== "string" || !CONVERSATION_ID.test(value)) fail();
   return value;
@@ -195,6 +204,20 @@ class StandaloneConversationStore {
         || state.conversations[index].createdAt !== normalized.createdAt) fail();
       state.conversations[index] = normalized;
       return normalized;
+    });
+  }
+
+  deleteBots(rawRequest) {
+    let request;
+    try { request = deleteRequest(rawRequest); }
+    catch { return Promise.reject(new StandaloneConversationStoreError()); }
+    const ids = new Set(request.botIds);
+    return this.#mutate((state) => {
+      const deletedConversationIds = state.conversations
+        .filter((entry) => ids.has(entry.botId))
+        .map((entry) => entry.conversationId);
+      state.conversations = state.conversations.filter((entry) => !ids.has(entry.botId));
+      return { deletedConversationIds };
     });
   }
 

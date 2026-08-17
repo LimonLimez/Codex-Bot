@@ -3,8 +3,10 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const { types } = require("node:util");
 
 const SCHEMA_VERSION = 1;
+const MAX_BOT_IDS = 256;
 const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const EFFORT = /^[a-z][a-z0-9_-]{0,31}$/;
@@ -17,6 +19,7 @@ const SELECTION_FIELDS = new Set([
 const REQUEST_FIELDS = new Set([
   "botId", "provider", "model", "reasoningEffort", "serviceTier", "catalogGeneration",
 ]);
+const DELETE_FIELDS = new Set(["botIds", "successorBotId"]);
 
 function ownData(value, allowed, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -45,6 +48,36 @@ function ownData(value, allowed, label) {
 function normalizeBotId(value) {
   if (typeof value !== "string" || !BOT_ID.test(value)) throw new Error("Bot selection is invalid.");
   return value;
+}
+
+function normalizeDeleteRequest(value) {
+  if (types.isProxy(value)) throw new Error("Bot deletion is invalid.");
+  const request = ownData(value, DELETE_FIELDS, "Bot deletion");
+  if (!Array.isArray(request.botIds) || types.isProxy(request.botIds)) {
+    throw new Error("Bot deletion is invalid.");
+  }
+  let descriptors;
+  try { descriptors = Object.getOwnPropertyDescriptors(request.botIds); }
+  catch { throw new Error("Bot deletion is invalid."); }
+  const length = descriptors.length?.value;
+  if (!Number.isSafeInteger(length) || length < 1 || length > MAX_BOT_IDS
+    || Reflect.ownKeys(descriptors).length !== length + 1) {
+    throw new Error("Bot deletion is invalid.");
+  }
+  const botIds = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[index];
+    if (!descriptor || !("value" in descriptor)) throw new Error("Bot deletion is invalid.");
+    botIds.push(normalizeBotId(descriptor.value));
+  }
+  const ids = new Set(botIds);
+  if (ids.size !== botIds.length) throw new Error("Bot deletion is invalid.");
+  const successorBotId = request.successorBotId === null
+    ? null : normalizeBotId(request.successorBotId);
+  if (successorBotId !== null && ids.has(successorBotId)) {
+    throw new Error("Bot deletion is invalid.");
+  }
+  return Object.freeze({ botIds: Object.freeze(botIds), successorBotId });
 }
 
 function normalizeSelection(value) {
@@ -234,6 +267,16 @@ class ModelSelectionStore {
         updatedAt: this.#now(),
       };
       return selection;
+    });
+  }
+
+  deleteBots(rawRequest) {
+    const request = normalizeDeleteRequest(rawRequest);
+    const ids = new Set(request.botIds);
+    return this.#mutate((state) => {
+      for (const id of ids) delete state.selections[id];
+      if (ids.has(state.activeBotId)) state.activeBotId = request.successorBotId;
+      return Object.freeze({ activeBotId: state.activeBotId });
     });
   }
 
