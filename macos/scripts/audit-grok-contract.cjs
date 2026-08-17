@@ -19,6 +19,16 @@ const DIRECT_IPC_METHODS = new Set([
   "send",
   "sendSync",
 ]);
+const STAGED_COORDINATOR_SUBSTITUTIONS = Object.freeze([
+  Object.freeze({
+    stock: "sand:coordinator-port",
+    patched: "openbot:coordinator-port",
+  }),
+  Object.freeze({
+    stock: "sand:coordinator-port-request",
+    patched: "openbot:coordinator-port-request",
+  }),
+]);
 
 const FEATURES = Object.freeze([
   {
@@ -214,7 +224,7 @@ function extractPreloadContract(source) {
     if (
       DIRECT_IPC_METHODS.has(method) &&
       first?.type === "StringLiteral" &&
-      first.value.startsWith("sand:")
+      (first.value.startsWith("sand:") || first.value.startsWith("openbot:coordinator-"))
     ) {
       directIpcChannels.add(first.value);
     }
@@ -273,7 +283,22 @@ function validateContract(contract) {
   return contract;
 }
 
-function auditPreloadContract(source, contract, { checkSourceHash = true } = {}) {
+function stagedDirectIpcChannels(contract) {
+  const expected = new Set(contract.directIpcChannels);
+  for (const { stock, patched } of STAGED_COORDINATOR_SUBSTITUTIONS) {
+    if (!expected.delete(stock)) {
+      throw new Error(`Grok preload contract is missing reviewed coordinator channel ${stock}`);
+    }
+    expected.add(patched);
+  }
+  return [...expected].sort();
+}
+
+function auditPreloadContract(
+  source,
+  contract,
+  { checkSourceHash = true, staged = false } = {},
+) {
   validateContract(contract);
   const actual = extractPreloadContract(source);
   if (checkSourceHash && actual.preloadSha256 !== contract.preloadSha256) {
@@ -281,7 +306,11 @@ function auditPreloadContract(source, contract, { checkSourceHash = true } = {})
   }
   compareList(actual.rpcMethods, contract.rpcMethods, "RPC method");
   compareList(actual.eventSubscriptions, contract.eventSubscriptions, "Event subscription");
-  compareList(actual.directIpcChannels, contract.directIpcChannels, "Direct IPC");
+  compareList(
+    actual.directIpcChannels,
+    staged ? stagedDirectIpcChannels(contract) : contract.directIpcChannels,
+    "Direct IPC",
+  );
   return {
     ok: true,
     rpcMethods: actual.rpcMethods.length,
@@ -309,6 +338,7 @@ function auditAppContract(appPath, contract) {
 function auditAsarContract(asarPath, contract) {
   return auditPreloadContract(readPreloadFromAsar(asarPath), contract, {
     checkSourceHash: false,
+    staged: true,
   });
 }
 

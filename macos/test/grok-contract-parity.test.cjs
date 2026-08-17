@@ -192,9 +192,17 @@ test("the auditor rejects missing, added, and renamed stock contract members", (
   );
 });
 
-test("the auditor checks a staged ASAR by its preserved stock preload contract", async (t) => {
+test("the staged ASAR auditor requires the exact reviewed OpenBot coordinator substitution", async (t) => {
   const contract = loadContract();
-  const source = syntheticPreload(contract);
+  const source = syntheticPreload(contract)
+    .replace(
+      'ipcRenderer.invoke("sand:coordinator-port",{});',
+      'ipcRenderer.on("openbot:coordinator-port",listener);',
+    )
+    .replace(
+      'ipcRenderer.invoke("sand:coordinator-port-request",{});',
+      'ipcRenderer.invoke("openbot:coordinator-port-request",{});',
+    );
   const stagedContract = {
     ...contract,
     preloadSha256: crypto.createHash("sha256").update(source).digest("hex"),
@@ -218,6 +226,24 @@ test("the auditor checks a staged ASAR by its preserved stock preload contract",
     eventSubscriptions: 22,
     directIpcChannels: 7,
   });
+
+  const unreviewedTree = path.join(root, "unreviewed-tree");
+  const unreviewedPreload = path.join(unreviewedTree, "dist", "electron-preload", "preload.cjs");
+  fs.mkdirSync(path.dirname(unreviewedPreload), { recursive: true });
+  fs.writeFileSync(
+    unreviewedPreload,
+    `${source}\nipcRenderer.invoke("openbot:coordinator-port-shadow",{});\n`,
+  );
+  fs.writeFileSync(
+    path.join(unreviewedTree, "package.json"),
+    '{"name":"sand","version":"0.1.4-macos.1"}\n',
+  );
+  const unreviewedArchive = path.join(root, "unreviewed.asar");
+  await asar.createPackage(unreviewedTree, unreviewedArchive);
+  assert.throws(
+    () => auditAsarContract(unreviewedArchive, stagedContract),
+    /Direct IPC.*unexpected.*openbot:coordinator-port-shadow/i,
+  );
 });
 
 test(
