@@ -79,6 +79,7 @@ function forwardingStore(store, overrides = {}) {
     updateProfile: (...args) => store.updateProfile(...args),
     advanceSetup: (...args) => store.advanceSetup(...args),
     updateRuntime: (...args) => store.updateRuntime(...args),
+    deleteBots: (...args) => store.deleteBots(...args),
     runtimeTransaction: (...args) => store.runtimeTransaction(...args),
     isCurrentRuntimeCommit: (...args) => store.isCurrentRuntimeCommit(...args),
     ...overrides,
@@ -3486,4 +3487,253 @@ test("provider callbacks from a pre-existing AsyncResource fail closed instead o
     /BOT_STORE_|bots\.json|codex-bot-runtime-controller-|endpoint|authToken|private-escaped/i,
   );
   assert.equal((await store.rename(bot.botId, "Lock recovered")).name, "Lock recovered");
+});
+
+test("deleteBots synchronously fences one atomic batch and emits one sanitized deletion", async (t) => {
+  const realStore = await temporaryStore(t);
+  const first = await realStore.create();
+  const second = await realStore.create();
+  const survivor = await realStore.create();
+  const entered = deferred();
+  const release = deferred();
+  const deleteCalls = [];
+  let fencedReads = 0;
+  let fencedRenames = 0;
+  const store = forwardingStore(realStore, {
+    read: (...args) => {
+      fencedReads += 1;
+      return realStore.read(...args);
+    },
+    rename: (...args) => {
+      fencedRenames += 1;
+      return realStore.rename(...args);
+    },
+    deleteBots: async (...args) => {
+      deleteCalls.push(args);
+      entered.resolve();
+      await release.promise;
+      return realStore.deleteBots(...args);
+    },
+  });
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const events = [];
+  controller.on("bots-deleted", (event) => events.push(event));
+
+  const deletion = controller.deleteBots([first.botId, second.botId], {
+    preferredActiveBotId: survivor.botId,
+  });
+  await entered.promise;
+  await assert.rejects(
+    controller.ensureRuntime(first.botId),
+    (error) => error?.code === "RUNTIME_BOT_DELETING",
+  );
+  await assert.rejects(
+    controller.renameBot(second.botId, "Must stay fenced"),
+    (error) => error?.code === "RUNTIME_BOT_DELETING",
+  );
+  assert.equal(fencedReads, 0);
+  assert.equal(fencedRenames, 0);
+  release.resolve();
+
+  assert.deepEqual(await deletion, {
+    deletedBotIds: [first.botId, second.botId],
+    survivingBotIds: [survivor.botId],
+    activeBotId: survivor.botId,
+  });
+  assert.deepEqual(deleteCalls, [[
+    [first.botId, second.botId],
+    { preferredActiveBotId: survivor.botId, extraRemoteRuntimes: [] },
+  ]]);
+  assert.deepEqual(events, [{
+    botIds: [first.botId, second.botId],
+    activeBotId: survivor.botId,
+  }]);
+  assertDeepFrozen(events[0]);
+  assert.deepEqual(harness.retireCalls, []);
+  assert.deepEqual(await controller.listBots(), [survivor]);
+  await assert.rejects(controller.ensureRuntime(first.botId), /not found/i);
+});
+
+test("deleteBots rejects after disposal during its durable store commit without rolling it back", async (t) => {
+  const realStore = await temporaryStore(t);
+  const deleted = await realStore.create();
+  const survivor = await realStore.create();
+  const entered = deferred();
+  const release = deferred();
+  const store = forwardingStore(realStore, {
+    deleteBots: async (...args) => {
+      entered.resolve();
+      await release.promise;
+      return realStore.deleteBots(...args);
+    },
+  });
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  const events = [];
+  controller.on("bots-deleted", (event) => events.push(event));
+
+  const deletion = controller.deleteBots([deleted.botId], {
+    preferredActiveBotId: survivor.botId,
+  });
+  await entered.promise;
+  controller.dispose();
+  release.resolve();
+
+  await assert.rejects(
+    deletion,
+    (error) => error?.code === "RUNTIME_CONTROLLER_DISPOSED",
+  );
+  assert.deepEqual(events, []);
+  assert.equal(await realStore.read(deleted.botId), null);
+  const [receipt] = await realStore.listPendingDeletions();
+  assert.deepEqual(receipt.botIds, [deleted.botId]);
+});
+
+test("deleteBots awaits an older provision and tombstones its exact private candidate", async (t) => {
+  const realStore = await temporaryStore(t);
+  const deleted = await realStore.create();
+  const survivor = await realStore.create();
+  const provisionGate = deferred();
+  const candidate = runtimeResult(deleted.botId, {
+    runtimeId: `delete-candidate-${deleted.botId.slice(-12)}`,
+    endpoint: "wss://delete-candidate.runtime.example.test/app-server",
+    authToken: "private-delete-candidate-token",
+    state: "provisioning",
+  });
+  const harness = new ProviderHarness();
+  harness.queueProvision(deleted.botId, async () => {
+    await provisionGate.promise;
+    return candidate;
+  });
+  const deleteCalls = [];
+  const store = forwardingStore(realStore, {
+    deleteBots: (...args) => {
+      deleteCalls.push(args);
+      return realStore.deleteBots(...args);
+    },
+  });
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+
+  const provisioning = controller.ensureRuntime(deleted.botId);
+  await waitFor(() => harness.provisionCalls.length === 1, "older provision did not begin");
+  const deletion = controller.deleteBots([deleted.botId], {
+    preferredActiveBotId: survivor.botId,
+  });
+  await Promise.resolve();
+  assert.equal(deleteCalls.length, 0);
+  await assert.rejects(
+    controller.runtimeSession(deleted.botId),
+    (error) => error?.code === "RUNTIME_BOT_DELETING",
+  );
+
+  provisionGate.resolve();
+  assert.equal((await provisioning).runtime.state, "provisioning");
+  await deletion;
+  assert.deepEqual(deleteCalls, [[
+    [deleted.botId],
+    {
+      preferredActiveBotId: survivor.botId,
+      extraRemoteRuntimes: [{ botId: deleted.botId, runtimeId: candidate.runtimeId }],
+    },
+  ]]);
+  assert.deepEqual(harness.retireCalls, []);
+  const [receipt] = await realStore.listPendingDeletions();
+  assert.deepEqual(receipt.remoteRuntimes, [{
+    botId: deleted.botId,
+    runtimeId: candidate.runtimeId,
+  }]);
+
+  await realStore.completeDeletion(receipt.deletionId);
+  harness.queueProvision(survivor.botId, runtimeResult(survivor.botId, {
+    runtimeId: candidate.runtimeId,
+    endpoint: "wss://reassigned-delete-candidate.runtime.example.test/app-server",
+    authToken: "private-reassigned-delete-candidate-token",
+  }));
+  const reassigned = await controller.ensureRuntime(survivor.botId);
+  assert.equal(reassigned.runtime.remoteRuntimeId, candidate.runtimeId);
+  assert.equal(reassigned.runtime.state, "ready");
+});
+
+test("deleteBots waits an older provider event and drops every event after its fence", async (t) => {
+  const realStore = await temporaryStore(t);
+  const deleted = await realStore.create();
+  const survivor = await realStore.create();
+  const harness = new ProviderHarness();
+  let blockReads = false;
+  const eventReadEntered = deferred();
+  const releaseEventRead = deferred();
+  let deleteCalls = 0;
+  const store = forwardingStore(realStore, {
+    read: async (...args) => {
+      if (blockReads && args[0] === deleted.botId) {
+        eventReadEntered.resolve();
+        await releaseEventRead.promise;
+      }
+      return realStore.read(...args);
+    },
+    deleteBots: (...args) => {
+      deleteCalls += 1;
+      return realStore.deleteBots(...args);
+    },
+  });
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const ready = await controller.ensureRuntime(deleted.botId);
+  const frames = [];
+  controller.on("runtime-event", (event) => frames.push(event.event.sequence));
+
+  blockReads = true;
+  harness.emit({
+    runtimeId: ready.runtime.remoteRuntimeId,
+    type: "computer/frame",
+    sequence: 1,
+  });
+  await eventReadEntered.promise;
+  const deletion = controller.deleteBots([deleted.botId], {
+    preferredActiveBotId: survivor.botId,
+  });
+  harness.emit({
+    runtimeId: ready.runtime.remoteRuntimeId,
+    type: "computer/frame",
+    sequence: 2,
+  });
+  await Promise.resolve();
+  assert.equal(deleteCalls, 0);
+
+  blockReads = false;
+  releaseEventRead.resolve();
+  await deletion;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deleteCalls, 1);
+  assert.deepEqual(frames, [1]);
+  assert.deepEqual(harness.retireCalls, []);
+});
+
+test("an unknown bot makes controller deletion all-or-none without clearing private state", async (t) => {
+  const store = await temporaryStore(t);
+  const retained = await store.create();
+  const other = await store.create();
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const ready = await controller.ensureRuntime(retained.botId);
+  const events = [];
+  controller.on("bots-deleted", (event) => events.push(event));
+  const unknownBotId = "bot-44444444-4444-4444-8444-444444444444";
+
+  await assert.rejects(
+    controller.deleteBots([retained.botId, unknownBotId]),
+    /not found/i,
+  );
+  assert.deepEqual((await controller.listBots()).map(({ botId }) => botId), [
+    retained.botId,
+    other.botId,
+  ]);
+  const session = await controller.runtimeSession(retained.botId);
+  assert.equal(session.runtimeId, ready.runtime.remoteRuntimeId);
+  assert.deepEqual(events, []);
+  assert.deepEqual(harness.retireCalls, []);
 });

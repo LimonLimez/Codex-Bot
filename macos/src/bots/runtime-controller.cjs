@@ -27,6 +27,9 @@ const RUNTIME_TRANSACTION_LOCK_ERRORS = new Set([
   "BOT_STORE_RUNTIME_TRANSACTION_BUSY",
   "BOT_STORE_RUNTIME_TRANSACTION_REENTRANT",
 ]);
+const MAX_DELETE_BOTS = 4096;
+const BOT_ID_PATTERN = /^bot-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
+const DELETE_OPTION_FIELDS = new Set(["preferredActiveBotId"]);
 const SESSION_LEASES = new WeakMap();
 
 class ControllerError extends Error {
@@ -171,6 +174,98 @@ function providerEventRetryDelay(attempt) {
   );
 }
 
+function normalizeBotId(value) {
+  if (typeof value !== "string" || !BOT_ID_PATTERN.test(value)) {
+    throw new Error("Bot ID is invalid.");
+  }
+  return value.toLowerCase();
+}
+
+function normalizeDeleteBotIds(value) {
+  let array;
+  let prototype;
+  let descriptors;
+  try {
+    array = Array.isArray(value);
+    if (array) {
+      prototype = Object.getPrototypeOf(value);
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    }
+  } catch {
+    throw new TypeError("Bot deletion IDs could not be inspected safely.");
+  }
+  if (!array || prototype !== Array.prototype) {
+    throw new TypeError("Bot deletion IDs must be a dense plain array.");
+  }
+  const length = descriptors.length?.value;
+  if (!Number.isSafeInteger(length) || length < 1 || length > MAX_DELETE_BOTS) {
+    throw new Error("Bot deletion IDs are invalid or oversized.");
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new TypeError("Bot deletion IDs cannot contain symbol fields.");
+  }
+  const elementKeys = keys.filter((key) => key !== "length");
+  if (elementKeys.length !== length
+    || elementKeys.some((key, index) => key !== String(index))) {
+    throw new TypeError("Bot deletion IDs must be a dense plain array.");
+  }
+  const botIds = elementKeys.map((key) => {
+    const descriptor = descriptors[key];
+    if (!("value" in descriptor)) {
+      throw new TypeError("Bot deletion IDs must contain plain data values only.");
+    }
+    return normalizeBotId(descriptor.value);
+  });
+  if (new Set(botIds).size !== botIds.length) {
+    throw new Error("Bot deletion IDs must be unique.");
+  }
+  return botIds;
+}
+
+function normalizeDeleteOptions(value) {
+  if (value === undefined) return { preferredActiveBotId: null };
+  let array;
+  let prototype;
+  let descriptors;
+  try {
+    array = Array.isArray(value);
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw new TypeError("Bot deletion options could not be inspected safely.");
+  }
+  if (!value || typeof value !== "object" || array
+    || (prototype !== Object.prototype && prototype !== null)) {
+    throw new TypeError("Bot deletion options must be a plain object.");
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new TypeError("Bot deletion options cannot contain symbol fields.");
+  }
+  for (const key of keys) {
+    if (!DELETE_OPTION_FIELDS.has(key)) {
+      throw new Error(`Bot deletion options contain an unsupported field: ${key}.`);
+    }
+    if (!("value" in descriptors[key])) {
+      throw new TypeError(`Bot deletion option ${key} must be plain data, not an accessor.`);
+    }
+  }
+  const preferred = descriptors.preferredActiveBotId?.value;
+  return {
+    preferredActiveBotId: preferred === undefined || preferred === null
+      ? null
+      : normalizeBotId(preferred),
+  };
+}
+
+function deletingBotError() {
+  return new ControllerError(
+    "Remote runtime bot is being deleted.",
+    "RUNTIME_BOT_DELETING",
+  );
+}
+
 class BotRuntimeController extends EventEmitter {
   #store;
   #provider;
@@ -186,6 +281,7 @@ class BotRuntimeController extends EventEmitter {
   #candidateOwners = new Map();
   #candidateFingerprints = new Map();
   #supersededBots = new Set();
+  #deletingBots = new Map();
   #unsubscribe = null;
   #disposed = false;
   #lifecycleEpoch = 0;
@@ -198,6 +294,7 @@ class BotRuntimeController extends EventEmitter {
       || typeof store.create !== "function"
       || typeof store.advanceSetup !== "function"
       || typeof store.updateRuntime !== "function"
+      || typeof store.deleteBots !== "function"
       || typeof store.runtimeTransaction !== "function"
       || typeof store.isCurrentRuntimeCommit !== "function") {
       throw new TypeError("Bot runtime controller requires a BotStore.");
@@ -247,22 +344,69 @@ class BotRuntimeController extends EventEmitter {
   }
 
   async readBot(botId) {
-    return publicBot(await this.#store.read(botId));
+    const normalizedBotId = this.#assertBotNotDeleting(botId);
+    const bot = await this.#store.read(normalizedBotId);
+    this.#assertBotNotDeleting(normalizedBotId);
+    return publicBot(bot);
+  }
+
+  deleteBots(botIds, options = undefined) {
+    let request;
+    let transactionEpoch;
+    try {
+      request = {
+        botIds: normalizeDeleteBotIds(botIds),
+        ...normalizeDeleteOptions(options),
+      };
+      transactionEpoch = this.#lifecycleEpoch;
+      this.#assertActive(transactionEpoch);
+      if (request.botIds.some((botId) => this.#deletingBots.has(botId))) {
+        throw deletingBotError();
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+
+    const deletionToken = Object.freeze({ botIds: Object.freeze([...request.botIds]) });
+    for (const botId of request.botIds) this.#deletingBots.set(botId, deletionToken);
+    const olderOperations = new Set();
+    for (const botId of request.botIds) {
+      const queue = this.#botQueues.get(botId);
+      const provision = this.#provisions.get(botId);
+      if (queue) olderOperations.add(queue);
+      if (provision) olderOperations.add(provision);
+    }
+
+    return this.#deleteBotsTransaction(
+      request,
+      deletionToken,
+      [...olderOperations],
+      transactionEpoch,
+    ).finally(() => {
+      for (const botId of request.botIds) {
+        if (this.#deletingBots.get(botId) === deletionToken) this.#deletingBots.delete(botId);
+      }
+    });
   }
 
   async renameBot(botId, name) {
-    const bot = await this.#store.rename(botId, name);
+    const normalizedBotId = this.#assertBotNotDeleting(botId);
+    const bot = await this.#store.rename(normalizedBotId, name);
+    this.#assertBotNotDeleting(normalizedBotId);
     this.#publishBot(bot);
     return publicBot(bot);
   }
 
   async updateProfile(botId, profile) {
-    const bot = await this.#store.updateProfile(botId, profile);
+    const normalizedBotId = this.#assertBotNotDeleting(botId);
+    const bot = await this.#store.updateProfile(normalizedBotId, profile);
+    this.#assertBotNotDeleting(normalizedBotId);
     this.#publishBot(bot);
     return publicBot(bot);
   }
 
   async advanceSetup(botId, transition, commitFence = undefined) {
+    const normalizedBotId = this.#assertBotNotDeleting(botId);
     let expectedNextStage = null;
     try {
       const descriptor = Object.getOwnPropertyDescriptor(transition, "nextStage");
@@ -273,12 +417,13 @@ class BotRuntimeController extends EventEmitter {
     } catch {}
     let bot;
     try {
-      bot = await this.#store.advanceSetup(botId, transition, commitFence);
+      bot = await this.#store.advanceSetup(normalizedBotId, transition, commitFence);
     } catch (error) {
       if (!isCommittedDurabilityUncertain(error) || expectedNextStage === null) throw error;
-      bot = await this.#store.read(botId);
+      bot = await this.#store.read(normalizedBotId);
       if (!bot || bot.setupStage !== expectedNextStage) throw error;
     }
+    this.#assertBotNotDeleting(normalizedBotId);
     this.#publishBot(bot);
     return publicBot(bot);
   }
@@ -293,9 +438,11 @@ class BotRuntimeController extends EventEmitter {
 
   async runtimeSession(botId) {
     if (this.#disposed) return null;
+    const normalizedBotId = this.#assertBotNotDeleting(botId);
     const transactionEpoch = this.#lifecycleEpoch;
-    const bot = await this.#store.read(botId);
+    const bot = await this.#store.read(normalizedBotId);
     this.#assertActive(transactionEpoch);
+    this.#assertBotNotDeleting(normalizedBotId);
     if (!bot || this.#supersededBots.has(bot.botId) || bot.runtime.state !== "ready") return null;
     const captured = this.#sessions.get(bot.botId);
     if (!captured) {
@@ -414,6 +561,7 @@ class BotRuntimeController extends EventEmitter {
     this.#candidateOwners.clear();
     this.#candidateFingerprints.clear();
     this.#supersededBots.clear();
+    this.#deletingBots.clear();
     const unsubscribe = this.#unsubscribe;
     this.#unsubscribe = null;
     if (typeof unsubscribe === "function") {
@@ -425,7 +573,91 @@ class BotRuntimeController extends EventEmitter {
     }
   }
 
+  async #deleteBotsTransaction(request, deletionToken, olderOperations, transactionEpoch) {
+    await Promise.allSettled(olderOperations);
+    this.#assertActive(transactionEpoch);
+    if (request.botIds.some((botId) => this.#deletingBots.get(botId) !== deletionToken)) {
+      throw deletingBotError();
+    }
+    const extraRemoteRuntimes = this.#candidateCleanupIds(request.botIds);
+    const outcome = await this.#store.deleteBots([...request.botIds], {
+      preferredActiveBotId: request.preferredActiveBotId,
+      extraRemoteRuntimes,
+    });
+    this.#assertActive(transactionEpoch);
+    if (request.botIds.some((botId) => this.#deletingBots.get(botId) !== deletionToken)) {
+      throw deletingBotError();
+    }
+    const survivingBotIds = Array.isArray(outcome?.survivingBotIds)
+      ? outcome.survivingBotIds.map(normalizeBotId)
+      : [];
+    const activeBotId = outcome?.activeBotId === null
+      ? null
+      : normalizeBotId(outcome?.activeBotId);
+    if (activeBotId !== null && !survivingBotIds.includes(activeBotId)) {
+      throw new ControllerError("Bot deletion result is invalid.", "RUNTIME_DELETE_FAILED");
+    }
+    for (const botId of request.botIds) this.#clearBotPrivateState(botId);
+    const result = deepFreeze({
+      deletedBotIds: [...request.botIds],
+      survivingBotIds,
+      activeBotId,
+    });
+    if (!this.#disposed && transactionEpoch === this.#lifecycleEpoch) {
+      this.emit("bots-deleted", deepFreeze({
+        botIds: [...request.botIds],
+        activeBotId,
+      }));
+    }
+    return result;
+  }
+
+  #candidateCleanupIds(botIds) {
+    const cleanup = [];
+    for (const botId of botIds) {
+      const candidate = this.#candidates.get(botId);
+      if (!candidate) continue;
+      const runtimeId = candidate.runtimeId;
+      const fingerprint = this.#candidateFingerprints.get(runtimeId);
+      if (this.#candidateOwners.get(runtimeId) !== botId
+        || fingerprint?.botId !== botId
+        || fingerprint.provider !== candidate.provider
+        || fingerprint.endpoint !== candidate.endpoint) continue;
+      cleanup.push(Object.freeze({ botId, runtimeId }));
+    }
+    return Object.freeze(cleanup);
+  }
+
+  #clearBotPrivateState(botId) {
+    this.#sessions.delete(botId);
+    this.#candidates.delete(botId);
+    this.#provisions.delete(botId);
+    this.#botQueues.delete(botId);
+    this.#generations.delete(botId);
+    this.#supersededBots.delete(botId);
+    for (const [runtimeId, ownerBotId] of this.#runtimeOwners) {
+      if (ownerBotId !== botId) continue;
+      this.#runtimeOwners.delete(runtimeId);
+      this.#runtimeFingerprints.delete(runtimeId);
+      this.#runtimeEpochs.delete(runtimeId);
+    }
+    for (const [runtimeId, ownerBotId] of this.#candidateOwners) {
+      if (ownerBotId !== botId) continue;
+      this.#candidateOwners.delete(runtimeId);
+      this.#candidateFingerprints.delete(runtimeId);
+    }
+    for (const [runtimeId, fingerprint] of this.#runtimeFingerprints) {
+      if (fingerprint?.botId !== botId) continue;
+      this.#runtimeFingerprints.delete(runtimeId);
+      this.#runtimeEpochs.delete(runtimeId);
+    }
+    for (const [runtimeId, fingerprint] of this.#candidateFingerprints) {
+      if (fingerprint?.botId === botId) this.#candidateFingerprints.delete(runtimeId);
+    }
+  }
+
   #enqueueBot(botId, operation) {
+    if (this.#deletingBots.has(botId)) return Promise.reject(deletingBotError());
     const previous = this.#botQueues.get(botId) || Promise.resolve();
     const result = previous.then(operation, operation);
     const tail = result.then(() => undefined, () => undefined);
@@ -507,12 +739,20 @@ class BotRuntimeController extends EventEmitter {
     }
   }
 
+  #assertBotNotDeleting(botId) {
+    const normalizedBotId = normalizeBotId(botId);
+    if (this.#deletingBots.has(normalizedBotId)) throw deletingBotError();
+    return normalizedBotId;
+  }
+
   async #runtimeOperation(botId, force) {
     const transactionEpoch = this.#lifecycleEpoch;
     this.#assertActive(transactionEpoch);
-    const bot = await this.#store.read(botId);
+    const normalizedBotId = this.#assertBotNotDeleting(botId);
+    const bot = await this.#store.read(normalizedBotId);
     this.#assertActive(transactionEpoch);
-    if (!bot) throw new Error(`Bot not found: ${botId}.`);
+    this.#assertBotNotDeleting(normalizedBotId);
+    if (!bot) throw new Error(`Bot not found: ${normalizedBotId}.`);
     const existing = this.#provisions.get(bot.botId);
     if (existing) return existing;
     const leaseMarker = operationMarker();
