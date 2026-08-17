@@ -31,6 +31,474 @@ test("settings expose honest persisted workspace defaults and private computer m
   );
 });
 
+test("connection settings render the full CLIProxy provider list and stepped reasoning sliders", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
+  const context = { console, TextEncoder, URL, encodeURIComponent };
+  vm.runInNewContext(
+    `${executable}
+globalThis.__providerUi = (() => {
+  const providers = [
+    ["codex", "OpenAI Codex", "device", true],
+    ["claude", "Anthropic Claude", "oauth", false],
+    ["antigravity", "Google Antigravity", "oauth", false],
+    ["kimi", "Moonshot Kimi", "device", false],
+    ["xai", "xAI", "device", false],
+    ["vertex", "Google Vertex AI", "service-account", false],
+    ["local", "Local models", "local", false],
+  ].map(([id, label, loginKind, signedIn]) => ({
+    id,
+    label,
+    loginKind,
+    signedIn,
+    description: label + " connection",
+  }));
+  const status = {
+    connection: {
+      mode: "cliproxy-oauth",
+      route: "cliproxyapi-codex-oauth",
+      provider: "codex",
+      providerLabel: "OpenAI Codex",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "xhigh",
+      fastMode: false,
+    },
+    account: {
+      signedIn: true,
+      provider: "codex",
+      providerLabel: "OpenAI Codex",
+      name: "Provider User",
+      email: "person@example.test",
+      plan: "plus",
+    },
+    providers,
+    usage: { availability: { state: "ready" } },
+    officialComputer: { mode: "private", state: "signed-in", connected: true, permissions: {} },
+    preferences: {
+      catalog: {
+        models: [{ id: "gpt-5.6-terra", label: "5.6 Terra", description: "" }],
+        reasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"],
+        fastMode: { supported: true, default: false },
+      },
+      defaults: { model: "gpt-5.6-terra", reasoningEffort: "xhigh", fastMode: false },
+      effective: { model: "gpt-5.6-terra", reasoningEffort: "xhigh", fastMode: false },
+      override: null,
+    },
+  };
+  return {
+    settings: connectionPanelHtml(status),
+    picker: modelPickerHtml(status),
+  };
+})();`,
+    Object.assign(context, {
+      document: {
+        querySelectorAll() {
+          return [];
+        },
+      },
+    }),
+  );
+  const result = context.__providerUi;
+  for (const provider of [
+    "OpenAI Codex",
+    "Anthropic Claude",
+    "Google Antigravity",
+    "Moonshot Kimi",
+    "xAI",
+    "Google Vertex AI",
+    "Local models",
+  ])
+    assert.match(result.settings, new RegExp(provider));
+  assert.match(result.settings, /<select[^>]+data-codex-provider/);
+  assert.match(result.settings, /data-codex-provider-connect/);
+  assert.match(result.settings, /data-codex-vertex-form/);
+  assert.match(result.settings, /data-codex-local-form/);
+  assert.match(result.settings, /http:\/\/127\.0\.0\.1:11434\/v1/);
+  assert.match(result.settings, /Connect & discover models/);
+  assert.match(result.settings, /tool calling and streaming are required/);
+  assert.match(
+    result.settings,
+    /type="file" accept="application\/json,\.json"/,
+  );
+  for (const rendered of [result.settings, result.picker]) {
+    assert.match(rendered, /type="range"/);
+    assert.match(
+      rendered,
+      /data-reasoning-values="none\|low\|medium\|high\|xhigh\|max"/,
+    );
+    assert.match(rendered, /aria-valuetext="Extra high"/);
+    assert.match(rendered, /--codex-slider-progress:80%/);
+  }
+  assert.match(ui, /::-webkit-slider-thumb/);
+  assert.match(ui, /\.codex-reasoning-stops>span\.is-active/);
+});
+
+test("first-run onboarding presents provider logos, computer choice, and a remembered completion", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
+  const context = { console, TextEncoder, URL, encodeURIComponent };
+  vm.runInNewContext(
+    `${executable}
+globalThis.__onboardingUi = (() => {
+  const providers = [
+    ["codex", "OpenAI Codex", "device"],
+    ["claude", "Anthropic Claude", "oauth"],
+    ["antigravity", "Google Antigravity", "oauth"],
+    ["kimi", "Moonshot Kimi", "device"],
+    ["xai", "xAI", "device"],
+    ["vertex", "Google Vertex AI", "service-account"],
+    ["local", "Local models", "local"],
+  ].map(([id, label, loginKind]) => ({ id, label, loginKind, description: label + " account", signedIn: id === "codex" }));
+  const status = {
+    connection: { mode: "cliproxy-oauth", route: "cliproxyapi-codex-oauth", provider: "codex", providerLabel: "OpenAI Codex" },
+    account: { signedIn: true, provider: "codex", name: "Leon Miller", email: "leon@example.test" },
+    providers,
+    officialComputer: { mode: "private", state: "signed-in", connected: true, ready: false, permissions: {} },
+  };
+  return {
+    providers: onboardingProviderStepHtml(status),
+    computer: onboardingComputerStepHtml(status),
+    complete: onboardingCompleteStepHtml(status),
+  };
+})();`,
+    Object.assign(context, {
+      document: {
+        querySelectorAll() {
+          return [];
+        },
+      },
+    }),
+  );
+  const rendered = context.__onboardingUi;
+  assert.match(rendered.providers, /Connect an AI provider/);
+  for (const provider of [
+    "OpenAI Codex",
+    "Anthropic Claude",
+    "Google Antigravity",
+    "Moonshot Kimi",
+    "xAI",
+    "Google Vertex AI",
+    "Local models",
+  ])
+    assert.match(rendered.providers, new RegExp(provider));
+  assert.equal(
+    (rendered.providers.match(/data-codex-onboarding-provider=/g) || []).length,
+    7,
+  );
+  assert.equal((rendered.providers.match(/<img/g) || []).length, 5);
+  assert.equal((rendered.providers.match(/<svg/g) || []).length, 2);
+  assert.match(rendered.computer, /Choose where employees browse/);
+  assert.match(rendered.computer, /Private browser/);
+  assert.match(rendered.computer, /Vendor cloud computer/);
+  assert.match(rendered.computer, /cursor\.com/);
+  assert.match(rendered.computer, /data-codex-computer-official/);
+  assert.match(rendered.complete, /You’re all set/);
+  assert.match(rendered.complete, /Leon Miller/);
+  assert.match(rendered.complete, /Enter Open Bot/);
+  assert.match(ui, /open-bot\.onboarding\.v1\.complete/);
+  assert.match(ui, /rememberOnboardingCompleted\(\)/);
+  assert.match(
+    ui,
+    /\.codex-vertex-form\[hidden\],\.codex-local-form\[hidden\],\.codex-key-form\[hidden\] \{ display:none !important; \}/,
+  );
+  assert.doesNotMatch(read("scripts/patch-app.cjs"), /Codex Bot User/);
+});
+
+test("local model setup posts only endpoint and optional key then refreshes the catalog", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  assert.match(ui, /action: "local-connect"/);
+  assert.match(ui, /baseUrl: endpoint\.value/);
+  assert.match(ui, /apiKey: key\.value/);
+  assert.match(ui, /key\.value = ""/);
+  assert.match(ui, /acceptAuthoritativeStatus\(result\.status\)/);
+  assert.match(ui, /Only a literal 127\.0\.0\.1 address is accepted/);
+  assert.match(ui, /provider\.loginKind === "local"/);
+});
+
+test("first-run onboarding never calls an unsigned provider ready merely because its route is selected", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
+  const context = { console, TextEncoder, URL, encodeURIComponent };
+  vm.runInNewContext(
+    `${executable}
+globalThis.__disconnectedOnboarding = onboardingProviderStepHtml({
+  connection: {
+    mode: "cliproxy-oauth",
+    route: "cliproxyapi-codex-oauth",
+    provider: "codex",
+    providerLabel: "OpenAI Codex",
+  },
+  account: { signedIn: false, provider: "codex" },
+  providers: [{
+    id: "codex",
+    label: "OpenAI Codex",
+    description: "Use a ChatGPT account with Codex access.",
+    loginKind: "device",
+    signedIn: false,
+  }],
+  officialComputer: { mode: "private", connected: false, permissions: {} },
+});`,
+    Object.assign(context, {
+      document: {
+        querySelectorAll() {
+          return [];
+        },
+      },
+    }),
+  );
+  const rendered = context.__disconnectedOnboarding;
+  assert.match(
+    rendered,
+    /class="codex-provider-tile"[^>]*aria-pressed="false"/,
+  );
+  assert.match(rendered, /<small>Sign in<\/small>/);
+  assert.match(rendered, />Connect OpenAI Codex<\/button>/);
+  assert.match(rendered, /data-codex-onboarding-next="computer" disabled/);
+  assert.doesNotMatch(rendered, /Ready to use|is-active/);
+});
+
+test("provider sign-in keeps the working route live and a completed switch refreshes every picker catalog", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
+  const context = { console, TextEncoder, URL, encodeURIComponent };
+  vm.runInNewContext(
+    `${executable}
+globalThis.__providerTransitionUi = (() => {
+  const providers = [
+    { id: "codex", label: "OpenAI Codex", description: "Codex", loginKind: "device", signedIn: true, credentialRevision: 1 },
+    { id: "claude", label: "Anthropic Claude", description: "Claude", loginKind: "oauth", signedIn: false, credentialRevision: null },
+  ];
+  const codex = {
+    connection: { mode: "cliproxy-oauth", route: "cliproxyapi-codex-oauth", provider: "codex", providerLabel: "OpenAI Codex", model: "gpt-5.6-terra", reasoningEffort: "high", fastMode: false },
+    account: { signedIn: true, provider: "codex", name: "Codex User" },
+    providers,
+    usage: { availability: { state: "ready" } },
+    officialComputer: { mode: "private", state: "signed-in", connected: true, permissions: {} },
+    preferences: {
+      catalog: { models: [{ id: "gpt-5.6-terra", label: "5.6 Terra", description: "" }], reasoningEfforts: ["low", "high"], fastMode: { supported: true } },
+      defaults: { model: "gpt-5.6-terra", reasoningEffort: "high", fastMode: false },
+      effective: { model: "gpt-5.6-terra", reasoningEffort: "high", fastMode: false },
+      override: null,
+    },
+  };
+  const claude = {
+    ...codex,
+    connection: { mode: "cliproxy-oauth", route: "cliproxyapi-claude-oauth", provider: "claude", providerLabel: "Anthropic Claude", model: "claude-sonnet-5", reasoningEffort: "medium", fastMode: false },
+    account: { signedIn: true, provider: "claude", name: "Claude User" },
+    providers: providers.map((provider) => provider.id === "claude" ? { ...provider, signedIn: true, credentialRevision: 2 } : provider),
+    preferences: {
+      catalog: {
+        models: [
+          { id: "claude-opus-5", label: "Claude Opus 5", description: "" },
+          { id: "claude-sonnet-5", label: "Claude Sonnet 5", description: "" },
+        ],
+        reasoningEfforts: ["none", "medium", "max"],
+        fastMode: { supported: false },
+      },
+      defaults: { model: "claude-sonnet-5", reasoningEffort: "medium", fastMode: false },
+      effective: { model: "claude-sonnet-5", reasoningEffort: "medium", fastMode: false },
+      override: null,
+    },
+  };
+  lastStatus = codex;
+  pendingOAuthDevice = {
+    provider: "claude",
+    providerLabel: "Anthropic Claude",
+    url: "https://claude.ai/oauth/authorize?test=1",
+    message: "Finish sign-in.",
+    previousCredentialRevision: null,
+    deadlineAt: Date.now() + 60_000,
+  };
+  agentStatusCache.set("employee-1", codex);
+  const pendingHtml = connectionPanelHtml(codex);
+  pendingOAuthDevice = null;
+  acceptAuthoritativeStatus(claude);
+  return {
+    pendingHtml,
+    cacheSize: agentStatusCache.size,
+    settingsHtml: connectionPanelHtml(lastStatus),
+    pickerHtml: modelPickerHtml(lastStatus),
+  };
+})();`,
+    Object.assign(context, {
+      document: {
+        querySelectorAll() {
+          return [];
+        },
+      },
+    }),
+  );
+
+  const result = context.__providerTransitionUi;
+  assert.match(result.pendingHtml, /cliproxyapi-codex-oauth/);
+  assert.match(
+    result.pendingHtml,
+    /value="claude"[^>]+selected[^>]*>Anthropic Claude/,
+  );
+  assert.equal(result.cacheSize, 0);
+  for (const rendered of [result.settingsHtml, result.pickerHtml]) {
+    assert.match(rendered, /claude-sonnet-5/);
+    assert.doesNotMatch(rendered, /gpt-5\.6-terra/);
+    assert.match(rendered, /data-reasoning-values="none\|medium\|max"/);
+  }
+  assert.match(result.pickerHtml, /Claude Opus 5/);
+  assert.match(result.pickerHtml, /Claude Sonnet 5/);
+  assert.match(ui, /Cancel sign-in/);
+  assert.match(ui, /cancel-provider-login/);
+  assert.match(ui, /const connectControl = event\.currentTarget;/);
+  assert.match(ui, /const selectControl = event\.currentTarget;/);
+  assert.doesNotMatch(ui, /finally\s*\{\s*if \(event\.currentTarget/);
+});
+
+test("a provider choice survives settings rerenders before Connect is clicked", () => {
+  const ui = read("src/renderer/codex-ui.js");
+  const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
+  const context = { console, TextEncoder, URL, encodeURIComponent };
+  vm.runInNewContext(
+    `${executable}
+globalThis.__providerChoice = (() => {
+  const status = {
+    connection: { mode: "cliproxy-oauth", route: "cliproxyapi-codex-oauth", provider: "codex", model: "gpt-5.6-terra", reasoningEffort: "high", fastMode: false },
+    account: { signedIn: true, provider: "codex", name: "Codex User" },
+    providers: [
+      { id: "codex", label: "OpenAI Codex", description: "Codex", loginKind: "device", signedIn: true },
+      { id: "claude", label: "Anthropic Claude", description: "Claude", loginKind: "oauth", signedIn: false },
+    ],
+    usage: { availability: { state: "ready" } },
+    preferences: { catalog: { models: [], reasoningEfforts: [], fastMode: { supported: true } }, defaults: {}, effective: {}, override: null },
+  };
+  selectedProviderId = "claude";
+  providerConnectionNotice = { message: "", tone: "info" };
+  const first = connectionPanelHtml(status);
+  providerConnectionNotice = { message: "Preparing", tone: "info" };
+  const rebuilt = connectionPanelHtml(status);
+  return { first, rebuilt };
+})();`,
+    Object.assign(context, {
+      document: {
+        querySelectorAll() {
+          return [];
+        },
+      },
+    }),
+  );
+  for (const html of [
+    context.__providerChoice.first,
+    context.__providerChoice.rebuilt,
+  ]) {
+    assert.match(html, /value="claude"[^>]+selected[^>]*>Anthropic Claude/);
+    assert.match(html, />Connect Anthropic Claude<\/button>/);
+  }
+});
+
+test("provider polling activates exactly once after a new credential appears and timeout cancellation stays non-blocking", async () => {
+  const ui = read("src/renderer/codex-ui.js");
+  const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
+  const context = {
+    console,
+    TextEncoder,
+    URL,
+    encodeURIComponent,
+    setInterval,
+    clearInterval,
+  };
+  const result = await vm.runInNewContext(
+    `${executable}
+(async () => {
+  const base = {
+    connection: { mode: "cliproxy-oauth", route: "cliproxyapi-codex-oauth", provider: "codex", model: "gpt-5.6-terra", reasoningEffort: "high", fastMode: false },
+    account: { signedIn: true, provider: "codex", name: "Codex User" },
+    providers: [
+      { id: "codex", signedIn: true, credentialRevision: 1 },
+      { id: "claude", signedIn: false, credentialRevision: null },
+    ],
+    officialComputer: { mode: "private", state: "signed-in", connected: true },
+    preferences: {
+      catalog: { models: [{ id: "gpt-5.6-terra", label: "5.6 Terra" }], reasoningEfforts: ["low", "high"], fastMode: { supported: true } },
+      defaults: { model: "gpt-5.6-terra", reasoningEffort: "high", fastMode: false },
+      effective: { model: "gpt-5.6-terra", reasoningEffort: "high", fastMode: false },
+      override: null,
+    },
+  };
+  const connected = {
+    ...base,
+    providers: base.providers.map((provider) => provider.id === "claude" ? { ...provider, signedIn: true, credentialRevision: 2 } : provider),
+  };
+  const claude = {
+    ...connected,
+    connection: { mode: "cliproxy-oauth", route: "cliproxyapi-claude-oauth", provider: "claude", model: "claude-sonnet-5", reasoningEffort: "medium", fastMode: false },
+    account: { signedIn: true, provider: "claude", name: "Claude User" },
+    preferences: {
+      catalog: { models: [{ id: "claude-sonnet-5", label: "Claude Sonnet 5" }], reasoningEfforts: ["none", "medium", "max"], fastMode: { supported: false } },
+      defaults: { model: "claude-sonnet-5", reasoningEffort: "medium", fastMode: false },
+      effective: { model: "claude-sonnet-5", reasoningEffort: "medium", fastMode: false },
+      override: null,
+    },
+  };
+  const statuses = [base, connected];
+  const actions = [];
+  request = async (pathname, body) => {
+    if (pathname === "/api/codex/status") return statuses.shift();
+    actions.push(body);
+    if (body.action === "use-provider") return { status: claude };
+    if (body.action === "cancel-provider-login") return { ok: true };
+    throw new Error("unexpected request");
+  };
+  officialComputerState = () => ({ mode: "private", state: "signed-in", connected: true });
+  completeOfficialEnableAfterCursorLogin = async (status) => status;
+  syncOfficialConnectionPolling = () => {};
+  applyUi = () => {};
+  pendingOAuthDevice = {
+    provider: "claude",
+    providerLabel: "Anthropic Claude",
+    previousCredentialRevision: null,
+    deadlineAt: Date.now() + 60_000,
+  };
+  await loadStatus();
+  const first = { provider: lastStatus.connection.provider, pending: pendingOAuthDevice.provider, actions: actions.length };
+  await loadStatus();
+  const second = { provider: lastStatus.connection.provider, pending: pendingOAuthDevice, actions: [...actions], models: inferenceState(lastStatus).models.map((model) => model.id), efforts: inferenceState(lastStatus).reasoningEfforts };
+  pendingOAuthDevice = {
+    provider: "claude",
+    providerLabel: "Anthropic Claude",
+    previousCredentialRevision: null,
+    deadlineAt: Date.now() - 1,
+  };
+  await completePendingProviderLogin(lastStatus);
+  return { first, second, timeoutPending: pendingOAuthDevice, notice: providerConnectionNotice };
+})()`,
+    Object.assign(context, {
+      document: {
+        querySelector() {
+          return null;
+        },
+        querySelectorAll() {
+          return [];
+        },
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    { ...result.first },
+    {
+      provider: "codex",
+      pending: "claude",
+      actions: 0,
+    },
+  );
+  assert.equal(result.second.provider, "claude");
+  assert.equal(result.second.pending, null);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.second.actions)), [
+    { action: "use-provider", provider: "claude" },
+  ]);
+  assert.deepEqual([...result.second.models], ["claude-sonnet-5"]);
+  assert.deepEqual([...result.second.efforts], ["none", "medium", "max"]);
+  assert.equal(result.timeoutPending, null);
+  assert.equal(result.notice.tone, "info");
+  assert.match(result.notice.message, /timed out/i);
+});
+
 test("settings mutations preserve omitted verified status without inventing provider state", async () => {
   const ui = read("src/renderer/codex-ui.js");
   const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
@@ -44,7 +512,7 @@ test("settings mutations preserve omitted verified status without inventing prov
     `${executable}
 globalThis.__statusMergeRegression = (async () => {
   const previous = {
-    product: "Codex Bot",
+    product: "Open Bot",
     connection: {
       mode: "codex-oauth",
       route: "cliproxyapi-codex-oauth",
@@ -181,7 +649,7 @@ test("each employee composer gets an accessible per-chat picker left of the stoc
   assert.match(ui, /function boltIcon/);
 });
 
-test("per-chat picker keeps focus valid and implements the ARIA radio keyboard pattern", () => {
+test("per-chat picker keeps focus valid with model radios and a native reasoning slider", () => {
   const ui = read("src/renderer/codex-ui.js");
   const executable = ui.slice(0, ui.indexOf("document.addEventListener("));
   assert.ok(
@@ -323,12 +791,12 @@ globalThis.__pickerAccessibility = (() => {
   );
   assert.match(
     result.html,
-    /role="radio" aria-checked="true" tabindex="0" data-codex-pick-reasoning="high"/,
+    /type="range" min="0" max="2" step="1" value="2"[^>]+aria-valuetext="High"[^>]+data-reasoning-values="low\|medium\|high"[^>]+data-codex-pick-reasoning/,
   );
   assert.equal(
     (result.html.match(/tabindex="0"/g) || []).length,
-    2,
-    "each radio group exposes exactly one tab stop",
+    1,
+    "the model radio group exposes one tab stop while the native range remains keyboard focusable",
   );
   assert.deepEqual(
     [...result.focused],

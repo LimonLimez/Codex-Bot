@@ -7,7 +7,7 @@ $ErrorActionPreference = 'Stop'
 $installRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $toolsRoot = Join-Path $installRoot 'tools'
 $appRoot = Join-Path $installRoot 'app'
-$stateRoot = Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge'
+$stateRoot = Join-Path $env:LOCALAPPDATA 'Open Bot'
 $runtimePath = Join-Path $stateRoot 'runtime.json'
 $launcherLogRoot = Join-Path $stateRoot 'logs'
 $launcherLog = Join-Path $launcherLogRoot 'launcher.log'
@@ -60,7 +60,7 @@ function Get-ValidatedToken($Value, [string]$Name) {
 
 function Read-ValidatedRuntime([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) {
-        throw "Codex Bot is not configured. Re-run the installer. Missing: $Path"
+        throw "Open Bot is not configured. Re-run the installer. Missing: $Path"
     }
     try {
         $candidate = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
@@ -99,7 +99,7 @@ function Read-ValidatedRuntime([string]$Path) {
 
 $runtime = Read-ValidatedRuntime $runtimePath
 
-$portable = Join-Path $appRoot 'Codex Bot.exe'
+$portable = Join-Path $appRoot 'Open Bot.exe'
 $proxyExe = Join-Path $toolsRoot 'cliproxyapi\cli-proxy-api.exe'
 $proxyConfig = Join-Path $stateRoot 'cliproxy\config.yaml'
 $proxyAuth = Join-Path $stateRoot 'cliproxy\auth'
@@ -110,7 +110,7 @@ $desktopData = Join-Path $stateRoot 'desktop-user-data'
 $browserData = Join-Path $stateRoot 'browser-seats'
 
 foreach ($required in @($portable, $proxyExe, $proxyConfig)) {
-    if (-not (Test-Path -LiteralPath $required)) { throw "Required Codex Bot file is missing: $required" }
+    if (-not (Test-Path -LiteralPath $required)) { throw "Required Open Bot file is missing: $required" }
 }
 foreach ($directory in @($stateRoot, $hostData, $logRoot, $desktopData, $browserData)) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
@@ -321,9 +321,9 @@ if (-not (Test-Path -LiteralPath $hiddenRunner -PathType Leaf)) {
 }
 
 try {
-    $watchdogTask = Get-ScheduledTask -TaskName 'Codex Bot Bridge' -ErrorAction Stop
+    $watchdogTask = Get-ScheduledTask -TaskName 'Open Bot' -ErrorAction Stop
     if ([string]$watchdogTask.State -ne 'Running') {
-        Start-ScheduledTask -TaskName 'Codex Bot Bridge' -ErrorAction Stop
+        Start-ScheduledTask -TaskName 'Open Bot' -ErrorAction Stop
     }
     Write-SafeLauncherLog 'Desktop started; supervision was handed to the registered watchdog task.'
 } catch {

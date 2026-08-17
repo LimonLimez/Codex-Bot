@@ -1,11 +1,11 @@
 $ErrorActionPreference = 'Stop'
 $createdNew = $false
-$mutex = New-Object System.Threading.Mutex($true, 'Local\CodexBotBridgeWatchdogV1', [ref]$createdNew)
+$mutex = New-Object System.Threading.Mutex($true, 'Local\OpenBotWatchdogV1', [ref]$createdNew)
 if (-not $createdNew) { $mutex.Dispose(); exit 0 }
 
 $installRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $toolsRoot = Join-Path $installRoot 'tools'
-$stateRoot = Join-Path $env:LOCALAPPDATA 'Codex Bot Bridge'
+$stateRoot = Join-Path $env:LOCALAPPDATA 'Open Bot'
 $runtimePath = Join-Path $stateRoot 'runtime.json'
 $logRoot = Join-Path $stateRoot 'logs'
 $serviceIdentityHelper = Join-Path $PSScriptRoot 'Local-Service-Identity.ps1'
@@ -88,7 +88,7 @@ try {
     exit 1
 }
 
-$portable = Join-Path $installRoot 'app\Codex Bot.exe'
+$portable = Join-Path $installRoot 'app\Open Bot.exe'
 $hostMain = Join-Path $installRoot 'app\resources\app.asar\dist\host\host-main.cjs'
 $proxyExe = Join-Path $toolsRoot 'cliproxyapi\cli-proxy-api.exe'
 $proxyConfig = Join-Path $stateRoot 'cliproxy\config.yaml'

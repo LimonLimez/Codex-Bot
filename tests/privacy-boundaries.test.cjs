@@ -98,6 +98,51 @@ test("browser bridge returns and logs redacted tool errors", async () => {
   }
 });
 
+test("browser Computer results include bounded readable page evidence with the screenshot", async () => {
+  const original = seatBridge.privateManager.executeSeatActions;
+  seatBridge.privateManager.executeSeatActions = async () => ({
+    screenshotBase64:
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl7sAAAAASUVORK5CYII=",
+    cursorPosition: { x: 0, y: 0 },
+    url: "https://forecast.weather.gov/MapClick.php",
+    title: "National Weather Service",
+    pageState: "loaded",
+    bodyPreview:
+      "Current conditions at Phoenix Sky Harbor International Airport Partly Cloudy 106°F Humidity 18%\u0000 " +
+      "x".repeat(2500),
+    profileId: "0123456789abcdef",
+    activeSeatCount: 1,
+  });
+
+  class Value {
+    constructor(value) {
+      Object.assign(this, value);
+    }
+  }
+
+  try {
+    const executor = seatBridge.createExecutor({
+      seatKey: "page-evidence-seat",
+      ComputerUseResult: Value,
+      ComputerUseSuccess: Value,
+      ComputerUseError: Value,
+      Coordinate: Value,
+    });
+    const result = await executor.execute(null, {
+      actions: [{ kind: "screenshot" }],
+      toolCallId: "page-evidence-call",
+    });
+    const value = result.result.value;
+    assert.equal(value.screenshot.length > 0, true);
+    assert.match(value.log, /UNTRUSTED PAGE TEXT/);
+    assert.match(value.log, /Partly Cloudy 106°F Humidity 18%/);
+    assert.doesNotMatch(value.log, /\u0000/);
+    assert.equal(value.log.length < 2400, true);
+  } finally {
+    seatBridge.privateManager.executeSeatActions = original;
+  }
+});
+
 test("seat-control JSON parsing accepts normal bodies and drains oversized bodies without retention", async () => {
   const valid = new PassThrough();
   const validResult = seatBridge.readJson(valid);

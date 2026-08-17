@@ -85,6 +85,7 @@ test("legacy preferences migrate, persisted defaults beat bootstrap environment,
 
   assert.deepEqual(connection.getPreferences(), {
     agentId: null,
+    provider: "codex",
     defaults: {
       model: "gpt-5.6-luna",
       reasoningEffort: "xhigh",
@@ -119,8 +120,10 @@ test("legacy preferences migrate, persisted defaults beat bootstrap environment,
   // next process start. Stored choices must remain authoritative.
   connection = loadConnection();
   assert.deepEqual(connection.getConnection(), {
-    mode: "codex-oauth",
+    mode: "cliproxy-oauth",
     route: "cliproxyapi-codex-oauth",
+    provider: "codex",
+    providerLabel: "OpenAI Codex",
     baseUrl: "http://127.0.0.1:8317/v1",
     apiKey: `test-${"proxy-key"}-that-must-never-be-public`,
     model: "gpt-5.6-luna",
@@ -144,6 +147,7 @@ test("agent overrides are partial, inherit updated defaults, and can be cleared"
   });
   assert.deepEqual(connection.getPreferences("agent-123"), {
     agentId: "agent-123",
+    provider: "codex",
     defaults: {
       model: "gpt-5.6-terra",
       reasoningEffort: "medium",
@@ -167,8 +171,10 @@ test("agent overrides are partial, inherit updated defaults, and can be cleared"
   });
   connection = loadConnection();
   assert.deepEqual(connection.getConnection("agent-123"), {
-    mode: "codex-oauth",
+    mode: "cliproxy-oauth",
     route: "cliproxyapi-codex-oauth",
+    provider: "codex",
+    providerLabel: "OpenAI Codex",
     baseUrl: "http://127.0.0.1:8317/v1",
     apiKey: `test-${"proxy-key"}-that-must-never-be-public`,
     model: "gpt-5.6-sol",
@@ -179,6 +185,7 @@ test("agent overrides are partial, inherit updated defaults, and can be cleared"
   connection.clearAgentPreferences("agent-123");
   assert.deepEqual(connection.getPreferences("agent-123"), {
     agentId: "agent-123",
+    provider: "codex",
     defaults: {
       model: "gpt-5.6-terra",
       reasoningEffort: "xhigh",
@@ -268,7 +275,7 @@ async function unusedLoopbackPort() {
 test("authenticated Codex settings HTTP API updates defaults and per-agent inheritance", async (t) => {
   const token = "model-preferences-test-token-123456789";
   const port = await unusedLoopbackPort();
-  isolatedEnvironment(t, {
+  const stateRoot = isolatedEnvironment(t, {
     GROK_BOT_BROWSER_VIEW_PORT: String(port),
     GROK_BOT_BROWSER_VIEW_TOKEN: token,
   });
@@ -355,8 +362,10 @@ test("authenticated Codex settings HTTP API updates defaults and per-agent inher
     fastMode: true,
   });
   assert.deepEqual(payload.connection, {
-    mode: "codex-oauth",
+    mode: "cliproxy-oauth",
     route: "cliproxyapi-codex-oauth",
+    provider: "codex",
+    providerLabel: "OpenAI Codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "max",
     fastMode: true,
@@ -372,6 +381,68 @@ test("authenticated Codex settings HTTP API updates defaults and per-agent inher
   assert.deepEqual(
     payload.status.preferences.effective,
     payload.status.preferences.defaults,
+  );
+
+  response = await request("/api/codex/auth", {
+    body: { action: "use-provider", provider: "claude" },
+  });
+  assert.equal(response.status, 400);
+  payload = await response.json();
+  assert.match(payload.error, /not connected/i);
+
+  fs.writeFileSync(
+    path.join(stateRoot, "auth", "claude-connected.json"),
+    JSON.stringify({ type: "claude", organization_name: "Claude Test" }),
+  );
+  response = await request("/api/codex/auth", {
+    body: { action: "use-provider", provider: "claude" },
+  });
+  assert.equal(response.status, 200);
+  payload = await response.json();
+  assert.equal(payload.status.connection.provider, "claude");
+  assert.equal(payload.status.connection.route, "cliproxyapi-claude-oauth");
+  assert.equal(payload.status.preferences.defaults.model, "claude-sonnet-5");
+  assert.equal(payload.status.preferences.catalog.fastMode.supported, false);
+  assert.deepEqual(
+    payload.status.providers.map((provider) => provider.id),
+    ["codex", "claude", "antigravity", "kimi", "xai", "vertex", "local"],
+  );
+
+  response = await request("/api/codex/settings", {
+    body: {
+      scope: "default",
+      model: "claude-opus-5",
+      reasoningEffort: "xhigh",
+    },
+  });
+  assert.equal(response.status, 200);
+  payload = await response.json();
+  assert.equal(payload.status.preferences.defaults.model, "claude-opus-5");
+  assert.equal(payload.status.preferences.defaults.reasoningEffort, "xhigh");
+
+  fs.writeFileSync(
+    path.join(stateRoot, "auth", "codex-connected.json"),
+    JSON.stringify({ type: "codex", name: "Codex Test" }),
+  );
+  response = await request("/api/codex/auth", {
+    body: { action: "use-provider", provider: "codex" },
+  });
+  assert.equal(response.status, 200);
+  payload = await response.json();
+  assert.equal(payload.status.preferences.defaults.model, "gpt-5.6-luna");
+  assert.equal(payload.status.preferences.defaults.reasoningEffort, "low");
+
+  assert.equal(
+    (
+      await request("/api/codex/auth", {
+        body: {
+          action: "use-provider",
+          provider: "claude",
+          unexpected: true,
+        },
+      })
+    ).status,
+    400,
   );
 
   assert.equal(

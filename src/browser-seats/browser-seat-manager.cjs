@@ -29,11 +29,7 @@ const MAX_ACTIVE = Math.max(
 );
 const DATA_ROOT =
   process.env.GROK_BOT_BROWSER_SEAT_DATA ||
-  path.join(
-    process.env.LOCALAPPDATA || __dirname,
-    "Codex Bot Bridge",
-    "browser-seats",
-  );
+  path.join(process.env.LOCALAPPDATA || __dirname, "Open Bot", "browser-seats");
 const CHROME_CANDIDATES = [
   process.env.GROK_BOT_BROWSER_EXECUTABLE,
   "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -49,6 +45,8 @@ const CHROME_CANDIDATES = [
   "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
 ].filter(Boolean);
 const LOG_PATH = path.join(DATA_ROOT, "browser-seats.log");
+const PERMISSION_PATH = path.join(DATA_ROOT, "permissions.json");
+const PRIVATE_PERMISSION_PROVIDER = "private-browser";
 const DEFAULT_START_URL =
   process.env.GROK_BOT_BROWSER_START_URL || "https://www.google.com/";
 const SESSION_STATE_VERSION = 1;
@@ -106,6 +104,66 @@ function log(event, detail = {}) {
       `${JSON.stringify({ time: new Date().toISOString(), event, ...redactLogDetails(detail) })}\n`,
     );
   } catch {}
+}
+
+function computerPermissions() {
+  try {
+    const value = JSON.parse(fs.readFileSync(PERMISSION_PATH, "utf8"));
+    return Object.freeze({
+      provider: PRIVATE_PERMISSION_PROVIDER,
+      alwaysAllowComputerActions:
+        value?.version === 1 &&
+        value?.provider === PRIVATE_PERMISSION_PROVIDER &&
+        value?.alwaysAllowComputerActions === true,
+    });
+  } catch {
+    return Object.freeze({
+      provider: PRIVATE_PERMISSION_PROVIDER,
+      alwaysAllowComputerActions: false,
+    });
+  }
+}
+
+function setComputerPermissions(
+  alwaysAllowComputerActions,
+  acknowledged,
+  provider,
+) {
+  if (
+    typeof alwaysAllowComputerActions !== "boolean" ||
+    typeof acknowledged !== "boolean" ||
+    provider !== PRIVATE_PERMISSION_PROVIDER
+  )
+    throw new TypeError("The private browser permission request is invalid.");
+  if (alwaysAllowComputerActions && !acknowledged)
+    throw new Error(
+      "Always allow requires acknowledgement of the private browser warning.",
+    );
+  if (!alwaysAllowComputerActions) {
+    fs.rmSync(PERMISSION_PATH, { force: true });
+    return computerPermissions();
+  }
+  fs.mkdirSync(path.dirname(PERMISSION_PATH), { recursive: true });
+  const temporary = `${PERMISSION_PATH}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(
+      temporary,
+      `${JSON.stringify(
+        {
+          version: 1,
+          provider: PRIVATE_PERMISSION_PROVIDER,
+          alwaysAllowComputerActions: true,
+        },
+        null,
+        2,
+      )}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    fs.renameSync(temporary, PERMISSION_PATH);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+  return computerPermissions();
 }
 
 function hostnameAddress(value) {
@@ -615,7 +673,7 @@ async function launchSeat(key) {
   fs.mkdirSync(profileDir, { recursive: true });
   fs.mkdirSync(downloadsDir, { recursive: true });
   // Chrome may reopen crash-recovery tabs before Playwright can attach routes or
-  // init scripts. Codex Bot's sanitized session snapshot is canonical, so make
+  // init scripts. Open Bot's sanitized session snapshot is canonical, so make
   // Chrome itself start clean while retaining cookies and all other profile data.
   preparePersistentProfileForSafeLaunch(profileDir);
   const publicWebProxy = createPublicWebProxy();
@@ -1140,12 +1198,12 @@ async function classifyPage(page) {
     return {
       state: "challenge",
       title,
-      bodyPreview: bodyPreview.slice(0, 500),
+      bodyPreview: bodyPreview.slice(0, 2000),
     };
   }
   if (bodyPreview.trim().length === 0)
     return { state: "empty", title, bodyPreview: "" };
-  return { state: "loaded", title, bodyPreview: bodyPreview.slice(0, 500) };
+  return { state: "loaded", title, bodyPreview: bodyPreview.slice(0, 2000) };
 }
 
 async function executeSeatActions(key, actions, options = {}) {
@@ -1166,6 +1224,14 @@ async function executeSeatActions(key, actions, options = {}) {
         if (actor === "user") {
           browserControls.authorizeUser(seat.key, controlId);
           page = await currentPage(seat);
+          await executeAction(seat, page, action);
+          continue;
+        }
+
+        if (computerPermissions().alwaysAllowComputerActions) {
+          browserControls.assertAgentAllowed(seat.key);
+          page = await currentPage(seat);
+          browserControls.assertAgentAllowed(seat.key);
           await executeAction(seat, page, action);
           continue;
         }
@@ -1304,6 +1370,12 @@ function pendingApprovalForSeat(key) {
   return actionApprovals.getPendingStatus(String(key || ""));
 }
 
+function pendingApprovals() {
+  return [...activeSeats.keys()]
+    .map((seatKey) => pendingApprovalForSeat(seatKey))
+    .filter(Boolean);
+}
+
 function decidePendingApproval(key, decision, binding) {
   const seatKey = String(key || "");
   if (seatKey !== String(binding?.seatId || ""))
@@ -1423,7 +1495,10 @@ module.exports = {
   approvalOriginForPage,
   approvalContextForActions,
   pendingApprovalForSeat,
+  pendingApprovals,
   decidePendingApproval,
+  computerPermissions,
+  setComputerPermissions,
   acquireUserControl,
   heartbeatUserControl,
   releaseUserControl,

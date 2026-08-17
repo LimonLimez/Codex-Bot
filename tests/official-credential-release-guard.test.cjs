@@ -94,7 +94,7 @@ test("normal release audit allows only an empty artifacts directory or the exact
     const version = JSON.parse(
       fs.readFileSync(path.join(fixture, "package.json"), "utf8"),
     ).version;
-    const installerName = `CodexBot-Setup-${version}.exe`;
+    const installerName = `OpenBot-Setup-${version}.exe`;
     const artifacts = path.join(fixture, "artifacts");
     const installer = path.join(artifacts, installerName);
     const sidecar = `${installer}.sha256`;
@@ -131,7 +131,7 @@ test("normal release audit allows only an empty artifacts directory or the exact
       recursive: true,
       force: true,
     });
-    const developmentName = `CodexBot-Setup-${version}-DEVELOPMENT-fixture.exe`;
+    const developmentName = `OpenBot-Setup-${version}-DEVELOPMENT-fixture.exe`;
     const developmentInstaller = path.join(artifacts, developmentName);
     const developmentBytes = Buffer.from(
       "harmless development installer fixture\n",

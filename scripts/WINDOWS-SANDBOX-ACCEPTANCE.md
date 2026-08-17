@@ -1,6 +1,6 @@
 # Windows Sandbox acceptance harness
 
-This harness validates the **0.1.4 DEVELOPMENT TEST BUILD** in a disposable,
+This harness validates the **0.1.5 DEVELOPMENT TEST BUILD** in a disposable,
 fresh Windows environment. It is an acceptance aid, not a release-signing or
 publishing step. It never enables Windows Sandbox, changes host policy, bypasses
 SmartScreen, clicks a permission prompt, or automates authentication.
@@ -24,7 +24,7 @@ The emitted elements follow Microsoft's current
   is not accepted as the trust anchor. It also requires the current Git
   revision in the filename and exact embedded DEVELOPMENT/DO NOT PUBLISH PE
   metadata. It separately requires the independently reviewed SHA-256 of the
-  deterministic branded `Codex Bot.exe` entry point.
+  deterministic branded `Open Bot.exe` entry point.
 - The sandbox runner refuses to execute the installer if it finds prior Codex
   Bot, Grok Bot, or Cursor install/state indicators in user or machine paths,
   uninstall/App Paths registry keys, processes, or scheduled tasks.
@@ -52,7 +52,7 @@ from the sidecar during this command:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\New-WindowsSandboxAcceptanceHarness.ps1 `
-  -InstallerPath 'C:\path\to\CodexBot-Setup-0.1.4-DEVELOPMENT-<build-id>.exe' `
+  -InstallerPath 'C:\path\to\OpenBot-Setup-0.1.5-DEVELOPMENT-<build-id>.exe' `
   -ExpectedSha256 '<independently-reviewed-64-character-sha256>' `
   -ExpectedBrandedExecutableSha256 '<independently-reviewed-branded-exe-sha256>' `
   -OutputRoot "$env:TEMP\CodexBot-Sandbox-Acceptance\review-001" `
@@ -79,7 +79,7 @@ the generator to launch exactly one scenario:
 ```powershell
 # Regenerate into a new OutputRoot, replacing Interactive with Silent as needed.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\New-WindowsSandboxAcceptanceHarness.ps1 `
-  -InstallerPath 'C:\path\to\CodexBot-Setup-0.1.4-DEVELOPMENT-<build-id>.exe' `
+  -InstallerPath 'C:\path\to\OpenBot-Setup-0.1.5-DEVELOPMENT-<build-id>.exe' `
   -ExpectedSha256 '<independently-reviewed-64-character-sha256>' `
   -ExpectedBrandedExecutableSha256 '<independently-reviewed-branded-exe-sha256>' `
   -OutputRoot "$env:TEMP\CodexBot-Sandbox-Acceptance\review-002" `
@@ -97,7 +97,7 @@ normal installer. A human must:
 
 1. choose **Download and install the pinned official Grok Bot 0.18.0 user app**;
 2. review and handle any SmartScreen or permission decision;
-3. finish Setup and leave **Launch Codex Bot** selected;
+3. finish Setup and leave **Launch Open Bot** selected;
 4. complete Codex sign-in in the app;
 5. in Settings, start **Sign in to Cursor and enable vendor computer**, then
    complete the Cursor web sign-in; and
@@ -130,9 +130,9 @@ The runner uses:
 
 It does not launch or authenticate the app. Success requires the separately
 installed vendor tree to pass the exact pinned manifest/signature verifier. The
-Codex Bot copy must contain every pinned vendor file, retain every pinned hash
+Open Bot copy must contain every pinned vendor file, retain every pinned hash
 except the intentionally patched `resources/app.asar`, and add exactly the one
-branded `Codex Bot.exe`.
+branded `Open Bot.exe`.
 
 ## Evidence review
 

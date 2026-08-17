@@ -9,4 +9,4 @@ $action = New-ScheduledTaskAction -Execute $windowsScriptHost -Argument "//B //N
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName 'Codex Bot Bridge' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Keeps the local Codex Bot worker and scheduled routines available while this Windows session is running.' -Force | Out-Null
+Register-ScheduledTask -TaskName 'Open Bot' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Keeps the local Open Bot worker and scheduled routines available while this Windows session is running.' -Force | Out-Null

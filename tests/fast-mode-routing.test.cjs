@@ -223,6 +223,41 @@ test(
 );
 
 test(
+  "local OpenAI-compatible routing omits authorization and unsupported reasoning fields",
+  { concurrency: false },
+  async () => {
+    const result = await exercise(
+      {
+        mode: "local",
+        route: "local-openai-compatible",
+        provider: "local",
+        baseUrl: "http://127.0.0.1:11434/v1",
+        apiKey: null,
+        model: "qwen3:8b",
+        reasoningEffort: "none",
+        reasoningSupported: false,
+        fastMode: false,
+      },
+      [{ choices: [{ delta: { content: "Local response" } }] }],
+    );
+
+    assert.equal(
+      result.calls[0].url,
+      "http://127.0.0.1:11434/v1/chat/completions",
+    );
+    assert.equal(result.calls[0].payload.model, "qwen3:8b");
+    assert.equal(
+      Object.hasOwn(result.calls[0].payload, "reasoning_effort"),
+      false,
+    );
+    assert.equal(
+      Object.hasOwn(result.calls[0].options.headers, "Authorization"),
+      false,
+    );
+  },
+);
+
+test(
   "standard mode leaves the existing Chat Completions request unchanged",
   { concurrency: false },
   async () => {

@@ -92,14 +92,14 @@ test("the OAuth handoff returns a canonical OpenAI link and rejects vendor links
     );
     await assert.rejects(
       resultPromise,
-      /Only the official OpenAI device page is allowed/,
+      /Only the reviewed official provider page is allowed/,
     );
     assert.equal(child.killed, true);
     globalThis[Symbol.for("codexbot.connection.oauth")] = null;
   });
 });
 
-test("the first-run renderer opens only the canonical device link in the external-browser path", () => {
+test("the first-run renderer opens only reviewed provider links in the external-browser path", () => {
   const ui = fs.readFileSync(
     path.join(root, "src", "renderer", "codex-ui.js"),
     "utf8",
@@ -108,8 +108,10 @@ test("the first-run renderer opens only the canonical device link in the externa
     ui,
     /const CODEX_DEVICE_URL = "https:\/\/auth\.openai\.com\/codex\/device";/,
   );
-  assert.match(ui, /device\?\.url !== CODEX_DEVICE_URL/);
-  assert.match(ui, /link\.href = CODEX_DEVICE_URL;/);
+  assert.match(ui, /const PROVIDER_LOGIN_TARGETS = Object\.freeze/);
+  assert.match(ui, /function validateProviderLoginUrl/);
+  assert.match(ui, /const trustedUrl = validateProviderLoginUrl/);
+  assert.match(ui, /link\.href = trustedUrl;/);
   assert.match(ui, /link\.target = "_blank";/);
   assert.match(ui, /link\.rel = "noreferrer";/);
 });

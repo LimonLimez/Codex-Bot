@@ -1790,7 +1790,7 @@ function createOfficialComputerCore(options = {}) {
     process.env.CODEX_OFFICIAL_COMPUTER_STATE ||
     path.join(
       process.env.LOCALAPPDATA || __dirname,
-      "Codex Bot Bridge",
+      "Open Bot",
       "official-computer",
     );
   const configPath = path.join(stateDir, "credentials.json");
@@ -3051,6 +3051,12 @@ function createOfficialComputerCore(options = {}) {
     return Object.freeze({ ...pending, frame: preview.frame });
   }
 
+  function pendingApprovals() {
+    return [...pendingApprovalFrames.keys()]
+      .map((seatKey) => pendingApprovalForSeat(seatKey))
+      .filter(Boolean);
+  }
+
   function decidePendingApproval(seatKey, decision, binding) {
     const seatId = String(seatKey || "");
     if (seatId !== String(binding?.seatId || ""))
@@ -3154,6 +3160,7 @@ function createOfficialComputerCore(options = {}) {
     captureSeat,
     executeSeatActions,
     pendingApprovalForSeat,
+    pendingApprovals,
     decidePendingApproval,
     acquireUserControl,
     heartbeatUserControl,
@@ -3186,6 +3193,7 @@ const IPC_METHODS = Object.freeze({
       deadlineMs: args?.deadlineMs,
     }),
   "approval.get": (core, args) => core.pendingApprovalForSeat(args?.seatKey),
+  "approval.list": (core) => core.pendingApprovals(),
   "approval.decide": (core, args) =>
     core.decidePendingApproval(args?.seatKey, args?.decision, args?.binding),
   "control.get": (core, args) => core.controlStatusForSeat(args?.seatKey),

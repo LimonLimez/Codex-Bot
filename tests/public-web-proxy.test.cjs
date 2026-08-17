@@ -528,7 +528,7 @@ test("proxy authentication is required before DNS resolution or connection", asy
   assert.match(response, /^HTTP\/1\.1 407 Proxy Authentication Required/);
   assert.match(
     response,
-    /Proxy-Authenticate: Basic realm="Codex Bot Public Web"/i,
+    /Proxy-Authenticate: Basic realm="Open Bot Public Web"/i,
   );
   const httpStatus = await new Promise((resolve, reject) => {
     const request = http.request(

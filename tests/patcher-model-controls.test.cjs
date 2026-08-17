@@ -12,12 +12,41 @@ const {
   replaceFunction,
   verifyBrowserSeatLifecycleSource,
   verifyHostComputerSeatRoutingSource,
+  verifyComputerResultEvidenceSource,
   verifyHostAgentIdentitySource,
   verifyLocalExecComputerIsolationSource,
   verifyRendererComposerIdentitySource,
   verifyRendererRuntimeBindingsSource,
   verifySettingsViewSource,
 } = require(path.join(root, "scripts", "patch-app.cjs"));
+
+function computerResultEvidenceFixture(includeEvidence = true) {
+  return `function describeOutcome(result, operation) {
+  const success2 = result.result.value;
+  const lines2 = ["Computer action ran on the box desktop."];
+  ${
+    includeEvidence
+      ? `if (success2.log != null && success2.log.length > 0) {
+    lines2.push(success2.log);
+  }`
+      : ""
+  }
+  return lines2.join("\\n");
+}
+function renderComputerResult(output, operation) { return output; }
+`;
+}
+
+test("Computer result summaries preserve readable page evidence beside screenshots", () => {
+  assert.doesNotThrow(() =>
+    verifyComputerResultEvidenceSource(computerResultEvidenceFixture(true)),
+  );
+  assert.throws(
+    () =>
+      verifyComputerResultEvidenceSource(computerResultEvidenceFixture(false)),
+    /text evidence reaches the model/i,
+  );
+});
 
 function browserSeatLifecycleFixture() {
   return `function createHostGatewayApi(deps) {
@@ -83,13 +112,15 @@ function createScreenshotArgs(toolCallId) {
 }
 function buildTurnTools(host, turn, props) {
   const tools = [];
-  tools.push(
-    createComputerTool(remoteBoxResourceAccessor, {
-      getPersistImage: () => host.persistImage,
-      seatKey: host.resolveBoxId(),
-      isUnicodeTypingEnabled: host.isUnicodeTypingEnabled,
-    }),
-  );
+  if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {
+    tools.push(
+      createComputerTool(remoteBoxResourceAccessor, {
+        getPersistImage: () => host.persistImage,
+        seatKey: host.resolveBoxId(),
+        isUnicodeTypingEnabled: host.isUnicodeTypingEnabled,
+      }),
+    );
+  }
   if (host.isBrowserUseSubagent) {
     tools.push(...createSandBrowserTools({ resourceAccessor: remoteBoxResourceAccessor }));
   }
@@ -105,6 +136,14 @@ function buildTurnTools(host, turn, props) {
   return tools;
 }
 function afterBuildTurnTools() {}
+function buildBoxDesktopPrompt(host) {
+  const directLocalComputerOffered = process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1" && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable();
+  return directLocalComputerOffered ? [
+    "Use Computer directly for browser and desktop work",
+    "A denied Shell call does not mean browser access is blocked",
+    "Show the real Computer approval card",
+  ].join("\n") : "fallback";
+}
 `;
 }
 
@@ -317,6 +356,15 @@ test("computer-seat verifier scopes Computer and Screenshot and fails closed", (
   assert.throws(
     () => verifyHostComputerSeatRoutingSource(sharedFallback),
     /fails closed before creating an employee-scoped executor/,
+  );
+
+  const subagentOnly = source.replace(
+    'if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {',
+    "if (host.isComputerUseSubagent && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {",
+  );
+  assert.throws(
+    () => verifyHostComputerSeatRoutingSource(subagentOnly),
+    /local private and same-user group turns receive the direct employee-scoped Computer tool/,
   );
 });
 

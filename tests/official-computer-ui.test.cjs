@@ -462,10 +462,7 @@ test("the stock-branding sweep preserves Cursor wording in Codex-owned UI", () =
 
   replaceVisibleBranding({ nodes: [stockNode, ownedNode] });
 
-  assert.equal(
-    stockNode.nodeValue,
-    "Sign in with Codex with your Codex account",
-  );
+  assert.equal(stockNode.nodeValue, "Connect an AI provider");
   assert.equal(
     ownedNode.nodeValue,
     "Sign in to Cursor with your Cursor account",
@@ -507,49 +504,17 @@ test("official vendor login links are accepted only at the exact trusted route",
     assert.throws(() => validateOfficialLoginUrl(value), /unsafe link/, value);
 });
 
-test("official sign-in opens only a validated noreferrer anchor", () => {
-  const opened = [];
-  const document = {
-    created: 0,
-    body: {
-      append(link) {
-        link.appended = true;
-      },
-    },
-    documentElement: {
-      append() {
-        throw new Error("body should be preferred");
-      },
-    },
-    createElement(tag) {
-      this.created += 1;
-      assert.equal(tag, "a");
-      return {
-        click() {
-          assert.equal(this.appended, true);
-          opened.push({ href: this.href, target: this.target, rel: this.rel });
-        },
-        remove() {
-          this.removed = true;
-        },
-      };
-    },
-  };
+test("official sign-in validates the bridge-opened Cursor URL without a popup", () => {
   const openOfficialLoginLink = Function(
-    "document",
     `"use strict"; ${validatorSource}; ${openerSource}; return openOfficialLoginLink;`,
-  )(document);
+  )();
   const safe = officialLoginUrl();
   assert.equal(openOfficialLoginLink(safe), safe);
-  assert.deepEqual(opened, [
-    { href: safe, target: "_blank", rel: "noopener noreferrer" },
-  ]);
-  assert.equal(document.created, 1);
   assert.throws(
     () => openOfficialLoginLink(safe.replace("cursor.com", "evil.example")),
     /unsafe link/,
   );
-  assert.equal(document.created, 1);
+  assert.doesNotMatch(openerSource, /createElement|\.click\s*\(/);
   assert.doesNotMatch(ui, /window\.open\s*\(/);
 });
 
@@ -897,7 +862,7 @@ test("live seats distinguish the shared vendor display without weakening takeove
   assert.match(liveSeat, /this employee's private browser/);
 });
 
-test("official approvals render only in chat while private approvals keep the live-view surface", async () => {
+test("all computer approvals render in chat instead of competing with the live-view surface", async () => {
   const flush = () => new Promise((resolve) => setImmediate(resolve));
   const pending = {
     requestId: "request-1",
@@ -948,13 +913,13 @@ test("official approvals render only in chat while private approvals keep the li
     privateSeat.requests.some(({ requestPath }) =>
       requestPath.startsWith("/api/approval?"),
     ),
-    true,
+    false,
   );
   assert.equal(
     virtualDescendants(privateTree).some(
       (node) => node.props?.["aria-label"] === "Browser action approval",
     ),
-    true,
+    false,
   );
 });
 
@@ -1449,241 +1414,7 @@ test("a first official frame failure keeps vendor identity and hides the private
   assert.ok(requests.includes("/api/frame?seatKey=employee-a"));
 });
 
-test("private live-view Allow once stays disabled until its exact approval frame is displayed", async () => {
-  const liveFrame =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Wl7sAAAAASUVORK5CYII=";
-  const approvalFrame =
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-  const frameBinding = {
-    generation: 11,
-    sequence: 4,
-    sha256: "a".repeat(64),
-  };
-  const refreshedFrameBinding = {
-    generation: 11,
-    sequence: 5,
-    sha256: "b".repeat(64),
-  };
-  let pending = {
-    requestId: "approval-request-1",
-    seatId: "employee-a",
-    origin: "https://official-cloud-computer.invalid",
-    actionDigest: "action-digest-1",
-    riskClass: "confirmation",
-    summary: "Click the current page",
-    presentation: { actions: [{ kind: "click" }] },
-    expiresAt: Date.now() + 30_000,
-    siteLeaseAvailable: false,
-    frame: {
-      ...frameBinding,
-      screenshotBase64: approvalFrame,
-      mimeType: "image/png",
-    },
-  };
-  const posted = [];
-  const request = async (requestPath, body) => {
-    if (requestPath.startsWith("/api/codex/status?"))
-      return { officialComputer: { mode: "private" } };
-    if (requestPath.startsWith("/api/frame?"))
-      return {
-        screenshotBase64: liveFrame,
-        provider: "private",
-        pageState: "loaded",
-        url: "https://example.test/",
-      };
-    if (requestPath.startsWith("/api/approval?") && body == null)
-      return { pending };
-    if (requestPath === "/api/approval") {
-      posted.push(body);
-      pending = null;
-      return { ok: true };
-    }
-    throw new Error(`Unexpected request: ${requestPath}`);
-  };
-  const stateSlots = [];
-  const refSlots = [];
-  let stateIndex = 0;
-  let refIndex = 0;
-  let collectEffects = true;
-  const effects = [];
-  const T = {
-    useState(initial) {
-      const index = stateIndex++;
-      if (!(index in stateSlots)) stateSlots[index] = initial;
-      return [
-        stateSlots[index],
-        (next) => {
-          stateSlots[index] =
-            typeof next === "function" ? next(stateSlots[index]) : next;
-        },
-      ];
-    },
-    useRef(initial) {
-      const index = refIndex++;
-      if (!(index in refSlots)) refSlots[index] = { current: initial };
-      return refSlots[index];
-    },
-    useCallback(callback) {
-      return callback;
-    },
-    useEffect(callback) {
-      if (collectEffects) effects.push(callback);
-    },
-  };
-  const h = {
-    jsx(type, props, key) {
-      return { type, props, key };
-    },
-    jsxs(type, props, key) {
-      return { type, props, key };
-    },
-  };
-  const GBLiveSeat = Function(
-    "T",
-    "h",
-    "globalThis",
-    "document",
-    "setInterval",
-    "clearInterval",
-    "setTimeout",
-    `${liveSeat}; return GBLiveSeat;`,
-  )(
-    T,
-    h,
-    {
-      crypto: { randomUUID: () => "control-id" },
-      __CODEX_BOT_VIEW_REQUEST__: request,
-    },
-    { activeElement: null },
-    () => 1,
-    () => {},
-    () => 1,
-  );
-  const render = () => {
-    stateIndex = 0;
-    refIndex = 0;
-    return GBLiveSeat({ agentId: "employee-a", subjectLabel: "Alex" });
-  };
-  const descendants = (node) => {
-    if (node == null || typeof node !== "object") return [];
-    const children = Array.isArray(node.props?.children)
-      ? node.props.children
-      : [node.props?.children];
-    return [node, ...children.flatMap(descendants)];
-  };
-  const flush = () => new Promise((resolve) => setImmediate(resolve));
-  const imageEvent = (node) => ({
-    currentTarget: {
-      getAttribute: (name) => (name === "src" ? node.props.src : null),
-      src: node.props.src,
-    },
-  });
-
-  render();
-  refSlots[5].current = "private";
-  collectEffects = false;
-  for (const effect of effects) effect();
-  await flush();
-  await flush();
-
-  let nodes = descendants(render());
-  const mainImage = nodes.find(
-    (node) => node.type === "img" && /live browser/.test(node.props?.alt),
-  );
-  const boundImageA = nodes.find(
-    (node) => node.props?.["aria-label"] === "Screen approved action will use",
-  );
-  let allow = nodes.find(
-    (node) => node.type === "button" && node.props?.children === "Allow once",
-  );
-  assert.equal(mainImage.props.src, `data:image/png;base64,${liveFrame}`);
-  assert.equal(boundImageA.props.src, `data:image/png;base64,${approvalFrame}`);
-  assert.equal(allow.props.disabled, true);
-  assert.equal(posted.length, 0);
-
-  pending = {
-    ...pending,
-    requestId: "approval-request-2",
-    actionDigest: "action-digest-2",
-    frame: {
-      ...refreshedFrameBinding,
-      screenshotBase64: liveFrame,
-      mimeType: "image/png",
-    },
-  };
-  stateSlots[3] = pending;
-  nodes = descendants(render());
-  const boundImageB = nodes.find(
-    (node) => node.props?.["aria-label"] === "Screen approved action will use",
-  );
-  allow = nodes.find(
-    (node) => node.type === "button" && node.props?.children === "Allow once",
-  );
-  assert.notEqual(boundImageA.key, boundImageB.key);
-  assert.equal(boundImageB.props.src, `data:image/png;base64,${liveFrame}`);
-  assert.equal(allow.props.disabled, true);
-
-  boundImageA.props.onLoad(imageEvent(boundImageA));
-  nodes = descendants(render());
-  allow = nodes.find(
-    (node) => node.type === "button" && node.props?.children === "Allow once",
-  );
-  assert.equal(allow.props.disabled, true);
-
-  boundImageB.props.onLoad(imageEvent(boundImageA));
-  nodes = descendants(render());
-  allow = nodes.find(
-    (node) => node.type === "button" && node.props?.children === "Allow once",
-  );
-  assert.equal(allow.props.disabled, true);
-
-  boundImageB.props.onLoad(imageEvent(boundImageB));
-  nodes = descendants(render());
-  allow = nodes.find(
-    (node) => node.type === "button" && node.props?.children === "Allow once",
-  );
-  assert.equal(allow.props.disabled, false);
-  await allow.props.onClick();
-  assert.deepEqual(posted, [
-    {
-      seatKey: "employee-a",
-      decision: "allow-once",
-      binding: {
-        requestId: "approval-request-2",
-        seatId: "employee-a",
-        origin: "https://official-cloud-computer.invalid",
-        actionDigest: "action-digest-2",
-        presentedFrame: refreshedFrameBinding,
-      },
-    },
-  ]);
-  assert.equal(JSON.stringify(posted).includes(approvalFrame), false);
-
-  await flush();
-  pending = {
-    requestId: "private-approval-1",
-    seatId: "employee-a",
-    origin: "https://example.test",
-    actionDigest: "private-action-digest",
-    summary: "Click the current page",
-    presentation: { actions: [{ kind: "click" }] },
-  };
-  stateSlots[1] = { provider: "private", pageState: "loaded" };
-  stateSlots[3] = pending;
-  nodes = descendants(render());
-  allow = nodes.find(
-    (node) => node.type === "button" && node.props?.children === "Allow once",
-  );
-  assert.equal(allow.props.disabled, false);
-  await allow.props.onClick();
-  assert.deepEqual(posted.at(-1), {
-    seatKey: "employee-a",
-    decision: "allow-once",
-    binding: {
-      requestId: "private-approval-1",
-      seatId: "employee-a",
-      origin: "https://example.test",
-      actionDigest: "private-action-digest",
-    },
-  });
+test("private live view leaves approval decisions to the chat-adjacent permission card", () => {
+  assert.equal(liveSeat.includes("/api/approval?seatKey="), false);
+  assert.match(liveSeat, /Computer approvals belong beside the conversation/);
 });

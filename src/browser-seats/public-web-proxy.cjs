@@ -12,7 +12,7 @@ const DEFAULT_MAX_CLIENT_CONNECTIONS = 128;
 const DEFAULT_MAX_PENDING_UPSTREAMS = 32;
 const DEFAULT_MAX_HEADER_BYTES = 64 * 1024;
 const DEFAULT_MAX_HEADER_COUNT = 128;
-const PROXY_AUTH_REALM = "Codex Bot Public Web";
+const PROXY_AUTH_REALM = "Open Bot Public Web";
 
 const BLOCKED_IPV4 = new net.BlockList();
 for (const [network, prefix] of [

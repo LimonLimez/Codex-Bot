@@ -1,13 +1,13 @@
 {
-  "name": "codex-bot-bridge",
-  "version": "0.1.4",
-  "description": "A local patch-and-bridge project that connects a user-owned Grok Bot 0.18.0 frontend to their own Codex account.",
+  "name": "open-bot",
+  "version": "0.1.5",
+  "description": "A local multi-model coworker app powered by the AI provider the user chooses.",
   "private": true,
   "license": "MIT",
-  "homepage": "https://github.com/LimonLimez/Codex-Bot",
+  "homepage": "https://github.com/LimonLimez/Open-Bot",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LimonLimez/Codex-Bot.git"
+    "url": "https://github.com/LimonLimez/Open-Bot.git"
   },
   "engines": {
     "node": ">=22"

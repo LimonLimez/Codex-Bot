@@ -45,6 +45,28 @@ const FORBIDDEN_NAMES = new Set([
   "web data",
   "local state",
 ]);
+const ALLOWED_BINARY_ASSETS = new Map([
+  [
+    "assets/provider-icons/openai-codex.png",
+    "56a56d0274328e2ebed32809049143eec4a49730452cd629ad848f52589df12f",
+  ],
+  [
+    "assets/provider-icons/anthropic-claude.png",
+    "7906e69847418235965b8c0475e6d932d3f02cf20425add726a72bf88f675836",
+  ],
+  [
+    "assets/provider-icons/moonshot-kimi.png",
+    "4cfac411aa9eb8040bcb038ceeb7639a6931284187a7b685fa82f41b0a40616e",
+  ],
+  [
+    "assets/provider-icons/xai.png",
+    "1c2979d123daf1a2a01bac015d6bf796c167cacc19b68345b372e8f3c9e5d23d",
+  ],
+  [
+    "assets/provider-icons/google-vertex.png",
+    "fd0e5aafdf5f4ca83f15e2e3c99275bbdabf6311b678f4bdd35a0b1f872dd4fd",
+  ],
+]);
 const FORBIDDEN_PATHS = [
   /(^|\/)browser-seats\/profiles(\/|$)/i,
   /(^|\/)chrome-profile(\/|$)/i,
@@ -175,7 +197,7 @@ function auditArtifactStaging(projectRoot) {
     ];
   }
 
-  const installerName = `CodexBot-Setup-${version}.exe`;
+  const installerName = `OpenBot-Setup-${version}.exe`;
   const sidecarName = `${installerName}.sha256`;
   const allowed = new Set([
     `artifacts/${installerName}`,
@@ -246,7 +268,15 @@ for (const entry of collect(ROOT)) {
   }
   const extension = path.extname(file).toLowerCase();
   const basename = path.basename(file).toLowerCase();
-  if (FORBIDDEN_EXTENSIONS.has(extension))
+  const expectedBinaryHash = ALLOWED_BINARY_ASSETS.get(relative);
+  const actualBinaryHash = expectedBinaryHash
+    ? crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")
+    : null;
+  const allowedBinary =
+    expectedBinaryHash != null && actualBinaryHash === expectedBinaryHash;
+  if (expectedBinaryHash != null && !allowedBinary)
+    failures.push(`${relative}: reviewed binary asset hash changed`);
+  if (FORBIDDEN_EXTENSIONS.has(extension) && !allowedBinary)
     failures.push(`${relative}: forbidden release file type ${extension}`);
   if (FORBIDDEN_NAMES.has(basename) || basename.startsWith(".env."))
     failures.push(`${relative}: forbidden credential/runtime filename`);
@@ -257,7 +287,7 @@ for (const entry of collect(ROOT)) {
     failures.push(`${relative}: unexpected source file larger than 5 MiB`);
   const bytes = fs.readFileSync(file);
   if (bytes.includes(0)) {
-    if (extension !== ".ico")
+    if (extension !== ".ico" && !allowedBinary)
       failures.push(`${relative}: unexpected binary file in source tree`);
     continue;
   }
@@ -409,7 +439,7 @@ const documentationRequirements = {
     "downloads.cursor.com",
     "464079A15EF5FA8B61CCEA8FFFCC78F63CFCF6DF65FB0AD5E725D8B95F7E437E",
     "/BOOTSTRAPGROKBOT=1",
-    "remains installed if Codex Bot Setup is canceled",
+    "remains installed if Open Bot Setup is canceled",
     "terms of service",
   ],
   "SECURITY.md": [
@@ -421,7 +451,7 @@ const documentationRequirements = {
     "verified remote deletion",
     "125,825,552-byte Grok Bot 0.18.0 installer",
     "/BOOTSTRAPGROKBOT=1",
-    "not part of the Codex Bot rollback boundary",
+    "not part of the Open Bot rollback boundary",
   ],
   "PRIVACY.md": [
     "Private browser seats remain the default.",
@@ -439,7 +469,7 @@ const documentationRequirements = {
     "ws 8.21.3",
     "MIT License",
     "vendor installer is never embedded or staged",
-    "not removed by the Codex Bot uninstaller",
+    "not removed by the Open Bot uninstaller",
   ],
 };
 for (const [relative, requiredPhrases] of Object.entries(
@@ -636,8 +666,8 @@ try {
 try {
   const verifier = fs.readFileSync(supportedRuntimeVerifierPath, "utf8");
   for (const required of [
-    "Get-AuthenticodeSignature",
-    "Get-FileHash -Algorithm SHA256",
+    "Security.Cryptography.SHA256",
+    "System.Management.Automation.SignatureHelper",
     "FileAttributes]::ReparsePoint",
     expectedSignerSubject,
     expectedSignerThumbprint,
@@ -700,8 +730,8 @@ try {
     expectedSignerThumbprint,
     expectedInstallerIssuer,
     "FileAttributes]::ReparsePoint",
-    "Get-FileHash -Algorithm SHA256",
-    "Get-AuthenticodeSignature",
+    "Security.Cryptography.SHA256",
+    "System.Management.Automation.SignatureHelper",
   ]) {
     if (!installerVerifier.includes(required)) {
       failures.push(
@@ -709,8 +739,10 @@ try {
       );
     }
   }
-  const hashIndex = installerVerifier.indexOf("Get-FileHash -Algorithm SHA256");
-  const signatureIndex = installerVerifier.indexOf("Get-AuthenticodeSignature");
+  const hashIndex = installerVerifier.indexOf("Security.Cryptography.SHA256");
+  const signatureIndex = installerVerifier.indexOf(
+    "System.Management.Automation.SignatureHelper",
+  );
   if (hashIndex < 0 || signatureIndex <= hashIndex) {
     failures.push(
       "scripts/Verify-GrokBotInstaller.ps1: exact byte verification must precede signature verification",
@@ -751,7 +783,7 @@ try {
     "InvalidateInteractiveVendorChoiceCache",
     "PrepareVendorDependencyAndRecordExitCode",
     "exact separate 120 MiB per-user installer",
-    "remains installed if Codex Bot Setup fails, is canceled, or Codex Bot is later uninstalled",
+    "remains installed if Open Bot Setup fails, is canceled, or Open Bot is later uninstalled",
     "VendorChoicePage.SelectedValueIndex = 0",
     "HasConflictingPerUserVendor",
     "will not repair, overwrite, update, or downgrade",

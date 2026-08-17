@@ -4,21 +4,21 @@ async function main() {
   const executable = process.argv[2];
   const icon = process.argv[3];
   if (!executable)
-    throw new Error("Usage: brand-executable.cjs <Codex Bot.exe>");
+    throw new Error("Usage: brand-executable.cjs <Open Bot.exe>");
   const imported = await import("rcedit");
   const rcedit = imported.rcedit || imported.default;
   if (typeof rcedit !== "function")
     throw new Error("The installed rcedit package did not expose its API.");
   await rcedit(executable, {
-    "file-version": "0.1.4.0",
-    "product-version": "0.1.4.0",
+    "file-version": "0.1.5.0",
+    "product-version": "0.1.5.0",
     "version-string": {
-      CompanyName: "Codex Bot contributors",
-      FileDescription: "Codex Bot",
-      InternalName: "Codex Bot",
-      LegalCopyright: "Codex Bot Bridge contributors",
-      OriginalFilename: "Codex Bot.exe",
-      ProductName: "Codex Bot",
+      CompanyName: "Open Bot contributors",
+      FileDescription: "Open Bot",
+      InternalName: "Open Bot",
+      LegalCopyright: "Open Bot contributors",
+      OriginalFilename: "Open Bot.exe",
+      ProductName: "Open Bot",
     },
     ...(icon ? { icon } : {}),
   });

@@ -23,6 +23,7 @@ let official;
 let privateManager;
 let originalOfficial;
 let originalPrivate;
+const openedOfficialLogins = [];
 
 function deferred() {
   let resolve;
@@ -111,9 +112,17 @@ test.before(async () => {
     closeSeatForKey: privateManager.closeSeatForKey,
     captureSeat: privateManager.captureSeat,
     executeSeatActions: privateManager.executeSeatActions,
+    pendingApprovals: privateManager.pendingApprovals,
+    computerPermissions: privateManager.computerPermissions,
+    setComputerPermissions: privateManager.setComputerPermissions,
   };
   official.status = async () => safeStatus("private");
-  server = bridge.startViewServer();
+  server = bridge.startViewServer({
+    openOfficialLogin: async (loginUrl) => {
+      openedOfficialLogins.push(loginUrl);
+      return loginUrl;
+    },
+  });
   if (!server.listening) await once(server, "listening");
 });
 
@@ -123,7 +132,10 @@ test.after(async () => {
   fs.rmSync(stateRoot, { recursive: true, force: true });
 });
 
-test.afterEach(() => restoreMocks());
+test.afterEach(() => {
+  restoreMocks();
+  openedOfficialLogins.length = 0;
+});
 
 test("official control route requires authentication and an exact JSON schema", async () => {
   let loginCalls = 0;
@@ -302,6 +314,83 @@ test("vendor permission updates require an exact provider-scoped acknowledgement
   assert.equal(updates.length, 2);
 });
 
+test("Private browser permission updates are exact, scoped, and exposed in status", async () => {
+  const updates = [];
+  let alwaysAllow = false;
+  privateManager.computerPermissions = () => ({
+    provider: "private-browser",
+    alwaysAllowComputerActions: alwaysAllow,
+    injectedSecret: SECRET_SENTINEL,
+  });
+  privateManager.setComputerPermissions = (next, acknowledged, provider) => {
+    updates.push({ next, acknowledged, provider });
+    alwaysAllow = next;
+    return privateManager.computerPermissions();
+  };
+  const enabled = await request("/api/private-computer", {
+    body: {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+    },
+  });
+  assert.equal(enabled.status, 200);
+  assert.equal(enabled.text.includes(SECRET_SENTINEL), false);
+  assert.deepEqual(enabled.value.result, {
+    provider: "private-browser",
+    alwaysAllowComputerActions: true,
+  });
+  assert.deepEqual(enabled.value.status, {
+    provider: "private-browser",
+    available: true,
+    permissions: {
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+    },
+  });
+  assert.deepEqual(updates, [
+    {
+      next: true,
+      acknowledged: true,
+      provider: "private-browser",
+    },
+  ]);
+
+  const status = await request("/api/codex/status");
+  assert.equal(
+    status.value.privateComputer.permissions.alwaysAllowComputerActions,
+    true,
+  );
+
+  for (const body of [
+    {
+      action: "permissions",
+      provider: "official-grok-cloud",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+    },
+    {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: "true",
+      acknowledged: true,
+    },
+    {
+      action: "permissions",
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+      acknowledged: true,
+      unexpected: true,
+    },
+  ])
+    assert.equal(
+      (await request("/api/private-computer", { body })).status,
+      400,
+    );
+  assert.equal(updates.length, 1);
+});
+
 test("helper results are allowlisted before anything reaches the renderer", async () => {
   const loginUrl =
     "https://cursor.com/loginDeepControl?challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&uuid=123e4567-e89b-42d3-a456-426614174000&mode=login&redirectTarget=sand";
@@ -371,6 +460,7 @@ test("helper results are allowlisted before anything reaches the renderer", asyn
     "loginUrl",
     "state",
   ]);
+  assert.deepEqual(openedOfficialLogins, [loginUrl]);
 
   const frame = await request("/api/frame?seatKey=employee-a");
   assert.equal(frame.status, 200);
@@ -454,6 +544,39 @@ test("approval routes expose only the exact safe frame and echo its displayed bi
     binding,
   });
   assert.deepEqual(decision.value, { ok: true });
+
+  official.pendingApprovals = async () => [
+    {
+      requestId: "approval-request-list-1",
+      seatId: "group-member-a",
+      origin: "https://official-cloud-computer.invalid",
+      actionDigest: "action-digest-list-1",
+      riskClass: "confirmation",
+      summary: "Navigate to another page",
+      presentation: { actions: [{ kind: "navigate" }] },
+      expiresAt: Date.now() + 30_000,
+      frame: {
+        generation: 7,
+        sequence: 5,
+        sha256,
+        screenshotBase64: PNG_BASE64,
+        networkToken: SECRET_SENTINEL,
+      },
+      networkToken: SECRET_SENTINEL,
+    },
+  ];
+  const approvalList = await request("/api/approvals");
+  assert.equal(approvalList.status, 200);
+  assert.equal(approvalList.text.includes(SECRET_SENTINEL), false);
+  assert.equal(approvalList.value.pending.length, 1);
+  assert.equal(approvalList.value.pending[0].seatId, "group-member-a");
+  assert.deepEqual(approvalList.value.pending[0].frame, {
+    generation: 7,
+    sequence: 5,
+    sha256,
+    screenshotBase64: PNG_BASE64,
+    mimeType: "image/png",
+  });
 
   official.decidePendingApproval = async () => ({
     accepted: true,

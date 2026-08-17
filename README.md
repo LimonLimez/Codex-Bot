@@ -1,83 +1,136 @@
-# Codex Bot Bridge
+# Open Bot
 
-Codex Bot Bridge turns a **user-owned local Grok Bot 0.18.0 installation** into a Codex-powered digital-coworker app. It keeps the installed frontend, customizable blob avatars, conversations, routines, and computer preview while routing new model requests through the user's own Codex OAuth account or optional OpenAI API key.
+Open Bot turns a **user-owned Grok Bot 0.18.0 installation** into a local, always-on digital-coworker app powered by the AI provider you choose. It preserves the original desktop experience—blob avatars, conversations, routines, and computer preview—while replacing model routing and computer controls with reviewed local components.
 
-This is an independent community project. It is not an official xAI or OpenAI product.
+This is an independent community project. It is not affiliated with, endorsed by, or supported by xAI, OpenAI, Anthropic, Google, or Moonshot AI.
 
-## What works
+## At a glance
 
-- The real locally installed Grok Bot frontend; this project does not recreate or redistribute it.
-- User-owned Codex OAuth through the local CLIProxyAPI sidecar, or an optional OpenAI API key protected with Windows DPAPI.
-- Chat and planning requests have no xAI fallback: they use the selected Codex OAuth or OpenAI API-key route and fail closed when that route is unavailable. This does not describe the internals of the optional vendor-managed computer below.
-- Workspace-wide model, reasoning, and Fast-mode defaults, plus an optional override on each employee's composer. Fast uses the local proxy's reviewed priority mapping for Codex OAuth and OpenAI's Fast service tier for API keys.
-- Original per-bot blob avatar shapes and colors.
-- A persistent, isolated Chrome or Edge profile for each bot.
-- Up to three active browser seats at once. If a fourth is needed, the least-recently-used idle seat closes while its profile and sessions remain saved.
-- A live browser view inside the bot's existing computer pane.
-- **Take control / Release control** with independent virtual mouse and keyboard input. It does not move the physical mouse or type into the user's current app.
-- Saved schedule-based routines and a background worker that survives closing the app window.
-- A per-user Windows installer and uninstaller.
+- Choose **OpenAI Codex, Anthropic Claude, Google Antigravity, Moonshot Kimi, xAI, or Google Vertex AI** through the bundled local CLIProxyAPI sidecar.
+- Keep a direct OpenAI API key as an optional route; it is protected with Windows DPAPI for the current Windows user.
+- Connect a local OpenAI-compatible server such as **Ollama, LM Studio, or vLLM** through a loopback-only endpoint and discover its models automatically.
+- Pick a workspace model and reasoning level, then override either choice for an individual employee.
+- Set reasoning with a real stepped slider from the employee composer or Settings.
+- Give every employee a persistent, isolated Chrome or Edge browser profile.
+- Use the local Private browser by default, or explicitly opt into the Experimental vendor cloud computer.
+- Approve vendor-computer actions in chat, enable provider-scoped **Always allow**, or take over in a full-window control surface.
+- Keep schedules running in the background while that Windows user remains signed in and the PC stays awake.
+
+## Quick start
+
+1. Download `OpenBot-Setup-0.1.5.exe` from [Releases](https://github.com/LimonLimez/Open-Bot/releases).
+2. Let Setup reuse an exact Grok Bot 0.18.0 tree, or explicitly authorize the separate vendor-hosted download.
+3. Launch Open Bot and choose an AI provider from the connection list.
+4. Finish that provider's official sign-in, import a Google Vertex service-account JSON key, or connect a local model server at `http://127.0.0.1:<port>/v1`.
+5. Choose a model and reasoning level. Your workspace is ready when the selected account is connected.
+
+The app never asks for a provider password. OAuth and device flows open only reviewed official authorization pages.
+
+## AI providers
+
+| Route              | Connection method                   | Models shown in the app                | Fast mode                                           |
+| ------------------ | ----------------------------------- | -------------------------------------- | --------------------------------------------------- |
+| OpenAI Codex       | ChatGPT/Codex device authorization  | Sol, Terra, Luna                       | Supported through the reviewed CLIProxy model alias |
+| Anthropic Claude   | Anthropic OAuth                     | Opus, Sonnet, Fable                    | Not exposed by this route                           |
+| Google Antigravity | Google OAuth                        | Gemini and reviewed Antigravity models | Not exposed by this route                           |
+| Moonshot Kimi      | Kimi device authorization           | Kimi K3 and coding variants            | Not exposed by this route                           |
+| xAI                | xAI device authorization            | Grok and Grok Build                    | Not exposed by this route                           |
+| Google Vertex AI   | Service-account JSON import         | Gemini through Vertex AI               | Not exposed by this route                           |
+| OpenAI API key     | Direct key verification             | Sol, Terra, Luna                       | OpenAI Fast service tier; premium pricing may apply |
+| Local models       | Loopback OpenAI-compatible endpoint | Models discovered from `/v1/models`    | Not exposed; reasoning fields are omitted           |
+
+The hosted-provider list is pinned to the reviewed CLIProxyAPI version bundled with the release. Account, plan, region, provider-side availability, and local model capabilities can still limit which models actually run. Requests fail closed if the selected route is unavailable; there is no silent fallback to another model provider.
+
+Provider choices keep independent workspace and per-employee model preferences. Switching from Claude to Kimi and back, for example, restores the saved Claude model instead of forcing one provider's model ID onto another.
+
+CLIProxy OAuth and imported provider credentials remain in this installation's private local auth directory. A Vertex upload is written to a private temporary file only long enough for the local CLIProxy importer to validate and store it, then the upload is deleted. Never upload the local state directory or provider auth files.
+
+Local model setup accepts only a literal `http://127.0.0.1:<port>` endpoint, normalizes it to `/v1`, blocks Open Bot's own internal service ports, and never follows discovery redirects. Model discovery is time- and size-bounded. An optional local-server API key is protected with Windows DPAPI and is never returned to the renderer or written to logs. The selected model must implement OpenAI-compatible streaming chat completions and tool calling; a model appearing in `/v1/models` alone does not prove those capabilities. Open Bot sends local-model requests only to the configured loopback service, but that independently installed service may itself download models, contact a remote backend, or retain data according to its own configuration.
+
+## Models and reasoning
+
+Settings contains the workspace default model, a stepped reasoning slider, and Fast mode when the selected route supports it. Each employee composer has the same model and reasoning controls immediately beside the stock action cluster.
+
+Per-employee overrides are partial. An employee can keep a custom model while inheriting future workspace reasoning changes, or return to all workspace defaults with one action.
+
+Fast mode is deliberately provider-aware:
+
+- Codex OAuth uses CLIProxyAPI's reviewed `-fast` model mapping.
+- A direct OpenAI API key sends `service_tier: "fast"`; turning Fast off explicitly pins the standard/default tier.
+- Other provider routes keep Fast disabled instead of pretending the setting is supported.
+- Local routes keep Fast disabled and omit `reasoning_effort` for broad server compatibility.
 
 ## Computer modes
 
-Private browser seats remain the default. They run locally in isolated Chrome or Edge profiles, keep Codex as the only reasoning model, and never select a vendor cloud computer automatically or as a fallback.
+### Private browser
 
-An **Experimental vendor cloud computer** is available only after a fresh, direct Cursor web sign-in for this add-on and an explicit billing/background-services acknowledgement. It does not read or import a Grok Bot or Cursor desktop profile or saved sign-in. It reconnects to one persistent account box shared by all employees in this app; it does not create an independent VM for each employee. Actions are serialized through the shared primary display.
+Private browser seats remain the default. Each employee receives a persistent local Chrome or Edge profile. Up to three seats stay active; when a fourth is needed, the least-recently-used idle seat closes while its profile and sessions remain saved.
 
-Codex remains the local chat and planning model in this mode. The helper sends only the vendor authentication, access check, provisioning, and remote-frame/input traffic needed to operate that display; it does not send Codex credentials, prompts, conversation history, or model requests to the vendor control plane. However, the computer is managed by the vendor and may contain vendor inference, telemetry, transcript, or other background services that this project cannot inspect or disable. **Zero vendor inference, telemetry, or charges cannot be guaranteed.** Provisioning or using the computer may consume included allowance, banked credits, or on-demand usage. Billing is possible.
+Browser-originated HTTP(S) and WebSocket traffic is forced through an authenticated local proxy. It rejects literal or DNS-resolved local, private, link-local, reserved, and cloud-metadata addresses, then connects to the already-checked public address. Page WebRTC APIs, non-proxied WebRTC UDP, QUIC, permission prompts, page clipboard access, and automatic downloads are disabled.
 
-Vendor OAuth credentials are kept separately under the current user's Local AppData state and protected with Windows DPAPI for that Windows user. Signing out closes the view, removes those local credentials, and clears any saved **Always allow** choice. It does not delete the persistent remote computer, revoke every remote session, or provide verified remote deletion; manage the remote account and computer with the vendor.
+Viewing, scrolling, pointer movement, and waiting can proceed automatically. Navigation, typing, clicks, drags, key activation, submissions, sensitive fields, and other mutating actions pause for an exact one-use **Allow once** or **Deny** decision. The approval expires if the page, destination, control lease, or live context changes.
 
-## Private-browser safety
+### Experimental vendor cloud computer
 
-Each browser seat forces browser-originated HTTP(S) and WebSocket traffic through its own authenticated local proxy. The proxy rejects any destination whose literal address or any DNS answer is local, private, link-local, reserved, or a cloud-metadata address, then connects to the checked public address without resolving it again. These controls block ordinary browser-originated access and DNS-rebinding attempts to those non-public address ranges.
+The optional vendor computer requires a fresh direct Cursor web sign-in for this add-on plus an explicit billing/background-services acknowledgement. It does not read or import a Grok Bot or Cursor desktop profile. It reconnects to **one persistent account box shared by all employees**, not a separate VM for each employee.
 
-Page viewing, scrolling, pointer movement, and waiting can proceed automatically. By default, agent-driven navigation, typing, clicks, drags, key activation, form controls, sensitive fields, submissions, and other mutating actions pause for an exact one-use **Allow once** or **Deny** decision. Private-browser decisions remain in the live view; Experimental vendor-computer decisions appear as a chat card with the exact screen the action will use. The approval is invalidated if the page, destination, or live control changes before execution.
+The selected AI provider remains the local chat and planning model. The isolated helper receives no model-provider credentials, prompts, or conversation history. It sends only the vendor authentication, access-check, provisioning, remote-frame, and input traffic needed to operate the display.
 
-Settings includes a clearly labeled **Permissions** section for the Experimental vendor computer. After a separate warning acknowledgement, the Windows user can enable **Always allow computer actions** for that provider only. While it is on, employees may click, drag, type, press keys, submit forms, and navigate on the shared vendor computer without a per-action approval card. It does not apply to Private browser seats or other tools. The choice defaults off, is protected with current-user Windows DPAPI, and is cleared by vendor sign-out or starting a different vendor sign-in. Takeover leases, provider/session generation checks, action deadlines, stale-frame checks, and uncertain-outcome stops still apply.
+The remote computer is vendor managed and may contain services this project cannot inspect or disable. **Zero vendor inference, telemetry, or charges cannot be guaranteed.** Provisioning or use may consume allowance, banked credits, or on-demand usage. **Billing is possible.**
 
-For the Experimental vendor cloud computer, clicks and drags remain bound to an identical displayed frame. Keyboard-only actions may continue across only a same-session, tightly bounded caret-width or unchanged-cursor-local pixel change; any broader visual change presents a fresh frame and asks again.
+Vendor-computer OAuth credentials are stored separately with current-user Windows DPAPI. Signing out closes the view, removes those local credentials, and clears **Always allow**. It does not delete the remote computer, revoke every remote session, or provide verified remote deletion.
 
-**Take control** expands the computer into a full-window control surface and acquires an exclusive, short-lived backend lease: while it is active, the bot cannot interact with that browser. Releasing control, pressing Escape, losing the lease, or changing providers returns to the small preview. Direct user actions do not show a second approval prompt. Page WebRTC APIs, non-proxied WebRTC UDP, Chromium QUIC, browser permission prompts, page clipboard access, and automatic downloads are disabled to close common routes around the public-web or approval boundaries.
+Vendor actions appear as chat-adjacent approval cards containing the exact screen used for the decision. Settings also provides a warned, provider-scoped **Always allow computer actions** option. Always allow bypasses only per-action prompts; takeover leases, session generation, screen freshness, deadlines, and uncertain-outcome stops remain enforced.
+
+**Take control** expands either computer provider into a full-window control surface with an exclusive backend lease. Releasing control, pressing Escape, losing the lease, or changing providers returns to the compact preview. Direct control does not move the physical mouse or type into the user's current app.
 
 ## Requirements
 
-- Windows 10/11 x64.
-- A legitimate **Grok Bot 0.18.0** Windows x64 installation. Setup can reuse an exact installed tree or, with explicit authorization, obtain the separate per-user app from the vendor-hosted version-pinned URL. Its `resources/app.asar` SHA-256 is:
-
-  `38E85C0E5042C0257DB7925E1E55709D6D155D90D92FE26AD654127D509766E0`
-
+- Windows 10 or 11 x64.
 - Google Chrome or Microsoft Edge.
-- Internet access during setup and Codex sign-in.
-- A ChatGPT account with Codex access, or an OpenAI API key.
+- Internet access during setup and provider sign-in.
+- An account with access to at least one listed provider, a Google Vertex service account, an OpenAI API key, or a compatible local model server.
+- A legitimate Grok Bot 0.18.0 Windows x64 installation. Setup can reuse one or—with explicit authorization—obtain the separate per-user installer directly from the vendor-hosted, version-pinned URL.
 
-The patcher deliberately rejects every unknown vendor archive. New Grok Bot releases require a reviewed compatibility update.
+The only supported Grok Bot `resources/app.asar` SHA-256 is:
 
-## Install
+`38E85C0E5042C0257DB7925E1E55709D6D155D90D92FE26AD654127D509766E0`
 
-1. Download `CodexBot-Setup-0.1.4.exe` from this repository's Releases page.
-2. On the **Grok Bot frontend** page, allow Setup to reuse an exact 0.18.0 installation or download the official 0.18.0 per-user installer directly from `downloads.cursor.com`. The 125,825,552-byte download is checked against SHA-256 `464079A15EF5FA8B61CCEA8FFFCC78F63CFCF6DF65FB0AD5E725D8B95F7E437E` and the exact reviewed Authenticode signer before it can run. It is not embedded in Codex Bot.
-3. Launch Codex Bot.
-4. On a fresh install, the blocking **Codex connection** dialog appears automatically. Choose **Use Codex OAuth** and complete sign-in in the browser, or choose **Use OpenAI API key** instead.
-5. Optional: in Settings, acknowledge the Experimental vendor-computer warning and choose **Sign in to Cursor and enable vendor computer**. This starts a separate Cursor PKCE web sign-in; it does not require or reuse a Grok Bot or Cursor desktop login.
+The patcher rejects every unknown vendor archive. A new Grok Bot release requires a reviewed compatibility update.
 
-The installer copies the fully verified vendor tree into `%LOCALAPPDATA%\Programs\Codex Bot` and patches only that copy. An exact pre-existing Grok Bot installation is never modified. If Setup installs Grok Bot first, that is a separate vendor application: it remains installed if Codex Bot Setup is canceled, fails, or is later uninstalled. Setup refuses to run the vendor installer over an existing non-matching per-user Grok Bot installation or folder.
+## Installer behavior
 
-Silent Setup never downloads or installs Grok Bot implicitly. Supply `/BOOTSTRAPGROKBOT=1` to authorize the pinned vendor-hosted bootstrap, or `/GROKBOTDIR="C:\path\to\exact\Grok Bot"` to select an exact existing tree.
+The setup wizard makes dependency download an explicit choice. If authorized, it downloads the 125,825,552-byte Grok Bot 0.18.0 installer directly from `downloads.cursor.com`, checks SHA-256 `464079A15EF5FA8B61CCEA8FFFCC78F63CFCF6DF65FB0AD5E725D8B95F7E437E`, verifies the reviewed Authenticode identity, runs the separate vendor installer, and fully verifies all 657 installed files before copying anything.
 
-## Local always-on behavior
+Open Bot copies the verified tree into `%LOCALAPPDATA%\Programs\Open Bot` and patches only that copy. It never modifies an existing Grok Bot installation. The proprietary installer is not embedded in the Open Bot artifact.
 
-The background worker and schedules continue when the Codex Bot window is closed. They run only while that Windows user is signed in and the PC is running and awake. They cannot run while the PC is powered off, sleeping, or signed out, and online work requires internet access. True 24/7 operation requires an always-on Windows machine or VM with an interactive desktop session.
+If Setup installs Grok Bot first, that separate app remains installed if Open Bot Setup is canceled, fails, or is later uninstalled. Setup refuses to run the vendor installer over an existing non-matching per-user Grok Bot folder.
 
-Websites can still require login, CAPTCHA, approval, or human judgment. The bot preserves the current state and asks for takeover instead of bypassing those checks.
+Silent Setup never downloads implicitly. Use:
+
+```powershell
+OpenBot-Setup-0.1.5.exe /VERYSILENT /BOOTSTRAPGROKBOT=1
+```
+
+Or select an exact existing tree:
+
+```powershell
+OpenBot-Setup-0.1.5.exe /VERYSILENT /GROKBOTDIR="C:\Path\To\Grok Bot"
+```
 
 ## Local data and uninstall
 
-Per-user state lives under `%LOCALAPPDATA%\Codex Bot Bridge` and can include OAuth files, conversations, attachments, downloads, logs, settings, routines, sanitized open-tab URLs, and separate signed-in browser profiles. Each bot restores its public tabs and signed-in browser profile after a restart. The separate tab snapshot retains only each public origin and path; URL credentials, all query strings, and fragments are removed before it is written. Do not upload that folder.
+Per-user state lives under `%LOCALAPPDATA%\Open Bot`. It can include provider auth files, API settings, conversations, attachments, downloads, logs, routines, browser profiles, and sanitized open-tab snapshots. Snapshots retain only public origin and path; URL credentials, query strings, and fragments are removed.
 
-The interactive uninstaller asks whether to preserve that state for a future reinstall or permanently wipe it from this PC. Choosing **No** at the wipe prompt preserves it. Silent uninstall preserves it. A wipe deletes the complete local state directory and cannot be undone by Codex Bot; it does not revoke credentials or sessions already held by remote services, delete the vendor cloud computer, or verify remote deletion. If Windows cannot remove every local file, the uninstaller reports the remaining folder instead of claiming the wipe succeeded.
+All bridge services bind to `127.0.0.1` and require installer-generated random credentials. Hosted-model traffic leaves the PC only for the provider explicitly selected by the user; local-model traffic is sent only to the configured loopback endpoint. A local server can still relay or retain requests independently. Website traffic leaves through the browser seat's checked public-web proxy. The optional vendor computer has the separate boundary described above.
 
-All bridge services bind to `127.0.0.1`; their control and data endpoints require installer-generated random credentials. No token, API key, OAuth file, browser profile, conversation database, screenshot, vendor archive, or vendor executable belongs in this repository. `npm run audit:release` enforces that boundary.
+The interactive uninstaller asks whether to preserve state for a future reinstall or permanently wipe it. Silent uninstall preserves state. A wipe cannot revoke credentials or sessions already held by remote services, delete the vendor cloud computer, or verify remote deletion. If Windows cannot remove every local file, the uninstaller reports the remaining path.
+
+## Always-on behavior
+
+Schedules continue after the window closes only while that Windows user is signed in and the PC is running, awake, and online. They do not run while the PC is powered off, sleeping, or signed out. True 24/7 operation requires an always-on Windows PC or VM with an interactive desktop session.
+
+Websites may still require login, CAPTCHA, approval, or human judgment. The app preserves state and asks for takeover instead of bypassing those checks.
 
 ## Build from source
 
@@ -91,26 +144,25 @@ npm run audit:release
 npm run build:installer
 ```
 
-The build downloads the reviewed, pinned CLIProxyAPI 7.2.130 Windows x64 release, verifies both its source-pinned SHA-256 and that release's published `checksums.txt`, and bundles the verified MIT-licensed binary. It does not download, stage, or package Grok Bot. At install time only, the setup wizard can download the pinned official Grok Bot installer directly from the vendor after the user authorizes it.
+The build downloads CLIProxyAPI 7.2.130 Windows x64, verifies its source-pinned SHA-256 and published checksum file, and bundles that reviewed MIT-licensed binary. It does not download, stage, or package Grok Bot. The separate vendor download can occur only later, during Setup and after explicit user authorization.
 
-Release builds require a clean Git worktree so every packaged source file is committed. Developers may explicitly pass `-AllowDirtyDevelopmentBuild` to `scripts/build-installer.ps1` for a local test installer, but that build is not suitable for publication.
+Canonical builds require a clean Git worktree. `-AllowDirtyDevelopmentBuild` creates a clearly marked local test installer that must not be published. Finished installers and SHA-256 sidecars are written to ignored `artifacts/`.
 
-The finished installer and SHA-256 are written to `artifacts/` (ignored by Git).
+## Project map
 
-## Project layout
-
-- `src/bridge.cjs` - model/tool protocol bridge and digital-coworker policy.
-- `src/browser-seats/` - persistent browser seats, public-web proxy, and action approvals.
-- `src/browser-seat-bridge.cjs` - authenticated loopback live-view/input service.
-- `src/official-computer-client.cjs` and `src/official-computer-helper.cjs` - isolated, opt-in vendor authentication/provisioning and primary-display relay.
-- `src/renderer/` - code injected into the user's local frontend; no vendor bundle is stored here.
-- `scripts/patch-app.cjs` - exact-hash patcher.
-- `src/runtime/` - launcher, background worker, and scheduled-task helpers.
-- `installer/` - Inno Setup definition.
-- `tests/` and `scripts/security-audit.cjs` - release and privacy gates.
+- `src/codex-connection.cjs` — provider accounts, model preferences, credential handoff, and safe public status.
+- `src/bridge.cjs` — OpenAI-compatible model/tool protocol bridge and coworker policy.
+- `src/browser-seats/` — persistent private browsers, public-web proxy, control leases, and approvals.
+- `src/browser-seat-bridge.cjs` — authenticated loopback API for settings, live view, input, and provider connection.
+- `src/official-computer-client.cjs` and `src/official-computer-helper.cjs` — isolated opt-in vendor authentication, provisioning, and display relay.
+- `src/renderer/` — local UI injected into the verified frontend.
+- `scripts/patch-app.cjs` — exact-hash compatibility patcher.
+- `src/runtime/` — launcher, watchdog, background worker, and scheduled-task helpers.
+- `installer/` — Inno Setup definition and explicit vendor bootstrap flow.
+- `tests/` and `scripts/security-audit.cjs` — behavior, privacy, and release gates.
 
 ## Compatibility and terms
 
-Codex OAuth support is provided by the third-party CLIProxyAPI project and can change when providers change their services. Grok Bot is a separate vendor application governed by the vendor's [terms of service](https://cursor.com/terms-of-service) and [privacy policy](https://cursor.com/privacy); Codex Bot does not grant a license to it or manage its uninstall. Users are responsible for their accounts, subscriptions, site permissions, and compliance with applicable terms and law.
+Provider support comes from the third-party CLIProxyAPI project and can change when provider services change. Every provider, Grok Bot, and any website used through a computer seat remains governed by its owner's terms of service, subscription, billing, privacy, and acceptable-use policies.
 
-See [NOTICE.md](NOTICE.md), [PRIVACY.md](PRIVACY.md), and [SECURITY.md](SECURITY.md).
+Grok Bot is a separate proprietary application. Open Bot does not redistribute it, grant a license to it, or manage its uninstall. See [NOTICE.md](NOTICE.md), [PRIVACY.md](PRIVACY.md), and [SECURITY.md](SECURITY.md).

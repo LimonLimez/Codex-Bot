@@ -116,6 +116,84 @@ test("agent browser input is approval-gated while direct takeover is a trusted u
   assert.match(manager, /acquireUserControl/);
 });
 
+test("Private browser Always allow persists, bypasses only action prompts, and fails closed", async (t) => {
+  const dataRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "open-bot-private-permission-"),
+  );
+  t.after(() => fs.rmSync(dataRoot, { force: true, recursive: true }));
+  const manager = loadIsolatedSeatManager(dataRoot);
+  assert.deepEqual(manager.computerPermissions(), {
+    provider: "private-browser",
+    alwaysAllowComputerActions: false,
+  });
+  assert.throws(
+    () => manager.setComputerPermissions(true, false, "private-browser"),
+    /requires acknowledgement/,
+  );
+  assert.deepEqual(
+    manager.setComputerPermissions(true, true, "private-browser"),
+    {
+      provider: "private-browser",
+      alwaysAllowComputerActions: true,
+    },
+  );
+  assert.equal(
+    loadIsolatedSeatManager(dataRoot).computerPermissions()
+      .alwaysAllowComputerActions,
+    true,
+  );
+
+  const sinkCalls = [];
+  const page = {
+    isClosed: () => false,
+    url: () => "https://example.com/work",
+    mouse: {
+      click: async () => sinkCalls.push("mouse.click"),
+    },
+    keyboard: {},
+    locator: () => ({ innerText: async () => "ready" }),
+    screenshot: async () => Buffer.from("frame"),
+    title: async () => "Example",
+    waitForTimeout: async () => {},
+  };
+  const seatKey = "always-allow-seat";
+  manager.__activeSeatsForTest.set(seatKey, {
+    key: seatKey,
+    profileId: "always-allow-profile",
+    profileDir: dataRoot,
+    downloadsDir: dataRoot,
+    sessionStatePath: path.join(dataRoot, "session-state.json"),
+    context: { pages: () => [page], newPage: async () => page },
+    publicWebProxy: null,
+    page,
+    cursor: { x: 640, y: 400 },
+    address: null,
+    navigationEpoch: 0,
+    queue: Promise.resolve(),
+    pending: 0,
+    lastUsed: Date.now(),
+    lastPageInfo: { state: "loaded", title: "Example", bodyPreview: "ready" },
+    restoringSession: false,
+    closing: false,
+    closePromise: null,
+  });
+  await manager.executeSeatActions(seatKey, [
+    { kind: "click", coordinate: { x: 12, y: 34 }, button: "left" },
+  ]);
+  assert.deepEqual(sinkCalls, ["mouse.click"]);
+  assert.equal(manager.pendingApprovalForSeat(seatKey), null);
+
+  fs.writeFileSync(path.join(dataRoot, "permissions.json"), "corrupt");
+  assert.equal(manager.computerPermissions().alwaysAllowComputerActions, false);
+  assert.deepEqual(
+    manager.setComputerPermissions(false, false, "private-browser"),
+    {
+      provider: "private-browser",
+      alwaysAllowComputerActions: false,
+    },
+  );
+});
+
 test("takeover during the final validated page lookup stops the approved agent action", async (t) => {
   const dataRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), "codex-seat-takeover-"),
@@ -295,37 +373,33 @@ test("an approved action stays on the exact page that passed final validation", 
 
 test("approval UI exposes safe status and authenticated allow or deny decisions", () => {
   const bridge = read("src/browser-seat-bridge.cjs");
-  const renderer = read("src/renderer/live-seat-component.jsfrag");
+  const liveSeat = read("src/renderer/live-seat-component.jsfrag");
+  const renderer = read("src/renderer/codex-ui.js");
   assert.match(bridge, /\/api\/approval/);
+  assert.match(bridge, /\/api\/approvals/);
   assert.match(bridge, /provider\.pendingApprovalForSeat/);
+  assert.match(bridge, /provider\.pendingApprovals/);
   assert.match(bridge, /provider\.decidePendingApproval/);
-  assert.match(renderer, /Browser action approval/);
+  assert.match(renderer, /Computer action needs your permission/);
+  assert.match(renderer, /Private browser/);
+  assert.match(renderer, /Vendor computer/);
   assert.match(renderer, /Allow once/);
-  assert.match(renderer, /Allow this site briefly/);
   assert.match(renderer, /Deny/);
-  assert.match(renderer, /Action:/);
-  assert.match(renderer, /Destination:/);
-  assert.match(renderer, /Target:/);
-  assert.match(renderer, /Form:/);
-  assert.match(renderer, /Content:/);
-  const framePoll = renderer.slice(
-    renderer.indexOf("const g = T.useCallback"),
-    renderer.indexOf("const j = T.useCallback"),
-  );
-  const approvalPoll = renderer.slice(
-    renderer.indexOf("const j = T.useCallback"),
-    renderer.indexOf(
+  assert.match(renderer, /approvalActionLabel/);
+  assert.match(renderer, /officialApprovalBinding/);
+  assert.match(renderer, /request\("\/api\/approvals"\)/);
+  assert.match(renderer, /request\("\/api\/approval"/);
+  const approvalPoll = liveSeat.slice(
+    liveSeat.indexOf("const j = T.useCallback"),
+    liveSeat.indexOf(
       "T.useEffect",
-      renderer.indexOf("const j = T.useCallback"),
+      liveSeat.indexOf("const j = T.useCallback"),
     ),
   );
-  assert.doesNotMatch(framePoll, /\/api\/approval/);
-  assert.match(approvalPoll, /\/api\/approval/);
-  assert.match(renderer, /setInterval\(\(\) => a && j\(\), 350\)/);
-  assert.match(renderer, /action: "acquire"/);
-  assert.match(renderer, /action: "heartbeat"/);
-  assert.match(renderer, /action: "release"/);
-  assert.match(renderer, /data-gb-overlay/);
+  assert.doesNotMatch(approvalPoll, /\/api\/approval/);
+  assert.match(liveSeat, /action: "acquire"/);
+  assert.match(liveSeat, /action: "heartbeat"/);
+  assert.match(liveSeat, /action: "release"/);
 });
 
 test("installer explicitly packages both browser security modules", () => {
