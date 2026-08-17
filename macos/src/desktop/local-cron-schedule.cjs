@@ -60,22 +60,24 @@ function normalizeExpression(expression) {
   if (!source) throw invalidSchedule();
 
   let timezone = "UTC";
-  const timezoneMatch = /^TZ=([^\s]+)\s+(.+)$/u.exec(source);
+  let timezonePrefix = "";
+  const timezoneMatch = /^(TZ|CRON_TZ)=([^\s]+)\s+(.+)$/u.exec(source);
   if (timezoneMatch) {
-    timezone = timezoneMatch[1];
-    source = timezoneMatch[2].trim();
+    timezonePrefix = timezoneMatch[1];
+    timezone = timezoneMatch[2];
+    source = timezoneMatch[3].trim();
     getFormatter(timezone);
-  } else if (source.startsWith("TZ=")) {
+  } else if (/^(?:TZ|CRON_TZ)=/u.test(source)) {
     throw invalidSchedule();
   }
 
   const alias = ALIASES[source.toLowerCase()];
   if (alias) source = alias;
 
-  const interval = /^@every\s+(\d+)(ms|s|m|h|d)$/iu.exec(source);
+  const interval = /^@every\s+(\d+)(s|m|h|d)$/iu.exec(source);
   if (interval) {
     const amount = Number(interval[1]);
-    const multiplier = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[interval[2].toLowerCase()];
+    const multiplier = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[interval[2].toLowerCase()];
     if (!Number.isSafeInteger(amount) || amount < 1 || amount > Math.floor(Number.MAX_SAFE_INTEGER / multiplier)) {
       throw invalidSchedule();
     }
@@ -95,7 +97,7 @@ function normalizeExpression(expression) {
   const normalizedFields = parsed.map(field => field.normalized).join(" ");
   return Object.freeze({
     kind: "cron",
-    normalized: `${timezone === "UTC" ? "" : `TZ=${timezone} `}${normalizedFields}`,
+    normalized: `${timezonePrefix ? `${timezonePrefix}=${timezone} ` : ""}${normalizedFields}`,
     timezone,
     minute: parsed[0],
     hour: parsed[1],
@@ -129,10 +131,13 @@ function parseField(source, minimum, maximum, normalizeSunday) {
 
   const sorted = Object.freeze([...values].sort((left, right) => left - right));
   if (!sorted.length) throw invalidSchedule();
+  const normalizedMaximum = normalizeSunday ? 6 : maximum;
+  const hasEveryValue = sorted.length === normalizedMaximum - minimum + 1;
+  const wildcard = source.startsWith("*") && hasEveryValue;
   return Object.freeze({
     values: sorted,
-    wildcard: source === "*",
-    normalized: source === "*" ? "*" : sorted.join(","),
+    wildcard,
+    normalized: wildcard ? "*" : hasEveryValue ? `${minimum}-${normalizedMaximum}` : sorted.join(","),
   });
 }
 

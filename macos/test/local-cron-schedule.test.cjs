@@ -75,11 +75,40 @@ test("local cron rejects forged sparse accessor and proxy schedules before execu
 });
 
 test("local cron rejects non-integer epochs and interval overflow instead of producing invalid dates", () => {
-  const interval = parseLocalCron("@every 1ms");
+  const interval = parseLocalCron("@every 1s");
   assertInvalid(() => nextLocalCronAt(interval, NaN), "");
   assertInvalid(() => nextLocalCronAt(interval, Infinity), "");
   assertInvalid(() => nextLocalCronAt(interval, 1.5), "");
-  assertInvalid(() => nextLocalCronAt(interval, Number.MAX_SAFE_INTEGER), "");
+  assertInvalid(() => nextLocalCronAt(interval, 8_640_000_000_000_000), "");
+  assertInvalid(() => parseLocalCron("@every 1ms"), "1ms");
+});
+
+test("local cron accepts CRON_TZ schedules and persists their selected wall-clock timezone", () => {
+  const schedule = parseLocalCron("CRON_TZ=America/Indiana/Indianapolis 30 2 * * *");
+  assert.equal(schedule.normalized, "CRON_TZ=America/Indiana/Indianapolis 30 2 * * *");
+  assert.equal(nextLocalCronAt(schedule, Date.parse("2026-03-08T06:59:00.000Z")),
+    Date.parse("2026-03-09T06:30:00.000Z"));
+});
+
+test("local cron persists compact full-range schedules that can be reparsed unchanged", () => {
+  const schedule = parseLocalCron("0-59 0-23 1-31 1-12 0-7");
+  assert.equal(schedule.normalized, "0-59 0-23 1-31 1-12 0-6");
+  assert.ok(schedule.normalized.length <= 256);
+  const restored = parseLocalCron(schedule.normalized);
+  assert.equal(nextLocalCronAt(schedule, Date.UTC(2026, 7, 17, 12, 34)),
+    Date.UTC(2026, 7, 17, 12, 35));
+  assert.equal(nextLocalCronAt(restored, Date.UTC(2026, 7, 17, 12, 34)),
+    Date.UTC(2026, 7, 17, 12, 35));
+});
+
+test("local cron treats full leading-star day fields as wildcard DOM constraints after round-trip", () => {
+  const schedule = parseLocalCron("0 0 */1 * 1");
+  assert.equal(schedule.normalized, "0 0 * * 1");
+  const restored = parseLocalCron(schedule.normalized);
+  assert.equal(nextLocalCronAt(schedule, Date.parse("2026-08-18T00:01:00.000Z")),
+    Date.parse("2026-08-24T00:00:00.000Z"));
+  assert.equal(nextLocalCronAt(restored, Date.parse("2026-08-18T00:01:00.000Z")),
+    Date.parse("2026-08-24T00:00:00.000Z"));
 });
 
 test("local cron bounds an impossible calendar search at five years", () => {
