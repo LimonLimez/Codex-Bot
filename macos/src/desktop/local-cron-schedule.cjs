@@ -133,12 +133,35 @@ function parseField(source, minimum, maximum, normalizeSunday) {
   if (!sorted.length) throw invalidSchedule();
   const normalizedMaximum = normalizeSunday ? 6 : maximum;
   const hasEveryValue = sorted.length === normalizedMaximum - minimum + 1;
-  const wildcard = source.startsWith("*") && hasEveryValue;
+  const wildcard = source.startsWith("*");
   return Object.freeze({
     values: sorted,
     wildcard,
-    normalized: wildcard ? "*" : hasEveryValue ? `${minimum}-${normalizedMaximum}` : sorted.join(","),
+    normalized: normalizeFieldExpression(source, sorted, wildcard, hasEveryValue),
   });
+}
+
+function normalizeFieldExpression(source, values, wildcard, hasEveryValue) {
+  if (wildcard) {
+    if (hasEveryValue) return "*";
+    const starStep = /^\*\/(\d+)$/u.exec(source);
+    return starStep ? `*/${Number(starStep[1])}` : source;
+  }
+
+  const ranges = [];
+  let start = values[0];
+  let previous = start;
+  for (const value of values.slice(1)) {
+    if (value === previous + 1) {
+      previous = value;
+      continue;
+    }
+    ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+    start = value;
+    previous = value;
+  }
+  ranges.push(start === previous ? `${start}` : `${start}-${previous}`);
+  return ranges.join(",");
 }
 
 function parseRange(source, minimum, maximum) {

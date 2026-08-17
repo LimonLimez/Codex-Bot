@@ -29,7 +29,7 @@ test("local cron normalizes every alias before persistent schedule storage", () 
 
 test("local cron sorts list and range fields before calculating their first occurrence", () => {
   const schedule = parseLocalCron("5,1-2,2 0 * * *");
-  assert.equal(schedule.normalized, "1,2,5 0 * * *");
+  assert.equal(schedule.normalized, "1-2,5 0 * * *");
   assert.equal(nextLocalCronAt(schedule, Date.UTC(2026, 7, 17)),
     Date.UTC(2026, 7, 17, 0, 1));
 });
@@ -101,9 +101,30 @@ test("local cron persists compact full-range schedules that can be reparsed unch
     Date.UTC(2026, 7, 17, 12, 35));
 });
 
+test("local cron persists compact partial-range schedules without exceeding its parser bound", () => {
+  const schedule = parseLocalCron("0-58 0-22 1-30 1-11 0-5");
+  assert.equal(schedule.normalized, "0-58 0-22 1-30 1-11 0-5");
+  assert.ok(schedule.normalized.length <= 256);
+  const restored = parseLocalCron(schedule.normalized);
+  assert.equal(nextLocalCronAt(schedule, Date.UTC(2026, 7, 17, 12, 34)),
+    Date.UTC(2026, 7, 17, 12, 35));
+  assert.equal(nextLocalCronAt(restored, Date.UTC(2026, 7, 17, 12, 34)),
+    Date.UTC(2026, 7, 17, 12, 35));
+});
+
 test("local cron treats full leading-star day fields as wildcard DOM constraints after round-trip", () => {
   const schedule = parseLocalCron("0 0 */1 * 1");
   assert.equal(schedule.normalized, "0 0 * * 1");
+  const restored = parseLocalCron(schedule.normalized);
+  assert.equal(nextLocalCronAt(schedule, Date.parse("2026-08-18T00:01:00.000Z")),
+    Date.parse("2026-08-24T00:00:00.000Z"));
+  assert.equal(nextLocalCronAt(restored, Date.parse("2026-08-18T00:01:00.000Z")),
+    Date.parse("2026-08-24T00:00:00.000Z"));
+});
+
+test("local cron preserves stepped leading-star DOM semantics after round-trip", () => {
+  const schedule = parseLocalCron("0 0 */2 * 1");
+  assert.equal(schedule.normalized, "0 0 */2 * 1");
   const restored = parseLocalCron(schedule.normalized);
   assert.equal(nextLocalCronAt(schedule, Date.parse("2026-08-18T00:01:00.000Z")),
     Date.parse("2026-08-24T00:00:00.000Z"));
