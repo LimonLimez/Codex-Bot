@@ -62,6 +62,9 @@ screenshots/
 *.jpeg
 *.webp
 
+# Reviewed product artwork is intentionally versioned.
+!/assets/provider-icons/*.png
+
 # Developer-local files
 .idea/
 .vscode/
