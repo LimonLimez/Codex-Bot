@@ -177,7 +177,113 @@ test("team messaging and question-widget schemas pass through the local tool bri
     ["SendMessage", "SendToAgent", "ReactToMessage"],
   );
   assert.deepEqual(converted[0].function.parameters, widgetParameters);
+  assert.match(converted[1].function.description, /active assignment/i);
+  assert.match(converted[1].function.description, /fresh continuation/i);
+  assert.match(
+    converted[1].function.description,
+    /resume the unfinished assignment/i,
+  );
 });
+
+const LIVE_AGENT_HANDOFF = `[agent] A message just arrived from another of your user's agents: Marketing Manager (id: marketing-1).
+This is another assistant reaching out — not the user typing here.
+
+Marketing Manager: What are the current product positioning and launch constraints?`;
+
+test("teammate handoffs are detected only from the host's exact hidden wake cue", () => {
+  assert.equal(
+    bridge.isAgentHandoffTurn([{ role: "user", content: LIVE_AGENT_HANDOFF }]),
+    true,
+  );
+  assert.equal(
+    bridge.isAgentHandoffTurn([
+      { role: "user", content: "Can my agents message each other?" },
+    ]),
+    false,
+  );
+});
+
+test(
+  "an inbound teammate question requires a current-context answer and resumes prior work",
+  { concurrency: false },
+  async () => {
+    const originalGetConnection = connectionManager.getConnection;
+    const originalFetch = globalThis.fetch;
+    let requestPayload;
+    connectionManager.getConnection = () => ({
+      mode: "codex-oauth",
+      route: "cliproxyapi-codex-oauth",
+      baseUrl: "http://127.0.0.1:8317/v1",
+      apiKey: "local-test-key",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "high",
+      fastMode: false,
+    });
+    globalThis.fetch = async (_url, options) => {
+      requestPayload = JSON.parse(options.body);
+      return new Response(
+        `data: ${JSON.stringify({ choices: [{ delta: {} }] })}\n\ndata: [DONE]\n\n`,
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      );
+    };
+
+    try {
+      const result = bridge
+        .createPromptSession({ agentId: "sites-manager" })
+        .getExecutor([
+          {
+            role: "user",
+            content: "Finish the launch architecture and deployment notes.",
+          },
+          { role: "assistant", content: "I am auditing the current repo." },
+          { role: "user", content: LIVE_AGENT_HANDOFF },
+        ])
+        .stream(
+          {},
+          "agent-handoff-invocation",
+          [
+            {
+              name: "SendToAgent",
+              description: "Send a message to a teammate.",
+              parameters: {
+                type: "object",
+                properties: {
+                  target_id: { type: "string" },
+                  message: { type: "string" },
+                },
+                required: ["target_id", "message"],
+              },
+            },
+            sendMessageTool(),
+          ],
+          {},
+        );
+      for await (const _event of result.fullStream) {
+        // Drain the response.
+      }
+      await result.response;
+
+      const instruction = requestPayload.messages.find((message) =>
+        String(message.content).includes("<active_agent_handoff>"),
+      );
+      assert.ok(instruction);
+      assert.match(instruction.content, /newest transcript, task state/i);
+      assert.match(instruction.content, /exactly one substantive answer back/i);
+      assert.match(instruction.content, /continue that work now/i);
+      assert.match(
+        instruction.content,
+        /Never start acknowledgement ping-pong/i,
+      );
+      const sendToAgent = requestPayload.tools.find(
+        (tool) => tool.function.name === "SendToAgent",
+      );
+      assert.match(sendToAgent.function.description, /fresh continuation/i);
+    } finally {
+      connectionManager.getConnection = originalGetConnection;
+      globalThis.fetch = originalFetch;
+    }
+  },
+);
 
 const LIVE_GROUP_TURN = `<timestamp>Sunday, Aug 16, 2026, 2:31 PM (UTC-4)</timestamp>
 <user_query>

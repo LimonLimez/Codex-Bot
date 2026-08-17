@@ -9,7 +9,7 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8317/v1";
 const DEFAULT_API_KEY = "codex-bot-local";
 const DEFAULT_MODEL = "gpt-5.6-terra";
 const DEFAULT_REASONING_EFFORT = "high";
-const COWORKER_POLICY_VERSION = "2026-08-17.1";
+const COWORKER_POLICY_VERSION = "2026-08-17.2";
 const SEARCH_MODE_INSTRUCTION = Object.freeze({
   role: "system",
   content: `Search mode is active for this employee. Use Computer to look up fresh public-web information whenever it is listed.
@@ -56,7 +56,8 @@ Tools and connected apps
 - Permissions are capability-specific. Browser or Computer access never implies Shell access, and Shell approval never implies browser approval. Do not tell the user that changing a Shell, local-execution, browser, or vendor-computer setting unlocks a different capability.
 - For public website research, use Computer when it is listed instead of trying curl, Python networking, or another Shell workaround. If Computer needs approval, let the app present its real approval card; do not invent a settings path or ask for approval only in prose. A denied Shell call is not evidence that browser access is blocked.
 - When the user's judgment is truly required, use SendMessage's selectable widget format rather than a vague plain-text question; SendMessage also owns secure secret-request cards. Use ReactToMessage only when it is listed. Use connector discovery/call tools only for connected apps they actually report. If Dropbox or another named app is absent, say it is not connected and use an available browser fallback only when that is within the assignment.
-- When coordination is part of the assignment, use the real teammate id with SendToAgent. Do not claim that you briefed, synced, or handed work to a teammate until the tool succeeds, and do not create acknowledgement ping-pong between agents.
+- When coordination is part of the assignment, use the real teammate id with SendToAgent. Do not claim that you briefed, synced, or handed work to a teammate until the tool succeeds. When you ask for information needed by an active assignment, keep doing independent work and leave that assignment open: the teammate's reply will wake a fresh continuation with your latest transcript and task state. Incorporate that answer and resume the unfinished work instead of merely acknowledging it or making the user prompt you again.
+- A hidden [agent] turn is a live teammate handoff, not a user message. If it contains a direct question or work request, inspect the latest available task context, do the useful work, and send one substantive answer back with SendToAgent before finishing. If it is an answer to your own earlier request, use it to continue the current user assignment and do not send an acknowledgement back. Pure FYIs may remain silent. Never create acknowledgement ping-pong between agents.
 - Treat a host-managed group chat as a shared work stream, not an open-ended roleplay. Speak only to add a completed result, concrete next move, correction, blocker, decision, or direct answer that advances the room. Do not manufacture tasks for teammates, ask them for arbitrary examples, or keep the room alive with readiness and acknowledgement messages. If another teammate already covered the point, pass instead of paraphrasing it.
 - When a routine-creation tool or UI is available, create a real saved routine and verify its schedule and persisted state instead of merely drafting instructions in chat.
 
@@ -272,6 +273,7 @@ const UNAVAILABLE_TOOL_NAMES = new Set([
 
 const COMPUTER_TOOL_NAME = "Computer";
 const SEND_MESSAGE_TOOL_NAME = "SendMessage";
+const SEND_TO_AGENT_TOOL_NAME = "SendToAgent";
 const MAX_COMPATIBLE_COMPUTER_ACTIONS = 10;
 const AI_SDK_SCHEMA_SYMBOL = Symbol.for("vercel.ai.schema");
 const AI_SDK_VALIDATOR_SYMBOL = Symbol.for("vercel.ai.validator");
@@ -279,6 +281,14 @@ const COMPUTER_TOOL_USE_GUIDANCE = `<computer_tool_argument_format>
 Computer uses a flattened action object. To capture the screen, call Computer with exactly {"action":"screenshot"}. For a known multi-step batch, put the first action at the top level and later actions in "then", for example {"action":"scroll","direction":"down","then":[{"action":"scroll","direction":"down"}]}. Never send an "actions" property and never call Computer with an empty object.
 For a direct website request on Windows, use this exact sequence: screenshot, CTRL+L, a short wait, type the canonical https:// URL, ENTER, wait for navigation, then screenshot and verify the expected hostname or unmistakable destination page. Do not click or type into a webpage search field for direct navigation. If the typed URL appears as a search query or the expected destination is not visible, do not claim success; retry CTRL+L once from the fresh screen or report the exact failure. Do not use META.
 </computer_tool_argument_format>`;
+const SEND_TO_AGENT_CONTINUITY_GUIDANCE = `A direct question or work request sent here remains part of the sender's active assignment. Give the recipient enough context to answer. Keep doing independent work after sending; a substantive reply wakes a fresh continuation with your latest transcript and task state, where you must incorporate it and resume the unfinished assignment. Do not ask the user to prompt you again, do not send acknowledgement-only follow-ups, and do not poll or create reply loops.`;
+
+const ACTIVE_AGENT_HANDOFF_INSTRUCTION = `<active_agent_handoff>
+This turn was woken by a message from another bot while work is in progress. Read the newest transcript, task state, and teammate message together so your answer uses current context.
+- If the teammate asked a direct question or requested work, complete the useful bounded work now and send exactly one substantive answer back with SendToAgent before finishing. Do not substitute a SendMessage to the user and do not reply with readiness or acknowledgement alone.
+- If this message answers a question you sent earlier, incorporate the answer into the unfinished user assignment and continue that work now. Do not acknowledge it back unless a new consequential question is genuinely required.
+- If it is only an FYI with no action or answer needed, stay silent. Never start acknowledgement ping-pong.
+</active_agent_handoff>`;
 
 function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value))
@@ -526,7 +536,10 @@ function convertTools(tools) {
       type: "function",
       function: {
         name: tool.name,
-        description: tool.description || "",
+        description:
+          tool.name === SEND_TO_AGENT_TOOL_NAME
+            ? `${tool.description || ""}\n\n${SEND_TO_AGENT_CONTINUITY_GUIDANCE}`.trim()
+            : tool.description || "",
         parameters:
           tool.parameters && typeof tool.parameters === "object"
             ? unwrapAiSdkJsonSchema(tool.parameters)
@@ -547,6 +560,24 @@ function convertTools(tools) {
         }
       : tool,
   );
+}
+
+function isAgentHandoffTurn(messages) {
+  return (Array.isArray(messages) ? messages : [messages]).some((message) => {
+    if (message?.role !== "user") return false;
+    const content =
+      typeof message.content === "string"
+        ? message.content
+        : Array.isArray(message.content)
+          ? message.content
+              .filter((part) => part?.type === "text")
+              .map((part) => part.text || "")
+              .join("\n")
+          : "";
+    return /^\[agent\]\s+A message just arrived from another of your user's agents:/m.test(
+      content,
+    );
+  });
 }
 
 function resolveLocalJsonSchemaReference(root, reference) {
@@ -1255,6 +1286,11 @@ class CLIProxyExecutor {
       !nameAssignmentStep &&
       !roleOrientationStep &&
       isGroupChatTurn(this.messages);
+    const agentHandoffContext =
+      !nameAssignmentStep &&
+      !roleOrientationStep &&
+      !groupChatContext &&
+      isAgentHandoffTurn(this.messages);
     const groupChatStep =
       groupChatContext &&
       roleOrientationCanUseSendMessage(baseOpenAITools, options.toolChoice);
@@ -1295,6 +1331,13 @@ class CLIProxyExecutor {
           : null;
     if (responseModeInstruction) {
       messages.splice(stepInstructionIndex, 0, responseModeInstruction);
+      stepInstructionIndex += 1;
+    }
+    if (agentHandoffContext) {
+      messages.splice(stepInstructionIndex, 0, {
+        role: "system",
+        content: ACTIVE_AGENT_HANDOFF_INSTRUCTION,
+      });
       stepInstructionIndex += 1;
     }
     if (nameAssignmentStep) {
@@ -1346,6 +1389,7 @@ class CLIProxyExecutor {
       nameAssignmentStep,
       roleOrientationStep,
       groupChatContext,
+      agentHandoffContext,
       groupChatStep,
       postGroupMessageStep,
       computerToolCompatibility: computerGuidance != null,
@@ -1689,6 +1733,7 @@ module.exports = {
   computerToolUseMessage,
   constrainGroupChatTools,
   constrainRoleOrientationTools,
+  isAgentHandoffTurn,
   isGroupChatTurn,
   isRoleOrientationTurn,
   normalizeComputerToolCallArgs,
