@@ -247,9 +247,28 @@ async function main() {
       slider.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "End" }));
       await waitForPowerState(
         () => label.textContent === ${JSON.stringify(expectedLabel)}
+          && document.querySelector(".codex-power-control")?.classList.contains("is-ultra"),
+        "Keyboard End did not restore the steady Ultra state.",
+      );
+      if (document.querySelector(".codex-power-control")?.classList.contains("is-ultra-entering")
+        || document.querySelector(".codex-power-warning")?.hidden === false) {
+        throw new Error("Keyboard Ultra must remain steady.");
+      }
+      slider.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Home" }));
+      await waitForPowerState(
+        () => label.textContent !== ${JSON.stringify(expectedLabel)}
+          && !document.querySelector(".codex-power-control")?.classList.contains("is-ultra"),
+        "Ultra pointer evidence did not reset below the endpoint.",
+      );
+      slider.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      slider.value = slider.max;
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+      slider.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await waitForPowerState(
+        () => label.textContent === ${JSON.stringify(expectedLabel)}
           && document.querySelector(".codex-power-control")?.classList.contains("is-ultra-entering")
           && document.querySelector(".codex-power-warning")?.hidden === false,
-        "Ultra entry evidence did not originate from a user transition.",
+        "Ultra entry evidence did not originate from a pointer drag.",
       );
     }
     if (phase === "advanced") document.querySelector(".codex-power-advanced-toggle")?.click();
