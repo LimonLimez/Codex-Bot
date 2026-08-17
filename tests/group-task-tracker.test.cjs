@@ -72,3 +72,13 @@ test("group task tracker rejects unsafe identifiers and stale task updates", () 
   assert.equal(tracker.clear("group-02"), true);
   assert.equal(tracker.latestTask("group-02"), null);
 });
+
+test("group task UI refreshes member progress without replacing an active task", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "src", "renderer", "codex-ui.js"),
+    "utf8",
+  );
+  assert.match(source, /const taskSignature = JSON\.stringify\(/);
+  assert.match(source, /codexTaskSignature === taskSignature/);
+  assert.match(source, /task\.state === "complete"/);
+});

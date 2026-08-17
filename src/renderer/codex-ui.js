@@ -2667,11 +2667,17 @@ function renderGroupTaskTracker(form, task) {
     `:scope > [data-codex-group-task-tracker][data-codex-group-id="${CSS.escape(groupId)}"]`,
   );
   const taskKey = String(task.id || "");
-  if (
-    tracker?.dataset.codexTaskKey === taskKey &&
-    tracker.dataset.state === task.state
-  )
-    return;
+  const taskSignature = JSON.stringify({
+    id: taskKey,
+    state: String(task.state || "active"),
+    updatedAt: String(task.updatedAt || ""),
+    members: (task.members || []).map((member) => [
+      member.id,
+      member.status,
+      member.updatedAt || "",
+    ]),
+  });
+  if (tracker?.dataset.codexTaskSignature === taskSignature) return;
   if (!tracker) {
     host
       .querySelectorAll(":scope > [data-codex-group-task-tracker]")
@@ -2683,6 +2689,7 @@ function renderGroupTaskTracker(form, task) {
     host.insertBefore(tracker, form.parentElement);
   }
   tracker.dataset.codexTaskKey = taskKey;
+  tracker.dataset.codexTaskSignature = taskSignature;
   tracker.dataset.state = String(task.state || "active");
   const titleId = `codex-group-task-${crypto.randomUUID()}`;
   const members = (task.members || [])
@@ -2703,7 +2710,11 @@ function renderGroupTaskTracker(form, task) {
       </div>
       <div class="codex-group-task-actions">
         <span data-codex-group-task-state>${escapeHtml(groupTaskSummary(task))}</span>
-        <button type="button" data-codex-clear-group-task aria-label="Clear completed group task">Clear</button>
+        ${
+          task.state === "complete"
+            ? '<button type="button" data-codex-clear-group-task aria-label="Clear completed group task">Clear</button>'
+            : ""
+        }
       </div>
     </header>
     <p>${escapeHtml(task.summary || "Working on the latest group request")}</p>
