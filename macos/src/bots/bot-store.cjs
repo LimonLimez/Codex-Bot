@@ -5,10 +5,16 @@ const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 
+// Bot records remain schema v3. Only the enclosing durable Store advances to
+// v4 so renderer/controller consumers keep the existing public bot contract.
 const SCHEMA_VERSION = 3;
+const STORE_SCHEMA_VERSION = 4;
 const LEGACY_SCHEMA_VERSION = 1;
 const PREVIOUS_SCHEMA_VERSION = 2;
 const MAX_BOTS = 4096;
+const MAX_PENDING_DELETIONS = MAX_BOTS;
+const MAX_CLEANUP_IDS = MAX_BOTS * 3;
+const MAX_DELETED_LEGACY_IMPORTS = 65_536;
 const MAX_CONVERSATIONS = 2048;
 const MAX_NAME_LENGTH = 160;
 const MAX_TITLE_LENGTH = 160;
@@ -53,9 +59,27 @@ const BOT_FIELDS = new Set([
 ]);
 const PREVIOUS_BOT_FIELDS = new Set([...BOT_FIELDS].filter((field) => field !== "setupStage"));
 const LEGACY_BOT_FIELDS = new Set([...PREVIOUS_BOT_FIELDS].filter((field) => field !== "computer"));
-const STORE_FIELDS = new Set(["schemaVersion", "bots", "legacyImports"]);
+const PREVIOUS_STORE_FIELDS = new Set(["schemaVersion", "bots", "legacyImports"]);
+const STORE_FIELDS = new Set([
+  "schemaVersion",
+  "bots",
+  "legacyImports",
+  "deletedLegacyImports",
+  "pendingDeletions",
+]);
 const LEGACY_FIELDS = new Set(["migrationKey", "name", "appearance", "notifications", "conversations"]);
 const LEGACY_IMPORT_FIELDS = new Set(["botId", "fingerprint"]);
+const DELETED_LEGACY_IMPORT_FIELDS = new Set(["fingerprint"]);
+const PENDING_DELETION_FIELDS = new Set([
+  "deletionId",
+  "createdAt",
+  "botIds",
+  "remoteRuntimes",
+  "localProfiles",
+]);
+const REMOTE_CLEANUP_FIELDS = new Set(["botId", "runtimeId"]);
+const LOCAL_CLEANUP_FIELDS = new Set(["botId", "profileId"]);
+const DELETE_OPTIONS_FIELDS = new Set(["preferredActiveBotId", "extraRemoteRuntimes"]);
 const RUNTIME_STATES = new Set([
   "unprovisioned",
   "provisioning",
@@ -482,25 +506,27 @@ function normalizeBotRecord(value) {
 
 function migrateStore(value) {
   const store = assertPlainObject(value, "Store");
-  assertExactKeys(store, STORE_FIELDS, "Store");
+  assertExactKeys(store, PREVIOUS_STORE_FIELDS, "Store");
   if (store.schemaVersion !== LEGACY_SCHEMA_VERSION
-    && store.schemaVersion !== PREVIOUS_SCHEMA_VERSION) {
+    && store.schemaVersion !== PREVIOUS_SCHEMA_VERSION
+    && store.schemaVersion !== SCHEMA_VERSION) {
     throw new Error("Unsupported bot store schema version.");
   }
   if (!Array.isArray(store.bots) || store.bots.length > MAX_BOTS) {
     throw new Error("Bot store bots are invalid or oversized.");
   }
   return {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion: STORE_SCHEMA_VERSION,
     bots: store.bots.map((rawBot) => {
       const bot = assertPlainObject(rawBot, "Bot");
       const expectedFields = store.schemaVersion === LEGACY_SCHEMA_VERSION
         ? LEGACY_BOT_FIELDS
-        : PREVIOUS_BOT_FIELDS;
+        : (store.schemaVersion === PREVIOUS_SCHEMA_VERSION ? PREVIOUS_BOT_FIELDS : BOT_FIELDS);
       assertExactKeys(bot, expectedFields, "Bot");
       if (bot.schemaVersion !== store.schemaVersion) {
         throw new Error("Bot schema version is unsupported.");
       }
+      if (store.schemaVersion === SCHEMA_VERSION) return bot;
       return {
         ...bot,
         schemaVersion: SCHEMA_VERSION,
@@ -511,12 +537,15 @@ function migrateStore(value) {
       };
     }),
     legacyImports: store.legacyImports,
+    deletedLegacyImports: Object.create(null),
+    pendingDeletions: [],
   };
 }
 
 function normalizeLoadedStore(value) {
   if (value?.schemaVersion === LEGACY_SCHEMA_VERSION
-    || value?.schemaVersion === PREVIOUS_SCHEMA_VERSION) {
+    || value?.schemaVersion === PREVIOUS_SCHEMA_VERSION
+    || value?.schemaVersion === SCHEMA_VERSION) {
     return normalizeStore(migrateStore(value));
   }
   return normalizeStore(value);
@@ -530,10 +559,81 @@ function normalizeMigrationKey(value) {
   return value;
 }
 
+function normalizeDeletionId(value) {
+  if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
+    throw new Error("Deletion ID is invalid.");
+  }
+  return value.toLowerCase();
+}
+
+function normalizeLocalProfileId(value) {
+  const normalized = normalizeIdentifier(value, "Local profile ID");
+  if (!/^local-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(normalized)) {
+    throw new Error("Local profile ID is invalid.");
+  }
+  return normalized.toLowerCase();
+}
+
+function normalizePendingDeletion(value) {
+  const deletion = assertPlainObject(value, "Pending deletion");
+  assertExactKeys(deletion, PENDING_DELETION_FIELDS, "Pending deletion");
+  if (!Array.isArray(deletion.botIds) || deletion.botIds.length === 0
+    || deletion.botIds.length > MAX_BOTS) {
+    throw new Error("Pending deletion bot IDs are invalid or oversized.");
+  }
+  const botIds = deletion.botIds.map(normalizeBotId);
+  if (new Set(botIds).size !== botIds.length) {
+    throw new Error("Pending deletion contains duplicate bot IDs.");
+  }
+  const members = new Set(botIds);
+
+  if (!Array.isArray(deletion.remoteRuntimes)
+    || deletion.remoteRuntimes.length > MAX_CLEANUP_IDS) {
+    throw new Error("Pending deletion remote runtimes are invalid or oversized.");
+  }
+  const remoteRuntimes = [];
+  const runtimeIds = new Set();
+  for (const rawEntry of deletion.remoteRuntimes) {
+    const entry = assertPlainObject(rawEntry, "Remote cleanup");
+    assertExactKeys(entry, REMOTE_CLEANUP_FIELDS, "Remote cleanup");
+    const botId = normalizeBotId(entry.botId);
+    if (!members.has(botId)) throw new Error("Remote cleanup references a bot outside its deletion.");
+    const runtimeId = normalizeIdentifier(entry.runtimeId, "Remote runtime ID");
+    if (runtimeIds.has(runtimeId)) throw new Error("Pending deletion contains a duplicate remote runtime ID.");
+    runtimeIds.add(runtimeId);
+    remoteRuntimes.push({ botId, runtimeId });
+  }
+
+  if (!Array.isArray(deletion.localProfiles)
+    || deletion.localProfiles.length > deletion.botIds.length) {
+    throw new Error("Pending deletion local profiles are invalid or oversized.");
+  }
+  const localProfiles = [];
+  const profileIds = new Set();
+  for (const rawEntry of deletion.localProfiles) {
+    const entry = assertPlainObject(rawEntry, "Local cleanup");
+    assertExactKeys(entry, LOCAL_CLEANUP_FIELDS, "Local cleanup");
+    const botId = normalizeBotId(entry.botId);
+    if (!members.has(botId)) throw new Error("Local cleanup references a bot outside its deletion.");
+    const profileId = normalizeLocalProfileId(entry.profileId);
+    if (profileIds.has(profileId)) throw new Error("Pending deletion contains a duplicate local profile ID.");
+    profileIds.add(profileId);
+    localProfiles.push({ botId, profileId });
+  }
+
+  return {
+    deletionId: normalizeDeletionId(deletion.deletionId),
+    createdAt: normalizeTimestamp(deletion.createdAt, "Pending deletion createdAt"),
+    botIds,
+    remoteRuntimes,
+    localProfiles,
+  };
+}
+
 function normalizeStore(value) {
   const store = assertPlainObject(value, "Store");
   assertExactKeys(store, STORE_FIELDS, "Store");
-  if (store.schemaVersion !== SCHEMA_VERSION) throw new Error("Unsupported bot store schema version.");
+  if (store.schemaVersion !== STORE_SCHEMA_VERSION) throw new Error("Unsupported bot store schema version.");
   if (!Array.isArray(store.bots) || store.bots.length > MAX_BOTS) throw new Error("Bot store bots are invalid or oversized.");
   const bots = store.bots.map(normalizeBotRecord);
   const botIds = new Set();
@@ -580,11 +680,87 @@ function normalizeStore(value) {
     importedBots.add(botId);
     legacyImports[migrationKey] = { botId, fingerprint: entry.fingerprint };
   }
-  return { schemaVersion: SCHEMA_VERSION, bots, legacyImports };
+  const deletedImports = assertPlainObject(store.deletedLegacyImports, "Deleted legacy imports");
+  const deletedLegacyImports = Object.create(null);
+  const deletedImportEntries = Object.entries(deletedImports);
+  if (deletedImportEntries.length > MAX_DELETED_LEGACY_IMPORTS) {
+    throw new Error("Deleted legacy imports are oversized.");
+  }
+  for (const [migrationKey, rawEntry] of deletedImportEntries) {
+    normalizeMigrationKey(migrationKey);
+    if (hasOwn(legacyImports, migrationKey)) {
+      throw new Error("A legacy import cannot be both active and deleted.");
+    }
+    const entry = assertPlainObject(rawEntry, "Deleted legacy import");
+    assertExactKeys(entry, DELETED_LEGACY_IMPORT_FIELDS, "Deleted legacy import");
+    if (typeof entry.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(entry.fingerprint)) {
+      throw new Error("Deleted legacy import fingerprint is invalid.");
+    }
+    deletedLegacyImports[migrationKey] = { fingerprint: entry.fingerprint };
+  }
+
+  if (!Array.isArray(store.pendingDeletions)
+    || store.pendingDeletions.length > MAX_PENDING_DELETIONS) {
+    throw new Error("Pending deletions are invalid or oversized.");
+  }
+  const pendingDeletions = [];
+  const deletionIds = new Set();
+  const deletedBotIds = new Set();
+  const pendingRuntimeIds = new Set();
+  const pendingProfileIds = new Set();
+  let cleanupIdCount = 0;
+  for (const rawDeletion of store.pendingDeletions) {
+    const deletion = normalizePendingDeletion(rawDeletion);
+    if (deletionIds.has(deletion.deletionId)) {
+      throw new Error("Bot store contains duplicate deletion IDs.");
+    }
+    deletionIds.add(deletion.deletionId);
+    for (const botId of deletion.botIds) {
+      if (botIds.has(botId)) throw new Error("A pending deletion still references a visible bot.");
+      if (deletedBotIds.has(botId)) throw new Error("A bot cannot belong to multiple pending deletions.");
+      deletedBotIds.add(botId);
+    }
+    for (const entry of deletion.remoteRuntimes) {
+      if (runtimeOwners.has(entry.runtimeId)) {
+        throw new Error("A pending deletion runtime is owned by a visible bot.");
+      }
+      if (pendingRuntimeIds.has(entry.runtimeId)) {
+        throw new Error("A remote runtime cannot belong to multiple pending deletions.");
+      }
+      pendingRuntimeIds.add(entry.runtimeId);
+    }
+    for (const entry of deletion.localProfiles) {
+      if (localProfileOwners.has(entry.profileId)) {
+        throw new Error("A pending deletion local profile is owned by a visible bot.");
+      }
+      if (pendingProfileIds.has(entry.profileId)) {
+        throw new Error("A local profile cannot belong to multiple pending deletions.");
+      }
+      pendingProfileIds.add(entry.profileId);
+    }
+    cleanupIdCount += deletion.botIds.length
+      + deletion.remoteRuntimes.length
+      + deletion.localProfiles.length;
+    if (cleanupIdCount > MAX_CLEANUP_IDS) throw new Error("Pending deletion cleanup IDs are oversized.");
+    pendingDeletions.push(deletion);
+  }
+  return {
+    schemaVersion: STORE_SCHEMA_VERSION,
+    bots,
+    legacyImports,
+    deletedLegacyImports,
+    pendingDeletions,
+  };
 }
 
 function emptyStore() {
-  return { schemaVersion: SCHEMA_VERSION, bots: [], legacyImports: Object.create(null) };
+  return {
+    schemaVersion: STORE_SCHEMA_VERSION,
+    bots: [],
+    legacyImports: Object.create(null),
+    deletedLegacyImports: Object.create(null),
+    pendingDeletions: [],
+  };
 }
 
 function legacyFingerprint(record) {
@@ -631,6 +807,167 @@ function safeUUID(makeUUID) {
   const value = makeUUID();
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) throw new Error("Generated UUID is invalid.");
   return value.toLowerCase();
+}
+
+function unsafeDeletionInspectionError() {
+  return new TypeError("Bot deletion request could not be inspected safely.");
+}
+
+function inspectDeletionRecord(value, allowed, label, { exact = false } = {}) {
+  let array;
+  try {
+    array = Array.isArray(value);
+  } catch {
+    throw unsafeDeletionInspectionError();
+  }
+  if (!value || typeof value !== "object" || array) {
+    throw new TypeError(`${label} must be a plain object.`);
+  }
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw unsafeDeletionInspectionError();
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${label} must be a plain object.`);
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new TypeError(`${label} cannot contain symbol fields.`);
+  }
+  for (const key of keys) {
+    if (DANGEROUS_KEYS.has(key)) throw new TypeError(`${label} contains a forbidden prototype field.`);
+    if (!allowed.has(key)) {
+      throw new Error(`${label} contains an unsupported ${label.toLowerCase()} field: ${key}.`);
+    }
+  }
+  if (exact) {
+    for (const key of allowed) {
+      if (!hasOwn(descriptors, key)) throw new Error(`${label} is missing ${key}.`);
+    }
+  }
+  const inspected = {};
+  for (const key of keys) {
+    const descriptor = descriptors[key];
+    if (!("value" in descriptor)) {
+      throw new TypeError(`${label} ${key} must be plain data, not an accessor.`);
+    }
+    inspected[key] = descriptor.value;
+  }
+  return inspected;
+}
+
+function inspectDeletionArray(value, label, maximum, { nonEmpty = false } = {}) {
+  let array;
+  let prototype;
+  let lengthDescriptor;
+  try {
+    array = Array.isArray(value);
+    if (array) {
+      prototype = Object.getPrototypeOf(value);
+      lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    }
+  } catch {
+    throw unsafeDeletionInspectionError();
+  }
+  if (!array || prototype !== Array.prototype || !lengthDescriptor || !("value" in lengthDescriptor)) {
+    throw new TypeError(`${label} must be a dense plain array.`);
+  }
+  const length = lengthDescriptor.value;
+  if (!Number.isSafeInteger(length) || length < 0 || length > maximum || (nonEmpty && length === 0)) {
+    throw new Error(`${label} are invalid or oversized.`);
+  }
+
+  let descriptors;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw unsafeDeletionInspectionError();
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new TypeError(`${label} cannot contain symbol fields.`);
+  }
+  const elementKeys = keys.filter((key) => key !== "length");
+  if (elementKeys.length !== length
+    || elementKeys.some((key, index) => key !== String(index))) {
+    throw new TypeError(`${label} must be a dense plain array.`);
+  }
+  const inspected = [];
+  for (const key of elementKeys) {
+    const descriptor = descriptors[key];
+    if (!("value" in descriptor)) {
+      throw new TypeError(`${label} ${key} must be plain data, not an accessor.`);
+    }
+    inspected.push(descriptor.value);
+  }
+  return inspected;
+}
+
+function normalizeDeleteRequest(value, options = undefined) {
+  const botIds = inspectDeletionArray(value, "Bot deletion IDs", MAX_BOTS, { nonEmpty: true });
+  const normalizedBotIds = botIds.map(normalizeBotId);
+  if (new Set(normalizedBotIds).size !== normalizedBotIds.length) {
+    throw new Error("Bot deletion IDs must be unique.");
+  }
+  const normalizedOptions = options === undefined
+    ? {}
+    : inspectDeletionRecord(options, DELETE_OPTIONS_FIELDS, "Bot deletion options");
+  const preferredActiveBotId = hasOwn(normalizedOptions, "preferredActiveBotId")
+    && normalizedOptions.preferredActiveBotId !== null
+    ? normalizeBotId(normalizedOptions.preferredActiveBotId)
+    : null;
+  const rawExtraRuntimes = inspectDeletionArray(
+    hasOwn(normalizedOptions, "extraRemoteRuntimes")
+      ? normalizedOptions.extraRemoteRuntimes
+      : [],
+    "Extra remote runtimes",
+    MAX_CLEANUP_IDS,
+  );
+  const members = new Set(normalizedBotIds);
+  const runtimeIds = new Set();
+  const extraRemoteRuntimes = rawExtraRuntimes.map((rawEntry) => {
+    const entry = inspectDeletionRecord(
+      rawEntry,
+      REMOTE_CLEANUP_FIELDS,
+      "Extra remote runtime",
+      { exact: true },
+    );
+    const botId = normalizeBotId(entry.botId);
+    if (!members.has(botId)) throw new Error("Extra remote runtime references a bot outside the deletion.");
+    const runtimeId = normalizeIdentifier(entry.runtimeId, "Remote runtime ID");
+    if (runtimeIds.has(runtimeId)) throw new Error("Extra remote runtime IDs must be unique.");
+    runtimeIds.add(runtimeId);
+    return { botId, runtimeId };
+  });
+  return { botIds: normalizedBotIds, preferredActiveBotId, extraRemoteRuntimes };
+}
+
+function sameBotIdSet(first, second) {
+  if (first.length !== second.length) return false;
+  const expected = new Set(first);
+  return second.every((botId) => expected.has(botId));
+}
+
+function deletionOutcome(deletion, bots, preferredActiveBotId) {
+  const survivingBotIds = bots.map((bot) => bot.botId);
+  const activeBotId = preferredActiveBotId && survivingBotIds.includes(preferredActiveBotId)
+    ? preferredActiveBotId
+    : (survivingBotIds[0] || null);
+  return publicSnapshot({
+    deletionId: deletion.deletionId,
+    deletedBotIds: deletion.botIds,
+    survivingBotIds,
+    activeBotId,
+    cleanup: {
+      botIds: deletion.botIds,
+      remoteRuntimes: deletion.remoteRuntimes,
+      localProfiles: deletion.localProfiles,
+    },
+  });
 }
 
 function isUnsupportedSyncError(error) {
@@ -687,6 +1024,12 @@ function recordRuntimeCommits(filePath, current, committed) {
     PATH_RUNTIME_REVISIONS.set(filePath, pathRevisions);
   }
   const previousBots = new Map(current.bots.map((bot) => [bot.botId, bot]));
+  const committedBotIds = new Set(committed.bots.map((bot) => bot.botId));
+  for (const botId of previousBots.keys()) {
+    if (!committedBotIds.has(botId)) {
+      pathRevisions.set(botId, (pathRevisions.get(botId) || 0) + 1);
+    }
+  }
   const receipts = new Map();
   for (const bot of committed.bots) {
     if (sameRuntime(previousBots.get(bot.botId)?.runtime, bot.runtime)) continue;
@@ -794,6 +1137,131 @@ class BotStore {
     }));
   }
 
+  async listPendingDeletions() {
+    return this.#enqueue(() => this.#withPathLock(async () => {
+      const state = await this.#readFile();
+      return publicSnapshot(state.pendingDeletions);
+    }));
+  }
+
+  async deleteBots(botIds, options = undefined) {
+    const request = normalizeDeleteRequest(botIds, options);
+    return this.#enqueue(() => this.#withPathLock(async () => {
+      const current = await this.#readFile();
+      if (request.preferredActiveBotId
+        && !request.botIds.includes(request.preferredActiveBotId)
+        && !current.bots.some((bot) => bot.botId === request.preferredActiveBotId)) {
+        throw new Error("Preferred active bot was not found.");
+      }
+      const retry = current.pendingDeletions.find((deletion) => (
+        sameBotIdSet(deletion.botIds, request.botIds)
+      ));
+      if (retry) {
+        const cleanupMatches = request.extraRemoteRuntimes.every((requested) => (
+          retry.remoteRuntimes.some((retained) => (
+            retained.botId === requested.botId && retained.runtimeId === requested.runtimeId
+          ))
+        ));
+        if (!cleanupMatches) {
+          throw new Error("Bot deletion retry cleanup does not match the pending deletion.");
+        }
+        return deletionOutcome(retry, current.bots, request.preferredActiveBotId);
+      }
+
+      const deleted = request.botIds.map((botId) => this.#requiredBot(current, botId));
+      const remoteRuntimes = [];
+      const runtimeOwners = new Map();
+      for (const bot of deleted) {
+        if (!bot.runtime.remoteRuntimeId) continue;
+        runtimeOwners.set(bot.runtime.remoteRuntimeId, bot.botId);
+        remoteRuntimes.push({ botId: bot.botId, runtimeId: bot.runtime.remoteRuntimeId });
+      }
+      for (const entry of request.extraRemoteRuntimes) {
+        const owner = runtimeOwners.get(entry.runtimeId);
+        if (owner && owner !== entry.botId) {
+          throw new Error("Remote runtime cleanup ownership conflicts with the stored bot.");
+        }
+        if (owner) continue;
+        runtimeOwners.set(entry.runtimeId, entry.botId);
+        remoteRuntimes.push(entry);
+      }
+      const localProfiles = deleted
+        .filter((bot) => bot.computer.localProfileId)
+        .map((bot) => ({ botId: bot.botId, profileId: bot.computer.localProfileId }));
+      const deletion = {
+        deletionId: safeUUID(this.#randomUUID),
+        createdAt: safeNow(this.#now),
+        botIds: [...request.botIds],
+        remoteRuntimes,
+        localProfiles,
+      };
+      const deletedIds = new Set(request.botIds);
+      const next = cloneData(current);
+      next.bots = next.bots.filter((bot) => !deletedIds.has(bot.botId));
+      for (const [migrationKey, entry] of Object.entries(next.legacyImports)) {
+        if (!deletedIds.has(entry.botId)) continue;
+        next.deletedLegacyImports[migrationKey] = { fingerprint: entry.fingerprint };
+        delete next.legacyImports[migrationKey];
+      }
+      next.pendingDeletions.push(deletion);
+      const validated = normalizeStore(next);
+      const committedDeletion = validated.pendingDeletions.find((entry) => (
+        entry.deletionId === deletion.deletionId
+      ));
+      try {
+        await this.#commitState(current, validated);
+      } catch (error) {
+        if (error?.committed !== true) throw error;
+        try {
+          const reloaded = await this.#readFile();
+          const durableDeletion = reloaded.pendingDeletions.find((entry) => (
+            entry.deletionId === deletion.deletionId
+          ));
+          const allAbsent = request.botIds.every((botId) => (
+            !reloaded.bots.some((bot) => bot.botId === botId)
+          ));
+          if (durableDeletion && allAbsent
+            && JSON.stringify(durableDeletion) === JSON.stringify(committedDeletion)) {
+            return deletionOutcome(durableDeletion, reloaded.bots, request.preferredActiveBotId);
+          }
+        } catch {
+          // Preserve the committed-uncertain error unless the exact durable receipt is readable.
+        }
+        throw error;
+      }
+      return deletionOutcome(committedDeletion, validated.bots, request.preferredActiveBotId);
+    }));
+  }
+
+  async completeDeletion(deletionId) {
+    const normalizedDeletionId = normalizeDeletionId(deletionId);
+    return this.#enqueue(() => this.#withPathLock(async () => {
+      const current = await this.#readFile();
+      const index = current.pendingDeletions.findIndex((entry) => (
+        entry.deletionId === normalizedDeletionId
+      ));
+      if (index < 0) return false;
+      const next = cloneData(current);
+      next.pendingDeletions.splice(index, 1);
+      const validated = normalizeStore(next);
+      try {
+        await this.#commitState(current, validated);
+      } catch (error) {
+        if (error?.committed !== true) throw error;
+        try {
+          const reloaded = await this.#readFile();
+          if (!reloaded.pendingDeletions.some((entry) => (
+            entry.deletionId === normalizedDeletionId
+          ))) return true;
+        } catch {
+          // Preserve the committed-uncertain error unless exact completion is readable.
+        }
+        throw error;
+      }
+      return true;
+    }));
+  }
+
   async create(input = undefined) {
     const { appearance, notifications } = normalizeCreateInput(input);
 
@@ -828,6 +1296,13 @@ class BotStore {
     const fingerprint = legacyFingerprint(canonical);
 
     return this.#mutate((next) => {
+      if (hasOwn(next.deletedLegacyImports, legacy.migrationKey)) {
+        const deletedImport = next.deletedLegacyImports[legacy.migrationKey];
+        if (deletedImport.fingerprint !== fingerprint) {
+          throw new Error("Conflicting previously deleted legacy import rejected.");
+        }
+        throw new Error("Legacy import was previously deleted.");
+      }
       const hasExistingImport = hasOwn(next.legacyImports, legacy.migrationKey);
       if (hasExistingImport) {
         const existingImport = next.legacyImports[legacy.migrationKey];

@@ -87,7 +87,22 @@ function expectedBot(overrides = {}) {
   };
 }
 
-function validStoreDocument(bots = [], legacyImports = {}) {
+function validStoreDocument(
+  bots = [],
+  legacyImports = {},
+  deletedLegacyImports = {},
+  pendingDeletions = [],
+) {
+  return {
+    schemaVersion: 4,
+    bots,
+    legacyImports,
+    deletedLegacyImports,
+    pendingDeletions,
+  };
+}
+
+function validV3StoreDocument(bots = [], legacyImports = {}) {
   return { schemaVersion: 3, bots, legacyImports };
 }
 
@@ -187,7 +202,7 @@ test("schema v1 migrates to an explicit not-now Computer target", async (t) => {
   const renamed = await store.rename(bot.botId, "Migrated Bot");
   const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
   assert.equal(renamed.name, "Migrated Bot");
-  assert.equal(persisted.schemaVersion, 3);
+  assert.equal(persisted.schemaVersion, 4);
   assert.deepEqual(persisted.bots[0].computer, expectedComputer());
   assert.equal(persisted.bots[0].setupStage, "complete");
 });
@@ -1179,7 +1194,13 @@ test("failed atomic rename preserves the destination and cleans only its owned t
 test("load rejects malformed versions, keys, timestamps, states, and polluted records", async (t) => {
   const { filePath } = await temporaryStore(t);
   const cases = [
-    ["unsupported version", { schemaVersion: 4, bots: [], legacyImports: {} }, /schema version/i],
+    ["unsupported version", {
+      schemaVersion: 5,
+      bots: [],
+      legacyImports: {},
+      deletedLegacyImports: {},
+      pendingDeletions: [],
+    }, /schema version/i],
     ["unknown root key", { schemaVersion: 1, bots: [], legacyImports: {}, endpoint: "wss://private" }, /unsupported store field/i],
     ["duplicate bot ID", validStoreDocument([expectedBot(), expectedBot()]), /duplicate bot IDs/i],
     ["invalid timestamp", validStoreDocument([expectedBot({ updatedAt: "today" })]), /timestamp/i],
@@ -1470,4 +1491,461 @@ test("rejects hostile non-plain inputs and unknown bot reads", async (t) => {
   await assert.rejects(store.read("bot-missing"), /bot ID/i);
   await assert.rejects(store.rename(`bot-${BOT_C_UUID}`, "Missing"), /not found/i);
   assert.equal({}.polluted, undefined);
+});
+
+test("deleteBots atomically removes an exact batch and records a durable cleanup receipt", async (t) => {
+  const { filePath, store } = await temporaryStore(t, {
+    uuids: [
+      BOT_A_UUID, TEMP_A_UUID,
+      BOT_B_UUID, TEMP_B_UUID,
+      BOT_C_UUID, TEMP_C_UUID,
+      TEMP_A_UUID, TEMP_B_UUID,
+    ],
+  });
+  const first = await store.create();
+  const second = await store.create();
+  const survivor = await store.create();
+
+  const result = await store.deleteBots([first.botId, second.botId], {
+    preferredActiveBotId: first.botId,
+  });
+
+  assert.deepEqual(result, {
+    deletionId: TEMP_A_UUID,
+    deletedBotIds: [first.botId, second.botId],
+    survivingBotIds: [survivor.botId],
+    activeBotId: survivor.botId,
+    cleanup: {
+      botIds: [first.botId, second.botId],
+      remoteRuntimes: [],
+      localProfiles: [],
+    },
+  });
+  assert.deepEqual(await store.list(), [survivor]);
+  assert.deepEqual(await store.listPendingDeletions(), [{
+    deletionId: TEMP_A_UUID,
+    createdAt: NOW,
+    botIds: [first.botId, second.botId],
+    remoteRuntimes: [],
+    localProfiles: [],
+  }]);
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.equal(persisted.schemaVersion, 4);
+  assert.deepEqual(persisted.bots, [survivor]);
+});
+
+test("deleting an adopted bot permanently suppresses its exact legacy import", async (t) => {
+  const { filePath, store } = await temporaryStore(t, {
+    uuids: [BOT_A_UUID, TEMP_A_UUID, TEMP_B_UUID, TEMP_C_UUID, TEMP_A_UUID],
+  });
+  const legacy = {
+    migrationKey: "appearance:deleted-bot",
+    name: "Imported Bot",
+    appearance: { shape: "gem", color: "blue" },
+    notifications: true,
+    conversations: [],
+  };
+  const adopted = await store.adoptLegacy(legacy);
+  const deletion = await store.deleteBots([adopted.botId]);
+  assert.equal(await store.completeDeletion(deletion.deletionId), true);
+  assert.equal(await store.completeDeletion(deletion.deletionId), false);
+  assert.deepEqual(await store.listPendingDeletions(), []);
+
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.deepEqual(persisted.legacyImports, {});
+  assert.deepEqual(Object.keys(persisted.deletedLegacyImports), ["appearance:deleted-bot"]);
+  assert.deepEqual(Object.keys(persisted.deletedLegacyImports["appearance:deleted-bot"]), ["fingerprint"]);
+  assert.match(
+    persisted.deletedLegacyImports["appearance:deleted-bot"].fingerprint,
+    /^[0-9a-f]{64}$/,
+  );
+
+  const restarted = new BotStore({ filePath, now: () => NOW });
+  await assert.rejects(restarted.adoptLegacy(legacy), /previously deleted/i);
+  assert.deepEqual(await restarted.list(), []);
+});
+
+test("deleting a bot fences every older runtime commit receipt", async (t) => {
+  const { store } = await temporaryStore(t, {
+    uuids: [
+      BOT_A_UUID, TEMP_A_UUID,
+      TEMP_B_UUID,
+      TEMP_C_UUID, TEMP_A_UUID,
+      TEMP_B_UUID,
+      BOT_A_UUID, TEMP_C_UUID,
+      TEMP_A_UUID,
+    ],
+  });
+  const created = await store.create();
+  const committed = await store.runtimeTransaction(created.botId, {}, ({ updateRuntime }) => {
+    updateRuntime({
+      provider: "openai",
+      remoteRuntimeId: "runtime-deleted",
+      state: "ready",
+      lastConfirmedAt: NOW,
+    });
+  });
+  assert.equal(store.isCurrentRuntimeCommit(committed, created.botId), true);
+
+  const deletion = await store.deleteBots([created.botId]);
+  assert.equal(store.isCurrentRuntimeCommit(committed, created.botId), false);
+
+  await store.completeDeletion(deletion.deletionId);
+  const replacement = await store.create();
+  assert.equal(replacement.botId, created.botId);
+  await store.runtimeTransaction(replacement.botId, {}, ({ updateRuntime }) => {
+    updateRuntime({
+      state: "provisioning",
+      lastErrorCode: "RUNTIME_OPERATION.replacement",
+    });
+  });
+  assert.equal(store.isCurrentRuntimeCommit(committed, created.botId), false);
+});
+
+test("schema v3 root migrates exactly to v4 without changing the public bot schema", async (t) => {
+  const { filePath, store } = await temporaryStore(t, { uuids: [TEMP_A_UUID] });
+  const bot = expectedBot({ setupStage: "complete" });
+  await writeDocument(filePath, validV3StoreDocument([bot], {
+    "appearance:v3-import": { botId: bot.botId, fingerprint: "a".repeat(64) },
+  }));
+
+  assert.deepEqual(await store.load(), [bot]);
+  assert.equal((JSON.parse(await fs.readFile(filePath, "utf8"))).schemaVersion, 3);
+  const renamed = await store.rename(bot.botId, "Migrated v3 Bot");
+  assert.equal(renamed.schemaVersion, 3);
+
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.equal(persisted.schemaVersion, 4);
+  assert.equal(persisted.bots[0].schemaVersion, 3);
+  assert.deepEqual(persisted.deletedLegacyImports, {});
+  assert.deepEqual(persisted.pendingDeletions, []);
+});
+
+test("delete tombstones retain only bounded cleanup identifiers", async (t) => {
+  const { filePath } = await temporaryStore(t);
+  const localProfileId = "local-11111111-1111-4111-8111-111111111111";
+  const first = expectedBot({
+    name: "Private Display Name",
+    appearance: { image: "https://images.example.test/private-avatar.png" },
+    runtime: {
+      provider: "openai",
+      remoteRuntimeId: "runtime-stored",
+      state: "ready",
+      lastConfirmedAt: NOW,
+    },
+    computer: {
+      mode: "local",
+      generation: 1,
+      localProfileId,
+      state: "starting",
+    },
+  });
+  const second = expectedBot({
+    botId: `bot-${BOT_B_UUID}`,
+    name: "Another Private Name",
+    computer: {
+      mode: "cursor",
+      generation: 1,
+      nativeAgentId: "native-agent-private",
+      state: "starting",
+    },
+  });
+  await writeDocument(filePath, validStoreDocument([first, second]));
+  const store = new BotStore({
+    filePath,
+    now: () => NOW,
+    randomUUID: sequence([TEMP_A_UUID, TEMP_B_UUID]),
+  });
+
+  await store.deleteBots([first.botId, second.botId], {
+    extraRemoteRuntimes: [{ botId: second.botId, runtimeId: "runtime-candidate" }],
+  });
+  const [pending] = await store.listPendingDeletions();
+  assert.deepEqual(Object.keys(pending), [
+    "deletionId", "createdAt", "botIds", "remoteRuntimes", "localProfiles",
+  ]);
+  assert.deepEqual(pending.remoteRuntimes, [
+    { botId: first.botId, runtimeId: "runtime-stored" },
+    { botId: second.botId, runtimeId: "runtime-candidate" },
+  ]);
+  assert.deepEqual(pending.localProfiles, [{ botId: first.botId, profileId: localProfileId }]);
+  assert.doesNotMatch(
+    JSON.stringify(pending),
+    /Private Display|Another Private|private-avatar|native-agent|provider|endpoint|authToken|secret/i,
+  );
+});
+
+test("deleteBots retries the exact pending batch without writing or losing cleanup IDs", async (t) => {
+  const base = await temporaryStore(t, {
+    uuids: [
+      BOT_A_UUID, TEMP_A_UUID,
+      BOT_B_UUID, TEMP_B_UUID,
+      BOT_C_UUID, TEMP_C_UUID,
+      TEMP_A_UUID, TEMP_B_UUID,
+    ],
+  });
+  const first = await base.store.create();
+  const second = await base.store.create();
+  const survivor = await base.store.create();
+  const initial = await base.store.deleteBots([first.botId, second.botId]);
+  const beforeRetry = await fs.readFile(base.filePath, "utf8");
+  const retrying = new BotStore({
+    filePath: base.filePath,
+    now: () => NOW,
+    randomUUID: () => { throw new Error("retry must not allocate"); },
+  });
+
+  const retried = await retrying.deleteBots([second.botId, first.botId], {
+    preferredActiveBotId: survivor.botId,
+  });
+  assert.equal(retried.deletionId, initial.deletionId);
+  assert.deepEqual(retried.cleanup, initial.cleanup);
+  assert.equal(retried.activeBotId, survivor.botId);
+  assert.equal(await fs.readFile(base.filePath, "utf8"), beforeRetry);
+
+  await assert.rejects(retrying.deleteBots([first.botId, second.botId], {
+    extraRemoteRuntimes: [{ botId: first.botId, runtimeId: "runtime-not-in-receipt" }],
+  }), /retry|cleanup|pending deletion/i);
+  await assert.rejects(retrying.deleteBots([first.botId, second.botId], {
+    preferredActiveBotId: `bot-${BOT_C_UUID.replace(/^3/, "4")}`,
+  }), /preferred active bot.*not found/i);
+  assert.equal(await fs.readFile(base.filePath, "utf8"), beforeRetry);
+});
+
+test("deleteBots rejects unknown, duplicate, sparse, accessor, and hostile requests atomically", async (t) => {
+  const { filePath, store } = await temporaryStore(t, {
+    uuids: [BOT_A_UUID, TEMP_A_UUID, BOT_B_UUID, TEMP_B_UUID],
+  });
+  const first = await store.create();
+  const second = await store.create();
+  const before = await fs.readFile(filePath, "utf8");
+
+  await assert.rejects(store.deleteBots([first.botId, `bot-${BOT_C_UUID}`]), /not found/i);
+  await assert.rejects(store.deleteBots([first.botId, first.botId]), /unique/i);
+  const sparse = [first.botId, , second.botId];
+  await assert.rejects(store.deleteBots(sparse), /plain data|dense|deletion request/i);
+  let accessorCalls = 0;
+  const accessor = [first.botId, second.botId];
+  Object.defineProperty(accessor, "1", {
+    enumerable: true,
+    get() {
+      accessorCalls += 1;
+      return second.botId;
+    },
+  });
+  await assert.rejects(store.deleteBots(accessor), /plain data|accessor|deletion request/i);
+  assert.equal(accessorCalls, 0);
+  const hostile = new Proxy({}, {
+    ownKeys() { throw new Error("/Users/private authToken=secret"); },
+  });
+  await assert.rejects(store.deleteBots([first.botId], hostile), (error) => (
+    /plain data|deletion request/i.test(error?.message)
+      && !/Users|authToken|secret/i.test(error?.message)
+  ));
+  await assert.rejects(store.deleteBots([first.botId], {
+    extraRemoteRuntimes: [{ botId: first.botId, runtimeId: "runtime-1", endpoint: "secret" }],
+  }), /remote runtime field/i);
+
+  assert.equal(await fs.readFile(filePath, "utf8"), before);
+  assert.deepEqual(await store.list(), [first, second]);
+  assert.deepEqual(await store.listPendingDeletions(), []);
+});
+
+test("delete request bounds and keys reject before traversing hostile nested values", async (t) => {
+  const { store } = await temporaryStore(t);
+  const botId = `bot-${BOT_A_UUID}`;
+
+  let oversizedBotTraversal = 0;
+  const hostileBotValue = new Proxy({}, {
+    getPrototypeOf() {
+      oversizedBotTraversal += 1;
+      throw new Error("oversized bot value was traversed");
+    },
+  });
+  await assert.rejects(
+    store.deleteBots(Array(4097).fill(hostileBotValue)),
+    /bot deletion IDs.*oversized/i,
+  );
+  assert.equal(oversizedBotTraversal, 0);
+
+  let oversizedRuntimeTraversal = 0;
+  const hostileRuntimeValue = new Proxy({}, {
+    getPrototypeOf() {
+      oversizedRuntimeTraversal += 1;
+      throw new Error("oversized runtime value was traversed");
+    },
+  });
+  await assert.rejects(store.deleteBots([botId], {
+    extraRemoteRuntimes: Array(12_289).fill(hostileRuntimeValue),
+  }), /extra remote runtimes.*oversized/i);
+  assert.equal(oversizedRuntimeTraversal, 0);
+
+  let unsupportedGetterCalls = 0;
+  const options = {};
+  Object.defineProperty(options, "endpoint", {
+    enumerable: true,
+    get() {
+      unsupportedGetterCalls += 1;
+      throw new Error("unsupported option getter was invoked");
+    },
+  });
+  await assert.rejects(
+    store.deleteBots([botId], options),
+    /unsupported bot deletion options field: endpoint/i,
+  );
+  assert.equal(unsupportedGetterCalls, 0);
+
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  await assert.rejects(store.deleteBots([botId], revoked.proxy), (error) => (
+    /deletion request.*could not be inspected safely/i.test(error?.message)
+      && !/revoked/i.test(error?.message)
+  ));
+});
+
+test("delete and completion recover only after exact committed-uncertain readback", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-delete-uncertain-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "bots.json");
+  let failDirectorySync = false;
+  let forcedFailures = 0;
+  const uncertainFs = {
+    ...fs,
+    open: async (target, ...args) => {
+      const handle = await fs.open(target, ...args);
+      if (path.resolve(String(target)) !== path.resolve(directory)) return handle;
+      return {
+        sync: async () => {
+          if (failDirectorySync) {
+            failDirectorySync = false;
+            forcedFailures += 1;
+            const error = new Error("forced committed directory sync failure");
+            error.code = "EIO";
+            throw error;
+          }
+          return handle.sync();
+        },
+        close: (...closeArgs) => handle.close(...closeArgs),
+      };
+    },
+  };
+  const store = new BotStore({
+    filePath,
+    fs: uncertainFs,
+    now: () => NOW,
+    randomUUID: sequence([BOT_A_UUID, TEMP_A_UUID, TEMP_B_UUID, TEMP_C_UUID, TEMP_A_UUID]),
+  });
+  const created = await store.create();
+
+  failDirectorySync = true;
+  const deletion = await store.deleteBots([created.botId]);
+  assert.deepEqual(await store.list(), []);
+  assert.equal((await store.listPendingDeletions())[0].deletionId, deletion.deletionId);
+
+  failDirectorySync = true;
+  assert.equal(await store.completeDeletion(deletion.deletionId), true);
+  assert.deepEqual(await store.listPendingDeletions(), []);
+  assert.equal(forcedFailures, 2);
+});
+
+test("a precommit delete failure preserves every bot and creates no tombstone", async (t) => {
+  const base = await temporaryStore(t, { uuids: [BOT_A_UUID, TEMP_A_UUID] });
+  const created = await base.store.create();
+  const before = await fs.readFile(base.filePath, "utf8");
+  const failingFs = {
+    ...fs,
+    rename: async () => {
+      const error = new Error("forced delete rename failure");
+      error.code = "EIO";
+      throw error;
+    },
+  };
+  const failing = new BotStore({
+    filePath: base.filePath,
+    fs: failingFs,
+    now: () => NOW,
+    randomUUID: sequence([TEMP_B_UUID, TEMP_C_UUID]),
+  });
+
+  await assert.rejects(failing.deleteBots([created.botId]), /forced delete rename failure/);
+  assert.equal(await fs.readFile(base.filePath, "utf8"), before);
+  assert.deepEqual(await base.store.list(), [created]);
+  assert.deepEqual(await base.store.listPendingDeletions(), []);
+});
+
+test("committed-uncertain delete remains an error when exact readback is unavailable", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-delete-unverified-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "bots.json");
+  let failDirectorySync = false;
+  let failNextRead = false;
+  const uncertainFs = {
+    ...fs,
+    readFile: async (...args) => {
+      if (failNextRead) {
+        failNextRead = false;
+        const error = new Error("forced exact readback failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return fs.readFile(...args);
+    },
+    open: async (target, ...args) => {
+      const handle = await fs.open(target, ...args);
+      if (path.resolve(String(target)) !== path.resolve(directory)) return handle;
+      return {
+        sync: async () => {
+          if (failDirectorySync) {
+            failDirectorySync = false;
+            failNextRead = true;
+            const error = new Error("forced committed directory sync failure");
+            error.code = "EIO";
+            throw error;
+          }
+          return handle.sync();
+        },
+        close: (...closeArgs) => handle.close(...closeArgs),
+      };
+    },
+  };
+  const store = new BotStore({
+    filePath,
+    fs: uncertainFs,
+    now: () => NOW,
+    randomUUID: sequence([BOT_A_UUID, TEMP_A_UUID, TEMP_B_UUID, TEMP_C_UUID]),
+  });
+  const created = await store.create();
+  failDirectorySync = true;
+
+  await assert.rejects(store.deleteBots([created.botId]), (error) => (
+    error?.code === "BOT_STORE_DURABILITY_UNCERTAIN" && error?.committed === true
+  ));
+  const durable = new BotStore({ filePath });
+  assert.deepEqual(await durable.list(), []);
+  assert.equal((await durable.listPendingDeletions()).length, 1);
+});
+
+test("schema v4 rejects malformed or oversized deletion metadata without exposing it", async (t) => {
+  const { filePath } = await temporaryStore(t);
+  const baseDeletion = {
+    deletionId: TEMP_A_UUID,
+    createdAt: NOW,
+    botIds: [`bot-${BOT_A_UUID}`],
+    remoteRuntimes: [],
+    localProfiles: [],
+  };
+  const cases = [
+    [{ ...baseDeletion, name: "Private Bot" }, /deletion field/i],
+    [{
+      ...baseDeletion,
+      remoteRuntimes: [{ botId: `bot-${BOT_A_UUID}`, runtimeId: "/Users/private" }],
+    }, /runtime ID/i],
+    [{ ...baseDeletion, botIds: Array(4097).fill(`bot-${BOT_A_UUID}`) }, /oversized/i],
+  ];
+  for (const [pending, pattern] of cases) {
+    await writeDocument(filePath, validStoreDocument([], {}, {}, [pending]));
+    await assert.rejects(new BotStore({ filePath }).load(), (error) => (
+      pattern.test(error?.message) && !/Private Bot|Users\/private/i.test(error?.message)
+    ));
+  }
 });
