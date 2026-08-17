@@ -10,8 +10,8 @@ async function main() {
   if (typeof rcedit !== "function")
     throw new Error("The installed rcedit package did not expose its API.");
   await rcedit(executable, {
-    "file-version": "0.1.5.0",
-    "product-version": "0.1.5.0",
+    "file-version": "0.1.6.0",
+    "product-version": "0.1.6.0",
     "version-string": {
       CompanyName: "Open Bot contributors",
       FileDescription: "Open Bot",

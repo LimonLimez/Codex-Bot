@@ -18,7 +18,7 @@ This is an independent community project. It is not affiliated with, endorsed by
 
 ## Quick start
 
-1. Download `OpenBot-Setup-0.1.5.exe` from [Releases](https://github.com/LimonLimez/Open-Bot/releases).
+1. Download `OpenBot-Setup-0.1.6.exe` from [Releases](https://github.com/LimonLimez/Open-Bot/releases).
 2. Let Setup reuse an exact Grok Bot 0.18.0 tree, or explicitly authorize the separate vendor-hosted download.
 3. Launch Open Bot and choose an AI provider from the connection list.
 4. Finish that provider's official sign-in, import a Google Vertex service-account JSON key, or connect a local model server at `http://127.0.0.1:<port>/v1`.
@@ -109,13 +109,13 @@ If Setup installs Grok Bot first, that separate app remains installed if Open Bo
 Silent Setup never downloads implicitly. Use:
 
 ```powershell
-OpenBot-Setup-0.1.5.exe /VERYSILENT /BOOTSTRAPGROKBOT=1
+OpenBot-Setup-0.1.6.exe /VERYSILENT /BOOTSTRAPGROKBOT=1
 ```
 
 Or select an exact existing tree:
 
 ```powershell
-OpenBot-Setup-0.1.5.exe /VERYSILENT /GROKBOTDIR="C:\Path\To\Grok Bot"
+OpenBot-Setup-0.1.6.exe /VERYSILENT /GROKBOTDIR="C:\Path\To\Grok Bot"
 ```
 
 ## Local data and uninstall
