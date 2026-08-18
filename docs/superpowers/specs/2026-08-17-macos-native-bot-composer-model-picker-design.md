@@ -34,7 +34,7 @@ The trusted native `createAgent` path creates the bot with `setupStage: "complet
 
 The model trigger is a compact composer control inside the same footer/control row as the voice and send actions. It sits immediately before those right-side actions and never becomes a separate row below the text box.
 
-Mount discovery must identify the native composer action row and a stable voice/send anchor. It must insert or move the single OpenBot trigger before that anchor. DOM remounts may relocate the same trigger, but must never duplicate it. If the exact action row is unavailable, the integration remains pending instead of appending the control to an outer composer container.
+The exact Grok renderer patch inserts one empty `data-openbot-model-picker-host` immediately before the existing voice/send cluster inside `sand-prompt-actions-trailing`. Mount discovery targets that dedicated host and moves the single OpenBot trigger into it. DOM remounts may replace the host and relocate the same trigger, but must never duplicate it. If the exact host is unavailable, the native integration remains pending instead of appending the control to an outer composer container.
 
 ### Compact picker
 
@@ -108,6 +108,8 @@ The existing renderer integration remains the owner of mounting and lifecycle. P
 - native bot-creation interception removal.
 
 `macos/src/bots/bot-store.cjs` accepts an exact trusted creation-stage field, defaulting to `profile-model`. `macos/src/desktop/openbot-native-coordinator.cjs` is the only native caller that requests `complete`. `macos/src/bots/runtime-controller.cjs` passes the validated creation input through without changing existing callers.
+
+`macos/src/patch/renderer.cjs` owns the dedicated composer host transform. It replaces one hash-pinned, unique Grok 0.20 trailing-action anchor and fails closed if the source changes, just like the existing renderer transforms. The host is empty and carries no OpenBot behavior; `bot-runtime-ui.js` remains the only owner of the mounted picker.
 
 CSS remains in `macos/src/renderer/codex-ui.css`, scoped under the OpenBot model picker. No signed Codex or Grok asset is copied into the repository; the implementation reproduces the reviewed behavior using the project's own DOM and CSS.
 
