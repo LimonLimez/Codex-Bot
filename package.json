@@ -19,6 +19,7 @@
     "build:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1"
   },
   "dependencies": {
+    "@composio/core": "0.14.0",
     "@electron/asar": "4.2.1",
     "@novnc/novnc": "1.7.0",
     "playwright-core": "1.62.1",
