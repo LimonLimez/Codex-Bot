@@ -748,6 +748,8 @@ const providerManager = Object.freeze({
 
 function startViewServer({
   openOfficialLogin = openOfficialLoginInDefaultBrowser,
+  connectedApps = composioManager,
+  openConnectedApp = openComposioLinkInDefaultBrowser,
 } = {}) {
   if (globalThis[VIEW_SERVER_KEY]) return globalThis[VIEW_SERVER_KEY];
   const server = http.createServer(async (request, response) => {
@@ -825,7 +827,7 @@ function startViewServer({
       }
       if (request.method === "GET" && url.pathname === "/api/composio/status") {
         requireNoQuery(url);
-        sendJson(response, 200, composioManager.status());
+        sendJson(response, 200, connectedApps.status());
         return;
       }
       if (
@@ -847,7 +849,7 @@ function startViewServer({
         sendJson(
           response,
           200,
-          await composioManager.listToolkits({
+          await connectedApps.listToolkits({
             query: url.searchParams.get("query") || "",
             cursor: url.searchParams.get("cursor") || "",
           }),
@@ -860,18 +862,18 @@ function startViewServer({
         const action = String(body.action || "");
         if (action === "configure") {
           requireExactBodyKeys(body, ["action", "apiKey"]);
-          sendJson(response, 200, await composioManager.configure(body.apiKey));
+          sendJson(response, 200, await connectedApps.configure(body.apiKey));
           return;
         }
         if (action === "disconnect") {
           requireExactBodyKeys(body, ["action"]);
-          sendJson(response, 200, composioManager.disconnect());
+          sendJson(response, 200, connectedApps.disconnect());
           return;
         }
         if (action === "authorize") {
           requireExactBodyKeys(body, ["action", "toolkit"]);
-          const result = await composioManager.authorize(body.toolkit);
-          openComposioLinkInDefaultBrowser(result.redirectUrl);
+          const result = await connectedApps.authorize(body.toolkit);
+          openConnectedApp(result.redirectUrl);
           sendJson(response, 200, result);
           return;
         }

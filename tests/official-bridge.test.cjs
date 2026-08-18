@@ -24,6 +24,31 @@ let privateManager;
 let originalOfficial;
 let originalPrivate;
 const openedOfficialLogins = [];
+const openedConnectedApps = [];
+const connectedAppCalls = [];
+const connectedApps = {
+  status: () => ({ configured: true }),
+  listToolkits: async (options) => {
+    connectedAppCalls.push(["list", options]);
+    return { items: [], cursor: null };
+  },
+  configure: async (apiKey) => {
+    connectedAppCalls.push(["configure", apiKey]);
+    return { configured: true };
+  },
+  disconnect: () => {
+    connectedAppCalls.push(["disconnect"]);
+    return { configured: false };
+  },
+  authorize: async (toolkit) => {
+    connectedAppCalls.push(["authorize", toolkit]);
+    return {
+      toolkit,
+      connectedAccountId: "ca_test",
+      redirectUrl: `https://app.composio.dev/connect/${toolkit}`,
+    };
+  },
+};
 
 function deferred() {
   let resolve;
@@ -122,6 +147,8 @@ test.before(async () => {
       openedOfficialLogins.push(loginUrl);
       return loginUrl;
     },
+    connectedApps,
+    openConnectedApp: (url) => openedConnectedApps.push(url),
   });
   if (!server.listening) await once(server, "listening");
 });
@@ -135,6 +162,51 @@ test.after(async () => {
 test.afterEach(() => {
   restoreMocks();
   openedOfficialLogins.length = 0;
+  openedConnectedApps.length = 0;
+  connectedAppCalls.length = 0;
+});
+
+test("connected-app routes require auth, exact schemas, and open only backend-vetted links", async () => {
+  assert.equal(
+    (await request("/api/composio/status", { authorized: false })).status,
+    401,
+  );
+  assert.deepEqual((await request("/api/composio/status")).value, {
+    configured: true,
+  });
+  assert.equal(
+    (await request("/api/composio/toolkits?query=mail&extra=nope")).status,
+    400,
+  );
+  assert.deepEqual(
+    (await request("/api/composio/toolkits?query=mail&cursor=next")).value,
+    { items: [], cursor: null },
+  );
+  assert.deepEqual(connectedAppCalls.pop(), [
+    "list",
+    { query: "mail", cursor: "next" },
+  ]);
+
+  assert.equal(
+    (
+      await request("/api/composio", {
+        body: { action: "configure", apiKey: "sk_test", extra: true },
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await request("/api/composio", {
+        body: { action: "authorize", toolkit: "gmail" },
+      })
+    ).status,
+    200,
+  );
+  assert.deepEqual(connectedAppCalls.pop(), ["authorize", "gmail"]);
+  assert.deepEqual(openedConnectedApps, [
+    "https://app.composio.dev/connect/gmail",
+  ]);
 });
 
 test("official control route requires authentication and an exact JSON schema", async () => {
