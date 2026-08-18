@@ -30,6 +30,7 @@ const PROTOTYPE_SENSITIVE_MIGRATION_KEYS = new Set([
 const APPEARANCE_FIELDS = new Set(["shape", "color", "image", "title", "description"]);
 const PROFILE_FIELDS = new Set(["appearance", "notifications"]);
 const SETUP_STAGES = new Set(["profile-model", "computer", "complete"]);
+const CREATION_SETUP_STAGES = new Set(["profile-model", "complete"]);
 const SETUP_TRANSITION_FIELDS = new Set(["expectedStage", "nextStage"]);
 const RUNTIME_FIELDS = new Set(["provider", "remoteRuntimeId", "state", "lastConfirmedAt", "lastErrorCode"]);
 const RUNTIME_TRANSACTION_FIELDS = new Set(["expectedLastErrorCode", "afterCommit"]);
@@ -366,17 +367,29 @@ function normalizeCreateAppearance(value) {
 }
 
 function normalizeCreateInput(value) {
-  if (value === undefined) return { appearance: { ...DEFAULT_APPEARANCE }, notifications: true };
+  if (value === undefined) {
+    return {
+      appearance: { ...DEFAULT_APPEARANCE },
+      notifications: true,
+      setupStage: "profile-model",
+    };
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("Create input must be an object.");
   }
   const appearanceField = selectedOwnDataField(value, "appearance", "Create input");
   const notificationsField = selectedOwnDataField(value, "notifications", "Create input");
+  const setupStageField = selectedOwnDataField(value, "setupStage", "Create input");
   const notifications = notificationsField.present ? notificationsField.value : true;
+  const setupStage = setupStageField.present ? setupStageField.value : "profile-model";
   if (typeof notifications !== "boolean") throw new Error("Bot notifications must be boolean.");
+  if (!CREATION_SETUP_STAGES.has(setupStage)) {
+    throw new Error("Bot creation setup stage is invalid.");
+  }
   return {
     appearance: appearanceField.present ? normalizeCreateAppearance(appearanceField.value) : { ...DEFAULT_APPEARANCE },
     notifications,
+    setupStage,
   };
 }
 
@@ -1263,7 +1276,7 @@ class BotStore {
   }
 
   async create(input = undefined) {
-    const { appearance, notifications } = normalizeCreateInput(input);
+    const { appearance, notifications, setupStage } = normalizeCreateInput(input);
 
     return this.#mutate((next) => {
       const timestamp = safeNow(this.#now);
@@ -1278,7 +1291,7 @@ class BotStore {
         conversations: [],
         runtime: { ...DEFAULT_RUNTIME },
         computer: { ...DEFAULT_COMPUTER },
-        setupStage: "profile-model",
+        setupStage,
       };
       next.bots.push(record);
       return record.botId;

@@ -228,6 +228,19 @@ test("setup stage distinguishes fresh setup from migrated and adopted existing b
   assert.equal(adopted.setupStage, "complete");
 });
 
+test("trusted native creation may start complete while ordinary creation remains profile-model", async (t) => {
+  const { store } = await temporaryStore(t);
+  const ordinary = await store.create();
+  const native = await store.create({ setupStage: "complete" });
+
+  assert.equal(ordinary.setupStage, "profile-model");
+  assert.equal(native.setupStage, "complete");
+  await assert.rejects(
+    store.create({ setupStage: "computer" }),
+    /creation setup stage/i,
+  );
+});
+
 test("setup stage advances only through exact monotonic expected-stage transactions", async (t) => {
   const { filePath, store } = await temporaryStore(t);
   const created = await store.create();

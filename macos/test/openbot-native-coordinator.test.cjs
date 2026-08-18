@@ -149,7 +149,7 @@ class BotControllerHarness extends EventEmitter {
         title: input?.appearance?.title ?? "",
         description: input?.appearance?.description ?? "",
       },
-      setupStage: "profile-model",
+      setupStage: input?.setupStage ?? "profile-model",
     }));
     this.bots.set(created.botId, created);
     this.emit("bot-changed", { botId: created.botId, bot: structuredClone(created) });
@@ -703,6 +703,7 @@ test("native roster requests preserve correlation and route create, rename, prof
         description: "Build with Direct Codex.",
       },
       notifications: true,
+      setupStage: "complete",
     }],
     ["renameBot", BOT_B, "Builder"],
   ]);

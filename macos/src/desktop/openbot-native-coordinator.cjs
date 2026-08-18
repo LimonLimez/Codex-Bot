@@ -1610,7 +1610,11 @@ class OpenBotNativeCoordinator {
       title: "",
       description,
     };
-    let created = await this.#bots.createBot({ appearance, notifications: true });
+    let created = await this.#bots.createBot({
+      appearance,
+      notifications: true,
+      setupStage: "complete",
+    });
     const id = botId(created.botId);
     const token = this.#captureBot(id);
     created = await this.#bots.renameBot(id, name);

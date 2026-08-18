@@ -328,6 +328,22 @@ test("bot facade publishes only exact monotonic setup-stage transactions", async
   assertDeepFrozen(botEvents.at(-1));
 });
 
+test("bot facade preserves trusted native setup-stage transactions", async (t) => {
+  const store = await temporaryStore(t);
+  const controller = new BotRuntimeController({ store, provider: unavailableProvider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const botEvents = [];
+  controller.on("bot-changed", (event) => botEvents.push(event.bot));
+
+  const ordinary = await controller.createBot();
+  const native = await controller.createBot({ setupStage: "complete" });
+
+  assert.equal(ordinary.setupStage, "profile-model");
+  assert.equal(native.setupStage, "complete");
+  assert.equal(botEvents.findLast(({ botId }) => botId === native.botId).setupStage, "complete");
+  assertDeepFrozen(botEvents.findLast(({ botId }) => botId === native.botId));
+});
+
 test("a committed-uncertain setup stage is reread and published only at its exact successor", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-setup-stage-controller-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
