@@ -329,7 +329,7 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(css, /\.codex-bot-controls\s*\{[^}]*color:\s*var\(--codex-text\)[^}]*background:\s*var\(--codex-surface\)/s);
   assert.match(css, /\.codex-model-dock\s*\{[^}]*position:\s*relative[^}]*width:\s*max-content/s);
   assert.match(css, /\.codex-model-trigger\s*\{[^}]*max-width:\s*210px/s);
-  assert.match(css, /\.codex-power-popover\s*\{[^}]*position:\s*absolute[^}]*bottom:\s*calc\(100% \+ 8px\)[^}]*width:\s*224px[^}]*overflow:\s*clip/s);
+  assert.match(css, /\.codex-power-popover\s*\{[^}]*position:\s*fixed[^}]*width:\s*224px[^}]*overflow:\s*clip/s);
   assert.match(css, /\.codex-power-popover\s*\{[^}]*animation:\s*codex-power-popover-enter 320ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\) 30ms both/s);
   assert.match(css, /\.codex-power-popover\[hidden\]\s*\{[^}]*display:\s*none/s);
   assert.match(css, /\[data-codex-mount-state="pending"\][^}]*display:\s*none/s);
@@ -373,7 +373,7 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(css, /\.codex-power-view-panel\[aria-hidden="true"\]\s*\{[^}]*opacity:\s*0[^}]*pointer-events:\s*none/s);
   assert.match(css, /\.codex-power-view-controls::before\s*\{[^}]*right:\s*6px[^}]*left:\s*6px/s);
   assert.match(css, /\.codex-power-advanced-row\s*\{[^}]*min-height:\s*40px/s);
-  assert.match(css, /\.codex-power-flyout\s*\{[^}]*position:\s*absolute/s);
+  assert.match(css, /\.codex-power-flyout\s*\{[^}]*position:\s*fixed/s);
   assert.doesNotMatch(css, /codex-power-advanced-field\s+select/);
   assert.doesNotMatch(css, /\.codex-model-row[^}]*112px/s);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*animation:\s*none\s*!important/);

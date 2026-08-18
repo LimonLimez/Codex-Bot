@@ -2770,6 +2770,63 @@
     let mountDisposed = false;
     let advancedViewExpanded = false;
     let pickerTransitionFrame = 0;
+    const POWER_SURFACE_MARGIN = 8;
+    const POWER_SURFACE_GAP = 8;
+    const finiteDimension = (value, fallback = 0) => (
+      Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback
+    );
+    const clampSurfaceCoordinate = (value, size, viewportSize) => {
+      const lower = POWER_SURFACE_MARGIN;
+      if (!Number.isFinite(viewportSize) || viewportSize <= 0) return Math.max(lower, value);
+      const upper = Math.max(lower, viewportSize - size - POWER_SURFACE_MARGIN);
+      return Math.max(lower, Math.min(value, upper));
+    };
+    function positionPowerSurfaces() {
+      if (mountDisposed || popover.hidden) return;
+      const triggerRect = modelTrigger.getBoundingClientRect?.();
+      if (!triggerRect) return;
+      const viewportWidth = finiteDimension(
+        windowRef.innerWidth,
+        finiteDimension(documentRef.documentElement?.clientWidth),
+      );
+      const viewportHeight = finiteDimension(
+        windowRef.innerHeight,
+        finiteDimension(documentRef.documentElement?.clientHeight),
+      );
+      const measuredPopover = popover.getBoundingClientRect?.();
+      const popoverWidth = finiteDimension(popover.offsetWidth, finiteDimension(measuredPopover?.width, 224));
+      const popoverHeight = finiteDimension(popover.offsetHeight, finiteDimension(measuredPopover?.height));
+      const triggerRight = Number(triggerRect.right) || (Number(triggerRect.left) + Number(triggerRect.width));
+      const triggerTop = Number(triggerRect.top) || 0;
+      const triggerBottom = Number(triggerRect.bottom) || (triggerTop + Number(triggerRect.height));
+      const left = clampSurfaceCoordinate(triggerRight - popoverWidth, popoverWidth, viewportWidth);
+      let top = triggerTop - popoverHeight - POWER_SURFACE_GAP;
+      if (top < POWER_SURFACE_MARGIN
+        && triggerBottom + POWER_SURFACE_GAP + popoverHeight <= viewportHeight - POWER_SURFACE_MARGIN) {
+        top = triggerBottom + POWER_SURFACE_GAP;
+      }
+      top = clampSurfaceCoordinate(top, popoverHeight, viewportHeight);
+      popover.style.left = `${left}px`;
+      popover.style.top = `${top}px`;
+
+      if (advancedFlyout.hidden) return;
+      const measuredFlyout = advancedFlyout.getBoundingClientRect?.();
+      const flyoutWidth = finiteDimension(advancedFlyout.offsetWidth, finiteDimension(measuredFlyout?.width));
+      const flyoutHeight = finiteDimension(advancedFlyout.offsetHeight, finiteDimension(measuredFlyout?.height));
+      let flyoutLeft = left - flyoutWidth - POWER_SURFACE_GAP;
+      if (flyoutLeft < POWER_SURFACE_MARGIN
+        && left + popoverWidth + POWER_SURFACE_GAP + flyoutWidth <= viewportWidth - POWER_SURFACE_MARGIN) {
+        flyoutLeft = left + popoverWidth + POWER_SURFACE_GAP;
+      }
+      flyoutLeft = clampSurfaceCoordinate(flyoutLeft, flyoutWidth, viewportWidth);
+      const flyoutTop = clampSurfaceCoordinate(
+        top + popoverHeight - flyoutHeight,
+        flyoutHeight,
+        viewportHeight,
+      );
+      advancedFlyout.style.left = `${flyoutLeft}px`;
+      advancedFlyout.style.top = `${flyoutTop}px`;
+    }
     function measurePickerViews() {
       if (mountDisposed) return;
       const simpleHeight = Math.max(0, Number(simplePanel.offsetHeight) || 0);
@@ -2778,6 +2835,7 @@
       pickerMenu.style.setProperty("--simple-view-height", `${simpleHeight}px`);
       pickerMenu.style.setProperty("--advanced-view-height", `${advancedHeight}px`);
       pickerMenu.style.height = `${(advancedViewExpanded ? advancedHeight : simpleHeight) + controlsHeight}px`;
+      positionPowerSurfaces();
     }
     function setAdvancedView(expanded) {
       advancedViewExpanded = Boolean(expanded);
@@ -2830,6 +2888,7 @@
           targetComposerHost.append?.(modelDock);
         }
         modelDock.dataset.codexMountState = "mounted";
+        positionPowerSurfaces();
       } else {
         if (nativeProtocolMode && modelDock.parentElement) modelDock.remove?.();
         modelDock.dataset.codexMountState = "pending";
@@ -3124,6 +3183,7 @@
       });
       advancedFlyoutOptions.replaceChildren(...optionNodes);
       advancedFlyout.hidden = false;
+      positionPowerSurfaces();
       (optionNodes.find((option) => option.tabIndex === 0) ?? optionNodes[0])?.focus?.();
     }
 
@@ -3411,6 +3471,7 @@
       advancedEffort.row.disabled = !enabled;
       advancedSpeed.row.disabled = !enabled;
       renderAdvanced(next, selectionIntent?.selection);
+      positionPowerSurfaces();
     }
 
     controller = createBotUiController({
@@ -3530,8 +3591,14 @@
       modelDock.classList.toggle("is-open", next);
       modelTrigger.setAttribute("aria-expanded", String(next));
       if (!next) setAdvancedView(false);
-      else measurePickerViews();
+      else {
+        measurePickerViews();
+        positionPowerSurfaces();
+      }
     };
+    const repositionPowerSurfaces = () => positionPowerSurfaces();
+    windowRef.addEventListener?.("resize", repositionPowerSurfaces);
+    windowRef.addEventListener?.("scroll", repositionPowerSurfaces, true);
     modelTrigger.addEventListener("click", () => setPopoverOpen(popover.hidden));
     modelDock.addEventListener("keydown", (event) => {
       if (event.key !== "Escape" || popover.hidden) return;
@@ -3681,6 +3748,8 @@
           pickerTransitionFrame = 0;
         }
         documentRef.removeEventListener?.("pointerdown", dismissPopover);
+        windowRef.removeEventListener?.("resize", repositionPowerSurfaces);
+        windowRef.removeEventListener?.("scroll", repositionPowerSurfaces, true);
         if (holdTimer != null) (windowRef.clearTimeout || clearTimeout)(holdTimer);
         if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;

@@ -579,8 +579,8 @@ body.light {
 .codex-model-trigger-chevron { color: var(--codex-muted); font-size: 13px; }
 
 .codex-power-popover {
-  position: absolute;
-  bottom: calc(100% + 8px);
+  position: fixed;
+  top: 0;
   left: 0;
   z-index: 2147483000;
   width: 224px;
@@ -1037,9 +1037,9 @@ body.light {
 }
 
 .codex-power-flyout {
-  position: absolute;
-  right: calc(100% + 8px);
-  bottom: calc(100% + 8px);
+  position: fixed;
+  top: 0;
+  left: 0;
   z-index: 2147483001;
   max-width: calc(100vw - 32px);
   max-height: min(420px, calc(100vh - 32px));

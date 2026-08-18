@@ -3768,6 +3768,7 @@ function createMountedUiHarness({
   nativeHost = nativeProtocol,
   reducedMotion = false,
   viewMetrics = Object.freeze({}),
+  viewportMetrics = Object.freeze({ width: 1040, height: 760 }),
 }) {
   const { mount } = require(uiPath);
   class MountElement extends FakeElement {
@@ -3783,9 +3784,28 @@ function createMountedUiHarness({
     }
     get offsetHeight() {
       for (const [className, height] of Object.entries(viewMetrics)) {
-        if (this.className.split(/\s+/).includes(className)) return height;
+        if (!this.className.split(/\s+/).includes(className)) continue;
+        return typeof height === "object" ? height.height ?? 0 : height;
       }
       return 0;
+    }
+    get offsetWidth() {
+      for (const [className, metrics] of Object.entries(viewMetrics)) {
+        if (!this.className.split(/\s+/).includes(className)) continue;
+        return typeof metrics === "object" ? metrics.width ?? 0 : 0;
+      }
+      return 0;
+    }
+    getBoundingClientRect() {
+      for (const [className, metrics] of Object.entries(viewMetrics)) {
+        if (!this.className.split(/\s+/).includes(className) || typeof metrics !== "object") continue;
+        const left = metrics.left ?? 0;
+        const top = metrics.top ?? 0;
+        const width = metrics.width ?? 0;
+        const height = metrics.height ?? 0;
+        return { left, top, right: left + width, bottom: top + height, width, height, x: left, y: top };
+      }
+      return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 };
     }
     append(...children) {
       for (const child of children) {
@@ -3855,6 +3875,7 @@ function createMountedUiHarness({
     disconnect() { this.disconnected = true; }
   }
   const animationFrames = new Map();
+  const windowListeners = new Map();
   const cancelledAnimationFrames = [];
   let nextAnimationFrame = 0;
   let current = initialSelection;
@@ -3906,6 +3927,10 @@ function createMountedUiHarness({
     matchMedia() {
       return Object.freeze({ matches: reducedMotion });
     },
+    innerWidth: viewportMetrics.width,
+    innerHeight: viewportMetrics.height,
+    addEventListener(name, listener) { windowListeners.set(name, listener); },
+    removeEventListener(name) { windowListeners.delete(name); },
   };
   if (fileReader) windowRef.FileReader = fileReader;
   if (computerFacade) windowRef.openbotComputer = computerFacade;
@@ -3943,6 +3968,7 @@ function createMountedUiHarness({
     get mountObserver() { return mountObserver; },
     resizeObservers,
     selected,
+    windowListeners,
   };
 }
 
@@ -4063,6 +4089,61 @@ test("native protocol mode preserves the Grok shell and owns the Codex Advanced 
   assert.equal(advanced.inert, false);
   assert.equal(advancedToggle.attributes["aria-expanded"], "true");
   assert.equal(harness.find("codex-power-input").tagName, "INPUT");
+});
+
+test("native composer Power surfaces use viewport coordinates outside Grok's clipped input frame", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "ultra",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+      supportedServiceTiers: Object.freeze(["priority"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "ultra",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    viewMetrics: Object.freeze({
+      "codex-model-trigger": Object.freeze({ left: 850, top: 708, width: 130, height: 28 }),
+      "codex-power-popover": Object.freeze({ width: 224, height: 243 }),
+      "codex-power-flyout": Object.freeze({ width: 280, height: 180 }),
+      "codex-power-view-simple": 132,
+      "codex-power-view-advanced": 168,
+      "codex-power-view-controls": 36,
+    }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const trigger = harness.find("codex-model-trigger");
+  const popover = harness.find("codex-power-popover");
+  trigger.listeners.get("click")();
+  assert.equal(popover.hidden, false);
+  assert.equal(popover.style.left, "756px");
+  assert.equal(popover.style.top, "457px");
+  assert.equal(harness.windowListeners.has("resize"), true);
+  assert.equal(harness.windowListeners.has("scroll"), true);
+
+  harness.find("codex-power-advanced-toggle").listeners.get("click")();
+  const modelRow = harness.findAll("codex-power-advanced-row").find((row) => row.dataset.kind === "model");
+  modelRow.listeners.get("click")();
+  const flyout = harness.find("codex-power-flyout");
+  assert.equal(flyout.hidden, false);
+  assert.equal(flyout.style.left, "468px");
+  assert.equal(flyout.style.top, "520px");
 });
 
 test("measured picker keeps stable Codex Advanced view panels and exact active height", async (context) => {
