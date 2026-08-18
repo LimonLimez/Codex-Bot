@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: Open Bot version
-      placeholder: 0.1.6
+      placeholder: 0.1.7
     validations:
       required: true
   - type: dropdown

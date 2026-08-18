@@ -1,4 +1,4 @@
-#define AppCanonicalVersion "0.1.6"
+#define AppCanonicalVersion "0.1.7"
 #define AppPublisher "Open Bot contributors"
 #define AppURL "https://github.com/LimonLimez/Open-Bot"
 #define DevelopmentBuild GetEnv("CODEX_BOT_INSTALLER_DEVELOPMENT")
@@ -10,14 +10,14 @@
 
 #if DevelopmentBuild == "1"
   #define AppName "Open Bot DEVELOPMENT TEST BUILD"
-  #define AppVersion "0.1.6 DEVELOPMENT TEST BUILD"
+  #define AppVersion "0.1.7 DEVELOPMENT TEST BUILD"
   #define AppOutputBaseFilename GetEnv("CODEX_BOT_INSTALLER_OUTPUT_BASENAME")
   #define AppVersionInfoDescription "Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH"
   #define AppVersionInfoProductName "Open Bot DEVELOPMENT TEST BUILD"
 #else
   #define AppName "Open Bot"
-  #define AppVersion "0.1.6"
-  #define AppOutputBaseFilename "OpenBot-Setup-0.1.6"
+  #define AppVersion "0.1.7"
+  #define AppOutputBaseFilename "OpenBot-Setup-0.1.7"
   #define AppVersionInfoDescription "Open Bot installer"
   #define AppVersionInfoProductName "Open Bot"
 #endif
