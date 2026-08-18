@@ -37,6 +37,7 @@ const STOCK_COORDINATOR_FACTORY = 'const Whe=VKn({portBridge:HKn()}),UPe=wKn()';
 const STOCK_RECONNECT_GATE = 'bt=()=>{if(!(Ge||t.get().status!=="ready"||s==null)){';
 const STOCK_FOCUS_GATE = 'mt=()=>{if(Ge||t.get().status!=="ready"||s==null)return;';
 const STOCK_COMPOSER_ACCOUNT_GATE = ':s?f!=null?W._(mbn(f)):i.length>0?U({id:"I/1BxG"}):C??W._(dht):U({id:"622+sP"})';
+const STOCK_PROMPT_TRAILING = 'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:Q})';
 const STOCK_ROSTER_CONNECT_GATE = 'Ve!=null&&F.connect()';
 const STOCK_ACCOUNT_SCOPED_CONNECT_GATE = 'for(const it of Ee)(Ve!=null||!Me.has(it))&&it.connect?.()';
 const STOCK_POST_RESTORE_GATE = 'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())';
@@ -60,6 +61,7 @@ const SYNTHETIC_VENDOR_RENDERER = [
   STOCK_FOCUS_GATE,
   'F.noteWindowFocus()};',
   STOCK_COMPOSER_ACCOUNT_GATE,
+  STOCK_PROMPT_TRAILING,
   STOCK_CLIENT_RESTORE,
   STOCK_ROSTER_CONNECT_GATE,
   STOCK_ACCOUNT_SCOPED_CONNECT_GATE,
@@ -173,6 +175,28 @@ test("the explicit local coordinator survives a null Cursor identity without unl
   assert.doesNotMatch(patched, /(?:accountSlot|assertedSlot|s=)\s*[:=]\s*"openbot-local-v1"/);
 });
 
+test("the pinned renderer adds one composer model picker host immediately before voice and send", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  assert.match(
+    patched,
+    /se=p\.jsx\("div",\{className:ne,ref:d,style:X\.style,children:\[p\.jsx\("div",\{"data-openbot-model-picker-host":!0\}\),Q\]\}\)/,
+  );
+  assert.equal((patched.match(/data-openbot-model-picker-host/g) ?? []).length, 1);
+  assert.doesNotMatch(
+    patched,
+    new RegExp(STOCK_PROMPT_TRAILING.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.throws(
+    () => patchVendorRendererSource(patched, sha256Text(patched)),
+    /already|anchor|not found/i,
+  );
+});
+
 test("the pinned native renderer patch fails closed on hash drift and every ambiguous anchor", async (t) => {
   const { patchVendorRendererSource } = require(patchPath);
   assert.throws(
@@ -190,6 +214,7 @@ test("the pinned native renderer patch fails closed on hash drift and every ambi
     ["reconnect", STOCK_RECONNECT_GATE],
     ["focus", STOCK_FOCUS_GATE],
     ["composer", STOCK_COMPOSER_ACCOUNT_GATE],
+    ["composer model picker host", STOCK_PROMPT_TRAILING],
     ["client restore", STOCK_CLIENT_RESTORE],
     ["roster connect", STOCK_ROSTER_CONNECT_GATE],
     ["post restore", STOCK_POST_RESTORE_GATE],
@@ -368,7 +393,12 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(botUi, /findUiMounts/);
   assert.match(botUi, /MutationObserver/);
   assert.match(botUi, /modelTrigger\.setAttribute\("aria-haspopup",\s*"dialog"\)/);
-  assert.match(botUi, /composerHost\.append\?\.\(modelDock\)/);
+  assert.match(
+    botUi,
+    /const targetComposerHost = nativeProtocolMode \? nativeComposerHost : composerHost;/,
+  );
+  assert.match(botUi, /targetComposerHost\.append\?\.\(modelDock\)/);
+  assert.doesNotMatch(botUi, /composerHost\.append\?\.\(modelDock\)/);
   assert.match(botUi, /reasoningView\.control\.classList\.toggle\("is-disabled",\s*snapshot\.disabled\)/s);
   assert.match(botUi, /compactControls\.append\(\.\.\.\(nativeProtocolMode\s*\?\s*\[\]\s*:\s*\[advancedToggle\]\),\s*fastToggle,\s*reasoningView\.warning\)/s);
   assert.match(botUi, /nativeControls\.append\(statusRow,\s*computerRow,\s*computerGrants\)/s);

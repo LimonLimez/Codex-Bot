@@ -2233,7 +2233,7 @@
 
   function findUiMounts(documentRef) {
     if (!documentRef || typeof documentRef.querySelector !== "function") {
-      return Object.freeze({ sidebarHost: null, composerHost: null });
+      return Object.freeze({ sidebarHost: null, composerHost: null, nativeComposerHost: null });
     }
     const sidebarSelectors = [
       "[data-codex-bot-sidebar-host]",
@@ -2269,7 +2269,8 @@
         if (composerHost) break;
       }
     }
-    return Object.freeze({ sidebarHost, composerHost });
+    const nativeComposerHost = documentRef.querySelector("[data-openbot-model-picker-host]");
+    return Object.freeze({ sidebarHost, composerHost, nativeComposerHost });
   }
 
   function createReasoningView(documentRef, {
@@ -2730,14 +2731,14 @@
     } else popover.append(panelStack, compactControls, reasoningView.label, reasoningView.instructions);
     modelDock.append(modelTrigger, popover);
     if (nativeProtocolMode) {
-      documentRef.body.append(newBotSetup, computerSetup, permissionSheet, modelDock);
+      documentRef.body.append(newBotSetup, computerSetup, permissionSheet);
       panel.dataset.codexMountState = "native-shell";
     } else documentRef.body.append(panel, modelDock);
 
     let mountDisposed = false;
     function attachToProductHosts() {
       if (mountDisposed) return;
-      const { sidebarHost, composerHost } = findUiMounts(documentRef);
+      const { sidebarHost, composerHost, nativeComposerHost } = findUiMounts(documentRef);
       if (nativeProtocolMode) {
         panel.dataset.codexMountState = "native-shell";
       } else if (sidebarHost) {
@@ -2746,12 +2747,14 @@
       } else {
         panel.dataset.codexMountState = "pending";
       }
-      if (composerHost) {
-        if (modelDock.parentElement !== composerHost) {
-          composerHost.append?.(modelDock);
+      const targetComposerHost = nativeProtocolMode ? nativeComposerHost : composerHost;
+      if (targetComposerHost) {
+        if (modelDock.parentElement !== targetComposerHost) {
+          targetComposerHost.append?.(modelDock);
         }
         modelDock.dataset.codexMountState = "mounted";
       } else {
+        if (nativeProtocolMode && modelDock.parentElement) modelDock.remove?.();
         modelDock.dataset.codexMountState = "pending";
       }
     }

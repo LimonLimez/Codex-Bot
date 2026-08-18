@@ -3561,10 +3561,12 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
   const { findUiMounts } = require(uiPath);
   const explicitSidebar = { id: "sidebar" };
   const explicitComposer = { id: "composer" };
+  const explicitNativeComposer = { id: "native-composer" };
   const explicitDocument = {
     querySelector(selector) {
       if (selector === "[data-codex-bot-sidebar-host]") return explicitSidebar;
       if (selector === "[data-codex-bot-composer-host]") return explicitComposer;
+      if (selector === "[data-openbot-model-picker-host]") return explicitNativeComposer;
       return null;
     },
     querySelectorAll() { return []; },
@@ -3572,6 +3574,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
   assert.deepEqual(findUiMounts(explicitDocument), {
     sidebarHost: explicitSidebar,
     composerHost: explicitComposer,
+    nativeComposerHost: explicitNativeComposer,
   });
 
   const semanticSidebar = { id: "semantic-sidebar" };
@@ -3594,6 +3597,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
   assert.deepEqual(findUiMounts(semanticDocument), {
     sidebarHost: semanticSidebar,
     composerHost: composerForm,
+    nativeComposerHost: null,
   });
 });
 
@@ -3755,6 +3759,7 @@ function createMountedUiHarness({
   computerFacade = null,
   runtimeFacade = null,
   nativeProtocol = false,
+  nativeHost = nativeProtocol,
 }) {
   const { mount } = require(uiPath);
   class MountElement extends FakeElement {
@@ -3769,6 +3774,11 @@ function createMountedUiHarness({
       this.listeners = new Map();
     }
     append(...children) {
+      for (const child of children) {
+        if (child.parentElement && child.parentElement !== this) {
+          child.parentElement.children = child.parentElement.children.filter((entry) => entry !== child);
+        }
+      }
       super.append(...children);
       for (const child of children) child.parentElement = this;
     }
@@ -3789,12 +3799,14 @@ function createMountedUiHarness({
     body: null,
     sidebar: null,
     composer: null,
+    nativeModelHost: null,
     listeners: new Map(),
     createElement(tagName) { return new MountElement(tagName, this); },
     getElementById() { return null; },
     querySelector(selector) {
       if (selector === "[data-codex-bot-sidebar-host]") return this.sidebar;
       if (selector === "[data-codex-bot-composer-host]") return this.composer;
+      if (selector === "[data-openbot-model-picker-host]") return this.nativeModelHost;
       return null;
     },
     querySelectorAll() { return []; },
@@ -3804,6 +3816,19 @@ function createMountedUiHarness({
   documentRef.body = documentRef.createElement("body");
   documentRef.sidebar = documentRef.createElement("aside");
   documentRef.composer = documentRef.createElement("form");
+  if (nativeHost) {
+    documentRef.nativeModelHost = documentRef.createElement("div");
+    documentRef.composer.append(documentRef.nativeModelHost);
+  }
+  let mountObserver = null;
+  class MountObserver {
+    constructor(callback) {
+      this.callback = callback;
+      mountObserver = this;
+    }
+    observe() {}
+    disconnect() {}
+  }
   let current = initialSelection;
   let generation = initialSelection.generation;
   const selected = [];
@@ -3839,6 +3864,7 @@ function createMountedUiHarness({
     dispatchEvent() {},
     setTimeout: windowTimers.setTimeout,
     clearTimeout: windowTimers.clearTimeout,
+    MutationObserver: MountObserver,
   };
   if (fileReader) windowRef.FileReader = fileReader;
   if (computerFacade) windowRef.openbotComputer = computerFacade;
@@ -3854,8 +3880,9 @@ function createMountedUiHarness({
   return {
     documentRef,
     find: (className) => find(mounted.modelDock, className),
-    findPanel: (className) => find(mounted.panel, className),
+    findPanel: (className) => find(mounted.panel, className) ?? find(documentRef.body, className),
     mounted,
+    get mountObserver() { return mountObserver; },
     selected,
   };
 }
@@ -3962,7 +3989,8 @@ test("native protocol mode preserves the Grok shell and mounts only Power plus o
 
   assert.equal(harness.mounted.panel.parentElement, null);
   assert.equal(harness.documentRef.sidebar.children.includes(harness.mounted.panel), false);
-  assert.equal(harness.mounted.modelDock.parentElement, harness.documentRef.composer);
+  assert.equal(harness.mounted.modelDock.parentElement, harness.documentRef.nativeModelHost);
+  assert.equal(harness.documentRef.composer.children.includes(harness.mounted.modelDock), false);
   for (const className of ["codex-new-bot-setup", "codex-computer-setup", "codex-permission-sheet"]) {
     const dialog = harness.findPanel(className);
     assert.equal(dialog.parentElement, harness.documentRef.body, className);
@@ -3975,6 +4003,56 @@ test("native protocol mode preserves the Grok shell and mounts only Power plus o
   assert.equal(harness.find("codex-power-effort-select"), null);
   assert.equal(harness.find("codex-power-speed-select"), null);
   assert.equal(harness.find("codex-power-input").tagName, "INPUT");
+});
+
+test("native protocol model dock waits for the exact composer host and remounts one identity", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const missing = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    nativeHost: false,
+  });
+  context.after(() => missing.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(missing.mounted.modelDock.dataset.codexMountState, "pending");
+  assert.equal(missing.mounted.modelDock.parentElement, null);
+  assert.equal(missing.documentRef.composer.children.includes(missing.mounted.modelDock), false);
+  assert.equal(missing.documentRef.body.children.includes(missing.mounted.modelDock), false);
+
+  const firstHost = missing.documentRef.createElement("div");
+  missing.documentRef.nativeModelHost = firstHost;
+  missing.documentRef.composer.append(firstHost);
+  missing.mountObserver.callback();
+  assert.equal(missing.mounted.modelDock.parentElement, firstHost);
+  assert.equal(firstHost.children.filter((node) => node === missing.mounted.modelDock).length, 1);
+
+  const replacement = missing.documentRef.createElement("div");
+  missing.documentRef.nativeModelHost = replacement;
+  missing.documentRef.composer.append(replacement);
+  missing.mountObserver.callback();
+  assert.equal(missing.mounted.modelDock.parentElement, replacement);
+  assert.equal(firstHost.children.includes(missing.mounted.modelDock), false);
+  assert.equal(replacement.children.filter((node) => node === missing.mounted.modelDock).length, 1);
 });
 
 test("mounted async provider completion never mutates detached controls after disposal", async () => {

@@ -68,6 +68,18 @@ body.light {
   font: 500 12px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
 }
 
+[data-openbot-model-picker-host] {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  min-width: 0;
+}
+
+[data-openbot-model-picker-host] > .codex-model-dock {
+  flex: 0 1 auto;
+  margin: 0;
+}
+
 [data-codex-mount-state="pending"] {
   display: none !important;
 }

@@ -45,6 +45,10 @@ const VENDOR_COMPOSER_ACCOUNT_GATE =
   ':s?f!=null?W._(mbn(f)):i.length>0?U({id:"I/1BxG"}):C??W._(dht):U({id:"622+sP"})';
 const OPENBOT_COMPOSER_ACCOUNT_GATE =
   ':(s||hasLocalCoordinator())?f!=null?W._(mbn(f)):i.length>0?U({id:"I/1BxG"}):C??W._(dht):U({id:"622+sP"})';
+const VENDOR_PROMPT_TRAILING =
+  'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:Q})';
+const OPENBOT_PROMPT_TRAILING =
+  'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:[p.jsx("div",{"data-openbot-model-picker-host":!0}),Q]})';
 const VENDOR_CLIENT_RESTORE = 'if(await j.write({accountSlot:null,value:Ve}),!Ye()||(await B.restore(Ve),!Ye())||(await q.restore(Ve),!Ye())||(await K.restore(Ve),!Ye())||(await F.restore(Ve),!Ye())||(await ne.restore(Ve),!Ye())||(await Z.restore(Ve),!Ye())||(await ke.restore(Ve),!Ye()))return;';
 const OPENBOT_CLIENT_RESTORE = 'const openbotPersistenceSlot=Ve??(hasLocalCoordinator()?"openbot-local-v1":null);if(await j.write({accountSlot:null,value:Ve}),!Ye()||(await B.restore(openbotPersistenceSlot),!Ye())||(await q.restore(openbotPersistenceSlot),!Ye())||(await K.restore(openbotPersistenceSlot),!Ye())||(await F.restore(openbotPersistenceSlot),!Ye())||(await ne.restore(openbotPersistenceSlot),!Ye())||(await Z.restore(openbotPersistenceSlot),!Ye())||(await ke.restore(openbotPersistenceSlot),!Ye()))return;';
 const VENDOR_ROSTER_CONNECT_GATE = 'Ve!=null&&F.connect()';
@@ -117,11 +121,17 @@ function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSE
     OPENBOT_POST_RESTORE_GATE,
     "Grok client post-restore account gate",
   );
-  return replaceUnique(
+  patched = replaceUnique(
     patched,
     VENDOR_IDENTITY_PORT_GATE,
     OPENBOT_IDENTITY_PORT_GATE,
     "Grok coordinator identity port account gate",
+  );
+  return replaceUnique(
+    patched,
+    VENDOR_PROMPT_TRAILING,
+    OPENBOT_PROMPT_TRAILING,
+    "Grok composer model picker host",
   );
 }
 
