@@ -293,17 +293,23 @@ test("Advanced controls expose exact Model Effort and Speed tuples and round-tri
     model: "gpt-live-sol",
     label: "GPT Live Sol",
     provider: "openai-codex",
+    providerLabel: null,
   }]);
   assert.deepEqual(advanced.efforts, [
-    { effort: "low", label: "Light" },
-    { effort: "medium", label: "Medium" },
-    { effort: "ultra", label: "Ultra" },
+    { effort: "low", label: "Light", description: "" },
+    { effort: "medium", label: "Medium", description: "" },
+    { effort: "ultra", label: "Ultra", description: "Consumes usage limits faster" },
   ]);
   assert.deepEqual(advanced.speeds, [
     { serviceTier: null, label: "Standard", description: "Default speed" },
-    { serviceTier: "priority", label: "Fast", description: "1.5x speed" },
+    { serviceTier: "priority", label: "Fast", description: "1.5x speed, more usage" },
     { serviceTier: "ultrafast", label: "Ultra fast", description: "Fastest" },
   ]);
+  assert.equal(Object.isFrozen(advanced), true);
+  for (const values of [advanced.models, advanced.efforts, advanced.speeds]) {
+    assert.equal(Object.isFrozen(values), true);
+    assert.equal(values.every(Object.isFrozen), true);
+  }
   const exact = controls.resolveAdvancedSelection(catalog, {
     provider: "openai-codex",
     model: "gpt-live-sol",
@@ -326,11 +332,11 @@ test("Advanced controls expose exact Model Effort and Speed tuples and round-tri
   }), null);
 });
 
-test("Power and Advanced preserve provider identity when official and CLIProxy models share one raw id", () => {
+test("Power and Advanced preserve provider identity when providers share one visible model", () => {
   const catalog = [
     {
       model: "claude-fable-5",
-      label: "Direct Claude Fable 5",
+      label: "Claude Fable 5",
       provider: "openai-codex",
       efforts: ["medium", "high"],
       defaultReasoningEffort: "medium",
@@ -367,14 +373,16 @@ test("Power and Advanced preserve provider identity when official and CLIProxy m
     {
       key: JSON.stringify(["openai-codex", "claude-fable-5"]),
       model: "claude-fable-5",
-      label: "Direct Claude Fable 5",
+      label: "Claude Fable 5",
       provider: "openai-codex",
+      providerLabel: "Direct Codex",
     },
     {
       key: JSON.stringify(["cliproxy-anthropic", "claude-fable-5"]),
       model: "claude-fable-5",
       label: "Claude Fable 5",
       provider: "cliproxy-anthropic",
+      providerLabel: "CLIProxy",
     },
   ]);
   assert.deepEqual(advanced.efforts.map(({ effort }) => effort), ["medium", "ultra-code"]);

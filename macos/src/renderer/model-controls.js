@@ -322,23 +322,41 @@
   function buildAdvancedOptions(catalog, selectedModel) {
     const models = (Array.isArray(catalog) ? catalog : []).filter(validPowerModel);
     const current = findCatalogModel(models, selectedModel) ?? models[0];
-    const modelOptions = Object.freeze(models.map((entry) => Object.freeze({
-      key: modelOptionKey(entry.provider, entry.model),
-      model: entry.model,
-      label: typeof entry.label === "string" && entry.label ? entry.label : entry.model,
-      provider: entry.provider,
-    })));
+    const labels = models.map((entry) => (
+      typeof entry.label === "string" && entry.label ? entry.label : entry.model
+    ));
+    const labelCounts = new Map();
+    for (const label of labels) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+    const modelOptions = Object.freeze(models.map((entry, index) => {
+      const label = labels[index];
+      const providerLabel = labelCounts.get(label) > 1
+        ? entry.provider === "openai-codex"
+          ? "Direct Codex"
+          : entry.provider === "cliproxy-anthropic" ? "CLIProxy" : entry.provider
+        : null;
+      return Object.freeze({
+        key: modelOptionKey(entry.provider, entry.model),
+        model: entry.model,
+        label,
+        provider: entry.provider,
+        providerLabel,
+      });
+    }));
     const efforts = Object.freeze((current ? catalogEfforts(current) : []).map((effort) => Object.freeze({
       effort,
       label: effortLabel(effort),
+      description: effort === "ultra" ? "Consumes usage limits faster" : "",
     })));
     const speeds = Object.freeze([
       Object.freeze({ serviceTier: null, label: "Standard", description: "Default speed" }),
-      ...(current ? catalogTiers(current) : []).map((tier) => Object.freeze({
-        serviceTier: tier.id,
-        label: tier.name,
-        description: tier.description,
-      })),
+      ...(current ? catalogTiers(current) : []).map((tier) => {
+        const isFast = isFastServiceTier(tier);
+        return Object.freeze({
+          serviceTier: tier.id,
+          label: isFast ? "Fast" : tier.name,
+          description: isFast ? "1.5x speed, more usage" : tier.description,
+        });
+      }),
     ]);
     return Object.freeze({ models: modelOptions, efforts, speeds });
   }
