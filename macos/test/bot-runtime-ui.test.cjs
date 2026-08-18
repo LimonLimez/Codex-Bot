@@ -4158,6 +4158,362 @@ test("Codex Advanced view marks reduced motion without changing its measured own
   assert.equal(harness.find("codex-power-menu").style.height, "157px");
 });
 
+test("Advanced flyout content and focus follow Codex menu semantics", async (context) => {
+  const catalog = Object.freeze({
+    generation: 31,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([
+        Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+      ]),
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "max", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 31,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({ catalog, initialSelection: selection });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const row = (kind) => harness.findAll("codex-power-advanced-row")
+    .find((candidate) => candidate.dataset.kind === kind);
+  const options = () => harness.findAll("codex-power-flyout-option");
+  const keyEvent = (key) => ({
+    key,
+    prevented: false,
+    stopped: false,
+    preventDefault() { this.prevented = true; },
+    stopPropagation() { this.stopped = true; },
+  });
+
+  const trigger = harness.find("codex-model-trigger");
+  trigger.listeners.get("click")();
+  harness.find("codex-power-advanced-toggle").listeners.get("click")();
+  const effortRow = row("effort");
+  effortRow.listeners.get("click")();
+  const flyout = harness.find("codex-power-flyout");
+  assert.equal(flyout.hidden, false);
+  assert.equal(flyout.attributes.role, "menu");
+  assert.equal(flyout.style.width, "180px");
+  assert.equal(harness.find("codex-power-flyout-title").textContent, "Effort");
+  const medium = options().find((option) => option.dataset.value === "medium");
+  const ultra = options().find((option) => option.dataset.value === "ultra");
+  assert.equal(medium.attributes["aria-checked"], "true");
+  assert.equal(medium.children[1].textContent, "✓");
+  assert.equal(ultra.children[0].children[1].textContent, "Consumes usage limits faster");
+  assert.equal(harness.documentRef.activeElement, medium);
+
+  const down = keyEvent("ArrowDown");
+  flyout.listeners.get("keydown")(down);
+  assert.equal(down.prevented, true);
+  assert.equal(harness.documentRef.activeElement.dataset.value, "high");
+  const escapeChild = keyEvent("Escape");
+  flyout.listeners.get("keydown")(escapeChild);
+  assert.equal(escapeChild.stopped, true);
+  assert.equal(flyout.hidden, true);
+  assert.equal(harness.documentRef.activeElement, effortRow);
+  assert.equal(harness.find("codex-power-popover").hidden, false);
+
+  effortRow.listeners.get("click")();
+  flyout.listeners.get("keydown")(keyEvent("ArrowDown"));
+  flyout.listeners.get("keydown")(keyEvent("Enter"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(effortRow.dataset.value, "high");
+  assert.equal(effortRow.children[1].textContent, "High");
+
+  const speedRow = row("speed");
+  speedRow.listeners.get("click")();
+  assert.equal(flyout.style.width, "233px");
+  const fast = options().find((option) => option.dataset.value === "priority");
+  assert.equal(fast.children[0].children[1].textContent, "1.5x speed, more usage");
+  flyout.listeners.get("keydown")(keyEvent("Escape"));
+  const modelRow = row("model");
+  modelRow.listeners.get("click")();
+  assert.equal(flyout.style.width, "280px");
+  flyout.listeners.get("keydown")(keyEvent("Escape"));
+
+  const escapeParent = keyEvent("Escape");
+  harness.mounted.modelDock.listeners.get("keydown")(escapeParent);
+  assert.equal(harness.find("codex-power-popover").hidden, true);
+  assert.equal(harness.documentRef.activeElement, trigger);
+});
+
+test("canonical collision choices preserve provider identity and rebuild model defaults", async (context) => {
+  const catalog = Object.freeze({
+    generation: 24,
+    status: "ready",
+    models: Object.freeze([
+      Object.freeze({
+        id: "claude-fable-5",
+        displayName: "Claude Fable 5",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: Object.freeze(["medium", "high"]),
+      }),
+      Object.freeze({
+        id: "gpt-next",
+        displayName: "GPT Next",
+        defaultReasoningEffort: "high",
+        defaultServiceTier: "priority",
+        serviceTiers: Object.freeze([
+          Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
+        ]),
+        supportedReasoningEfforts: Object.freeze(["high", "max"]),
+      }),
+    ]),
+  });
+  let generation = 1;
+  let current = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 24,
+    generation,
+  });
+  const selected = [];
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: current,
+    runtimeFacade: {
+      async selectBot() { return current; },
+      async readModel() { return current; },
+      async selectModel(value) {
+        selected.push(structuredClone(value));
+        current = Object.freeze({
+          ...value,
+          catalogGeneration: value.provider === "openai-codex" ? 24 : 1,
+          generation: ++generation,
+        });
+        return current;
+      },
+    },
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const row = (kind) => harness.findAll("codex-power-advanced-row")
+    .find((candidate) => candidate.dataset.kind === kind);
+  harness.find("codex-model-trigger").listeners.get("click")();
+  harness.find("codex-power-advanced-toggle").listeners.get("click")();
+
+  row("model").listeners.get("click")();
+  const optional = harness.findAll("codex-power-flyout-option")
+    .find((option) => option.dataset.key
+      === JSON.stringify(["cliproxy-anthropic", "claude-fable-5"]));
+  optional.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(selected.at(-1), {
+    botId: BOT_A,
+    provider: "cliproxy-anthropic",
+    model: "claude-fable-5",
+    reasoningEffort: "medium",
+    serviceTier: null,
+  });
+
+  row("model").listeners.get("click")();
+  const nextModel = harness.findAll("codex-power-flyout-option")
+    .find((option) => option.dataset.key === JSON.stringify(["openai-codex", "gpt-next"]));
+  nextModel.listeners.get("click")();
+  assert.equal(row("effort").dataset.value, "high");
+  assert.equal(row("effort").children[1].textContent, "High");
+  assert.equal(row("speed").dataset.value, "priority");
+  assert.equal(row("speed").children[1].textContent, "Fast");
+  row("effort").listeners.get("click")();
+  assert.deepEqual(
+    harness.findAll("codex-power-flyout-option").map((option) => option.dataset.value),
+    ["high", "max"],
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(selected.at(-1), {
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-next",
+    reasoningEffort: "high",
+    serviceTier: "priority",
+  });
+});
+
+test("Advanced mutation replies preserve click order and only repaint the latest intent", async (context) => {
+  for (const releaseOrder of [[1, 0], [0, 1]]) {
+    const catalog = Object.freeze({
+      generation: 7,
+      status: "ready",
+      models: Object.freeze([Object.freeze({
+        id: "gpt-5.6-sol",
+        displayName: "GPT-5.6 Sol",
+        defaultReasoningEffort: "medium",
+        supportedReasoningEfforts: Object.freeze(["medium", "high", "max"]),
+      })]),
+    });
+    let generation = 2;
+    let current = Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 7,
+      generation,
+    });
+    const gates = [deferred(), deferred()];
+    const selected = [];
+    const harness = createMountedUiHarness({
+      catalog,
+      initialSelection: current,
+      runtimeFacade: {
+        async selectBot() { return current; },
+        async readModel() { return current; },
+        selectModel(value) {
+          const index = selected.length;
+          selected.push(structuredClone(value));
+          return gates[index].promise.then(() => {
+            current = Object.freeze({
+              ...value,
+              catalogGeneration: 7,
+              generation: ++generation,
+            });
+            return current;
+          });
+        },
+      },
+    });
+    context.after(() => harness.mounted.dispose());
+    await new Promise((resolve) => setImmediate(resolve));
+    const effortRow = harness.findAll("codex-power-advanced-row")
+      .find((row) => row.dataset.kind === "effort");
+    harness.find("codex-model-trigger").listeners.get("click")();
+    harness.find("codex-power-advanced-toggle").listeners.get("click")();
+    const choose = (effort) => {
+      effortRow.listeners.get("click")();
+      harness.findAll("codex-power-flyout-option")
+        .find((option) => option.dataset.value === effort)
+        .listeners.get("click")();
+    };
+    choose("high");
+    choose("max");
+    assert.deepEqual(selected, [
+      {
+        botId: BOT_A,
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        serviceTier: null,
+      },
+      {
+        botId: BOT_A,
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "max",
+        serviceTier: null,
+      },
+    ]);
+    gates[releaseOrder[0]].resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    gates[releaseOrder[1]].resolve();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(effortRow.dataset.value, "max");
+    assert.equal(effortRow.children[1].textContent, "Max");
+    harness.mounted.dispose();
+  }
+});
+
+test("Advanced mutation completions stay inert after a bot switch and disposal", async () => {
+  const catalog = Object.freeze({
+    generation: 8,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "max"]),
+    })]),
+  });
+  const selections = new Map([
+    [BOT_A, Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 8,
+      generation: 1,
+    })],
+    [BOT_B, Object.freeze({
+      botId: BOT_B,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "low",
+      serviceTier: null,
+      catalogGeneration: 8,
+      generation: 1,
+    })],
+  ]);
+  const gates = [deferred(), deferred()];
+  const selected = [];
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selections.get(BOT_A),
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot(botId) { return selections.get(botId); },
+      async readModel(botId) { return selections.get(botId); },
+      selectModel(value) {
+        const index = selected.length;
+        selected.push(structuredClone(value));
+        return gates[index].promise.then(() => Object.freeze({
+          ...value,
+          catalogGeneration: 8,
+          generation: 2,
+        }));
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const effortRow = harness.findAll("codex-power-advanced-row")
+    .find((row) => row.dataset.kind === "effort");
+  harness.find("codex-model-trigger").listeners.get("click")();
+  harness.find("codex-power-advanced-toggle").listeners.get("click")();
+  const choose = (effort) => {
+    effortRow.listeners.get("click")();
+    harness.findAll("codex-power-flyout-option")
+      .find((option) => option.dataset.value === effort)
+      .listeners.get("click")();
+  };
+
+  choose("high");
+  await harness.mounted.controller.selectBot(BOT_B);
+  assert.equal(effortRow.dataset.value, "low");
+  gates[0].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(effortRow.dataset.value, "low");
+
+  choose("max");
+  assert.equal(effortRow.dataset.value, "max");
+  harness.mounted.dispose();
+  gates[1].resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.mounted.modelDock.parentElement, null);
+  assert.equal(effortRow.dataset.value, "max");
+  assert.deepEqual(selected.map((entry) => [entry.botId, entry.reasoningEffort]), [
+    [BOT_A, "high"],
+    [BOT_B, "max"],
+  ]);
+});
+
 test("native protocol model dock waits for the exact composer host and remounts one identity", async (context) => {
   const catalog = Object.freeze({
     generation: 12,

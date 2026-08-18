@@ -2724,7 +2724,18 @@
     const advancedModel = createAdvancedRow("model", "Model");
     const advancedEffort = createAdvancedRow("effort", "Effort");
     const advancedSpeed = createAdvancedRow("speed", "Speed");
-    advancedPanel.append(advancedModel.row, advancedEffort.row, advancedSpeed.row);
+    const advancedFlyout = element(documentRef, "div", "codex-power-flyout");
+    advancedFlyout.setAttribute("role", "menu");
+    advancedFlyout.hidden = true;
+    const advancedFlyoutTitle = element(documentRef, "div", "codex-power-flyout-title");
+    const advancedFlyoutOptions = element(documentRef, "div", "codex-power-flyout-options");
+    advancedFlyout.append(advancedFlyoutTitle, advancedFlyoutOptions);
+    advancedPanel.append(
+      advancedModel.row,
+      advancedEffort.row,
+      advancedSpeed.row,
+      advancedFlyout,
+    );
     const viewControls = element(documentRef, "div", "codex-power-view-controls");
     viewControls.append(compactControls);
     viewTrack.append(simplePanel, advancedPanel);
@@ -2771,6 +2782,7 @@
     }
     function setAdvancedView(expanded) {
       advancedViewExpanded = Boolean(expanded);
+      if (!advancedViewExpanded) closeAdvancedFlyout();
       pickerMenu.dataset.view = advancedViewExpanded ? "advanced" : "simple";
       simplePanel.setAttribute("aria-hidden", String(advancedViewExpanded));
       simplePanel.inert = advancedViewExpanded;
@@ -2831,11 +2843,14 @@
     let currentPowerScope = "unselected";
     let holdTimer = null;
     let activeFastTier = null;
-    const fastIntents = new Map();
+    const selectionIntents = new Map();
     let advancedModelIdentities = new Map();
     let advancedOptions = null;
     let advancedSelection = null;
-    let fastIntentSequence = 0;
+    let advancedFlyoutKind = null;
+    let advancedFlyoutOwner = null;
+    const advancedOptionActions = new WeakMap();
+    let selectionIntentSequence = 0;
     let compactProjectionPending = false;
     let newBotSetupReturnFocus = null;
     let newBotPhotoError = null;
@@ -2903,7 +2918,26 @@
       modelDock.classList.toggle("has-fast-tier", active);
     }
 
-    function populateAdvanced(next, preferredSelection) {
+    const advancedRowForKind = (kind) => ({
+      model: advancedModel.row,
+      effort: advancedEffort.row,
+      speed: advancedSpeed.row,
+    })[kind] ?? null;
+
+    function closeAdvancedFlyout({ restoreFocus = false } = {}) {
+      if (advancedFlyoutKind === null) return;
+      const owner = advancedFlyoutOwner;
+      advancedFlyout.hidden = true;
+      advancedFlyoutKind = null;
+      advancedFlyoutOwner = null;
+      for (const row of [advancedModel.row, advancedEffort.row, advancedSpeed.row]) {
+        row.setAttribute("aria-expanded", "false");
+      }
+      advancedFlyoutOptions.replaceChildren();
+      if (restoreFocus) owner?.focus?.();
+    }
+
+    function renderAdvanced(next, preferredSelection) {
       const powerSelection = powerState.snapshot().selection;
       const identity = preferredSelection
         ?? (next.modelSelection && {
@@ -2927,12 +2961,18 @@
         && entry.model === current?.model);
       const authoritative = next.modelSelection?.provider === current?.provider
         && next.modelSelection?.model === current?.model;
-      const effort = authoritative
-        ? next.modelSelection.reasoningEffort
-        : catalog?.defaultReasoningEffort ?? options.efforts[0]?.effort;
-      const serviceTier = authoritative
-        ? next.modelSelection.serviceTier
-        : catalog?.defaultServiceTier ?? null;
+      const preferred = preferredSelection?.provider === current?.provider
+        && preferredSelection?.model === current?.model;
+      const effort = preferred && typeof preferredSelection.effort === "string"
+        ? preferredSelection.effort
+        : authoritative
+          ? next.modelSelection.reasoningEffort
+          : catalog?.defaultReasoningEffort ?? options.efforts[0]?.effort;
+      const serviceTier = preferred && Object.hasOwn(preferredSelection, "serviceTier")
+        ? preferredSelection.serviceTier
+        : authoritative
+          ? next.modelSelection.serviceTier
+          : catalog?.defaultServiceTier ?? null;
       const effortOption = options.efforts.find((entry) => entry.effort === effort)
         ?? options.efforts[0] ?? null;
       const speedOption = options.speeds.find((entry) => entry.serviceTier === serviceTier)
@@ -2954,6 +2994,130 @@
       advancedSpeed.value.textContent = speedOption?.label ?? "Standard";
       advancedSpeed.row.dataset.value = speedOption?.serviceTier ?? "";
       advancedSpeed.row.title = speedOption?.description ?? "";
+    }
+
+    function submitSelectionIntent(selection, { fastTier = null } = {}) {
+      const botId = lastSnapshot?.activeBotId;
+      if (typeof botId !== "string" || !selection) return Promise.resolve();
+      const intentSelection = Object.freeze({
+        provider: selection.provider,
+        model: selection.model,
+        effort: selection.effort,
+        serviceTier: selection.serviceTier,
+      });
+      const intent = Object.freeze({
+        sequence: ++selectionIntentSequence,
+        botId,
+        selection: intentSelection,
+        fastTier,
+      });
+      selectionIntents.set(botId, intent);
+      renderAdvanced(lastSnapshot, intentSelection);
+      return controller.selectModel(
+        intentSelection.provider,
+        intentSelection.model,
+        intentSelection.effort,
+        intentSelection.serviceTier,
+      ).then(() => {
+        if (selectionIntents.get(botId) !== intent || lastSnapshot?.activeBotId !== botId) return;
+        selectionIntents.delete(botId);
+        render(controller.snapshot());
+      }).catch(() => {
+        if (selectionIntents.get(botId) !== intent) return;
+        selectionIntents.delete(botId);
+        if (lastSnapshot?.activeBotId === botId) {
+          return controller.selectBot(botId, true).catch(() => render(controller.snapshot()));
+        }
+      });
+    }
+
+    function selectAdvancedOption(kind, entry) {
+      if (!lastSnapshot || !advancedSelection) return;
+      let nextSelection = null;
+      if (kind === "model") {
+        const identity = advancedModelIdentities.get(entry.key);
+        const descriptor = identity && lastSnapshot.modelCatalog.find((candidate) => (
+          candidate.provider === identity.provider && candidate.model === identity.model
+        ));
+        if (!descriptor) return;
+        const projected = MODEL_CONTROLS.buildAdvancedOptions(lastSnapshot.modelCatalog, identity);
+        const effort = projected.efforts.some((candidate) => (
+          candidate.effort === descriptor.defaultReasoningEffort
+        )) ? descriptor.defaultReasoningEffort : projected.efforts[0]?.effort;
+        const serviceTier = projected.speeds.some((candidate) => (
+          candidate.serviceTier === descriptor.defaultServiceTier
+        )) ? descriptor.defaultServiceTier : null;
+        nextSelection = MODEL_CONTROLS.resolveAdvancedSelection(lastSnapshot.modelCatalog, {
+          provider: identity.provider,
+          model: identity.model,
+          effort,
+          serviceTier,
+        });
+      } else if (kind === "effort") {
+        nextSelection = MODEL_CONTROLS.resolveAdvancedSelection(lastSnapshot.modelCatalog, {
+          ...advancedSelection,
+          effort: entry.effort,
+        });
+      } else if (kind === "speed") {
+        nextSelection = MODEL_CONTROLS.resolveAdvancedSelection(lastSnapshot.modelCatalog, {
+          ...advancedSelection,
+          serviceTier: entry.serviceTier,
+        });
+      }
+      if (!nextSelection) return;
+      renderAdvanced(lastSnapshot, nextSelection);
+      closeAdvancedFlyout({ restoreFocus: true });
+      void submitSelectionIntent(nextSelection);
+    }
+
+    function openAdvancedFlyout(kind) {
+      const owner = advancedRowForKind(kind);
+      if (!owner || owner.disabled || !advancedOptions || !advancedSelection) return;
+      closeAdvancedFlyout();
+      const entries = kind === "model"
+        ? advancedOptions.models
+        : kind === "effort" ? advancedOptions.efforts : advancedOptions.speeds;
+      advancedFlyoutKind = kind;
+      advancedFlyoutOwner = owner;
+      owner.setAttribute("aria-expanded", "true");
+      advancedFlyoutTitle.textContent = kind === "model" ? "Model" : kind === "effort" ? "Effort" : "Speed";
+      advancedFlyout.style.width = kind === "model" ? "280px" : kind === "effort" ? "180px" : "233px";
+      const optionNodes = entries.map((entry) => {
+        const option = element(documentRef, "button", "codex-power-flyout-option");
+        option.type = "button";
+        option.setAttribute("role", "menuitemradio");
+        const selected = kind === "model"
+          ? entry.provider === advancedSelection.provider && entry.model === advancedSelection.model
+          : kind === "effort"
+            ? entry.effort === advancedSelection.effort
+            : entry.serviceTier === advancedSelection.serviceTier;
+        option.setAttribute("aria-checked", String(selected));
+        option.tabIndex = selected ? 0 : -1;
+        if (kind === "model") {
+          option.dataset.key = entry.key;
+          option.dataset.value = entry.key;
+        } else option.dataset.value = kind === "effort" ? entry.effort : entry.serviceTier ?? "__standard__";
+        const copy = element(documentRef, "span", "codex-power-flyout-option-copy");
+        copy.append(
+          element(documentRef, "span", "codex-power-flyout-option-label", entry.label),
+          element(
+            documentRef,
+            "span",
+            "codex-power-flyout-option-description",
+            kind === "model" ? entry.providerLabel ?? "" : entry.description ?? "",
+          ),
+        );
+        const check = element(documentRef, "span", "codex-power-flyout-option-check", selected ? "✓" : "");
+        check.setAttribute("aria-hidden", "true");
+        option.append(copy, check);
+        const choose = () => selectAdvancedOption(kind, entry);
+        advancedOptionActions.set(option, choose);
+        option.addEventListener("click", choose);
+        return option;
+      });
+      advancedFlyoutOptions.replaceChildren(...optionNodes);
+      advancedFlyout.hidden = false;
+      (optionNodes.find((option) => option.tabIndex === 0) ?? optionNodes[0])?.focus?.();
     }
 
     function populateNewBotSetup(next) {
@@ -3024,6 +3188,10 @@
       if (mountDisposed) return;
       const previousSnapshot = lastSnapshot;
       lastSnapshot = next;
+      const liveBotIds = new Set(next.bots.map((record) => record.botId));
+      for (const botId of selectionIntents.keys()) {
+        if (!liveBotIds.has(botId)) selectionIntents.delete(botId);
+      }
       const selected = next.activeBot;
       botSelect.replaceChildren();
       for (const record of next.bots) {
@@ -3218,13 +3386,13 @@
         ? MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, visibleSelection).speeds
         : [];
       activeFastTier = MODEL_CONTROLS.findFastServiceTier(speedOptions);
-      const fastIntent = fastIntents.get(next.activeBotId);
-      const desiredServiceTier = fastIntent
-        && fastIntent.provider === visibleSelection?.provider
-        && fastIntent.model === visibleSelection?.model
-        && fastIntent.effort === visibleSelection?.effort
-        && fastIntent.fastTier === activeFastTier
-        ? fastIntent.desiredServiceTier
+      const selectionIntent = selectionIntents.get(next.activeBotId);
+      const desiredServiceTier = selectionIntent
+        && selectionIntent.selection.provider === visibleSelection?.provider
+        && selectionIntent.selection.model === visibleSelection?.model
+        && selectionIntent.selection.effort === visibleSelection?.effort
+        && selectionIntent.fastTier === activeFastTier
+        ? selectionIntent.selection.serviceTier
         : visibleSelection?.serviceTier;
       const fastActive = Boolean(activeFastTier
         && desiredServiceTier === activeFastTier);
@@ -3235,7 +3403,7 @@
       advancedModel.row.disabled = !enabled;
       advancedEffort.row.disabled = !enabled;
       advancedSpeed.row.disabled = !enabled;
-      populateAdvanced(next);
+      renderAdvanced(next, selectionIntent?.selection);
     }
 
     controller = createBotUiController({
@@ -3365,6 +3533,11 @@
       modelTrigger.focus?.();
     });
     const dismissPopover = (event) => {
+      if (!advancedFlyout.hidden
+        && !advancedFlyout.contains?.(event.target)
+        && !advancedFlyoutOwner?.contains?.(event.target)) {
+        closeAdvancedFlyout();
+      }
       if (popover.hidden || modelDock.contains?.(event.target)) return;
       setPopoverOpen(false);
     };
@@ -3421,59 +3594,62 @@
     reasoning.addEventListener("mouseenter", () => paintPower(powerState.setHover(true)));
     reasoning.addEventListener("mouseleave", () => paintPower(powerState.setHover(false)));
 
+    advancedModel.row.addEventListener("click", () => openAdvancedFlyout("model"));
+    advancedEffort.row.addEventListener("click", () => openAdvancedFlyout("effort"));
+    advancedSpeed.row.addEventListener("click", () => openAdvancedFlyout("speed"));
+    advancedFlyout.addEventListener("keydown", (event) => {
+      const options = [...advancedFlyoutOptions.children].filter((option) => !option.disabled);
+      if (!options.length) return;
+      const focused = options.indexOf(documentRef.activeElement);
+      if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+        event.preventDefault?.();
+        let index = focused < 0 ? 0 : focused;
+        if (event.key === "ArrowDown") index = (index + 1) % options.length;
+        else if (event.key === "ArrowUp") index = (index - 1 + options.length) % options.length;
+        else if (event.key === "Home") index = 0;
+        else index = options.length - 1;
+        for (const [candidateIndex, option] of options.entries()) {
+          option.tabIndex = candidateIndex === index ? 0 : -1;
+        }
+        options[index].focus?.();
+        return;
+      }
+      if (["Enter", " "].includes(event.key) && focused >= 0) {
+        event.preventDefault?.();
+        advancedOptionActions.get(options[focused])?.();
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault?.();
+        event.stopPropagation?.();
+        closeAdvancedFlyout({ restoreFocus: true });
+      }
+    });
     advancedToggle.addEventListener("click", () => {
       setAdvancedView(!advancedViewExpanded);
-      if (advancedViewExpanded && lastSnapshot) populateAdvanced(lastSnapshot);
+      if (advancedViewExpanded && lastSnapshot) renderAdvanced(lastSnapshot);
     });
     fastToggle.addEventListener("click", () => {
       if (!lastSnapshot || !activeFastTier) return;
-      const selection = lastSnapshot.modelSelection ? {
+      const botId = lastSnapshot.activeBotId;
+      if (typeof botId !== "string") return;
+      const pendingSelection = selectionIntents.get(botId)?.selection;
+      const selection = pendingSelection ?? (lastSnapshot.modelSelection ? {
         provider: lastSnapshot.modelSelection.provider,
         model: lastSnapshot.modelSelection.model,
         effort: lastSnapshot.modelSelection.reasoningEffort,
         serviceTier: lastSnapshot.modelSelection.serviceTier,
-      } : powerState.snapshot().selection;
+      } : powerState.snapshot().selection);
       if (!selection) return;
-      const botId = lastSnapshot.activeBotId;
-      if (typeof botId !== "string") return;
-      const previousIntent = fastIntents.get(botId);
-      const currentTier = previousIntent
-        && previousIntent.provider === selection.provider
-        && previousIntent.model === selection.model
-        && previousIntent.effort === selection.effort
-        && previousIntent.fastTier === activeFastTier
-        ? previousIntent.desiredServiceTier
-        : selection.serviceTier;
-      const desiredServiceTier = currentTier === activeFastTier ? null : activeFastTier;
-      const intent = Object.freeze({
-        sequence: ++fastIntentSequence,
-        botId,
+      const desiredServiceTier = selection.serviceTier === activeFastTier ? null : activeFastTier;
+      const nextSelection = Object.freeze({
         provider: selection.provider,
         model: selection.model,
         effort: selection.effort,
-        fastTier: activeFastTier,
-        desiredServiceTier,
+        serviceTier: desiredServiceTier,
       });
-      fastIntents.set(botId, intent);
       paintFast(desiredServiceTier === activeFastTier);
-      void controller.selectModel(
-        selection.provider,
-        selection.model,
-        selection.effort,
-        desiredServiceTier,
-      )
-        .then(() => {
-          if (fastIntents.get(botId) !== intent) return;
-          fastIntents.delete(botId);
-          render(controller.snapshot());
-        })
-        .catch(() => {
-          if (fastIntents.get(botId) !== intent) return;
-          fastIntents.delete(botId);
-          if (lastSnapshot?.activeBotId === botId) {
-            void controller.selectBot(botId, true).catch(() => render(controller.snapshot()));
-          }
-        });
+      void submitSelectionIntent(nextSelection, { fastTier: activeFastTier });
     });
     void controller.initialize().catch(() => {
       if (mountDisposed) return;
@@ -3502,7 +3678,8 @@
         if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
         warningScope = null;
-        fastIntents.clear();
+        closeAdvancedFlyout();
+        selectionIntents.clear();
         reasoningView.dispose();
         controller.dispose();
         newBotSetup.remove?.();
