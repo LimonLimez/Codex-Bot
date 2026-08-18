@@ -36,7 +36,7 @@ This is not a single chat box wrapped in a desktop window:
 - **Model choice stays yours.** Set workspace defaults, then override model, reasoning, and Fast mode for an individual coworker.
 - **Computer use is visible.** Every coworker gets a private local browser profile with a live view and a full-window takeover surface.
 - **Recurring work survives the chat.** Routines run through a supervised current-user worker while your Windows session remains signed in.
-- **Connected apps stay intentional.** The genuine Grok Bot sidebar entry becomes **Connected apps**, where you can connect services through your own Composio project.
+- **Connected apps stay intentional and local.** The genuine Grok Bot sidebar entry becomes **Connected apps**, where your installation connects directly to your own Composio project. Open Bot operates no shared plugin backend.
 
 ## Bring the provider you already use
 

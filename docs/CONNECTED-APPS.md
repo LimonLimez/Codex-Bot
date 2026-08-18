@@ -2,6 +2,8 @@
 
 Open Bot keeps the genuine Grok Bot desktop shell. The stock **Plugins** row in its sidebar is restored as **Connected apps** and opens a local Open Bot dialog backed by [Composio Tool Router](https://docs.composio.dev/docs/tool-router/overview).
 
+This is a fully local, bring-your-own-project integration. Open Bot does not run a shared plugin backend and does not embed a developer-wide Composio credential. Each installation talks directly to Composio using the project key supplied by that Windows user.
+
 ## Connect Composio
 
 1. Create or choose a project in the [Composio dashboard](https://platform.composio.dev/).
@@ -9,7 +11,7 @@ Open Bot keeps the genuine Grok Bot desktop shell. The stock **Plugins** row in 
 3. Enter the project's API key. Open Bot protects it with Windows DPAPI for the current user.
 4. Choose **Connect** beside an app and finish OAuth in the Composio page that opens.
 
-Open Bot accepts connection links only on HTTPS `composio.dev` hosts. Provider OAuth tokens stay with Composio. Local configuration contains a DPAPI ciphertext, a random Open Bot user identifier, and a Composio session identifier—never the provider OAuth token.
+Open Bot accepts connection links only on HTTPS `composio.dev` hosts. Provider OAuth tokens stay with Composio. Local configuration contains a DPAPI ciphertext, a random Open Bot user identifier, and a Composio session identifier—never the provider OAuth token. The project key is never compiled into Open Bot, uploaded to an Open Bot service, or shared with another installation.
 
 ## How coworkers use apps
 

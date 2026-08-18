@@ -3367,14 +3367,14 @@ async function renderConnectedAppsCatalog(query = "") {
         <div>
           <span class="openbot-apps-eyebrow">Bring your own Composio project</span>
           <h3>Connect the apps your coworkers use</h3>
-          <p>Open Bot protects this project key for your Windows account. App OAuth tokens stay with Composio and never pass through Open Bot.</p>
+          <p>Fully local setup: use your own Composio project key. Open Bot protects it for your Windows account and has no shared plugin backend. App OAuth tokens stay with Composio and never pass through Open Bot.</p>
         </div>
         <form data-openbot-composio-form>
           <label for="openbot-composio-key">Composio project key</label>
           <input id="openbot-composio-key" name="apiKey" type="password" minlength="8" maxlength="512" autocomplete="off" spellcheck="false" placeholder="Your Composio project key" required>
           <button type="submit">Save and load apps</button>
         </form>
-        <p class="openbot-apps-fineprint">Connected apps can access data or perform actions in third-party accounts. Open Bot disables Composio sandbox execution and automatic local-file transfer.</p>
+        <p class="openbot-apps-fineprint">Your installation connects directly to Composio. Connected apps can access data or perform actions in third-party accounts. Open Bot disables Composio sandbox execution and automatic local-file transfer.</p>
       </section>`;
       body
         .querySelector("[data-openbot-composio-form]")
