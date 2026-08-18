@@ -36,6 +36,7 @@ This is not a single chat box wrapped in a desktop window:
 - **Model choice stays yours.** Set workspace defaults, then override model, reasoning, and Fast mode for an individual coworker.
 - **Computer use is visible.** Every coworker gets a private local browser profile with a live view and a full-window takeover surface.
 - **Recurring work survives the chat.** Routines run through a supervised current-user worker while your Windows session remains signed in.
+- **Connected apps stay intentional.** The genuine Grok Bot sidebar entry becomes **Connected apps**, where you can connect services through your own Composio project.
 
 ## Bring the provider you already use
 
@@ -56,14 +57,15 @@ Open Bot supports reviewed CLIProxyAPI sign-in routes, a direct OpenAI API key, 
 
 ## What you can do
 
-| Work                  | Open Bot behavior                                                                                            |
-| --------------------- | ------------------------------------------------------------------------------------------------------------ |
-| **Direct chat**       | Give one coworker a durable role, model, reasoning level, and private conversation.                          |
-| **Team chat**         | Add coworkers to a shared room where they can coordinate, message each other, and report one useful result.  |
-| **Search & Research** | Require public-web evidence and source-backed answers instead of invented citations.                         |
-| **Computer use**      | Watch a 30 FPS private browser stream, approve actions in chat, enable scoped Always allow, or take control. |
-| **Routines**          | Schedule recurring work through the local Always On worker.                                                  |
-| **Image generation**  | Use GPT Image 2 when a direct OpenAI API key is connected.                                                   |
+| Work                  | Open Bot behavior                                                                                                          |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| **Direct chat**       | Give one coworker a durable role, model, reasoning level, and private conversation.                                        |
+| **Team chat**         | Add coworkers to a shared room where they can coordinate, message each other, and report one useful result.                |
+| **Search & Research** | Require public-web evidence and source-backed answers instead of invented citations.                                       |
+| **Computer use**      | Watch a 30 FPS private browser stream, approve actions in chat, enable scoped Always allow, or take control.               |
+| **Routines**          | Schedule recurring work through the local Always On worker.                                                                |
+| **Image generation**  | Use GPT Image 2 when a direct OpenAI API key is connected.                                                                 |
+| **Connected apps**    | Search services through Composio; reads are bounded, writes require a direct request, and destructive actions are blocked. |
 
 ## Start here
 
@@ -111,6 +113,7 @@ Silent bootstrap requires `/BOOTSTRAPGROKBOT=1`. The separate Grok Bot installat
 
 - [Installation](docs/INSTALLATION.md) — setup, silent install, upgrades, and uninstall behavior
 - [Providers](docs/PROVIDERS.md) — authentication, model catalogs, local endpoints, and limitations
+- [Connected apps](docs/CONNECTED-APPS.md) — Composio setup, OAuth lifecycle, action limits, and data flow
 - [Architecture](docs/ARCHITECTURE.md) — components, request paths, trust boundaries, and local state
 - [Troubleshooting](docs/TROUBLESHOOTING.md) — provider, model, browser, installer, and routine failures
 - [Sources](docs/SOURCES.md) — upstream documentation, dependency pins, and provenance
