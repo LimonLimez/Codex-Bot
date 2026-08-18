@@ -15,6 +15,9 @@ const officialComputer = require(
 const groupTaskTracker = require(
   path.join(__dirname, "group-task-tracker.cjs"),
 );
+const composioManager = require(
+  path.join(__dirname, "composio-manager.cjs"),
+).manager;
 
 const STATE_ROOT =
   process.env.CODEX_BOT_STATE_ROOT ||
@@ -203,6 +206,46 @@ function openOfficialLoginInDefaultBrowser(loginUrl) {
       ),
     );
   });
+}
+
+function openComposioLinkInDefaultBrowser(linkUrl) {
+  let safe;
+  try {
+    const candidate = new URL(String(linkUrl || ""));
+    if (
+      candidate.protocol !== "https:" ||
+      candidate.username ||
+      candidate.password ||
+      candidate.port ||
+      !/(^|\.)composio\.dev$/i.test(candidate.hostname)
+    )
+      throw new Error("unsafe");
+    safe = candidate.href;
+  } catch {
+    throw requestError("Composio returned an unsafe connection address.", 502);
+  }
+  if (process.platform !== "win32")
+    throw requestError(
+      "Open Bot could not open the Composio connection page.",
+      503,
+    );
+  const launcher = path.join(
+    process.env.SystemRoot || "C:\\Windows",
+    "System32",
+    "rundll32.exe",
+  );
+  if (!fs.existsSync(launcher))
+    throw requestError(
+      "Open Bot could not open the Composio connection page.",
+      503,
+    );
+  const processHandle = childProcess.spawn(
+    launcher,
+    ["url.dll,FileProtocolHandler", safe],
+    { detached: true, stdio: "ignore", windowsHide: true },
+  );
+  processHandle.unref();
+  return safe;
 }
 
 function normalizeCursor(value) {
@@ -780,6 +823,60 @@ function startViewServer({
         sendJson(response, 200, { ok: groupTaskTracker.clear(body.groupId) });
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/composio/status") {
+        requireNoQuery(url);
+        sendJson(response, 200, composioManager.status());
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/composio/toolkits"
+      ) {
+        for (const key of url.searchParams.keys()) {
+          if (key !== "query" && key !== "cursor")
+            throw requestError("Unknown connected-app query field.", 400);
+        }
+        if (
+          url.searchParams.getAll("query").length > 1 ||
+          url.searchParams.getAll("cursor").length > 1
+        )
+          throw requestError(
+            "Connected-app query fields may appear only once.",
+            400,
+          );
+        sendJson(
+          response,
+          200,
+          await composioManager.listToolkits({
+            query: url.searchParams.get("query") || "",
+            cursor: url.searchParams.get("cursor") || "",
+          }),
+        );
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/composio") {
+        requireNoQuery(url);
+        const body = await readJson(request);
+        const action = String(body.action || "");
+        if (action === "configure") {
+          requireExactBodyKeys(body, ["action", "apiKey"]);
+          sendJson(response, 200, await composioManager.configure(body.apiKey));
+          return;
+        }
+        if (action === "disconnect") {
+          requireExactBodyKeys(body, ["action"]);
+          sendJson(response, 200, composioManager.disconnect());
+          return;
+        }
+        if (action === "authorize") {
+          requireExactBodyKeys(body, ["action", "toolkit"]);
+          const result = await composioManager.authorize(body.toolkit);
+          openComposioLinkInDefaultBrowser(result.redirectUrl);
+          sendJson(response, 200, result);
+          return;
+        }
+        throw requestError("Unknown connected-app action.", 400);
+      }
       if (request.method === "POST" && url.pathname === "/api/codex/settings") {
         if (
           !/^application\/json(?:\s*;|$)/i.test(
@@ -1299,6 +1396,7 @@ module.exports = {
   serializeAction,
   manager: providerManager,
   groupTaskTracker,
+  composioManager,
   privateManager: manager,
   officialComputer,
   openOfficialLoginInDefaultBrowser,

@@ -788,15 +788,13 @@ function verifyRendererLocalOnlySource(rendererSource) {
   );
   const pluginSidebar = uniqueFunctionRegion(
     rendererSource,
-    [
-      "Vendor plugin discovery is unavailable in the local-only build",
-      "return null;",
-    ],
-    "plugin sidebar isolation",
+    ["sand-agents-sidebar__plugins-entry", '"Connected apps"'],
+    "connected apps sidebar entry",
   ).source;
   assertPatchInvariant(
-    !pluginSidebar.includes("onOpenPlugins"),
-    "vendor plugin sidebar entry is disabled",
+    pluginSidebar.includes("globalThis.OpenBotConnectedApps?.open?.()") &&
+      !pluginSidebar.includes("onClick:t"),
+    "stock sidebar entry opens only the local connected-apps experience",
   );
   const pluginCommands = uniqueFunctionRegion(
     rendererSource,
@@ -2184,13 +2182,22 @@ function patchRenderer(root, viewToken, viewPort) {
     ["sand-agents-sidebar__plugins-entry", "onOpenPlugins"],
     "plugin sidebar entry",
   );
-  const pluginSidebarName = functionName(pluginSidebar, "plugin sidebar entry");
-  text = replaceFunction(
-    text,
-    ["sand-agents-sidebar__plugins-entry", "onOpenPlugins"],
-    `function ${pluginSidebarName}() {\n  // Vendor plugin discovery is unavailable in the local-only build.\n  return null;\n}`,
-    "plugin sidebar entry",
+  let connectedAppsSidebar = replaceOnce(
+    pluginSidebar.source,
+    'children:"Plugins"',
+    'children:"Connected apps"',
+    "connected apps sidebar label",
   );
+  connectedAppsSidebar = replaceOnce(
+    connectedAppsSidebar,
+    "onClick:t",
+    "onClick:()=>globalThis.OpenBotConnectedApps?.open?.()",
+    "connected apps sidebar action",
+  );
+  text =
+    text.slice(0, pluginSidebar.start) +
+    connectedAppsSidebar +
+    text.slice(pluginSidebar.end);
 
   const pluginOverlayOpeners = [
     {

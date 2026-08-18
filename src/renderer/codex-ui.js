@@ -3322,6 +3322,200 @@ for (const eventName of ["beforeinput", "keydown", "submit"]) {
   );
 }
 
+let connectedAppsDialog = null;
+let connectedAppsPollTimer = null;
+
+function connectedAppGlyph(slug) {
+  const value = String(slug || "app").replace(/[^a-z0-9]/gi, "");
+  return escapeHtml((value.slice(0, 2) || "AP").toUpperCase());
+}
+
+function stopConnectedAppsPolling() {
+  clearInterval(connectedAppsPollTimer);
+  connectedAppsPollTimer = null;
+}
+
+function closeConnectedApps() {
+  stopConnectedAppsPolling();
+  if (!connectedAppsDialog) return;
+  if (
+    typeof connectedAppsDialog.close === "function" &&
+    connectedAppsDialog.open
+  )
+    connectedAppsDialog.close();
+  else connectedAppsDialog.removeAttribute("open");
+}
+
+function setConnectedAppsNotice(message, tone = "info") {
+  const notice = connectedAppsDialog?.querySelector(
+    "[data-openbot-apps-notice]",
+  );
+  if (!notice) return;
+  notice.textContent = String(message || "");
+  notice.dataset.tone = tone === "error" ? "error" : "info";
+}
+
+async function renderConnectedAppsCatalog(query = "") {
+  const body = connectedAppsDialog?.querySelector("[data-openbot-apps-body]");
+  if (!body) return;
+  body.setAttribute("aria-busy", "true");
+  try {
+    const status = await request("/api/composio/status");
+    if (!status.configured) {
+      stopConnectedAppsPolling();
+      body.innerHTML = `<section class="openbot-apps-setup">
+        <div>
+          <span class="openbot-apps-eyebrow">Bring your own Composio project</span>
+          <h3>Connect the apps your coworkers use</h3>
+          <p>Open Bot protects this project key for your Windows account. App OAuth tokens stay with Composio and never pass through Open Bot.</p>
+        </div>
+        <form data-openbot-composio-form>
+          <label for="openbot-composio-key">Composio project key</label>
+          <input id="openbot-composio-key" name="apiKey" type="password" minlength="8" maxlength="512" autocomplete="off" spellcheck="false" placeholder="Your Composio project key" required>
+          <button type="submit">Save and load apps</button>
+        </form>
+        <p class="openbot-apps-fineprint">Connected apps can access data or perform actions in third-party accounts. Open Bot disables Composio sandbox execution and automatic local-file transfer.</p>
+      </section>`;
+      body
+        .querySelector("[data-openbot-composio-form]")
+        ?.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const submit = form.querySelector("button");
+          const field = form.elements.apiKey;
+          submit.disabled = true;
+          setConnectedAppsNotice(
+            "Protecting the key and creating your app session...",
+          );
+          try {
+            await request("/api/composio", {
+              action: "configure",
+              apiKey: field.value,
+            });
+            form.reset();
+            await renderConnectedAppsCatalog();
+            setConnectedAppsNotice("Connected apps are ready.");
+          } catch (error) {
+            field.value = "";
+            setConnectedAppsNotice(error.message, "error");
+          } finally {
+            submit.disabled = false;
+          }
+        });
+      return;
+    }
+    const search = String(query || "").trim();
+    const catalog = await request(
+      `/api/composio/toolkits${search ? `?query=${encodeURIComponent(search)}` : ""}`,
+    );
+    const items = Array.isArray(catalog.items) ? catalog.items : [];
+    body.innerHTML = `<section class="openbot-apps-catalog">
+      <div class="openbot-apps-toolbar">
+        <label><span class="codex-visually-hidden">Search connected apps</span><input type="search" value="${escapeHtml(search)}" maxlength="100" placeholder="Search Gmail, GitHub, Slack, Notion..."></label>
+        <button type="button" data-openbot-composio-disconnect>Remove project</button>
+      </div>
+      <div class="openbot-apps-grid" role="list">
+        ${
+          items
+            .map(
+              (
+                item,
+              ) => `<article class="openbot-app-card" role="listitem" data-toolkit="${escapeHtml(item.slug)}">
+              <span class="openbot-app-glyph" aria-hidden="true">${connectedAppGlyph(item.slug)}</span>
+              <div><strong>${escapeHtml(item.name)}</strong><small>${item.connected ? "Connected and available to coworkers" : "Connect with Composio"}</small></div>
+              <button type="button" data-openbot-app-connect ${item.connected ? "disabled" : ""}>${item.connected ? "Connected" : "Connect"}</button>
+            </article>`,
+            )
+            .join("") ||
+          `<p class="openbot-apps-empty">No apps matched that search.</p>`
+        }
+      </div>
+      <p class="openbot-apps-fineprint">Connections are private to this Open Bot installation. App actions appear only when Composio reports the connection active.</p>
+    </section>`;
+    const searchField = body.querySelector('input[type="search"]');
+    let searchTimer = null;
+    searchField?.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(
+        () => renderConnectedAppsCatalog(searchField.value),
+        250,
+      );
+    });
+    body
+      .querySelector("[data-openbot-composio-disconnect]")
+      ?.addEventListener("click", async () => {
+        setConnectedAppsNotice("Removing the protected Composio project...");
+        try {
+          await request("/api/composio", { action: "disconnect" });
+          await renderConnectedAppsCatalog();
+          setConnectedAppsNotice("Composio was removed from Open Bot.");
+        } catch (error) {
+          setConnectedAppsNotice(error.message, "error");
+        }
+      });
+    for (const button of body.querySelectorAll("[data-openbot-app-connect]")) {
+      button.addEventListener("click", async () => {
+        const card = button.closest("[data-toolkit]");
+        const toolkit = card?.dataset.toolkit || "";
+        button.disabled = true;
+        setConnectedAppsNotice(
+          `Opening ${card?.querySelector("strong")?.textContent || "app"} connection...`,
+        );
+        try {
+          await request("/api/composio", { action: "authorize", toolkit });
+          setConnectedAppsNotice(
+            "Finish connecting in the secure Composio tab. This list will update automatically.",
+          );
+          stopConnectedAppsPolling();
+          connectedAppsPollTimer = setInterval(
+            () => renderConnectedAppsCatalog(search).catch(() => {}),
+            3000,
+          );
+        } catch (error) {
+          button.disabled = false;
+          setConnectedAppsNotice(error.message, "error");
+        }
+      });
+    }
+  } catch (error) {
+    body.innerHTML = `<div class="openbot-apps-error"><strong>Connected apps unavailable</strong><p>${escapeHtml(error.message)}</p><button type="button" data-openbot-apps-retry>Try again</button></div>`;
+    body
+      .querySelector("[data-openbot-apps-retry]")
+      ?.addEventListener("click", () => renderConnectedAppsCatalog(query));
+  } finally {
+    body.removeAttribute("aria-busy");
+  }
+}
+
+function openConnectedApps() {
+  if (!connectedAppsDialog) {
+    const dialog = document.createElement("dialog");
+    dialog.className = "openbot-apps-dialog";
+    dialog.setAttribute("aria-labelledby", "openbot-apps-title");
+    dialog.innerHTML = `<div class="openbot-apps-shell">
+      <header><div><span class="openbot-apps-eyebrow">Open Bot</span><h2 id="openbot-apps-title">Connected apps</h2><p>Give your coworkers access to the services you choose.</p></div><button type="button" data-openbot-apps-close aria-label="Close connected apps">${closeIcon()}</button></header>
+      <main data-openbot-apps-body><div class="openbot-apps-loading">Loading connected apps...</div></main>
+      <footer><span data-openbot-apps-notice aria-live="polite"></span><a href="https://docs.composio.dev" target="_blank" rel="noreferrer">Composio documentation</a></footer>
+    </div>`;
+    dialog
+      .querySelector("[data-openbot-apps-close]")
+      ?.addEventListener("click", closeConnectedApps);
+    dialog.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      closeConnectedApps();
+    });
+    dialog.addEventListener("close", stopConnectedAppsPolling);
+    document.body.append(dialog);
+    connectedAppsDialog = dialog;
+  }
+  if (typeof connectedAppsDialog.showModal === "function") {
+    if (!connectedAppsDialog.open) connectedAppsDialog.showModal();
+  } else connectedAppsDialog.setAttribute("open", "");
+  void renderConnectedAppsCatalog();
+}
+
+globalThis.OpenBotConnectedApps = Object.freeze({ open: openConnectedApps });
+
 const style = document.createElement("style");
 style.textContent = `
   [data-codex-local] { display:grid; gap:16px; margin-bottom:16px; color:var(--sand-text-primary,#eee); }
@@ -3514,6 +3708,47 @@ style.textContent = `
   .codex-group-task-tracker li[data-status="complete"] .codex-group-task-dot { background:#8ed5a4; }
   .codex-group-task-tracker li[data-status="passed"] .codex-group-task-dot { background:#97a3b8; }
   .codex-group-task-tracker li[data-status="blocked"] .codex-group-task-dot { background:#f0ae84; }
+  .openbot-apps-dialog { width:min(900px,calc(100vw - 36px)); height:min(720px,calc(100vh - 36px)); max-width:none; max-height:none; padding:0; overflow:hidden; border:1px solid rgba(255,255,255,.15); border-radius:16px; color:var(--sand-text-primary,#eee); background:#151515; box-shadow:0 30px 90px rgba(0,0,0,.62); }
+  .openbot-apps-dialog::backdrop { background:rgba(0,0,0,.68); backdrop-filter:blur(5px); }
+  .openbot-apps-shell { height:100%; display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
+  .openbot-apps-shell>header { display:flex; align-items:flex-start; justify-content:space-between; gap:24px; padding:22px 24px 18px; border-bottom:1px solid rgba(255,255,255,.09); }
+  .openbot-apps-shell>header>div { display:grid; gap:4px; }
+  .openbot-apps-shell h2,.openbot-apps-shell h3,.openbot-apps-shell p { margin:0; }
+  .openbot-apps-shell h2 { font-size:21px; letter-spacing:-.025em; }
+  .openbot-apps-shell h3 { max-width:22ch; font-size:24px; line-height:1.15; letter-spacing:-.03em; }
+  .openbot-apps-shell>header p,.openbot-apps-setup p { color:#aaa; font-size:12px; line-height:1.5; }
+  .openbot-apps-eyebrow { color:#91b8ff; font-size:10px; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }
+  .openbot-apps-shell>header>button { width:30px; height:30px; display:grid; place-items:center; flex:none; border:0; border-radius:8px; color:#ddd; background:transparent; cursor:pointer; }
+  .openbot-apps-shell>header>button:hover { background:rgba(255,255,255,.08); }
+  .openbot-apps-shell>main { overflow:auto; padding:22px 24px; }
+  .openbot-apps-shell>footer { min-height:46px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 24px; border-top:1px solid rgba(255,255,255,.09); color:#999; font-size:11px; }
+  .openbot-apps-shell>footer span[data-tone="error"] { color:#ff9f9f; }
+  .openbot-apps-shell>footer a { color:#abc9ff; }
+  .openbot-apps-setup { width:min(600px,100%); min-height:100%; display:grid; align-content:center; gap:20px; margin:auto; }
+  .openbot-apps-setup>div { display:grid; gap:7px; }
+  .openbot-apps-setup form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
+  .openbot-apps-setup form label { grid-column:1/-1; color:#aaa; font-size:11px; font-weight:650; }
+  .openbot-apps-setup input,.openbot-apps-toolbar input { min-width:0; border:1px solid rgba(255,255,255,.17); border-radius:9px; padding:10px 12px; color:#eee; background:#202020; font:inherit; }
+  .openbot-apps-setup button,.openbot-app-card button,.openbot-apps-toolbar button,.openbot-apps-error button { border:1px solid rgba(255,255,255,.2); border-radius:9px; padding:9px 13px; color:#eee; background:#292929; font:inherit; font-weight:650; cursor:pointer; }
+  .openbot-apps-setup button { border-color:#f2f2f2; color:#111; background:#f2f2f2; }
+  .openbot-apps-setup button:disabled,.openbot-app-card button:disabled { opacity:.62; cursor:default; }
+  .openbot-apps-fineprint { color:#888 !important; font-size:10px !important; }
+  .openbot-apps-catalog { display:grid; gap:16px; }
+  .openbot-apps-toolbar { display:grid; grid-template-columns:minmax(240px,1fr) auto; gap:10px; }
+  .openbot-apps-toolbar label { display:grid; }
+  .openbot-apps-toolbar button { border:0; color:#aaa; background:transparent; font-weight:500; }
+  .openbot-apps-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
+  .openbot-app-card { min-width:0; display:grid; grid-template-columns:42px minmax(0,1fr) auto; align-items:center; gap:11px; padding:12px; border:1px solid rgba(255,255,255,.11); border-radius:12px; background:#1d1d1d; }
+  .openbot-app-glyph { width:42px; height:42px; display:grid; place-items:center; border-radius:11px; color:#bcd2ff; background:rgba(111,151,223,.14); font-size:12px; font-weight:800; letter-spacing:.04em; }
+  .openbot-app-card>div { min-width:0; display:grid; gap:3px; }
+  .openbot-app-card strong,.openbot-app-card small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .openbot-app-card strong { font-size:13px; }
+  .openbot-app-card small { color:#999; font-size:10px; }
+  .openbot-app-card button { min-width:88px; padding:7px 10px; font-size:11px; }
+  .openbot-app-card button:disabled { border-color:rgba(105,194,130,.25); color:#9ed7a8; background:rgba(84,162,105,.09); }
+  .openbot-apps-empty,.openbot-apps-loading,.openbot-apps-error { grid-column:1/-1; padding:48px 20px; color:#aaa; text-align:center; }
+  .openbot-apps-error { display:grid; place-items:center; gap:9px; }
+  .openbot-apps-dialog button:focus-visible,.openbot-apps-dialog input:focus-visible,.openbot-apps-dialog a:focus-visible { outline:2px solid #9dc6ff; outline-offset:2px; }
   html[data-codex-connection-required],html[data-codex-connection-required] body { overflow:hidden !important; }
   [data-codex-onboarding] { position:fixed; inset:0; z-index:2147483647; display:grid; place-items:center; overflow:auto; padding:clamp(20px,5vw,56px); background:rgba(11,11,11,.94); backdrop-filter:blur(12px); color:#f5f5f5; animation:codex-connect-enter 320ms cubic-bezier(.16,1,.3,1) both; }
   .codex-first-run-dialog { width:min(860px,100%); display:grid; gap:22px; }
@@ -3607,6 +3842,11 @@ style.textContent = `
     .codex-provider-grid,.codex-onboarding-computers,.codex-onboarding-summary { grid-template-columns:1fr; }
     .codex-onboarding-detail,.codex-onboarding-footer { align-items:stretch; flex-direction:column; }
     .codex-onboarding-footer .codex-primary-action { width:100%; }
+    .openbot-apps-dialog { width:100vw; height:100vh; max-width:none; max-height:none; border:0; border-radius:0; }
+    .openbot-apps-shell>header,.openbot-apps-shell>main,.openbot-apps-shell>footer { padding-inline:16px; }
+    .openbot-apps-grid { grid-template-columns:1fr; }
+    .openbot-apps-setup form,.openbot-apps-toolbar { grid-template-columns:1fr; }
+    .openbot-apps-shell>footer { align-items:flex-start; flex-direction:column; }
   }
   @media (prefers-reduced-motion:reduce) { [data-codex-onboarding],.codex-model-popover { animation:none; } .codex-switch-track,.codex-switch-track>span,.codex-computer-radio span { transition:none; } }
   @media (forced-colors:active) {

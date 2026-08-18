@@ -15,7 +15,7 @@
   "scripts": {
     "test": "node --test tests/*.test.cjs",
     "audit:release": "node scripts/security-audit.cjs",
-    "check": "node --check scripts/patch-app.cjs && node --check src/bridge.cjs && node --check src/codex-connection.cjs && node --check src/browser-seat-bridge.cjs && node --check src/official-computer-client.cjs && node --check src/official-computer-helper.cjs && node --check src/browser-seats/browser-seat-manager.cjs && node --check src/browser-seats/public-web-proxy.cjs && node --check src/browser-seats/browser-action-approval.cjs && node --check src/browser-seats/browser-control-lease.cjs && node --check src/browser-seats/browser-page-hardening.cjs",
+    "check": "node --check scripts/patch-app.cjs && node --check src/bridge.cjs && node --check src/codex-connection.cjs && node --check src/browser-seat-bridge.cjs && node --check src/composio-manager.cjs && node --check src/official-computer-client.cjs && node --check src/official-computer-helper.cjs && node --check src/browser-seats/browser-seat-manager.cjs && node --check src/browser-seats/public-web-proxy.cjs && node --check src/browser-seats/browser-action-approval.cjs && node --check src/browser-seats/browser-control-lease.cjs && node --check src/browser-seats/browser-page-hardening.cjs",
     "build:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1"
   },
   "dependencies": {

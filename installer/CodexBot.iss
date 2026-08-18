@@ -56,6 +56,7 @@ UninstallDisplayIcon={app}\app\Open Bot.exe
 Source: "..\src\bridge.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion
 Source: "..\src\codex-connection.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion
 Source: "..\src\browser-seat-bridge.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion
+Source: "..\src\composio-manager.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion
 Source: "..\src\group-task-tracker.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion
 Source: "..\src\official-computer-client.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion
 Source: "..\src\official-computer-helper.cjs"; DestDir: "{app}\tools\src"; Flags: ignoreversion

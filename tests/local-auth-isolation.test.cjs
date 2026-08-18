@@ -169,9 +169,14 @@ function uJt() {
   // sand_client_pause belongs to vendor computer setup.
   return false;
 }
-function s0n() {
-  // Vendor plugin discovery is unavailable in the local-only build.
-  return null;
+function s0n(n) {
+  const { onOpenPlugins: t } = n;
+  void t;
+  return {
+    className: "sand-agents-sidebar__plugins-entry",
+    onClick: () => globalThis.OpenBotConnectedApps?.open?.(),
+    children: "Connected apps",
+  };
 }
 function RDn() {
   return { label: "Jump to", composerActions: [] };
@@ -272,6 +277,17 @@ function globalPluginShortcut() {
   assert.throws(
     () => verifyLocalAuthIsolationSources(validMainSource(), mutated),
     /vendor plugin overlays have no reachable global action, shortcut, or opener/,
+  );
+});
+
+test("post-patch verifier rejects reconnecting the stock Plugins sidebar", () => {
+  const mutated = validRendererSource().replace(
+    "onClick: () => globalThis.OpenBotConnectedApps?.open?.()",
+    "onClick: t",
+  );
+  assert.throws(
+    () => verifyLocalAuthIsolationSources(validMainSource(), mutated),
+    /stock sidebar entry opens only the local connected-apps experience/,
   );
 });
 
