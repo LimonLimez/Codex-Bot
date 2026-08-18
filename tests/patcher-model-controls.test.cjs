@@ -173,8 +173,17 @@ function computerSeatRoutingFixture() {
 function createScreenshotArgs(toolCallId) {
   return new ComputerUseArgs({ toolCallId });
 }
+function createOpenBotConnectedAppsSearchTool() { return { name: "SearchConnectedApps" }; }
+function createOpenBotConnectedAppsExecuteTool() {
+  const args = { direct_user_request: false };
+  return { name: "RunConnectedAppAction", userAuthorizedWrite: args.direct_user_request === true };
+}
 function buildTurnTools(host, turn, props) {
   const tools = [];
+  const openBotComposio = { status: () => ({ configured: true }) };
+  if (!host.isSubagentRunner && openBotComposio?.status().configured === true) {
+    tools.push(createOpenBotConnectedAppsSearchTool(openBotComposio), createOpenBotConnectedAppsExecuteTool(openBotComposio));
+  }
   if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {
     tools.push(
       createComputerTool(remoteBoxResourceAccessor, {

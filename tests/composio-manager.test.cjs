@@ -144,6 +144,24 @@ test("unsafe connection links and malformed tool calls fail closed", async (t) =
     manager.execute("GITHUB_LIST_REPOS", []),
     /must be an object/i,
   );
+  await assert.rejects(
+    manager.execute("GMAIL_SEND_EMAIL", { to: "person@example.com" }),
+    /direct user request/i,
+  );
+  await assert.rejects(
+    manager.execute(
+      "GMAIL_DELETE_EMAIL",
+      { id: "mail_1" },
+      { userAuthorizedWrite: true },
+    ),
+    /destructive connected-app actions/i,
+  );
+  const sent = await manager.execute(
+    "GMAIL_SEND_EMAIL",
+    { to: "person@example.com" },
+    { userAuthorizedWrite: true },
+  );
+  assert.equal(sent.data.slug, "GMAIL_SEND_EMAIL");
 });
 
 test("disconnect removes only Open Bot's protected Composio configuration", async (t) => {

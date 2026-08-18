@@ -14,6 +14,10 @@ const MAX_RESULT_BYTES = 512 * 1024;
 const TOOLKIT_PATTERN = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 const TOOL_PATTERN = /^[A-Z0-9][A-Z0-9_]{0,159}$/;
 const CONNECT_URL_PATTERN = /^https:\/\/([a-z0-9-]+\.)*composio\.dev\//i;
+const READ_ONLY_ACTION_PATTERN =
+  /(?:^|_)(GET|LIST|SEARCH|FIND|FETCH|READ|RETRIEVE|QUERY|LOOKUP|CHECK|DESCRIBE|VIEW)(?:_|$)/;
+const DESTRUCTIVE_ACTION_PATTERN =
+  /(?:^|_)(DELETE|REMOVE|REVOKE|CANCEL|ARCHIVE|DISABLE|DEACTIVATE)(?:_|$)/;
 
 class ComposioError extends Error {
   constructor(message, code = "COMPOSIO_ERROR", status = 400) {
@@ -377,7 +381,7 @@ function createComposioManager(options = {}) {
     }
   }
 
-  async function execute(toolSlug, arguments_) {
+  async function execute(toolSlug, arguments_, options = {}) {
     if (
       !TOOL_PATTERN.test(toolSlug || "") ||
       toolSlug.length > MAX_TOOL_SLUG_CHARS
@@ -397,6 +401,21 @@ function createComposioManager(options = {}) {
       throw new ComposioError(
         "Connected-app arguments are too large.",
         "COMPOSIO_ARGUMENTS_TOO_LARGE",
+      );
+    if (DESTRUCTIVE_ACTION_PATTERN.test(toolSlug))
+      throw new ComposioError(
+        "Destructive connected-app actions are not available in Open Bot.",
+        "COMPOSIO_DESTRUCTIVE_ACTION_BLOCKED",
+        403,
+      );
+    if (
+      !READ_ONLY_ACTION_PATTERN.test(toolSlug) &&
+      options.userAuthorizedWrite !== true
+    )
+      throw new ComposioError(
+        "This connected-app action changes external data and requires a direct user request in the current message.",
+        "COMPOSIO_WRITE_REQUIRES_USER_REQUEST",
+        403,
       );
     try {
       return boundedJson(await (await session()).execute(toolSlug, arguments_));

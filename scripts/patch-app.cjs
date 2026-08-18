@@ -425,6 +425,15 @@ function verifyHostComputerSeatRoutingSource(hostSource) {
     ],
     "turn tool assembly",
   ).source;
+  assertPatchInvariant(
+    hostSource.includes('name: "SearchConnectedApps"') &&
+      hostSource.includes('name: "RunConnectedAppAction"') &&
+      hostSource.includes("openBotComposio?.status().configured === true") &&
+      hostSource.includes(
+        "userAuthorizedWrite: args.direct_user_request === true",
+      ),
+    "configured Composio sessions expose bounded search and explicitly authorized action tools",
+  );
   const localMainRegistration = tools.indexOf(
     'if ((host.isComputerUseSubagent || (!host.isSubagentRunner && !host.isSharedRoomRunner && process.env.GROK_BOT_USE_LOCAL_COMPUTER === "1")) && host.remoteBoxHasDesktop && host.getRemoteBoxAvailable()) {',
   );
@@ -1875,6 +1884,56 @@ try {
 
   text = replaceOnce(
     text,
+    "function buildTurnTools(host, turn, props) {",
+    `var openBotConnectedAppsSearchParameters = external_exports.object({
+  query: external_exports.string().trim().min(1).max(500).describe("What you need to find or do in the user's connected apps."),
+  apps: external_exports.array(external_exports.string().trim().min(1).max(80)).max(8).optional().describe("Optional connected app slugs to narrow the search.")
+});
+var openBotConnectedAppsExecuteParameters = external_exports.object({
+  tool_slug: external_exports.string().regex(/^[A-Z0-9][A-Z0-9_]{0,159}$/),
+  arguments: external_exports.record(external_exports.string(), external_exports.unknown()),
+  direct_user_request: external_exports.boolean().default(false).describe("Set true only when the user's current message directly requests this external write. Read actions do not need it. Destructive actions remain blocked.")
+});
+function openBotConnectedAppsManager() {
+  const bridgePath = process.env.GROK_BOT_WINDOWS_COMPUTER_BRIDGE?.trim();
+  return bridgePath ? require(bridgePath).composioManager : null;
+}
+function createOpenBotConnectedAppsSearchTool(manager) {
+  return defineCommunicateTool({ manager }, {
+    id: "PLATFORM_ACTION",
+    name: "SearchConnectedApps",
+    description: "Search only the apps connected in Open Bot and return a small set of relevant Composio actions with their required inputs. Use this before RunConnectedAppAction. Never claim an app is connected unless this tool returns it.",
+    parameters: openBotConnectedAppsSearchParameters,
+    execute: async (_ctx, args, deps) => JSON.stringify(await deps.manager.search(args.query, args.apps))
+  });
+}
+function createOpenBotConnectedAppsExecuteTool(manager) {
+  return defineCommunicateTool({ manager }, {
+    id: "PLATFORM_ACTION",
+    name: "RunConnectedAppAction",
+    description: "Run one exact action returned by SearchConnectedApps. Read actions run normally. For an external write, direct_user_request may be true only when the user's current message directly asks for that exact outcome. Open Bot always blocks destructive delete/remove/revoke/cancel/archive actions.",
+    parameters: openBotConnectedAppsExecuteParameters,
+    describeActivity: (args) => ({ target: args.tool_slug }),
+    execute: async (_ctx, args, deps) => JSON.stringify(await deps.manager.execute(args.tool_slug, args.arguments, { userAuthorizedWrite: args.direct_user_request === true }))
+  });
+}
+function buildTurnTools(host, turn, props) {`,
+    "connected apps tool definitions",
+  );
+  text = replaceOnce(
+    text,
+    "  const tools = [];\n  const shellFileOutputThresholdBytes =",
+    `  const tools = [];
+  const openBotComposio = openBotConnectedAppsManager();
+  if (!host.isSubagentRunner && openBotComposio?.status().configured === true) {
+    tools.push(createOpenBotConnectedAppsSearchTool(openBotComposio), createOpenBotConnectedAppsExecuteTool(openBotComposio));
+  }
+  const shellFileOutputThresholdBytes =`,
+    "connected apps tool registration",
+  );
+
+  text = replaceOnce(
+    text,
     "  if (success2.screenshotPath != null && success2.screenshotPath.length > 0) {",
     `  if (success2.log != null && success2.log.length > 0) {
     lines2.push(success2.log);
@@ -2184,14 +2243,17 @@ function patchRenderer(root, viewToken, viewPort) {
   );
   let connectedAppsSidebar = replaceOnce(
     pluginSidebar.source,
-    'children:"Plugins"',
-    'children:"Connected apps"',
+    '"Plugins"',
+    '"Connected apps"',
     "connected apps sidebar label",
   );
+  const stockPluginClick = connectedAppsSidebar.includes("onClick:t")
+    ? "onClick:t"
+    : "onClick: t";
   connectedAppsSidebar = replaceOnce(
     connectedAppsSidebar,
-    "onClick:t",
-    "onClick:()=>globalThis.OpenBotConnectedApps?.open?.()",
+    stockPluginClick,
+    `${stockPluginClick.slice(0, stockPluginClick.indexOf("t"))}() => globalThis.OpenBotConnectedApps?.open?.()`,
     "connected apps sidebar action",
   );
   text =
