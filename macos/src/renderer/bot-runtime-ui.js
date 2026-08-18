@@ -2684,28 +2684,51 @@
     fastToggle.setAttribute("aria-label", "Use Fast speed");
     fastToggle.setAttribute("aria-pressed", "false");
     const compactControls = element(documentRef, "div", "codex-power-compact-controls");
-    compactControls.append(...(nativeProtocolMode ? [] : [advancedToggle]), fastToggle, reasoningView.warning);
+    compactControls.append(advancedToggle, fastToggle, reasoningView.warning);
     powerShell.append(reasoningView.control);
-    const advanced = element(documentRef, "div", "codex-power-advanced");
-    advanced.hidden = true;
-    const advancedModelLabel = element(documentRef, "label", "codex-power-advanced-field");
-    advancedModelLabel.append(element(documentRef, "span", "", "Model"));
-    const advancedModel = element(documentRef, "select", "codex-power-model-select");
-    advancedModel.setAttribute("aria-label", "Model");
-    advancedModelLabel.append(advancedModel);
-    const advancedEffortLabel = element(documentRef, "label", "codex-power-advanced-field");
-    advancedEffortLabel.append(element(documentRef, "span", "", "Effort"));
-    const advancedEffort = element(documentRef, "select", "codex-power-effort-select");
-    advancedEffort.setAttribute("aria-label", "Effort");
-    advancedEffortLabel.append(advancedEffort);
-    const advancedSpeedLabel = element(documentRef, "label", "codex-power-advanced-field");
-    advancedSpeedLabel.append(element(documentRef, "span", "", "Speed"));
-    const advancedSpeed = element(documentRef, "select", "codex-power-speed-select");
-    advancedSpeed.setAttribute("aria-label", "Speed");
-    advancedSpeedLabel.append(advancedSpeed);
-    advanced.append(advancedModelLabel, advancedEffortLabel, advancedSpeedLabel);
-    const panelStack = element(documentRef, "div", "codex-power-panel-stack");
-    panelStack.append(powerShell, ...(nativeProtocolMode ? [] : [advanced]));
+    const pickerMenu = element(documentRef, "div", "codex-power-menu");
+    pickerMenu.dataset.view = "simple";
+    pickerMenu.dataset.reducedMotion = String(
+      windowRef.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true,
+    );
+    const viewTrack = element(documentRef, "div", "codex-power-view-track");
+    const simplePanel = element(
+      documentRef,
+      "div",
+      "codex-power-view-panel codex-power-view-simple",
+    );
+    simplePanel.setAttribute("aria-hidden", "false");
+    simplePanel.inert = false;
+    simplePanel.append(powerShell);
+    const advancedPanel = element(
+      documentRef,
+      "div",
+      "codex-power-view-panel codex-power-view-advanced",
+    );
+    advancedPanel.setAttribute("aria-hidden", "true");
+    advancedPanel.inert = true;
+    const createAdvancedRow = (kind, label) => {
+      const row = element(documentRef, "button", "codex-power-advanced-row");
+      row.type = "button";
+      row.dataset.kind = kind;
+      row.setAttribute("role", "menuitem");
+      row.setAttribute("aria-haspopup", "menu");
+      row.setAttribute("aria-expanded", "false");
+      const rowLabel = element(documentRef, "span", "codex-power-advanced-row-label", label);
+      const rowValue = element(documentRef, "span", "codex-power-advanced-row-value");
+      const rowChevron = element(documentRef, "span", "codex-power-advanced-row-chevron", "›");
+      rowChevron.setAttribute("aria-hidden", "true");
+      row.append(rowLabel, rowValue, rowChevron);
+      return Object.freeze({ row, value: rowValue });
+    };
+    const advancedModel = createAdvancedRow("model", "Model");
+    const advancedEffort = createAdvancedRow("effort", "Effort");
+    const advancedSpeed = createAdvancedRow("speed", "Speed");
+    advancedPanel.append(advancedModel.row, advancedEffort.row, advancedSpeed.row);
+    const viewControls = element(documentRef, "div", "codex-power-view-controls");
+    viewControls.append(compactControls);
+    viewTrack.append(simplePanel, advancedPanel);
+    pickerMenu.append(viewTrack, viewControls);
     panel.append(
       header,
       creationAlert,
@@ -2714,7 +2737,7 @@
       statusRow,
       computerRow,
       computerGrants,
-      newBotSetup,
+      ...(nativeProtocolMode ? [] : [newBotSetup]),
       computerSetup,
       permissionSheet,
     );
@@ -2723,19 +2746,56 @@
       nativeControls.append(statusRow, computerRow, computerGrants);
       popover.append(
         nativeControls,
-        panelStack,
-        compactControls,
+        pickerMenu,
         reasoningView.label,
         reasoningView.instructions,
       );
-    } else popover.append(panelStack, compactControls, reasoningView.label, reasoningView.instructions);
+    } else popover.append(pickerMenu, reasoningView.label, reasoningView.instructions);
     modelDock.append(modelTrigger, popover);
     if (nativeProtocolMode) {
-      documentRef.body.append(newBotSetup, computerSetup, permissionSheet);
+      documentRef.body.append(computerSetup, permissionSheet);
       panel.dataset.codexMountState = "native-shell";
     } else documentRef.body.append(panel, modelDock);
 
     let mountDisposed = false;
+    let advancedViewExpanded = false;
+    let pickerTransitionFrame = 0;
+    function measurePickerViews() {
+      if (mountDisposed) return;
+      const simpleHeight = Math.max(0, Number(simplePanel.offsetHeight) || 0);
+      const advancedHeight = Math.max(0, Number(advancedPanel.offsetHeight) || 0);
+      const controlsHeight = Math.max(0, Number(viewControls.offsetHeight) || 0);
+      pickerMenu.style.setProperty("--simple-view-height", `${simpleHeight}px`);
+      pickerMenu.style.setProperty("--advanced-view-height", `${advancedHeight}px`);
+      pickerMenu.style.height = `${(advancedViewExpanded ? advancedHeight : simpleHeight) + controlsHeight}px`;
+    }
+    function setAdvancedView(expanded) {
+      advancedViewExpanded = Boolean(expanded);
+      pickerMenu.dataset.view = advancedViewExpanded ? "advanced" : "simple";
+      simplePanel.setAttribute("aria-hidden", String(advancedViewExpanded));
+      simplePanel.inert = advancedViewExpanded;
+      advancedPanel.setAttribute("aria-hidden", String(!advancedViewExpanded));
+      advancedPanel.inert = !advancedViewExpanded;
+      advancedToggle.setAttribute("aria-expanded", String(advancedViewExpanded));
+      popover.classList.toggle("is-advanced", advancedViewExpanded);
+      if (advancedViewExpanded) fastToggle.hidden = true;
+      else if (lastSnapshot) fastToggle.hidden = !activeFastTier;
+      measurePickerViews();
+    }
+    const PickerResizeObserver = windowRef.ResizeObserver;
+    const pickerResizeObserver = typeof PickerResizeObserver === "function"
+      ? new PickerResizeObserver(() => measurePickerViews())
+      : null;
+    pickerResizeObserver?.observe(simplePanel);
+    pickerResizeObserver?.observe(advancedPanel);
+    pickerResizeObserver?.observe(viewControls);
+    measurePickerViews();
+    if (typeof windowRef.requestAnimationFrame === "function") {
+      pickerTransitionFrame = windowRef.requestAnimationFrame(() => {
+        pickerTransitionFrame = 0;
+        if (!mountDisposed) pickerMenu.dataset.transitionsReady = "true";
+      });
+    } else pickerMenu.dataset.transitionsReady = "true";
     function attachToProductHosts() {
       if (mountDisposed) return;
       const { sidebarHost, composerHost, nativeComposerHost } = findUiMounts(documentRef);
@@ -2773,6 +2833,8 @@
     let activeFastTier = null;
     const fastIntents = new Map();
     let advancedModelIdentities = new Map();
+    let advancedOptions = null;
+    let advancedSelection = null;
     let fastIntentSequence = 0;
     let compactProjectionPending = false;
     let newBotSetupReturnFocus = null;
@@ -2856,17 +2918,11 @@
       const options = MODEL_CONTROLS.buildAdvancedOptions(next.modelCatalog, identity);
       const current = options.models.find((entry) => entry.provider === identity?.provider
         && entry.model === identity?.model) ?? options.models[0];
+      advancedOptions = options;
       advancedModelIdentities = new Map(options.models.map((entry) => [entry.key, Object.freeze({
         provider: entry.provider,
         model: entry.model,
       })]));
-      advancedModel.replaceChildren(...options.models.map((entry) => {
-        const option = element(documentRef, "option", "", entry.label);
-        option.value = entry.key;
-        option.selected = entry.key === current?.key;
-        return option;
-      }));
-      if (current) advancedModel.value = current.key;
       const catalog = next.modelCatalog.find((entry) => entry.provider === current?.provider
         && entry.model === current?.model);
       const authoritative = next.modelSelection?.provider === current?.provider
@@ -2874,24 +2930,30 @@
       const effort = authoritative
         ? next.modelSelection.reasoningEffort
         : catalog?.defaultReasoningEffort ?? options.efforts[0]?.effort;
-      advancedEffort.replaceChildren(...options.efforts.map((entry) => {
-        const option = element(documentRef, "option", "", entry.label);
-        option.value = entry.effort;
-        option.selected = entry.effort === effort;
-        return option;
-      }));
-      if (effort) advancedEffort.value = effort;
       const serviceTier = authoritative
         ? next.modelSelection.serviceTier
         : catalog?.defaultServiceTier ?? null;
-      advancedSpeed.replaceChildren(...options.speeds.map((entry) => {
-        const option = element(documentRef, "option", "", entry.label);
-        option.value = entry.serviceTier ?? "__standard__";
-        option.title = entry.description;
-        option.selected = entry.serviceTier === serviceTier;
-        return option;
-      }));
-      advancedSpeed.value = serviceTier ?? "__standard__";
+      const effortOption = options.efforts.find((entry) => entry.effort === effort)
+        ?? options.efforts[0] ?? null;
+      const speedOption = options.speeds.find((entry) => entry.serviceTier === serviceTier)
+        ?? options.speeds[0] ?? null;
+      advancedSelection = current && effortOption && speedOption ? Object.freeze({
+        provider: current.provider,
+        model: current.model,
+        effort: effortOption.effort,
+        serviceTier: speedOption.serviceTier,
+      }) : null;
+      advancedModel.value.textContent = current?.label ?? "Choose model";
+      advancedModel.row.dataset.key = current?.key ?? "";
+      advancedModel.row.dataset.provider = current?.provider ?? "";
+      advancedModel.row.dataset.model = current?.model ?? "";
+      advancedModel.row.title = current?.providerLabel ?? "";
+      advancedEffort.value.textContent = effortOption?.label ?? "Choose effort";
+      advancedEffort.row.dataset.value = effortOption?.effort ?? "";
+      advancedEffort.row.title = effortOption?.description ?? "";
+      advancedSpeed.value.textContent = speedOption?.label ?? "Standard";
+      advancedSpeed.row.dataset.value = speedOption?.serviceTier ?? "";
+      advancedSpeed.row.title = speedOption?.description ?? "";
     }
 
     function populateNewBotSetup(next) {
@@ -3019,10 +3081,12 @@
       const profileOpening = next.profileSetup.open && !previousSnapshot?.profileSetup?.open;
       const profileClosing = !next.profileSetup.open && previousSnapshot?.profileSetup?.open;
       if (profileOpening) newBotSetupReturnFocus = documentRef.activeElement ?? newButton;
-      populateNewBotSetup(next);
-      setDialogOpen(newBotSetup, next.profileSetup.open);
-      newBotSetup.setAttribute("aria-busy", String(next.profileSetup.pending));
-      if (profileOpening) newBotName.focus?.();
+      if (!nativeProtocolMode) {
+        populateNewBotSetup(next);
+        setDialogOpen(newBotSetup, next.profileSetup.open);
+        newBotSetup.setAttribute("aria-busy", String(next.profileSetup.pending));
+        if (profileOpening) newBotName.focus?.();
+      }
       const setupOpening = next.computerSetup.open && !previousSnapshot?.computerSetup?.open;
       const setupClosing = !next.computerSetup.open && previousSnapshot?.computerSetup?.open;
       if (setupOpening) {
@@ -3164,13 +3228,13 @@
         : visibleSelection?.serviceTier;
       const fastActive = Boolean(activeFastTier
         && desiredServiceTier === activeFastTier);
-      fastToggle.hidden = !activeFastTier;
+      fastToggle.hidden = advancedViewExpanded || !activeFastTier;
       fastToggle.disabled = !enabled || !activeFastTier;
       paintFast(fastActive);
       advancedToggle.disabled = !enabled;
-      advancedModel.disabled = !enabled;
-      advancedEffort.disabled = !enabled;
-      advancedSpeed.disabled = !enabled;
+      advancedModel.row.disabled = !enabled;
+      advancedEffort.row.disabled = !enabled;
+      advancedSpeed.row.disabled = !enabled;
       populateAdvanced(next);
     }
 
@@ -3290,12 +3354,8 @@
       popover.hidden = !next;
       modelDock.classList.toggle("is-open", next);
       modelTrigger.setAttribute("aria-expanded", String(next));
-      if (!next) {
-        powerShell.hidden = false;
-        advanced.hidden = true;
-        popover.classList.remove("is-advanced");
-        advancedToggle.setAttribute("aria-expanded", "false");
-      }
+      if (!next) setAdvancedView(false);
+      else measurePickerViews();
     };
     modelTrigger.addEventListener("click", () => setPopoverOpen(popover.hidden));
     modelDock.addEventListener("keydown", (event) => {
@@ -3362,11 +3422,8 @@
     reasoning.addEventListener("mouseleave", () => paintPower(powerState.setHover(false)));
 
     advancedToggle.addEventListener("click", () => {
-      advanced.hidden = !advanced.hidden;
-      powerShell.hidden = !advanced.hidden;
-      popover.classList.toggle("is-advanced", !advanced.hidden);
-      advancedToggle.setAttribute("aria-expanded", String(!advanced.hidden));
-      if (!advanced.hidden && lastSnapshot) populateAdvanced(lastSnapshot);
+      setAdvancedView(!advancedViewExpanded);
+      if (advancedViewExpanded && lastSnapshot) populateAdvanced(lastSnapshot);
     });
     fastToggle.addEventListener("click", () => {
       if (!lastSnapshot || !activeFastTier) return;
@@ -3418,42 +3475,14 @@
           }
         });
     });
-    const submitAdvanced = () => {
-      if (!lastSnapshot) return;
-      const identity = advancedModelIdentities.get(advancedModel.value);
-      if (!identity) return;
-      const selection = MODEL_CONTROLS.resolveAdvancedSelection(lastSnapshot.modelCatalog, {
-        provider: identity.provider,
-        model: identity.model,
-        effort: advancedEffort.value,
-        serviceTier: advancedSpeed.value === "__standard__" ? null : advancedSpeed.value,
-      });
-      if (!selection) return;
-      void controller.selectModel(
-        selection.provider,
-        selection.model,
-        selection.effort,
-        selection.serviceTier,
-      )
-        .catch(() => render(controller.snapshot()));
-    };
-    advancedModel.addEventListener("change", () => {
-      if (!lastSnapshot) return;
-      const identity = advancedModelIdentities.get(advancedModel.value);
-      if (!identity) return;
-      populateAdvanced(lastSnapshot, identity);
-      submitAdvanced();
-    });
-    advancedEffort.addEventListener("change", submitAdvanced);
-    advancedSpeed.addEventListener("change", submitAdvanced);
     void controller.initialize().catch(() => {
       if (mountDisposed) return;
       status.textContent = "Remote computer unavailable";
       reasoning.disabled = true;
       advancedToggle.disabled = true;
-      advancedModel.disabled = true;
-      advancedEffort.disabled = true;
-      advancedSpeed.disabled = true;
+      advancedModel.row.disabled = true;
+      advancedEffort.row.disabled = true;
+      advancedSpeed.row.disabled = true;
     });
     return Object.freeze({
       controller,
@@ -3463,6 +3492,11 @@
         if (mountDisposed) return;
         mountDisposed = true;
         mountObserver?.disconnect();
+        pickerResizeObserver?.disconnect();
+        if (pickerTransitionFrame !== 0) {
+          windowRef.cancelAnimationFrame?.(pickerTransitionFrame);
+          pickerTransitionFrame = 0;
+        }
         documentRef.removeEventListener?.("pointerdown", dismissPopover);
         if (holdTimer != null) (windowRef.clearTimeout || clearTimeout)(holdTimer);
         if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);

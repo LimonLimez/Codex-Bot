@@ -400,10 +400,29 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(botUi, /targetComposerHost\.append\?\.\(modelDock\)/);
   assert.doesNotMatch(botUi, /composerHost\.append\?\.\(modelDock\)/);
   assert.match(botUi, /reasoningView\.control\.classList\.toggle\("is-disabled",\s*snapshot\.disabled\)/s);
-  assert.match(botUi, /compactControls\.append\(\.\.\.\(nativeProtocolMode\s*\?\s*\[\]\s*:\s*\[advancedToggle\]\),\s*fastToggle,\s*reasoningView\.warning\)/s);
+  assert.match(botUi, /compactControls\.append\(advancedToggle,\s*fastToggle,\s*reasoningView\.warning\)/s);
+  assert.match(botUi, /viewTrack\.append\(simplePanel,\s*advancedPanel\)/s);
+  assert.match(botUi, /pickerMenu\.append\(viewTrack,\s*viewControls\)/s);
   assert.match(botUi, /nativeControls\.append\(statusRow,\s*computerRow,\s*computerGrants\)/s);
   assert.doesNotMatch(botUi, /nativeControls\.append\(providerRow/s);
   assert.doesNotMatch(botUi, /popover\.append\([^;]*reasoningView\.warning/s);
+});
+
+test("Codex Advanced view replaces raw selects and suppresses the native legacy setup dialog", () => {
+  const botUi = fs.readFileSync(botUiPath, "utf8");
+  assert.match(botUi, /"div",\s*"codex-power-menu"/);
+  assert.match(botUi, /"div",\s*"codex-power-view-track"/);
+  assert.match(botUi, /"div",\s*"codex-power-view-panel codex-power-view-simple"/);
+  assert.match(botUi, /"div",\s*"codex-power-view-panel codex-power-view-advanced"/);
+  assert.match(botUi, /"div",\s*"codex-power-view-controls"/);
+  assert.match(botUi, /row\.dataset\.kind\s*=\s*kind/);
+  assert.match(botUi, /function setAdvancedView\(expanded\)/);
+  assert.match(botUi, /function measurePickerViews\(\)/);
+  assert.doesNotMatch(botUi, /"select",\s*"codex-power-(?:model|effort|speed)-select"/);
+  assert.doesNotMatch(
+    botUi,
+    /documentRef\.body\.append\(newBotSetup,\s*computerSetup,\s*permissionSheet\)/,
+  );
 });
 
 test("signed Ultra burst keeps all sixteen Codex vectors and the exact 76px 620ms burst", () => {

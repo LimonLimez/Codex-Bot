@@ -80,7 +80,10 @@ class FakeElement {
     this.className = "";
     this.classList = new FakeClassList();
     this.attributes = Object.create(null);
-    this.style = { setProperty: (key, value) => { this.style[key] = value; } };
+    this.style = {
+      setProperty: (key, value) => { this.style[key] = value; },
+      getPropertyValue: (key) => this.style[key] ?? "",
+    };
     this.hidden = false;
     this.textContent = "";
   }
@@ -3686,7 +3689,7 @@ test("mounted optional model controls stay reachable while the official catalog 
   const mounted = mount({ windowRef, documentRef });
   await new Promise((resolve) => setImmediate(resolve));
   const find = (node, className) => {
-    if (node.className === className) return node;
+    if (node.className.split(/\s+/).includes(className)) return node;
     for (const child of node.children) {
       const found = find(child, className);
       if (found) return found;
@@ -3698,12 +3701,14 @@ test("mounted optional model controls stay reachable while the official catalog 
   const triggerModel = find(mounted.modelDock, "codex-model-trigger-model");
   const triggerEffort = find(mounted.modelDock, "codex-model-trigger-effort");
   const popover = find(mounted.modelDock, "codex-power-popover");
-  const panelStack = find(mounted.modelDock, "codex-power-panel-stack");
+  const pickerMenu = find(mounted.modelDock, "codex-power-menu");
+  const viewTrack = find(mounted.modelDock, "codex-power-view-track");
   const powerShell = find(mounted.modelDock, "codex-power-shell");
   const fastToggle = find(mounted.modelDock, "codex-power-fast-toggle");
   const advancedToggle = find(mounted.modelDock, "codex-power-advanced-toggle");
-  const advanced = find(mounted.modelDock, "codex-power-advanced");
-  const advancedModel = find(mounted.modelDock, "codex-power-model-select");
+  const simple = find(mounted.modelDock, "codex-power-view-simple");
+  const advanced = find(mounted.modelDock, "codex-power-view-advanced");
+  const advancedModel = find(mounted.modelDock, "codex-power-advanced-row");
   assert.equal(mounted.controller.snapshot().activeBotId, BOT_A);
   assert.equal(mounted.controller.snapshot().modelSelection, null);
   assert.equal(power.disabled, false);
@@ -3711,10 +3716,8 @@ test("mounted optional model controls stay reachable while the official catalog 
   assert.equal(trigger.attributes["aria-haspopup"], "dialog");
   assert.equal(trigger.attributes["aria-expanded"], "false");
   assert.equal(popover.hidden, true);
-  assert.deepEqual(panelStack.children.map((child) => child.className), [
-    "codex-power-shell",
-    "codex-power-advanced",
-  ]);
+  assert.equal(pickerMenu.dataset.view, "simple");
+  assert.deepEqual(viewTrack.children, [simple, advanced]);
   trigger.listeners.get("click")();
   assert.equal(trigger.attributes["aria-expanded"], "true");
   assert.equal(popover.hidden, false);
@@ -3724,9 +3727,10 @@ test("mounted optional model controls stay reachable while the official catalog 
   assert.equal(popover.hidden, true);
   trigger.listeners.get("click")();
   assert.equal(advancedToggle.disabled, false);
-  assert.equal(advanced.hidden, true);
-  assert.equal(advancedModel.children[0].value,
-    JSON.stringify(["cliproxy-anthropic", "claude-fable-5"]));
+  assert.equal(advanced.attributes["aria-hidden"], "true");
+  assert.equal(advancedModel.dataset.kind, "model");
+  assert.equal(advancedModel.dataset.provider, "cliproxy-anthropic");
+  assert.equal(advancedModel.dataset.model, "claude-fable-5");
   assert.equal(find(mounted.modelDock, "codex-model-select"), null);
   power.listeners.get("pointerdown")();
   power.value = "5";
@@ -3744,8 +3748,10 @@ test("mounted optional model controls stay reachable while the official catalog 
   assert.equal(triggerModel.textContent, "Claude Fable 5");
   assert.equal(triggerEffort.textContent, "Ultra Code");
   advancedToggle.listeners.get("click")();
-  assert.equal(advanced.hidden, false);
-  assert.equal(powerShell.hidden, true);
+  assert.equal(pickerMenu.dataset.view, "advanced");
+  assert.equal(advanced.attributes["aria-hidden"], "false");
+  assert.equal(simple.attributes["aria-hidden"], "true");
+  assert.equal(powerShell.parentElement, simple);
   assert.equal(advancedToggle.attributes["aria-expanded"], "true");
   mounted.dispose();
 });
@@ -3760,6 +3766,8 @@ function createMountedUiHarness({
   runtimeFacade = null,
   nativeProtocol = false,
   nativeHost = nativeProtocol,
+  reducedMotion = false,
+  viewMetrics = Object.freeze({}),
 }) {
   const { mount } = require(uiPath);
   class MountElement extends FakeElement {
@@ -3772,6 +3780,12 @@ function createMountedUiHarness({
       this.disabled = false;
       this.open = false;
       this.listeners = new Map();
+    }
+    get offsetHeight() {
+      for (const [className, height] of Object.entries(viewMetrics)) {
+        if (this.className.split(/\s+/).includes(className)) return height;
+      }
+      return 0;
     }
     append(...children) {
       for (const child of children) {
@@ -3829,6 +3843,20 @@ function createMountedUiHarness({
     observe() {}
     disconnect() {}
   }
+  const resizeObservers = [];
+  class ViewResizeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.observed = [];
+      this.disconnected = false;
+      resizeObservers.push(this);
+    }
+    observe(target) { this.observed.push(target); }
+    disconnect() { this.disconnected = true; }
+  }
+  const animationFrames = new Map();
+  const cancelledAnimationFrames = [];
+  let nextAnimationFrame = 0;
   let current = initialSelection;
   let generation = initialSelection.generation;
   const selected = [];
@@ -3865,29 +3893,60 @@ function createMountedUiHarness({
     setTimeout: windowTimers.setTimeout,
     clearTimeout: windowTimers.clearTimeout,
     MutationObserver: MountObserver,
+    ResizeObserver: ViewResizeObserver,
+    requestAnimationFrame(callback) {
+      const id = ++nextAnimationFrame;
+      animationFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame(id) {
+      cancelledAnimationFrames.push(id);
+      animationFrames.delete(id);
+    },
+    matchMedia() {
+      return Object.freeze({ matches: reducedMotion });
+    },
   };
   if (fileReader) windowRef.FileReader = fileReader;
   if (computerFacade) windowRef.openbotComputer = computerFacade;
   const mounted = mount({ windowRef, documentRef });
-  const find = (node, className) => {
-    if (node.className === className) return node;
+  const find = (node, className, seen = new Set()) => {
+    if (seen.has(node)) return null;
+    seen.add(node);
+    if (node.className.split(/\s+/).includes(className)) return node;
     for (const child of node.children) {
-      const found = find(child, className);
+      const found = find(child, className, seen);
       if (found) return found;
     }
     return null;
   };
+  const findAll = (node, className, matches = [], seen = new Set()) => {
+    if (seen.has(node)) return matches;
+    seen.add(node);
+    if (node.className.split(/\s+/).includes(className)) matches.push(node);
+    for (const child of node.children) findAll(child, className, matches, seen);
+    return matches;
+  };
   return {
+    animationFrames,
+    cancelledAnimationFrames,
     documentRef,
     find: (className) => find(mounted.modelDock, className),
+    findAll: (className) => findAll(mounted.modelDock, className),
     findPanel: (className) => find(mounted.panel, className) ?? find(documentRef.body, className),
+    flushAnimationFrames() {
+      const pending = [...animationFrames.entries()];
+      animationFrames.clear();
+      for (const [, callback] of pending) callback(0);
+    },
     mounted,
     get mountObserver() { return mountObserver; },
+    resizeObservers,
     selected,
   };
 }
 
-test("mounted model controls keep same-id official and CLIProxy rows provider-scoped", async (context) => {
+test("mounted Advanced summary keeps a same-id CLIProxy selection provider-scoped", async (context) => {
   const catalog = Object.freeze({
     generation: 24,
     status: "ready",
@@ -3926,40 +3985,16 @@ test("mounted model controls keep same-id official and CLIProxy rows provider-sc
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
 
-  const model = harness.find("codex-power-model-select");
+  const model = harness.findAll("codex-power-advanced-row").find((row) => row.dataset.kind === "model");
   const triggerModel = harness.find("codex-model-trigger-model");
-  const option = (label) => model.children.find((entry) => entry.textContent === label);
   assert.equal(triggerModel.textContent, "Claude Fable 5");
-  assert.ok(option("Direct Claude Fable 5"));
-  assert.ok(option("Claude Fable 5"));
-  assert.notEqual(option("Direct Claude Fable 5").value, option("Claude Fable 5").value);
-
-  model.value = option("Direct Claude Fable 5").value;
-  model.listeners.get("change")();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(selected.at(-1), {
-    botId: BOT_A,
-    provider: "openai-codex",
-    model: "claude-fable-5",
-    reasoningEffort: "medium",
-    serviceTier: null,
-  });
-  assert.equal(triggerModel.textContent, "Direct Claude Fable 5");
-
-  model.value = option("Claude Fable 5").value;
-  model.listeners.get("change")();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(selected.at(-1), {
-    botId: BOT_A,
-    provider: "cliproxy-anthropic",
-    model: "claude-fable-5",
-    reasoningEffort: "medium",
-    serviceTier: null,
-  });
-  assert.equal(triggerModel.textContent, "Claude Fable 5");
+  assert.equal(model.dataset.provider, "cliproxy-anthropic");
+  assert.equal(model.dataset.model, "claude-fable-5");
+  assert.equal(model.children[1].textContent, "Claude Fable 5");
+  assert.deepEqual(selected, []);
 });
 
-test("native protocol mode preserves the Grok shell and mounts only Power plus owned dialogs", async (context) => {
+test("native protocol mode preserves the Grok shell and owns the Codex Advanced view", async (context) => {
   const catalog = Object.freeze({
     generation: 12,
     status: "ready",
@@ -3991,18 +4026,136 @@ test("native protocol mode preserves the Grok shell and mounts only Power plus o
   assert.equal(harness.documentRef.sidebar.children.includes(harness.mounted.panel), false);
   assert.equal(harness.mounted.modelDock.parentElement, harness.documentRef.nativeModelHost);
   assert.equal(harness.documentRef.composer.children.includes(harness.mounted.modelDock), false);
-  for (const className of ["codex-new-bot-setup", "codex-computer-setup", "codex-permission-sheet"]) {
+  assert.equal(
+    harness.findPanel("codex-new-bot-setup") === null,
+    true,
+    "native Grok creation must not mount the legacy setup dialog",
+  );
+  for (const className of ["codex-computer-setup", "codex-permission-sheet"]) {
     const dialog = harness.findPanel(className);
     assert.equal(dialog.parentElement, harness.documentRef.body, className);
     assert.equal(dialog.tagName, "DIALOG");
   }
   assert.equal(harness.find("codex-provider-select"), null, "the native Grok picker owns provider selection");
   assert.equal(harness.find("codex-provider-connect"), null);
-  assert.equal(harness.find("codex-power-advanced-toggle"), null, "the native Grok picker owns Advanced model controls");
+  const advancedToggle = harness.find("codex-power-advanced-toggle");
+  const menu = harness.find("codex-power-menu");
+  const simple = harness.find("codex-power-view-simple");
+  const advanced = harness.find("codex-power-view-advanced");
+  assert.ok(advancedToggle);
   assert.equal(harness.find("codex-power-model-select"), null);
   assert.equal(harness.find("codex-power-effort-select"), null);
   assert.equal(harness.find("codex-power-speed-select"), null);
+  assert.deepEqual(
+    harness.findAll("codex-power-advanced-row").map((row) => row.dataset.kind),
+    ["model", "effort", "speed"],
+  );
+  assert.equal(menu.dataset.view, "simple");
+  assert.equal(simple.attributes["aria-hidden"], "false");
+  assert.equal(simple.inert, false);
+  assert.equal(advanced.attributes["aria-hidden"], "true");
+  assert.equal(advanced.inert, true);
+  advancedToggle.listeners.get("click")();
+  assert.equal(menu.dataset.view, "advanced");
+  assert.equal(simple.attributes["aria-hidden"], "true");
+  assert.equal(simple.inert, true);
+  assert.equal(advanced.attributes["aria-hidden"], "false");
+  assert.equal(advanced.inert, false);
+  assert.equal(advancedToggle.attributes["aria-expanded"], "true");
   assert.equal(harness.find("codex-power-input").tagName, "INPUT");
+});
+
+test("measured picker keeps stable Codex Advanced view panels and exact active height", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    viewMetrics: Object.freeze({
+      "codex-power-view-simple": 121,
+      "codex-power-view-advanced": 132,
+      "codex-power-view-controls": 36,
+    }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const menu = harness.find("codex-power-menu");
+  const simple = harness.find("codex-power-view-simple");
+  const advanced = harness.find("codex-power-view-advanced");
+  const controls = harness.find("codex-power-view-controls");
+  const track = harness.find("codex-power-view-track");
+  assert.equal(menu.style.getPropertyValue("--simple-view-height"), "121px");
+  assert.equal(menu.style.getPropertyValue("--advanced-view-height"), "132px");
+  assert.equal(menu.style.height, "157px");
+  assert.deepEqual(harness.resizeObservers[0].observed, [simple, advanced, controls]);
+  harness.flushAnimationFrames();
+  assert.equal(menu.dataset.transitionsReady, "true");
+
+  harness.find("codex-power-advanced-toggle").listeners.get("click")();
+  assert.equal(menu.style.height, "168px");
+  assert.equal(harness.find("codex-power-view-track"), track);
+  assert.equal(harness.find("codex-power-view-simple"), simple);
+  assert.equal(harness.find("codex-power-view-advanced"), advanced);
+
+  harness.mounted.dispose();
+  assert.equal(harness.resizeObservers[0].disconnected, true);
+});
+
+test("Codex Advanced view marks reduced motion without changing its measured ownership", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    reducedMotion: true,
+    viewMetrics: Object.freeze({
+      "codex-power-view-simple": 121,
+      "codex-power-view-advanced": 132,
+      "codex-power-view-controls": 36,
+    }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.find("codex-power-menu").dataset.reducedMotion, "true");
+  assert.equal(harness.find("codex-power-menu").style.height, "157px");
 });
 
 test("native protocol model dock waits for the exact composer host and remounts one identity", async (context) => {
@@ -4833,7 +4986,7 @@ test("mounted Power keeps an authoritative noncompact tuple visible until a proj
   harness.mounted.dispose();
 });
 
-test("closed Power trigger uses compact labels while Advanced keeps raw effort labels", async () => {
+test("closed Power trigger uses compact labels while Advanced summary keeps raw effort labels", async () => {
   const catalog = Object.freeze({
     generation: 12,
     status: "ready",
@@ -4858,16 +5011,13 @@ test("closed Power trigger uses compact labels while Advanced keeps raw effort l
 
   const triggerEffort = harness.find("codex-model-trigger-effort");
   const advancedToggle = harness.find("codex-power-advanced-toggle");
-  const advancedEffort = harness.find("codex-power-effort-select");
+  const advancedEffort = harness.findAll("codex-power-advanced-row")
+    .find((row) => row.dataset.kind === "effort");
   assert.equal(triggerEffort.textContent, "Standard");
   advancedToggle.listeners.get("click")();
-  assert.equal(advancedEffort.children.find((option) => option.value === "medium").textContent, "Medium");
-  assert.equal(advancedEffort.children.find((option) => option.value === "high").textContent, "High");
-
-  advancedEffort.value = "high";
-  advancedEffort.listeners.get("change")();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(triggerEffort.textContent, "Extended");
+  assert.equal(advancedEffort.children[1].textContent, "Medium");
+  assert.equal(advancedEffort.dataset.value, "medium");
+  assert.equal(harness.find("codex-power-menu").dataset.view, "advanced");
   harness.mounted.dispose();
 });
 
@@ -5230,7 +5380,7 @@ test("mounted Ultra entry survives an immediate authoritative reply for its full
   harness.mounted.dispose();
 });
 
-test("persisted and Advanced-selected Ultra stay steady without replaying pointer entry", async () => {
+test("persisted Ultra keeps the Advanced summary steady without replaying pointer entry", async () => {
   const timers = new Map();
   let timerId = 0;
   const windowTimers = {
@@ -5263,20 +5413,15 @@ test("persisted and Advanced-selected Ultra stay steady without replaying pointe
   const harness = createMountedUiHarness({ catalog, initialSelection, windowTimers });
   await new Promise((resolve) => setImmediate(resolve));
   const warning = harness.find("codex-power-warning");
-  const effort = harness.find("codex-power-effort-select");
+  const effort = harness.findAll("codex-power-advanced-row")
+    .find((row) => row.dataset.kind === "effort");
   assert.equal(harness.find("codex-power-fast-toggle").hidden, true);
   assert.equal(warning.hidden, true);
   assert.equal(harness.find("codex-power-control").classList.contains("is-ultra-entering"), false);
   assert.equal(timers.size, 0);
 
-  effort.value = "max";
-  effort.listeners.get("change")();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(warning.hidden, true);
-  assert.equal(timers.size, 0);
-  effort.value = "ultra";
-  effort.listeners.get("change")();
-  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(effort.children[1].textContent, "Ultra");
+  assert.equal(effort.dataset.value, "ultra");
   assert.equal(warning.hidden, true);
   assert.equal(harness.mounted.modelDock.classList.contains("is-warning"), false);
   assert.equal(timers.size, 0);
