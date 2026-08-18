@@ -4112,13 +4112,14 @@ test("native composer Power surfaces use viewport coordinates outside Grok's cli
     catalogGeneration: 12,
     generation: 1,
   });
+  const popoverMetrics = { width: 224, height: 112 };
   const harness = createMountedUiHarness({
     catalog,
     initialSelection: selection,
     nativeProtocol: true,
     viewMetrics: Object.freeze({
       "codex-model-trigger": Object.freeze({ left: 850, top: 708, width: 130, height: 28 }),
-      "codex-power-popover": Object.freeze({ width: 224, height: 243 }),
+      "codex-power-popover": popoverMetrics,
       "codex-power-flyout": Object.freeze({ width: 280, height: 180 }),
       "codex-power-view-simple": 132,
       "codex-power-view-advanced": 168,
@@ -4133,6 +4134,9 @@ test("native composer Power surfaces use viewport coordinates outside Grok's cli
   trigger.listeners.get("click")();
   assert.equal(popover.hidden, false);
   assert.equal(popover.style.left, "756px");
+  assert.equal(popover.style.top, "588px");
+  popoverMetrics.height = 243;
+  harness.resizeObservers[1].callback();
   assert.equal(popover.style.top, "457px");
   assert.equal(harness.windowListeners.has("resize"), true);
   assert.equal(harness.windowListeners.has("scroll"), true);
@@ -4188,6 +4192,10 @@ test("measured picker keeps stable Codex Advanced view panels and exact active h
   assert.equal(menu.style.getPropertyValue("--advanced-view-height"), "132px");
   assert.equal(menu.style.height, "157px");
   assert.deepEqual(harness.resizeObservers[0].observed, [simple, advanced, controls]);
+  assert.deepEqual(
+    harness.resizeObservers[1].observed,
+    [harness.find("codex-power-popover"), harness.find("codex-power-flyout")],
+  );
   harness.flushAnimationFrames();
   assert.equal(menu.dataset.transitionsReady, "true");
   assert.equal(menu.classList.contains("transitions-ready"), true);
@@ -4200,6 +4208,7 @@ test("measured picker keeps stable Codex Advanced view panels and exact active h
 
   harness.mounted.dispose();
   assert.equal(harness.resizeObservers[0].disconnected, true);
+  assert.equal(harness.resizeObservers[1].disconnected, true);
 });
 
 test("Codex Advanced view marks reduced motion without changing its measured ownership", async (context) => {

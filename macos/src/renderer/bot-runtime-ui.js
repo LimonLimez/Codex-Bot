@@ -2855,9 +2855,14 @@
     const pickerResizeObserver = typeof PickerResizeObserver === "function"
       ? new PickerResizeObserver(() => measurePickerViews())
       : null;
+    const surfaceResizeObserver = typeof PickerResizeObserver === "function"
+      ? new PickerResizeObserver(() => positionPowerSurfaces())
+      : null;
     pickerResizeObserver?.observe(simplePanel);
     pickerResizeObserver?.observe(advancedPanel);
     pickerResizeObserver?.observe(viewControls);
+    surfaceResizeObserver?.observe(popover);
+    surfaceResizeObserver?.observe(advancedFlyout);
     measurePickerViews();
     if (typeof windowRef.requestAnimationFrame === "function") {
       pickerTransitionFrame = windowRef.requestAnimationFrame(() => {
@@ -3743,6 +3748,7 @@
         mountDisposed = true;
         mountObserver?.disconnect();
         pickerResizeObserver?.disconnect();
+        surfaceResizeObserver?.disconnect();
         if (pickerTransitionFrame !== 0) {
           windowRef.cancelAnimationFrame?.(pickerTransitionFrame);
           pickerTransitionFrame = 0;
