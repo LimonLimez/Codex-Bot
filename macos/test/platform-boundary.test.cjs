@@ -40,6 +40,8 @@ test("the macOS package is isolated from the Windows release line", () => {
     ":(exclude)docs/superpowers/plans/2026-08-14-macos-grok-020-preserve-patch.md",
     ":(exclude)docs/superpowers/specs/2026-08-17-macos-signed-out-local-routines-design.md",
     ":(exclude)docs/superpowers/plans/2026-08-17-macos-signed-out-local-routines.md",
+    ":(exclude)docs/superpowers/specs/2026-08-17-macos-native-bot-composer-model-picker-design.md",
+    ":(exclude)docs/superpowers/plans/2026-08-17-macos-native-bot-composer-model-picker.md",
     ":(exclude).github/workflows/macos-release.yml",
   )
     .trim()
