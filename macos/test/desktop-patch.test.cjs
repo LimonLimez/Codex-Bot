@@ -8,7 +8,7 @@ const vm = require("node:vm");
 
 const patchPath = path.join(__dirname, "..", "src", "patch", "desktop.cjs");
 
-const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;jEr=F=>o.emit(\"mcp-auth-completed\",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase(\"auth_service\");let $=Dzn({});qEr=$,s={pipes:{}};qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase(\"window\"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on(\"activate\",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const mainFeature='kept';\n";
+const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;jEr=F=>o.emit(\"mcp-auth-completed\",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase(\"auth_service\");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase(\"window\"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on(\"activate\",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const mainFeature='kept';\n";
 const STOCK_MAIN_WITH_HELD_REMOTE_READY = `"use strict";var fjn=Object.create;
 function createWebContents(){return{kind:"window-web-contents",listeners:new Map(),on(name,listener){let values=this.listeners.get(name)??[];values.push(listener);this.listeners.set(name,values)},removeListener(name,listener){let values=this.listeners.get(name)??[],index=values.indexOf(listener);if(index>=0){values.splice(index,1);globalThis.__startup.removedWebviewGuards+=1}this.listeners.set(name,values)},emit(name,...args){for(let listener of [...(this.listeners.get(name)??[])])listener(...args)},listenerCount(name){return(this.listeners.get(name)??[]).length}}}
 const Ic=globalThis.__startup.Ic,o={emit(){}},xt={
@@ -19,13 +19,15 @@ const Rzn=value=>{globalThis.__startup.remoteCompleted=true;return value},UOn=()
   configureBoxVncSession(){globalThis.__startup.vncConfigurations+=1},
   hardenWebviewAttach(contents){if(globalThis.__startup.hardenerFailure!=null)throw globalThis.__startup.hardenerFailure;globalThis.__startup.hardenedContents.push(contents);contents.on("will-attach-webview",()=>{globalThis.__startup.realWebviewAttachEvents+=1})}
 });
+const cJt=()=>null;
+function VOn(){globalThis.__startup.stockSyncRegistrations+=1}
 let ijn=false,jEr,mh,qEr,s,bu,FEr;
 function aJn(){globalThis.__startup.protocolRegistrations+=1;globalThis.__startup.events.push("protocol")}
 async function mjn(){qEr?.configureBoxVncSession();let r=new xt.BrowserWindow();qEr?.hardenWebviewAttach(r.webContents),bu=r,globalThis.__startup.window=r}
 function sjn(){bu!=null&&!bu.isDestroyed()||FEr==null&&(FEr=mjn().finally(()=>{FEr=void 0}))}
 globalThis.__bootstrapDone=(async()=>{
   jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(await globalThis.__remoteReady);aJn(),Ic.markPhase("auth_service");
-  let $=Dzn({});qEr=$,s={pipes:{}};
+  let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});
   UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})
 })().catch(error=>{Ic.noteFailed(error);throw error});
 `;
@@ -37,6 +39,7 @@ function startSyntheticMain(remoteReady, overrides = {}) {
     activateHandlers: 0,
     activateHandler: null,
     events: [],
+    earlySyncReleases: 0,
     hardenedContents: [],
     hardenerFailure: null,
     liveWindows: [],
@@ -47,6 +50,7 @@ function startSyntheticMain(remoteReady, overrides = {}) {
     remoteCompleted: false,
     remoteFailures: [],
     removedWebviewGuards: 0,
+    stockSyncRegistrations: 0,
     vncConfigurations: 0,
     window: null,
     windows: 0,
@@ -67,7 +71,15 @@ function startSyntheticMain(remoteReady, overrides = {}) {
     __startup: startup,
     require(request) {
       if (request === "../codex/desktop/runtime.cjs") {
-        return { installDesktopRuntime() {} };
+        return {
+          installDesktopRuntime() {
+            return {
+              releaseEarlySyncIpc() {
+                startup.earlySyncReleases += 1;
+              },
+            };
+          },
+        };
       }
       if (request === "electron") return {};
       throw new Error(`Unexpected synthetic require: ${request}`);
@@ -83,6 +95,7 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   const preload = patchPreloadSource(STOCK_PRELOAD);
   assert.match(main, /\.\.\/codex\/desktop\/runtime\.cjs/);
   assert.match(main, /installDesktopRuntime/);
+  assert.match(main, /releaseEarlySyncIpc\(\),VOn\(/);
   assert.match(main, /mainFeature='kept'/);
   assert.match(preload, /exposeInMainWorld\("desktop",Q\)/);
   assert.match(preload, /exposeInMainWorld\("coordinatorPort",X\)/);
@@ -138,6 +151,8 @@ test("desktop patch creates the stock window while remote-service readiness is h
   assert.equal(startup.remoteCompleted, false, "the stock remote gate must still be held");
   assert.deepEqual(startup.events, ["protocol", "browser-window"], "media protocol must precede the window");
   assert.equal(startup.protocolRegistrations, 1);
+  assert.equal(startup.earlySyncReleases, 0, "bootstrap sync IPC must remain active while the remote gate is held");
+  assert.equal(startup.stockSyncRegistrations, 0);
   assert.equal(startup.windows, 1, "window creation must not wait for stock remote readiness");
   const blockedAttach = {
     prevented: false,
@@ -161,6 +176,8 @@ test("desktop patch creates the stock window while remote-service readiness is h
   assert.equal(startup.ready, true);
   assert.equal(startup.readyCalls, 1);
   assert.equal(startup.protocolRegistrations, 1, "the relocated media protocol registration must run once");
+  assert.equal(startup.earlySyncReleases, 1, "stock sync IPC must atomically take ownership after remote readiness");
+  assert.equal(startup.stockSyncRegistrations, 1);
   assert.equal(startup.windows, 1, "the relocated stock window creator must run exactly once");
   assert.equal(startup.vncConfigurations, 1, "late VNC setup must catch up to the early window exactly once");
   assert.deepEqual(startup.hardenedContents, [startup.window.webContents]);
@@ -229,6 +246,8 @@ test("a remote failure after local readiness remains captured", async () => {
   assert.equal(startup.readyCalls, 1);
   assert.deepEqual(startup.remoteFailures, [remoteFailure]);
   assert.equal(startup.remoteCompleted, false);
+  assert.equal(startup.earlySyncReleases, 0, "failed remote startup must retain local bootstrap sync IPC");
+  assert.equal(startup.stockSyncRegistrations, 0);
   assert.equal(startup.activateHandlers, 1, "remote failure must not remove local window recreation");
   const failedBootstrapWindow = startup.window;
   failedBootstrapWindow.destroy();

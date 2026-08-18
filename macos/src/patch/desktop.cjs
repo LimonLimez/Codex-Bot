@@ -74,7 +74,7 @@ const WS_FILES = Object.freeze([
 ]);
 
 const MAIN_ANCHOR = '"use strict";var fjn=Object.create;';
-const MAIN_PATCH = '"use strict";require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));var __openbotEarlyWebviewGuard;var fjn=Object.create;';
+const MAIN_PATCH = '"use strict";var __openbotDesktopRuntime=require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));var __openbotEarlyWebviewGuard;var fjn=Object.create;';
 const MAIN_ACTIVATE_HANDLER = 'xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})';
 // A loaded local-protocol window is app-ready; stock remote-only services keep booting under the existing catch.
 const MAIN_WINDOW_EDGE_ANCHOR = 'jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(';
@@ -86,6 +86,8 @@ const MAIN_WEBVIEW_HARDENER_PATCH = 'qEr!=null?qEr.hardenWebviewAttach(r.webCont
 const MAIN_VNC_SERVICE_ANCHOR = '});qEr=$,s={pipes:';
 // Install the real hardener before removing the temporary deny listener so a thrown handoff stays fail-closed.
 const MAIN_VNC_SERVICE_PATCH = '});qEr=$,$.configureBoxVncSession(),bu!=null&&!bu.isDestroyed()&&($.hardenWebviewAttach(bu.webContents),__openbotEarlyWebviewGuard!=null&&bu.webContents.removeListener("will-attach-webview",__openbotEarlyWebviewGuard)),__openbotEarlyWebviewGuard=void 0,s={pipes:';
+const MAIN_STOCK_SYNC_IPC_ANCHOR = 'VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});';
+const MAIN_STOCK_SYNC_IPC_PATCH = '__openbotDesktopRuntime.releaseEarlySyncIpc(),VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});';
 const MAIN_LATE_WINDOW_ANCHOR = `}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),${MAIN_ACTIVATE_HANDLER}`;
 const MAIN_LATE_WINDOW_PATCH = '})';
 const COORDINATOR_REQUEST_ANCHOR = 'L=M({invokeRequest:()=>{s.ipcRenderer.invoke("sand:coordinator-port-request")}})';
@@ -127,8 +129,14 @@ function patchMainSource(source) {
     MAIN_VNC_SERVICE_PATCH,
     "Grok Electron early-window VNC catch-up",
   );
-  return replaceUnique(
+  const syncIpcHandoff = replaceUnique(
     vncCatchUp,
+    MAIN_STOCK_SYNC_IPC_ANCHOR,
+    MAIN_STOCK_SYNC_IPC_PATCH,
+    "Grok Electron stock sync IPC handoff",
+  );
+  return replaceUnique(
+    syncIpcHandoff,
     MAIN_LATE_WINDOW_ANCHOR,
     MAIN_LATE_WINDOW_PATCH,
     "Grok Electron late window bootstrap",

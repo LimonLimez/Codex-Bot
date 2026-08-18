@@ -230,6 +230,7 @@ test("production direct Codex snapshots the host environment into a plain launch
 test("desktop runtime registers the exact frozen bot/model boundary and keeps create zero-argument", async (t) => {
   const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
   const handlers = new Map();
+  const synchronousListeners = new Map();
   const sends = [];
   const calls = [];
   const listeners = new Map();
@@ -316,6 +317,16 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   const electron = {
     app: { once() {} },
     ipcMain: {
+      on(channel, listener) {
+        const listeners = synchronousListeners.get(channel) || new Set();
+        listeners.add(listener);
+        synchronousListeners.set(channel, listeners);
+      },
+      removeListener(channel, listener) {
+        const listeners = synchronousListeners.get(channel);
+        listeners?.delete(listener);
+        if (listeners?.size === 0) synchronousListeners.delete(channel);
+      },
       handle(channel, handler) {
         assert.equal(handlers.has(channel), false);
         handlers.set(channel, handler);
@@ -326,6 +337,10 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
       getAllWindows() {
         return [{ webContents: { isDestroyed: () => false, send: (...args) => sends.push(args) } }];
       },
+    },
+    nativeTheme: {
+      themeSource: "system",
+      shouldUseDarkColors: true,
     },
   };
   const installed = installDesktopRuntime(electron, {
@@ -344,6 +359,29 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   ]);
   assert.equal(handlers.size, 24);
   assert.equal(Object.isFrozen(installed), true);
+  assert.equal(typeof installed.releaseEarlySyncIpc, "function");
+  assert.deepEqual([...synchronousListeners.keys()].sort(), [
+    "sand:egress-tunnel-get-sync",
+    "sand:egress-tunnel-status-get-sync",
+    "sand:experiments-snapshot-sync",
+    "sand:theme-get-sync",
+    "sand:webauthn-proxy-get-sync",
+  ]);
+  const earlyValues = Object.fromEntries([...synchronousListeners].map(([channel, listeners]) => {
+    const event = {};
+    for (const listener of listeners) listener(event);
+    return [channel, event.returnValue];
+  }));
+  assert.deepEqual(earlyValues, {
+    "sand:experiments-snapshot-sync": null,
+    "sand:theme-get-sync": { preference: "system", resolved: "dark" },
+    "sand:egress-tunnel-get-sync": false,
+    "sand:webauthn-proxy-get-sync": false,
+    "sand:egress-tunnel-status-get-sync": { state: "off", relayedStreams: 0, activeStreams: 0 },
+  });
+  installed.releaseEarlySyncIpc();
+  installed.releaseEarlySyncIpc();
+  assert.deepEqual([...synchronousListeners.keys()], [], "stock IPC handoff must remove exact bootstrap listeners once");
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
   assert.deepEqual(calls.filter(([name]) => name === "sidecar-start"), []);

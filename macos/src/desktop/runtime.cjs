@@ -1238,6 +1238,52 @@ function productionDependencies(electron) {
   };
 }
 
+function installEarlySyncIpc(electron) {
+  const ipcMain = electron?.ipcMain;
+  const removeListener = typeof ipcMain?.off === "function"
+    ? (channel, listener) => ipcMain.off(channel, listener)
+    : typeof ipcMain?.removeListener === "function"
+      ? (channel, listener) => ipcMain.removeListener(channel, listener)
+      : null;
+  if (typeof ipcMain?.on !== "function" || removeListener === null) return () => {};
+
+  const currentTheme = () => {
+    let preference = "system";
+    let resolved = "light";
+    try {
+      const source = electron.nativeTheme?.themeSource;
+      if (source === "system" || source === "light" || source === "dark") preference = source;
+      resolved = electron.nativeTheme?.shouldUseDarkColors === true ? "dark" : "light";
+    } catch {}
+    return { preference, resolved };
+  };
+  const registrations = [
+    ["sand:experiments-snapshot-sync", () => null],
+    ["sand:theme-get-sync", currentTheme],
+    ["sand:egress-tunnel-get-sync", () => false],
+    ["sand:webauthn-proxy-get-sync", () => false],
+    ["sand:egress-tunnel-status-get-sync", () => ({
+      state: "off",
+      relayedStreams: 0,
+      activeStreams: 0,
+    })],
+  ].map(([channel, readValue]) => {
+    const listener = (event) => {
+      event.returnValue = readValue();
+    };
+    ipcMain.on(channel, listener);
+    return [channel, listener];
+  });
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    for (const [channel, listener] of registrations) {
+      try { removeListener(channel, listener); } catch {}
+    }
+  };
+}
+
 function installDesktopRuntime(electron, injected = {}) {
   if (!electron?.app || !electron?.ipcMain || !electron?.BrowserWindow) {
     throw new Error("Codex desktop runtime requires Electron.");
@@ -1305,6 +1351,7 @@ function installDesktopRuntime(electron, injected = {}) {
   const profileSetupReceipts = new Map();
   const computerSetupReceipts = new Map();
   const registered = [];
+  const releaseEarlySyncIpc = installEarlySyncIpc(electron);
   let disposePromise = null;
   let disposeComplete = false;
   let quitRequested = false;
@@ -1886,6 +1933,7 @@ function installDesktopRuntime(electron, injected = {}) {
   computerBoundary.on?.("permission-requested", onComputerPermission);
 
   const api = Object.freeze({
+    releaseEarlySyncIpc,
     dispose() {
       if (disposePromise) return disposePromise;
       if (disposeComplete) return Promise.resolve();
@@ -1898,6 +1946,7 @@ function installDesktopRuntime(electron, injected = {}) {
       };
       capture(() => profileSetupReceipts.clear());
       capture(() => computerSetupReceipts.clear());
+      capture(releaseEarlySyncIpc);
       for (const channel of registered) {
         capture(() => electron.ipcMain.removeHandler(channel));
       }
