@@ -792,8 +792,9 @@ test("the bootstrap bounds the vendor download before verification", () => {
   const flow = inno.slice(flowStart, flowEnd);
   const downloaded = flow.indexOf("DownloadedBytes := DownloadPage.Download;");
   const exactSizeGate = flow.indexOf(
-    "if DownloadedBytes <> GetVendorInstallerSizeBytes then",
+    "if DownloadedFileSize <> GetVendorInstallerSizeBytes then",
   );
+  const cacheHitGate = flow.indexOf("(DownloadedBytes <> 0)");
   const verifier = flow.indexOf("Verify-GrokBotInstaller.ps1");
   const userCancellation = flow.indexOf("if DownloadPage.AbortedByUser then");
   const policyRejection = flow.indexOf(
@@ -806,7 +807,11 @@ test("the bootstrap bounds the vendor download before verification", () => {
   );
   assert.ok(
     exactSizeGate > downloaded,
-    "the returned byte count must be checked after Download()",
+    "the downloaded file size must be checked after Download()",
+  );
+  assert.ok(
+    cacheHitGate > exactSizeGate,
+    "only Inno's documented zero-byte cache hit may bypass the returned-count equality check",
   );
   assert.ok(
     verifier > exactSizeGate,
@@ -982,16 +987,26 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   DownloadedBytes: Int64;
+  CachedBytes: Int64;
   ResultPath: String;
+  Url: String;
 begin
   Result := '';
   ResultPath := ExpandConstant('{param:RESULT|}');
+  Url := ExpandConstant('{param:URL|}');
   VendorDownloadPolicyError := '';
   DownloadPage.Clear;
-  DownloadPage.Add(ExpandConstant('{param:URL|}'), 'payload.bin', '');
+  DownloadPage.Add(Url, 'payload.bin', '9bc1b2a288b26af7257a36277ae3816a7d4f16e89c1e7e77d0a5c48bad62b360');
   try
     DownloadedBytes := DownloadPage.Download;
-    if DownloadedBytes = GetVendorInstallerSizeBytes then
+    if CompareText(ExpandConstant('{param:CACHEHIT|0}'), '1') = 0 then
+    begin
+      DownloadPage.Clear;
+      DownloadPage.Add(Url, 'payload.bin', '9bc1b2a288b26af7257a36277ae3816a7d4f16e89c1e7e77d0a5c48bad62b360');
+      CachedBytes := DownloadPage.Download;
+      SaveStringToFile(ResultPath, 'CACHE:' + IntToStr(DownloadedBytes) + ':' + IntToStr(CachedBytes), False);
+    end
+    else if DownloadedBytes = GetVendorInstallerSizeBytes then
       SaveStringToFile(ResultPath, 'OK:' + IntToStr(DownloadedBytes), False)
     else
       SaveStringToFile(ResultPath, 'COUNT_MISMATCH:' + IntToStr(DownloadedBytes), False);
@@ -1013,8 +1028,9 @@ end;
     const setup = path.join(temporary, "download-cap-probe.exe");
     assert.ok(fs.existsSync(setup), "the Inno probe did not compile");
 
-    const runProbe = (route) => {
-      const resultPath = path.join(temporary, `${route}.txt`);
+    const runProbe = (route, extraArgs = []) => {
+      const suffix = extraArgs.length ? "-cache" : "";
+      const resultPath = path.join(temporary, `${route}${suffix}.txt`);
       const execution = childProcess.spawnSync(
         setup,
         [
@@ -1024,6 +1040,7 @@ end;
           "/SP-",
           `/URL=http://127.0.0.1:${port}/${route}`,
           `/RESULT=${resultPath}`,
+          ...extraArgs,
         ],
         { encoding: "utf8", timeout: 30_000 },
       );
@@ -1037,6 +1054,7 @@ end;
     };
 
     assert.equal(runProbe("exact"), "OK:1048576");
+    assert.equal(runProbe("exact", ["/CACHEHIT=1"]), "CACHE:1048576:0");
     assert.match(runProbe("mismatch"), /^REJECT:.*size did not match/i);
     assert.match(runProbe("chunked"), /^REJECT:.*exceeded the pinned/i);
 

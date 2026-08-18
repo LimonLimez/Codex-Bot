@@ -422,6 +422,8 @@ var
   ResultCode: Integer;
   Parameters: String;
   DownloadedBytes: Int64;
+  DownloadedFileSize: Int64;
+  DownloadedInstallerPath: String;
   VerifyAttempt: Integer;
   VerifyStarted: Boolean;
   VerifyDiagnostic: AnsiString;
@@ -454,15 +456,31 @@ begin
       DownloadPage.Hide;
   end;
 
-  if DownloadedBytes <> GetVendorInstallerSizeBytes then
+  DownloadedInstallerPath := ExpandConstant('{tmp}\{#VendorInstallerName}');
+  if not FileSize64(DownloadedInstallerPath, DownloadedFileSize) then
   begin
-    LastVendorError := 'The official Grok Bot download returned a byte count that did not match the pinned {#VendorInstallerSize}-byte installer and was stopped before verification.';
+    LastVendorError := 'The official Grok Bot download did not produce a readable installer and was stopped before verification.';
+    Exit;
+  end;
+
+  if DownloadedFileSize <> GetVendorInstallerSizeBytes then
+  begin
+    LastVendorError := 'The official Grok Bot download produced a file that did not match the pinned {#VendorInstallerSize}-byte installer and was stopped before verification.';
+    Exit;
+  end;
+
+  { Inno returns zero when this exact hash-verified file is already present in
+    the current Setup session. This is the normal retry/cache-hit result. }
+  if (DownloadedBytes <> GetVendorInstallerSizeBytes) and
+     (DownloadedBytes <> 0) then
+  begin
+    LastVendorError := 'The official Grok Bot download returned an unexpected byte count and was stopped before verification.';
     Exit;
   end;
 
   Parameters := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' +
     ExpandConstant('{tmp}\Verify-GrokBotInstaller.ps1') + '" -InstallerPath "' +
-    ExpandConstant('{tmp}\{#VendorInstallerName}') + '" -DiagnosticPath "' +
+    DownloadedInstallerPath + '" -DiagnosticPath "' +
     ExpandConstant('{tmp}\grok-installer-verification.txt') + '"';
   VerifyStarted := False;
   ResultCode := -1;
