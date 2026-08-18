@@ -84,6 +84,30 @@ test("official OAuth state is ignored and rejected without hiding official sourc
   );
 });
 
+test("protected Composio configuration is ignored and rejected without hiding its source", () => {
+  for (const relativePath of [
+    "composio/config.json",
+    "copied-state/composio/config.json",
+  ]) {
+    const ignored = run("git", [
+      "check-ignore",
+      "--no-index",
+      "--",
+      relativePath,
+    ]);
+    assert.equal(ignored.status, 0, `${relativePath} must be ignored`);
+    const audited = run(process.execPath, [auditScript, relativePath]);
+    assert.equal(audited.status, 1);
+    assert.match(audited.stderr, /forbidden private runtime-data path/);
+  }
+  const sourcePath = "src/composio-manager.cjs";
+  assert.equal(
+    run("git", ["check-ignore", "--no-index", "--", sourcePath]).status,
+    1,
+  );
+  assert.equal(run(process.execPath, [auditScript, sourcePath]).status, 0);
+});
+
 test("normal release audit allows only an empty artifacts directory or the exact canonical pair", () => {
   const fixture = copyAuditFixture();
   try {

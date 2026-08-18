@@ -73,6 +73,7 @@ const FORBIDDEN_PATHS = [
   /(^|\/)cliproxy\/auth(\/|$)/i,
   /(^|\/)auth(\/|$)/i,
   /(^|\/)official-computer\/credentials\.json$/i,
+  /(^|\/)composio\/config\.json$/i,
   /(^|\/)(?:local-host-data|desktop-user-data|attachments|downloads|screenshots)(\/|$)/i,
 ];
 const CONTENT_RULES = [

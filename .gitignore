@@ -33,6 +33,7 @@ config.yaml
 **/cliproxy/auth/
 **/auth/
 **/official-computer/credentials.json
+**/composio/config.json
 codex-*.json
 host-secrets.json
 box-secrets.json
