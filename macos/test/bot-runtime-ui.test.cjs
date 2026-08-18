@@ -4109,6 +4109,7 @@ test("measured picker keeps stable Codex Advanced view panels and exact active h
   assert.deepEqual(harness.resizeObservers[0].observed, [simple, advanced, controls]);
   harness.flushAnimationFrames();
   assert.equal(menu.dataset.transitionsReady, "true");
+  assert.equal(menu.classList.contains("transitions-ready"), true);
 
   harness.find("codex-power-advanced-toggle").listeners.get("click")();
   assert.equal(menu.style.height, "168px");

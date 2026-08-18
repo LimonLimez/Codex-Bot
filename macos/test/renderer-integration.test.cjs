@@ -329,7 +329,8 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(css, /\.codex-bot-controls\s*\{[^}]*color:\s*var\(--codex-text\)[^}]*background:\s*var\(--codex-surface\)/s);
   assert.match(css, /\.codex-model-dock\s*\{[^}]*position:\s*relative[^}]*width:\s*max-content/s);
   assert.match(css, /\.codex-model-trigger\s*\{[^}]*max-width:\s*210px/s);
-  assert.match(css, /\.codex-power-popover\s*\{[^}]*position:\s*absolute[^}]*bottom:\s*calc\(100% \+ 8px\)[^}]*width:\s*224px/s);
+  assert.match(css, /\.codex-power-popover\s*\{[^}]*position:\s*absolute[^}]*bottom:\s*calc\(100% \+ 8px\)[^}]*width:\s*224px[^}]*overflow:\s*clip/s);
+  assert.match(css, /\.codex-power-popover\s*\{[^}]*animation:\s*codex-power-popover-enter 320ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\) 30ms both/s);
   assert.match(css, /\.codex-power-popover\[hidden\]\s*\{[^}]*display:\s*none/s);
   assert.match(css, /\[data-codex-mount-state="pending"\][^}]*display:\s*none/s);
   assert.doesNotMatch(css, /\.codex-bot-controls\s*\{[^}]*position:\s*fixed/s);
@@ -365,7 +366,15 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.doesNotMatch(css, /\.codex-power-warning(?:[^{}]|\{[^}]*\})*animation:[^;}]*infinite/s);
   assert.match(css, /@keyframes\s+codex-power-warning-shimmer/);
   assert.match(css, /\.codex-model-dock\.is-warning[^}]*\.codex-power-(?:advanced|fast)-toggle/s);
-  assert.match(css, /\.codex-power-advanced[^}]*grid-template-columns/s);
+  assert.match(css, /\.codex-power-menu\s*\{[^}]*position:\s*relative[^}]*overflow:\s*hidden/s);
+  assert.match(css, /\.codex-power-menu\.transitions-ready\s*\{[^}]*transition:\s*height 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
+  assert.match(css, /\.codex-power-menu\.transitions-ready \.codex-power-view-track\s*\{[^}]*transition:\s*transform 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
+  assert.match(css, /\.codex-power-view-panel\s*\{[^}]*width:\s*100%[^}]*opacity:\s*1[^}]*transition:\s*opacity 200ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
+  assert.match(css, /\.codex-power-view-panel\[aria-hidden="true"\]\s*\{[^}]*opacity:\s*0[^}]*pointer-events:\s*none/s);
+  assert.match(css, /\.codex-power-view-controls::before\s*\{[^}]*right:\s*6px[^}]*left:\s*6px/s);
+  assert.match(css, /\.codex-power-advanced-row\s*\{[^}]*min-height:\s*40px/s);
+  assert.match(css, /\.codex-power-flyout\s*\{[^}]*position:\s*absolute/s);
+  assert.doesNotMatch(css, /codex-power-advanced-field\s+select/);
   assert.doesNotMatch(css, /\.codex-model-row[^}]*112px/s);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*animation:\s*none\s*!important/);
   assert.match(
@@ -403,6 +412,10 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(botUi, /compactControls\.append\(advancedToggle,\s*fastToggle,\s*reasoningView\.warning\)/s);
   assert.match(botUi, /viewTrack\.append\(simplePanel,\s*advancedPanel\)/s);
   assert.match(botUi, /pickerMenu\.append\(viewTrack,\s*viewControls\)/s);
+  assert.match(botUi, /pickerMenu\.classList\.add\("transitions-ready"\)/s);
+  assert.match(botUi, /modelDock\.append\(modelTrigger,\s*popover,\s*advancedFlyout\)/s);
+  assert.doesNotMatch(botUi, /advancedPanel\.append\([^;]*advancedFlyout/s);
+  assert.doesNotMatch(botUi, /codex-power-(?:model|effort|speed)-select/);
   assert.match(botUi, /nativeControls\.append\(statusRow,\s*computerRow,\s*computerGrants\)/s);
   assert.doesNotMatch(botUi, /nativeControls\.append\(providerRow/s);
   assert.doesNotMatch(botUi, /popover\.append\([^;]*reasoningView\.warning/s);

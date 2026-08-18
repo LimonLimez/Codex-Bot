@@ -173,7 +173,7 @@ test("installer bundles the macOS privacy notice instead of Windows release poli
   assert.doesNotMatch(bundledNotice, /Windows|0\.18\.0/);
 });
 
-test("installer stages only the exact exported patcher source script and asset closures", (t) => {
+test("installer stages only the exact exported patcher source script and Advanced renderer asset closures", (t) => {
   const {
     PATCHER_ASSET_FILES,
     PATCHER_SCRIPT_FILES,
@@ -261,6 +261,22 @@ test("installer stages only the exact exported patcher source script and asset c
     ...PATCHER_SCRIPT_FILES.map((file) => `scripts/${file}`),
     ...PATCHER_SOURCE_FILES.map((file) => `src/${file}`),
   ].sort());
+
+  const advancedPickerCss = fs.readFileSync(
+    path.join(patcher, "src", "renderer", "codex-ui.css"),
+    "utf8",
+  );
+  const advancedPickerUi = fs.readFileSync(
+    path.join(patcher, "src", "renderer", "bot-runtime-ui.js"),
+    "utf8",
+  );
+  assert.match(advancedPickerCss, /\.codex-power-menu\s*\{/);
+  assert.match(advancedPickerCss, /\.codex-power-menu\.transitions-ready\s*\{/);
+  assert.match(advancedPickerCss, /\.codex-power-flyout\s*\{/);
+  assert.doesNotMatch(advancedPickerCss, /codex-power-advanced-field\s+select/);
+  assert.match(advancedPickerUi, /data-openbot-model-picker-host/);
+  assert.match(advancedPickerUi, /modelDock\.append\(modelTrigger,\s*popover,\s*advancedFlyout\)/s);
+  assert.doesNotMatch(advancedPickerUi, /codex-power-(?:model|effort|speed)-select/);
 
   for (const relative of [
     "src/bots/remote-provider-live-gate.cjs",

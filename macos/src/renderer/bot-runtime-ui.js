@@ -2734,7 +2734,6 @@
       advancedModel.row,
       advancedEffort.row,
       advancedSpeed.row,
-      advancedFlyout,
     );
     const viewControls = element(documentRef, "div", "codex-power-view-controls");
     viewControls.append(compactControls);
@@ -2762,7 +2761,7 @@
         reasoningView.instructions,
       );
     } else popover.append(pickerMenu, reasoningView.label, reasoningView.instructions);
-    modelDock.append(modelTrigger, popover);
+    modelDock.append(modelTrigger, popover, advancedFlyout);
     if (nativeProtocolMode) {
       documentRef.body.append(computerSetup, permissionSheet);
       panel.dataset.codexMountState = "native-shell";
@@ -2805,9 +2804,15 @@
     if (typeof windowRef.requestAnimationFrame === "function") {
       pickerTransitionFrame = windowRef.requestAnimationFrame(() => {
         pickerTransitionFrame = 0;
-        if (!mountDisposed) pickerMenu.dataset.transitionsReady = "true";
+        if (!mountDisposed) {
+          pickerMenu.dataset.transitionsReady = "true";
+          pickerMenu.classList.add("transitions-ready");
+        }
       });
-    } else pickerMenu.dataset.transitionsReady = "true";
+    } else {
+      pickerMenu.dataset.transitionsReady = "true";
+      pickerMenu.classList.add("transitions-ready");
+    }
     function attachToProductHosts() {
       if (mountDisposed) return;
       const { sidebarHost, composerHost, nativeComposerHost } = findUiMounts(documentRef);
@@ -2928,6 +2933,7 @@
       if (advancedFlyoutKind === null) return;
       const owner = advancedFlyoutOwner;
       advancedFlyout.hidden = true;
+      advancedFlyout.dataset.kind = "";
       advancedFlyoutKind = null;
       advancedFlyoutOwner = null;
       for (const row of [advancedModel.row, advancedEffort.row, advancedSpeed.row]) {
@@ -3079,6 +3085,7 @@
         : kind === "effort" ? advancedOptions.efforts : advancedOptions.speeds;
       advancedFlyoutKind = kind;
       advancedFlyoutOwner = owner;
+      advancedFlyout.dataset.kind = kind;
       owner.setAttribute("aria-expanded", "true");
       advancedFlyoutTitle.textContent = kind === "model" ? "Model" : kind === "effort" ? "Effort" : "Speed";
       advancedFlyout.style.width = kind === "model" ? "280px" : kind === "effort" ? "180px" : "233px";

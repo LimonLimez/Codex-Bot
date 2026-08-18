@@ -116,7 +116,7 @@ function loadPatcher() {
   return require(patcherPath);
 }
 
-test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes", async (t) => {
+test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, and preserves stock/unpacked bytes", async (t) => {
   const fixture = await syntheticAsar(t);
   const target = path.join(fixture.root, "target.asar");
   const sourceHash = sha256File(fixture.source);
@@ -229,6 +229,21 @@ test("the patch engine rebrands an exact ASAR and preserves stock/unpacked bytes
   const extracted = path.join(fixture.root, "extracted");
   fs.mkdirSync(extracted);
   asar.extractAll(target, extracted);
+  const advancedPickerCss = fs.readFileSync(
+    path.join(extracted, "dist", "renderer", "codex", "codex-ui.css"),
+    "utf8",
+  );
+  const advancedPickerUi = fs.readFileSync(
+    path.join(extracted, "dist", "renderer", "codex", "bot-runtime-ui.js"),
+    "utf8",
+  );
+  assert.match(advancedPickerCss, /\.codex-power-menu\s*\{/);
+  assert.match(advancedPickerCss, /\.codex-power-menu\.transitions-ready\s*\{/);
+  assert.match(advancedPickerCss, /\.codex-power-flyout\s*\{/);
+  assert.doesNotMatch(advancedPickerCss, /codex-power-advanced-field\s+select/);
+  assert.match(advancedPickerUi, /data-openbot-model-picker-host/);
+  assert.match(advancedPickerUi, /modelDock\.append\(modelTrigger,\s*popover,\s*advancedFlyout\)/s);
+  assert.doesNotMatch(advancedPickerUi, /codex-power-(?:model|effort|speed)-select/);
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(extracted, "package.json"), "utf8"),
   );
