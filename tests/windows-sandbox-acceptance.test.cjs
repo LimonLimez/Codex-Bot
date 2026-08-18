@@ -55,7 +55,7 @@ function createDevelopmentInstallerFixture(t) {
     revisionResult.stderr || revisionResult.stdout,
   );
   const revision = revisionResult.stdout.trim().toLowerCase();
-  const installerName = `OpenBot-Setup-0.1.7-DEVELOPMENT-20260814T000000000Z-${revision}.exe`;
+  const installerName = `OpenBot-Setup-0.1.8-DEVELOPMENT-20260814T000000000Z-${revision}.exe`;
   const installer = path.join(temporary, installerName);
   const source = path.join(temporary, "fixture.cs");
   fs.writeFileSync(
@@ -65,9 +65,9 @@ function createDevelopmentInstallerFixture(t) {
 [assembly: AssemblyDescription("Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH")]
 [assembly: AssemblyCompany("Open Bot contributors")]
 [assembly: AssemblyProduct("Open Bot DEVELOPMENT TEST BUILD")]
-[assembly: AssemblyVersion("0.1.7.0")]
-[assembly: AssemblyFileVersion("0.1.7.0")]
-[assembly: AssemblyInformationalVersion("0.1.7 DEVELOPMENT TEST BUILD")]
+[assembly: AssemblyVersion("0.1.8.0")]
+[assembly: AssemblyFileVersion("0.1.8.0")]
+[assembly: AssemblyInformationalVersion("0.1.8 DEVELOPMENT TEST BUILD")]
 internal static class Program { private static void Main() {} }
 `,
     "utf8",
@@ -222,7 +222,7 @@ test("generation fails closed on an unreviewed hash, non-development name, or re
     "ascii",
   );
 
-  const releaseName = "OpenBot-Setup-0.1.7.exe";
+  const releaseName = "OpenBot-Setup-0.1.8.exe";
   const releaseInstaller = path.join(fixture.temporary, releaseName);
   fs.copyFileSync(fixture.installer, releaseInstaller);
   const releaseHash = sha256(releaseInstaller);
@@ -474,7 +474,7 @@ internal static class Program {
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        String.raw`. $env:CODEX_BOT_RUNNER -Scenario Silent -ArtifactDirectory fixture -HarnessDirectory fixture -EvidenceDirectory fixture -ExpectedSha256 $('0' * 64) -ExpectedInstallerName fixture -ExpectedVersion 0.1.7 -ExpectedRevision 14fcf819cd7a -ExpectedBrandedExecutableSha256 $('1' * 64) -ExpectedPatchInputsSha256 $('2' * 64) -ExpectedVendorManifestSha256 $('3' * 64)
+        String.raw`. $env:CODEX_BOT_RUNNER -Scenario Silent -ArtifactDirectory fixture -HarnessDirectory fixture -EvidenceDirectory fixture -ExpectedSha256 $('0' * 64) -ExpectedInstallerName fixture -ExpectedVersion 0.1.8 -ExpectedRevision 14fcf819cd7a -ExpectedBrandedExecutableSha256 $('1' * 64) -ExpectedPatchInputsSha256 $('2' * 64) -ExpectedVendorManifestSha256 $('3' * 64)
 $verified = Test-DeterministicPatchedAsar -VendorSourceAsar $env:CODEX_BOT_SOURCE -InstalledPatchedAsar $env:CODEX_BOT_INSTALLED -VendorElectronExecutable $env:CODEX_BOT_EXECUTABLE -PatcherPath $env:CODEX_BOT_PATCHER -RuntimePath $env:CODEX_BOT_RUNTIME
 if ($verified) { exit 0 } else { exit 7 }`,
       ],
