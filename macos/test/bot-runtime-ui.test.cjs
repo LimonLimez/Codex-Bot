@@ -68,22 +68,27 @@ function eightConnections(overrides = {}) {
   })));
 }
 
-function providerFacade({ connections = eightConnections(), catalog = null, onboarding = null, connect = null, disconnect = null } = {}) {
+function providerFacade({ connections = eightConnections(), catalog = null, onboarding = null, connect = null, complete = null, disconnect = null, catalogSubscription = null, connectionsSubscription = null } = {}) {
   return {
-    async list() { return connections; },
+    async list() { return typeof connections === "function" ? connections() : connections; },
     async connect(request) {
       if (typeof connect === "function") return connect(request);
-      return connections.find((entry) => entry.providerId === request.providerId) ?? null;
+      const current = typeof connections === "function" ? connections() : connections;
+      return current.find((entry) => entry.providerId === request.providerId) ?? null;
     },
     async disconnect(providerId) {
       if (typeof disconnect === "function") return disconnect(providerId);
-      return connections.find((entry) => entry.providerId === providerId) ?? null;
+      const current = typeof connections === "function" ? connections() : connections;
+      return current.find((entry) => entry.providerId === providerId) ?? null;
     },
     async catalog() {
-      return catalog ?? Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
+      return typeof catalog === "function"
+        ? catalog()
+        : catalog ?? Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
     },
-    async readOnboarding() { return onboarding; },
+    async readOnboarding() { return typeof onboarding === "function" ? onboarding() : onboarding; },
     async completeOnboarding(providerId) {
+      if (typeof complete === "function") return complete(providerId);
       return Object.freeze({
         schemaVersion: 1,
         providerId,
@@ -92,9 +97,37 @@ function providerFacade({ connections = eightConnections(), catalog = null, onbo
         completedAt: "2026-08-19T00:00:00.000Z",
       });
     },
-    onConnectionsChanged() { return () => {}; },
-    onCatalogChanged() { return () => {}; },
+    onConnectionsChanged(listener) {
+      return typeof connectionsSubscription === "function" ? connectionsSubscription(listener) : () => {};
+    },
+    onCatalogChanged(listener) {
+      return typeof catalogSubscription === "function" ? catalogSubscription(listener) : () => {};
+    },
   };
+}
+
+function providerModel(providerId, model, label, efforts, catalogGeneration = 1, overrides = {}) {
+  const descriptor = providerDescriptor(providerId);
+  return Object.freeze({
+    provider: providerId,
+    providerLabel: descriptor.label,
+    model,
+    label,
+    efforts: Object.freeze([...efforts]),
+    serviceTiers: Object.freeze(overrides.serviceTiers ?? []),
+    defaultReasoningEffort: overrides.defaultReasoningEffort ?? efforts[0],
+    defaultServiceTier: overrides.defaultServiceTier ?? null,
+    catalogGeneration,
+    isDefault: overrides.isDefault === true,
+  });
+}
+
+function providerCatalog(models, generation = 1, status = "ready") {
+  return Object.freeze({
+    generation,
+    status,
+    models: Object.freeze(models),
+  });
 }
 
 class FakeClassList {
@@ -1133,7 +1166,7 @@ test("disposing during profile setup fences every late completion", async () => 
   const profileRelease = deferred();
   const selected = Object.freeze({
     botId: BOT_B,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "medium",
     serviceTier: null,
@@ -1168,6 +1201,11 @@ test("disposing during profile setup fences every late completion", async () => 
       onChanged() { return () => {}; },
       onPermissionRequested() { return () => {}; },
     },
+    providerFacade: providerFacade({
+      catalog: providerCatalog([
+        providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      ]),
+    }),
     onStateChanged() { publications += 1; },
   });
 
@@ -1193,7 +1231,7 @@ test("disposing during the durable setup-stage advance fences its late completio
   const advanceRelease = deferred();
   const selected = Object.freeze({
     botId: BOT_B,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "medium",
     serviceTier: null,
@@ -1227,6 +1265,11 @@ test("disposing during the durable setup-stage advance fences its late completio
       onChanged() { return () => {}; },
       onPermissionRequested() { return () => {}; },
     },
+    providerFacade: providerFacade({
+      catalog: providerCatalog([
+        providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      ]),
+    }),
     onStateChanged() { publications += 1; },
   });
 
@@ -1297,13 +1340,18 @@ test("New Bot setup asks for an explicit Computer mode with no default", async (
       async selectModel(value) {
         return Object.freeze({
           ...value,
-          provider: "cliproxy-anthropic",
+          provider: "anthropic-claude",
           catalogGeneration: 1,
           generation: 1,
         });
       },
     },
     computerFacade,
+    providerFacade: providerFacade({
+      catalog: providerCatalog([
+        providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      ]),
+    }),
   });
   await controller.initialize();
   await controller.createBot();
@@ -2938,33 +2986,25 @@ test("controller model selection round-trips an exact provider when raw model id
         calls.push(structuredClone(selection));
         return Object.freeze({
           ...selection,
-          catalogGeneration: selection.provider === "openai-codex" ? 24 : 1,
+          catalogGeneration: 24,
           generation: ++generation,
         });
       },
     },
-    accountFacade: {
-      async catalog() {
-        return Object.freeze({
-          generation: 24,
-          status: "ready",
-          models: Object.freeze([Object.freeze({
-            id: "claude-fable-5",
-            displayName: "Direct Claude Fable 5",
-            defaultReasoningEffort: "medium",
-            supportedReasoningEfforts: Object.freeze(["medium", "high"]),
-          })]),
-        });
-      },
-    },
+    providerFacade: providerFacade({
+      catalog: providerCatalog([
+        providerModel("openai-codex", "claude-fable-5", "Claude Fable 5", ["medium", "high"], 24),
+        providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["medium", "high", "ultra-code"], 24),
+      ], 24),
+    }),
   });
   await controller.initialize();
-  await controller.selectModel("cliproxy-anthropic", "claude-fable-5", "ultra-code", null);
-  assert.equal(controller.snapshot().modelSelection.provider, "cliproxy-anthropic");
+  await controller.selectModel("anthropic-claude", "claude-fable-5", "ultra-code", null);
+  assert.equal(controller.snapshot().modelSelection.provider, "anthropic-claude");
   await controller.selectModel("openai-codex", "claude-fable-5", "high", null);
   assert.equal(controller.snapshot().modelSelection.provider, "openai-codex");
   assert.deepEqual(calls.map(({ provider, model, reasoningEffort }) => [provider, model, reasoningEffort]), [
-    ["cliproxy-anthropic", "claude-fable-5", "ultra-code"],
+    ["anthropic-claude", "claude-fable-5", "ultra-code"],
     ["openai-codex", "claude-fable-5", "high"],
   ]);
 });
@@ -3103,22 +3143,12 @@ test("bot selection renders the authoritative persisted model and suppresses sta
   assert.deepEqual(controller.snapshot().modelSelection, selections.get(BOT_B));
 });
 
-test("the renderer uses the live official catalog and refreshes an unsupported saved tuple", async () => {
+test("the renderer uses the authoritative provider catalog and refreshes an unsupported saved tuple", async () => {
   const { createBotUiController } = require(uiPath);
   let catalogListener;
-  let catalog = Object.freeze({
-    generation: 12,
-    status: "ready",
-    models: Object.freeze([Object.freeze({
-      id: "gpt-live-only",
-      displayName: "GPT Live Only",
-      defaultReasoningEffort: "high",
-      supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
-      inputModalities: Object.freeze(["text", "image"]),
-      supportsPersonality: false,
-      isDefault: true,
-    })]),
-  });
+  let catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-live-only", "GPT Live Only", ["medium", "high", "ultra"], 12, { isDefault: true }),
+  ], 12);
   let stored = Object.freeze({
     botId: BOT_A,
     provider: "openai-codex",
@@ -3137,30 +3167,18 @@ test("the renderer uses the live official catalog and refreshes an unsupported s
       async selectBot() { return stored; },
       async readModel() { return stored; },
     },
-    accountFacade: {
-      async catalog() { return catalog; },
-      onCatalogChanged(listener) { catalogListener = listener; return () => {}; },
-    },
+    providerFacade: providerFacade({
+      catalog: () => catalog,
+      catalogSubscription(listener) { catalogListener = listener; return () => {}; },
+    }),
   });
   await controller.initialize();
-  assert.deepEqual(controller.snapshot().modelCatalog.map(({ model }) => model), [
-    "gpt-live-only", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
-  ]);
+  assert.deepEqual(controller.snapshot().modelCatalog.map(({ model }) => model), ["gpt-live-only"]);
   assert.deepEqual(controller.snapshot().modelSelection, stored);
 
-  catalog = Object.freeze({
-    generation: 13,
-    status: "ready",
-    models: Object.freeze([Object.freeze({
-      id: "gpt-replacement",
-      displayName: "GPT Replacement",
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: Object.freeze(["low", "medium"]),
-      inputModalities: Object.freeze(["text"]),
-      supportsPersonality: false,
-      isDefault: true,
-    })]),
-  });
+  catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-replacement", "GPT Replacement", ["low", "medium"], 13, { isDefault: true }),
+  ], 13);
   stored = Object.freeze({
     botId: BOT_A,
     provider: "openai-codex",
@@ -3172,20 +3190,21 @@ test("the renderer uses the live official catalog and refreshes an unsupported s
   });
   catalogListener(catalog);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(controller.snapshot().modelCatalog[0].model, "gpt-replacement");
+  assert.deepEqual(controller.snapshot().modelCatalog.map(({ model }) => model), ["gpt-replacement"]);
   assert.deepEqual(controller.snapshot().modelSelection, stored);
 });
 
-test("a loading official catalog keeps reviewed optional models usable until the live catalog arrives", async () => {
+test("a loading provider catalog keeps an unsupported stored tuple unavailable until the live catalog arrives", async () => {
   const { createBotUiController } = require(uiPath);
   let catalogListener;
+  let catalog = providerCatalog([], 0, "loading");
   const stored = Object.freeze({
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
-    catalogGeneration: 1,
+    catalogGeneration: 0,
     generation: 2,
   });
   const controller = createBotUiController({
@@ -3197,31 +3216,24 @@ test("a loading official catalog keeps reviewed optional models usable until the
       async selectBot() { return stored; },
       async readModel() { return stored; },
     },
-    accountFacade: {
-      async catalog() { return Object.freeze({ generation: 0, status: "loading", models: Object.freeze([]) }); },
-      onCatalogChanged(listener) { catalogListener = listener; return () => {}; },
-    },
+    providerFacade: providerFacade({
+      catalog: () => catalog,
+      catalogSubscription(listener) { catalogListener = listener; return () => {}; },
+    }),
   });
   await controller.initialize();
-  assert.deepEqual(controller.snapshot().modelSelection, stored);
-  assert.equal(controller.snapshot().modelCatalog[0].model, "claude-fable-5");
-  catalogListener(Object.freeze({
-    generation: 2,
-    status: "ready",
-    models: Object.freeze([Object.freeze({
-      id: "gpt-live",
-      displayName: "GPT Live",
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: Object.freeze(["medium", "high"]),
-    })]),
-  }));
+  assert.equal(controller.snapshot().modelSelection, null);
+  assert.deepEqual(controller.snapshot().modelCatalog, []);
+  catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-live", "GPT Live", ["medium", "high"], 2, { isDefault: true }),
+  ], 2);
+  catalogListener(catalog);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(controller.snapshot().modelCatalog.map(({ model }) => model), [
-    "gpt-live", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
-  ]);
+  assert.deepEqual(controller.snapshot().modelCatalog.map(({ model }) => model), ["gpt-live"]);
+  assert.equal(controller.snapshot().modelSelection, null);
 });
 
-test("a pending official catalog keeps the bot active so a reviewed optional model can be chosen", async () => {
+test("a pending provider catalog keeps the bot active but rejects unadvertised model choices", async () => {
   const { createBotUiController } = require(uiPath);
   const official = Object.freeze({
     botId: BOT_A,
@@ -3232,15 +3244,6 @@ test("a pending official catalog keeps the bot active so a reviewed optional mod
     catalogGeneration: 12,
     generation: 2,
   });
-  const optional = Object.freeze({
-    botId: BOT_A,
-    provider: "cliproxy-anthropic",
-    model: "claude-fable-5",
-    reasoningEffort: "ultra-code",
-    serviceTier: null,
-    catalogGeneration: 1,
-    generation: 3,
-  });
   const controller = createBotUiController({
     facade: {
       async list() { return [bot(BOT_A, "A", "unavailable")]; },
@@ -3249,20 +3252,18 @@ test("a pending official catalog keeps the bot active so a reviewed optional mod
     runtimeFacade: {
       async selectBot() { return official; },
       async readModel() { return official; },
-      async selectModel() { return optional; },
+      async selectModel() { throw new Error("selection should be rejected before transport"); },
     },
-    accountFacade: {
-      async catalog() {
-        return Object.freeze({ generation: 0, status: "loading", models: Object.freeze([]) });
-      },
-      onCatalogChanged() { return () => {}; },
-    },
+    providerFacade: providerFacade({ catalog: providerCatalog([], 0, "loading") }),
   });
   await controller.initialize();
   assert.equal(controller.snapshot().activeBotId, BOT_A);
   assert.equal(controller.snapshot().modelSelection, null);
-  await controller.selectModel("cliproxy-anthropic", "claude-fable-5", "ultra-code");
-  assert.deepEqual(controller.snapshot().modelSelection, optional);
+  await assert.rejects(
+    () => controller.selectModel("anthropic-claude", "claude-fable-5", "ultra-code"),
+    /selection/i,
+  );
+  assert.equal(controller.snapshot().modelSelection, null);
 });
 
 test("a newer catalog event wins over an older in-flight catalog reply", async () => {
@@ -3321,7 +3322,7 @@ test("a newer catalog event wins over an older in-flight catalog reply", async (
   assert.equal(controller.snapshot().modelCatalog[0].model, "gpt-newer");
 });
 
-test("unavailable or malformed catalog events fail closed without disabling reviewed optional models", async () => {
+test("unavailable or malformed provider catalog events fail closed without inventing models", async () => {
   const { createBotUiController } = require(uiPath);
   let catalogListener;
   const stored = Object.freeze({
@@ -3342,33 +3343,20 @@ test("unavailable or malformed catalog events fail closed without disabling revi
       async selectBot() { return stored; },
       async readModel() { return stored; },
     },
-    accountFacade: {
-      async catalog() {
-        return Object.freeze({
-          generation: 8,
-          status: "ready",
-          models: Object.freeze([Object.freeze({
-            id: "gpt-live",
-            displayName: "GPT Live",
-            defaultReasoningEffort: "high",
-            supportedReasoningEfforts: Object.freeze(["medium", "high"]),
-          })]),
-        });
-      },
-      onCatalogChanged(listener) { catalogListener = listener; return () => {}; },
-    },
+    providerFacade: providerFacade({
+      catalog: providerCatalog([
+        providerModel("openai-codex", "gpt-live", "GPT Live", ["medium", "high"], 8, { isDefault: true }),
+      ], 8),
+      catalogSubscription(listener) { catalogListener = listener; return () => {}; },
+    }),
   });
   await controller.initialize();
   catalogListener(Object.freeze({ generation: 9, status: "unavailable", models: Object.freeze([]) }));
   assert.equal(controller.snapshot().modelSelection, null);
-  assert.deepEqual(controller.snapshot().modelCatalog.map(({ model }) => model), [
-    "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
-  ]);
+  assert.deepEqual(controller.snapshot().modelCatalog, []);
   catalogListener(Object.freeze({ generation: 10, status: "ready", models: "private malformed" }));
   assert.equal(controller.snapshot().modelSelection, null);
-  assert.deepEqual(controller.snapshot().modelCatalog.map(({ model }) => model), [
-    "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
-  ]);
+  assert.deepEqual(controller.snapshot().modelCatalog, []);
 });
 
 test("initialization and creation keep send gated until the main-owned selection is durable", async () => {
@@ -3549,7 +3537,7 @@ test("native coordinator selection switches the active bot before model and Comp
   const selections = [];
   const selectionFor = (botId) => Object.freeze({
     botId,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "medium",
     serviceTier: null,
@@ -3565,6 +3553,11 @@ test("native coordinator selection switches the active bot before model and Comp
       async selectBot(botId) { selections.push(botId); return selectionFor(botId); },
       onEvent(listener) { runtimeListener = listener; return () => {}; },
     },
+    providerFacade: providerFacade({
+      catalog: providerCatalog([
+        providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      ]),
+    }),
   });
   await controller.initialize();
   assert.equal(controller.snapshot().activeBotId, BOT_A);
@@ -3649,7 +3642,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
   });
 });
 
-test("mounted optional model controls stay reachable while the official catalog is pending", async () => {
+test("mounted model controls use only the authoritative provider catalog", async () => {
   const { mount } = require(uiPath);
   const selected = [];
   class MountElement extends FakeElement {
@@ -3695,11 +3688,11 @@ test("mounted optional model controls stay reachable while the official catalog 
   documentRef.composer = documentRef.createElement("form");
   const official = Object.freeze({
     botId: BOT_A,
-    provider: "openai-codex",
-    model: "gpt-not-loaded-yet",
+    provider: "anthropic-claude",
+    model: "claude-fable-5",
     reasoningEffort: "high",
     serviceTier: null,
-    catalogGeneration: 12,
+    catalogGeneration: 1,
     generation: 2,
   });
   const windowRef = {
@@ -3714,7 +3707,7 @@ test("mounted optional model controls stay reachable while the official catalog 
         selected.push(value);
         return Object.freeze({
           ...value,
-          provider: "cliproxy-anthropic",
+          provider: "anthropic-claude",
           catalogGeneration: 1,
           generation: 3,
         });
@@ -3726,6 +3719,11 @@ test("mounted optional model controls stay reachable while the official catalog 
       },
       onCatalogChanged() { return () => {}; },
     },
+    openbotProviders: providerFacade({
+      catalog: providerCatalog([
+        providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]),
+      ]),
+    }),
     CustomEvent: class CustomEvent { constructor(type) { this.type = type; } },
     dispatchEvent() {},
     setTimeout,
@@ -3755,7 +3753,7 @@ test("mounted optional model controls stay reachable while the official catalog 
   const advanced = find(mounted.modelDock, "codex-power-view-advanced");
   const advancedModel = find(mounted.modelDock, "codex-power-advanced-row");
   assert.equal(mounted.controller.snapshot().activeBotId, BOT_A);
-  assert.equal(mounted.controller.snapshot().modelSelection, null);
+  assert.deepEqual(mounted.controller.snapshot().modelSelection, official);
   assert.equal(power.disabled, false);
   assert.ok(trigger);
   assert.equal(trigger.attributes["aria-haspopup"], "dialog");
@@ -3774,7 +3772,7 @@ test("mounted optional model controls stay reachable while the official catalog 
   assert.equal(advancedToggle.disabled, false);
   assert.equal(advanced.attributes["aria-hidden"], "true");
   assert.equal(advancedModel.dataset.kind, "model");
-  assert.equal(advancedModel.dataset.provider, "cliproxy-anthropic");
+  assert.equal(advancedModel.dataset.provider, "anthropic-claude");
   assert.equal(advancedModel.dataset.model, "claude-fable-5");
   assert.equal(find(mounted.modelDock, "codex-model-select"), null);
   power.listeners.get("pointerdown")();
@@ -3784,7 +3782,7 @@ test("mounted optional model controls stay reachable while the official catalog 
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(selected, [{
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
@@ -3950,7 +3948,7 @@ function createMountedUiHarness({
       async readModel() { return current; },
       async selectModel(value) {
         selected.push(value);
-        const model = catalog.models.find((entry) => entry.id === value.model);
+        const model = catalog.models.find((entry) => entry.id === value.model || entry.model === value.model);
         current = Object.freeze({
           ...value,
           provider: "openai-codex",
@@ -4154,7 +4152,11 @@ test("existing bots without a durable receipt still open the eight-route gate", 
         models: Object.freeze([]),
       }),
       onboarding: null,
-      connections: eightConnections(),
+      connections: eightConnections({
+        "openai-codex": { state: "connected", generation: 2 },
+        "anthropic-claude": { state: "connecting", generation: 1 },
+        xai: { state: "unavailable", generation: 3, errorCode: "OPENBOT_PROVIDER_CANCELLED" },
+      }),
     }),
   });
   context.after(() => harness.mounted.dispose());
@@ -4167,6 +4169,17 @@ test("existing bots without a durable receipt still open the eight-route gate", 
   assert.deepEqual(
     harness.findAllPanel("codex-first-connection-choice").map((node) => node.dataset.providerId),
     PROVIDER_IDS,
+  );
+  const expectedLabels = PROVIDER_IDS.map((providerId) => providerDescriptor(providerId).label);
+  assert.deepEqual(
+    harness.findAllPanel("codex-first-connection-choice")
+      .map((node) => node.children[0].children[0].textContent),
+    expectedLabels,
+  );
+  assert.deepEqual(
+    harness.findAllPanel("codex-first-connection-choice")
+      .map((node) => node.children[0].children[1].textContent),
+    ["Connected", "Connecting…", "Not connected", "Not connected", "Unavailable", "Not connected", "Not connected", "Not connected"],
   );
 });
 
@@ -4326,21 +4339,195 @@ test("provider chooser sends exact route requests, completes first onboarding, a
   assert.equal(requests.length, 2);
 });
 
-test("mounted Advanced summary keeps a same-id CLIProxy selection provider-scoped", async (context) => {
-  const catalog = Object.freeze({
-    generation: 24,
-    status: "ready",
-    models: Object.freeze([Object.freeze({
-      id: "claude-fable-5",
-      displayName: "Direct Claude Fable 5",
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: Object.freeze(["medium", "high"]),
-    })]),
+test("Direct Codex exposes browser and device actions through the provider facade", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  const requests = [];
+  let connections = eightConnections();
+  let onboarding = null;
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog,
+    catalogSubscription() { return () => {}; },
+    connect(request) {
+      requests.push(request);
+      connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
+    },
+    disconnect() {},
   });
+  facade.completeOnboarding = async (providerId) => {
+    onboarding = {
+      schemaVersion: 1,
+      providerId,
+      connectionGeneration: 1,
+      catalogGeneration: 1,
+      completedAt: "2026-08-19T00:00:00.000Z",
+    };
+    return onboarding;
+  };
+  facade.readOnboarding = async () => onboarding;
+  const makeHarness = () => createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+  });
+  const browserHarness = makeHarness();
+  context.after(() => browserHarness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const browserRow = browserHarness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  browserRow.children[2].children[0].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests[0], { providerId: "openai-codex", authMode: "browser" });
+  browserHarness.mounted.dispose();
+
+  connections = eightConnections();
+  onboarding = null;
+  const deviceHarness = makeHarness();
+  context.after(() => deviceHarness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const deviceRow = deviceHarness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  deviceRow.children[1].children[0].value = "device-code";
+  deviceRow.children[2].children[0].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests[1], { providerId: "openai-codex", authMode: "device-code" });
+});
+
+test("cancelled provider connections keep the chooser open and restore focus to the same route", async (context) => {
+  const facade = providerFacade({
+    catalog: providerCatalog([], 0, "unavailable"),
+    connect() {
+      const error = new Error("cancelled");
+      error.code = "OPENBOT_PROVIDER_CANCELLED";
+      return Promise.reject(error);
+    },
+  });
+  const harness = createMountedUiHarness({
+    catalog: providerCatalog([], 0, "unavailable"),
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 0,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const route = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "moonshot-kimi");
+  const action = route.children[2].children[0];
+  action.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
+  assert.equal(harness.documentRef.activeElement, action);
+  assert.match(route.children[0].children[2].textContent, /cancelled|try again/i);
+  assert.doesNotMatch(route.children[0].children[2].textContent, /cancelled.*secret|Users|token/i);
+});
+
+test("successful onboarding restores the active bot and never creates one", async (context) => {
+  let connections = eightConnections();
+  let receipt = null;
+  let createCalls = 0;
+  const catalog = providerCatalog([
+    providerModel("google-vertex-ai", "gemini-3.1-pro", "Gemini 3.1 Pro", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog,
+    onboarding: () => receipt,
+    connect(request) {
+      connections = eightConnections({ [request.providerId]: { state: "connected", generation: 1 } });
+    },
+    complete(providerId) {
+      receipt = {
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      };
+      return receipt;
+    },
+  });
+  const selection = (botId) => Object.freeze({
+    botId,
+    provider: "google-vertex-ai",
+    model: "gemini-3.1-pro",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection(BOT_A),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
+      async create() { createCalls += 1; return bot(BOT_C, "C", "ready"); },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot(botId) { return selection(botId); },
+      async readModel(botId) { return selection(botId); },
+    },
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const botSelect = harness.findPanel("codex-bot-select");
+  botSelect.value = BOT_B;
+  botSelect.listeners.get("change")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
+  const vertex = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "google-vertex-ai");
+  vertex.children[2].children[0].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
+  assert.equal(createCalls, 0);
+});
+
+test("mounted Advanced summary keeps a same-id provider selection provider-scoped", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["medium", "high", "ultra-code"], 24),
+  ], 24);
   let generation = 1;
   let current = Object.freeze({
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
@@ -4355,20 +4542,25 @@ test("mounted Advanced summary keeps a same-id CLIProxy selection provider-scope
       selected.push(structuredClone(value));
       current = Object.freeze({
         ...value,
-        catalogGeneration: value.provider === "openai-codex" ? catalog.generation : 1,
+        catalogGeneration: catalog.generation,
         generation: ++generation,
       });
       return current;
     },
   };
-  const harness = createMountedUiHarness({ catalog, initialSelection: current, runtimeFacade });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: current,
+    runtimeFacade,
+    providerFacade: providerFacade({ catalog }),
+  });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
 
   const model = harness.findAll("codex-power-advanced-row").find((row) => row.dataset.kind === "model");
   const triggerModel = harness.find("codex-model-trigger-model");
   assert.equal(triggerModel.textContent, "Claude Fable 5");
-  assert.equal(model.dataset.provider, "cliproxy-anthropic");
+  assert.equal(model.dataset.provider, "anthropic-claude");
   assert.equal(model.dataset.model, "claude-fable-5");
   assert.equal(model.children[1].textContent, "Claude Fable 5");
   assert.deepEqual(selected, []);
@@ -4694,28 +4886,15 @@ test("Advanced flyout content and focus follow Codex menu semantics", async (con
 });
 
 test("canonical collision choices preserve provider identity and rebuild model defaults", async (context) => {
-  const catalog = Object.freeze({
-    generation: 24,
-    status: "ready",
-    models: Object.freeze([
-      Object.freeze({
-        id: "claude-fable-5",
-        displayName: "Claude Fable 5",
-        defaultReasoningEffort: "medium",
-        supportedReasoningEfforts: Object.freeze(["medium", "high"]),
-      }),
-      Object.freeze({
-        id: "gpt-next",
-        displayName: "GPT Next",
-        defaultReasoningEffort: "high",
-        defaultServiceTier: "priority",
-        serviceTiers: Object.freeze([
-          Object.freeze({ id: "priority", name: "Fast", description: "Lower latency" }),
-        ]),
-        supportedReasoningEfforts: Object.freeze(["high", "max"]),
-      }),
-    ]),
-  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "claude-fable-5", "Claude Fable 5", ["medium", "high"], 24),
+    providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["medium", "high", "ultra-code"], 24),
+    providerModel("openai-codex", "gpt-next", "GPT Next", ["high", "max"], 24, {
+      defaultReasoningEffort: "high",
+      defaultServiceTier: "priority",
+      serviceTiers: [{ id: "priority", name: "Fast", description: "Lower latency" }],
+    }),
+  ], 24);
   let generation = 1;
   let current = Object.freeze({
     botId: BOT_A,
@@ -4737,12 +4916,13 @@ test("canonical collision choices preserve provider identity and rebuild model d
         selected.push(structuredClone(value));
         current = Object.freeze({
           ...value,
-          catalogGeneration: value.provider === "openai-codex" ? 24 : 1,
+          catalogGeneration: 24,
           generation: ++generation,
         });
         return current;
       },
     },
+    providerFacade: providerFacade({ catalog }),
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
@@ -4754,12 +4934,12 @@ test("canonical collision choices preserve provider identity and rebuild model d
   row("model").listeners.get("click")();
   const optional = harness.findAll("codex-power-flyout-option")
     .find((option) => option.dataset.key
-      === JSON.stringify(["cliproxy-anthropic", "claude-fable-5"]));
+      === JSON.stringify(["anthropic-claude", "claude-fable-5"]));
   optional.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(selected.at(-1), {
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "medium",
     serviceTier: null,
@@ -5010,16 +5190,9 @@ test("native protocol model dock waits for the exact composer host and remounts 
 });
 
 test("mounted async provider completion never mutates detached controls after disposal", async () => {
-  const catalog = Object.freeze({
-    generation: 12,
-    status: "ready",
-    models: Object.freeze([Object.freeze({
-      id: "gpt-5.6-sol",
-      displayName: "GPT-5.6 Sol",
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
-    })]),
-  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium", "max", "ultra"], 12),
+  ], 12);
   const selection = Object.freeze({
     botId: BOT_A,
     provider: "openai-codex",
@@ -5030,20 +5203,21 @@ test("mounted async provider completion never mutates detached controls after di
     generation: 1,
   });
   const connection = deferred();
+  const providers = providerFacade({
+    catalog,
+    connect() { return connection.promise; },
+  });
   const harness = createMountedUiHarness({
     catalog,
     initialSelection: selection,
-    runtimeFacade: {
-      async selectBot() { return selection; },
-      async readModel() { return selection; },
-      async selectModel() { return selection; },
-      async connectProvider() { return connection.promise; },
-    },
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: providers,
   });
   await new Promise((resolve) => setImmediate(resolve));
-  const provider = harness.findPanel("codex-provider-select");
-  const connect = harness.findPanel("codex-provider-connect");
-  provider.value = "claude";
+  const route = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  const connect = route.children.at(-1).children[0];
   connect.listeners.get("click")();
   assert.equal(connect.disabled, true);
   harness.mounted.dispose();
@@ -5741,24 +5915,10 @@ test("closing a changed Computer and its stale permission prompt restores the or
 });
 
 test("mounted Power keeps an authoritative noncompact tuple visible until a projected stop commits", async () => {
-  const catalog = Object.freeze({
-    generation: 12,
-    status: "ready",
-    models: Object.freeze([
-      Object.freeze({
-        id: "gpt-5.6-sol",
-        displayName: "GPT-5.6 Sol",
-        defaultReasoningEffort: "medium",
-        supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra"]),
-      }),
-      Object.freeze({
-        id: "gpt-5.5",
-        displayName: "GPT-5.5",
-        defaultReasoningEffort: "medium",
-        supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh"]),
-      }),
-    ]),
-  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["low", "medium", "high", "xhigh", "max", "ultra"], 12),
+    providerModel("openai-codex", "gpt-5.5", "GPT-5.5", ["low", "medium", "high", "xhigh"], 12),
+  ], 12);
   const initialSelection = Object.freeze({
     botId: BOT_A,
     provider: "openai-codex",
@@ -5768,19 +5928,25 @@ test("mounted Power keeps an authoritative noncompact tuple visible until a proj
     catalogGeneration: 12,
     generation: 4,
   });
-  const harness = createMountedUiHarness({ catalog, initialSelection });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection,
+    providerFacade: providerFacade({ catalog }),
+  });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.find("codex-model-trigger-model").textContent, "GPT-5.5");
   assert.equal(harness.find("codex-model-trigger-effort").textContent, "Extra High");
   const power = harness.find("codex-power-input");
   power.listeners.get("pointerdown")();
+  power.value = "0";
+  power.listeners.get("input")();
   power.listeners.get("pointerup")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(harness.selected, [{
     botId: BOT_A,
     provider: "openai-codex",
     model: "gpt-5.6-sol",
-    reasoningEffort: "xhigh",
+    reasoningEffort: "low",
     serviceTier: null,
   }]);
   assert.equal(harness.find("codex-model-trigger-model").textContent, "GPT-5.6 Sol");
@@ -6240,16 +6406,10 @@ test("switching to a bot with persisted Ultra Code starts steady", async () => {
     },
     clearTimeout(id) { timers.delete(id); },
   };
-  const catalog = Object.freeze({
-    generation: 9,
-    status: "ready",
-    models: Object.freeze([Object.freeze({
-      id: "gpt-5.6-sol",
-      displayName: "GPT-5.6 Sol",
-      defaultReasoningEffort: "medium",
-      supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
-    })]),
-  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium", "high", "ultra"], 9),
+    providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["medium", "high", "ultra-code"], 9),
+  ], 9);
   const selections = new Map([
     [BOT_A, Object.freeze({
       botId: BOT_A,
@@ -6262,11 +6422,11 @@ test("switching to a bot with persisted Ultra Code starts steady", async () => {
     })],
     [BOT_B, Object.freeze({
       botId: BOT_B,
-      provider: "cliproxy-anthropic",
+      provider: "anthropic-claude",
       model: "claude-fable-5",
       reasoningEffort: "ultra-code",
       serviceTier: null,
-      catalogGeneration: 1,
+      catalogGeneration: 9,
       generation: 7,
     })],
   ]);
@@ -6283,6 +6443,7 @@ test("switching to a bot with persisted Ultra Code starts steady", async () => {
       async readModel(botId) { return selections.get(botId); },
       async selectModel() { throw new Error("not used"); },
     },
+    providerFacade: providerFacade({ catalog }),
   });
   await new Promise((resolve) => setImmediate(resolve));
   const botSelect = harness.findPanel("codex-bot-select");

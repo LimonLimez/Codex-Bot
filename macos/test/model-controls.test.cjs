@@ -249,11 +249,11 @@ test("Power stop fallback never invents a missing preferred model or unsupported
   assert.equal(controls.buildPowerStops([]).length, 0);
 });
 
-test("optional Fable Power keeps Ultra Code identity while reusing the Ultra effect", () => {
+test("canonical Claude Power keeps Ultra Code identity while reusing the Ultra effect", () => {
   const catalog = [{
     model: "claude-fable-5",
     label: "Claude Fable 5",
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     efforts: ["low", "medium", "high", "xhigh", "max", "ultra-code"],
     defaultServiceTier: null,
     serviceTiers: [],
@@ -349,8 +349,8 @@ test("Power and Advanced preserve provider identity when providers share one vis
     {
       model: "claude-fable-5",
       label: "Claude Fable 5",
-      provider: "cliproxy-anthropic",
-      providerLabel: "CLIProxy",
+      provider: "anthropic-claude",
+      providerLabel: "Anthropic Claude",
       efforts: ["medium", "ultra-code"],
       defaultReasoningEffort: "medium",
       defaultServiceTier: null,
@@ -359,18 +359,18 @@ test("Power and Advanced preserve provider identity when providers share one vis
       isDefault: false,
     },
   ];
-  const optional = {
-    provider: "cliproxy-anthropic",
+  const claudeSelection = {
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     effort: "ultra-code",
     serviceTier: null,
     catalogGeneration: 1,
   };
-  const stops = controls.buildPowerStops(catalog, optional);
-  assert.equal(stops.every((stop) => stop.provider === "cliproxy-anthropic"), true);
+  const stops = controls.buildPowerStops(catalog, claudeSelection);
+  assert.equal(stops.every((stop) => stop.provider === "anthropic-claude"), true);
   assert.equal(stops.at(-1).effort, "ultra-code");
 
-  const advanced = controls.buildAdvancedOptions(catalog, optional);
+  const advanced = controls.buildAdvancedOptions(catalog, claudeSelection);
   assert.deepEqual(advanced.models, [
     {
       key: JSON.stringify(["openai-codex", "claude-fable-5"]),
@@ -380,15 +380,15 @@ test("Power and Advanced preserve provider identity when providers share one vis
       providerLabel: "Direct Codex",
     },
     {
-      key: JSON.stringify(["cliproxy-anthropic", "claude-fable-5"]),
+      key: JSON.stringify(["anthropic-claude", "claude-fable-5"]),
       model: "claude-fable-5",
       label: "Claude Fable 5",
-      provider: "cliproxy-anthropic",
-      providerLabel: "CLIProxy",
+      provider: "anthropic-claude",
+      providerLabel: "Anthropic Claude",
     },
   ]);
   assert.deepEqual(advanced.efforts.map(({ effort }) => effort), ["medium", "ultra-code"]);
-  assert.deepEqual(controls.resolveAdvancedSelection(catalog, optional), optional);
+  assert.deepEqual(controls.resolveAdvancedSelection(catalog, claudeSelection), claudeSelection);
   assert.deepEqual(controls.resolveAdvancedSelection(catalog, {
     provider: "openai-codex",
     model: "claude-fable-5",

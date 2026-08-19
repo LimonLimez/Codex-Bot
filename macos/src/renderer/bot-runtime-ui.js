@@ -535,7 +535,6 @@
         provider: raw.provider,
         providerLabel: raw.providerLabel,
         efforts,
-        serviceTier: raw.defaultServiceTier,
         defaultServiceTier: raw.defaultServiceTier,
         serviceTiers,
         catalogGeneration: raw.catalogGeneration,
@@ -585,7 +584,6 @@
         provider: "openai-codex",
         providerLabel: PROVIDER_LABELS["openai-codex"],
         efforts,
-        serviceTier: defaultServiceTier,
         defaultServiceTier,
         serviceTiers,
         catalogGeneration: value.generation,
@@ -3325,6 +3323,7 @@
       const connected = connection.state === "connected";
       const stateText = pending ? "Connecting…"
         : connected ? "Connected"
+          : connection.state === "connecting" ? "Connecting…"
           : connection.state === "unavailable" ? "Unavailable" : "Not connected";
       entry.state.textContent = stateText;
       entry.state.dataset.state = connection.state;
@@ -3455,6 +3454,7 @@
       providerPending.add(providerId);
       entry.error.hidden = true;
       updateConnectionPresentation(lastSnapshot);
+      let failed = false;
       try {
         await providerFacade.connect(request);
         await refreshProviderAuthority();
@@ -3468,6 +3468,7 @@
           firstConnectionError.hidden = true;
         }
       } catch (error) {
+        failed = true;
         if (!mountDisposed) {
           entry.error.textContent = providerErrorCopy(providerId, error);
           entry.error.hidden = false;
@@ -3479,7 +3480,10 @@
         }
       } finally {
         providerPending.delete(providerId);
-        if (!mountDisposed) updateConnectionPresentation(lastSnapshot);
+        if (!mountDisposed) {
+          updateConnectionPresentation(lastSnapshot);
+          if (failed) entry.action.focus?.();
+        }
       }
     }
 
