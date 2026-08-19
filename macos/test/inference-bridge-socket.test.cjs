@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const serverPath = path.join(__dirname, "..", "src", "desktop", "inference-bridge-server.cjs");
 const clientPath = path.join(__dirname, "..", "src", "bridge", "inference-socket-client.cjs");
+const routerPath = path.join(__dirname, "..", "src", "desktop", "inference-provider-router.cjs");
 
 const BOT_UUID = "11111111-1111-4111-8111-111111111111";
 const BOT_ID = `bot-${BOT_UUID}`;
@@ -53,6 +54,7 @@ function config(overrides = {}) {
   const value = {
     botId: BOT_UUID,
     generation: 7,
+    catalogGeneration: 7,
     provider: "openai-codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "max",
@@ -184,6 +186,7 @@ test("the private loopback bridge streams official inference without exposing pr
   assert.deepEqual(received[0].selection, {
     botId: `bot-${BOT_UUID}`,
     generation: 7,
+    catalogGeneration: 7,
     provider: "openai-codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "max",
@@ -196,6 +199,55 @@ test("the private loopback bridge streams official inference without exposing pr
   assert.equal(typeof received[0].assertCurrent, "undefined");
   assert.equal(received[0].signal instanceof AbortSignal, true);
   assert.doesNotMatch(JSON.stringify(received), /aaaa|credential|endpoint|Authorization|CLIProxy/);
+});
+
+test("InferenceSocketClient carries catalog generation through the production provider router and rejects stale generations", async (t) => {
+  const { InferenceProviderRouter } = require(routerPath);
+  const current = {
+    botId: BOT_ID,
+    generation: 7,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "max",
+    serviceTier: "priority",
+    catalogGeneration: 7,
+  };
+  const calls = [];
+  const router = new InferenceProviderRouter({
+    readSelection: async () => current,
+    transportForProvider: async () => ({
+      stream(request) {
+        calls.push(request);
+        return providerResult([
+          { type: "text-delta", textDelta: "ok" },
+          { type: "finish", finishReason: "stop", usage: {} },
+        ]);
+      },
+      dispose() {},
+    }),
+  });
+  const { session } = await withBridge(t, router);
+  const { InferenceSocketClient } = require(clientPath);
+  const client = new InferenceSocketClient({
+    config: config({ endpoint: session.endpoint, catalogGeneration: 7 }),
+    conversationId: "conversation-1",
+    taskId: "parent",
+  });
+  t.after(() => client.dispose());
+  const result = client.stream(prompt());
+  assert.deepEqual((await collect(result.fullStream)).map((event) => event.type), ["text-delta", "finish"]);
+  assert.equal(calls[0].selection.catalogGeneration, 7);
+
+  const staleClient = new InferenceSocketClient({
+    config: config({ endpoint: session.endpoint, catalogGeneration: 7 }),
+    conversationId: "conversation-stale",
+    taskId: "parent",
+  });
+  t.after(() => staleClient.dispose());
+  current.catalogGeneration = 8;
+  const stale = staleClient.stream(prompt({ invocationId: "invocation-stale" }));
+  await assert.rejects(collect(stale.fullStream), { code: "CODEX_BRIDGE_STALE" });
+  assert.equal(calls.length, 1);
 });
 
 test("main replaces native Grok child tools with the exact reviewed Local Computer catalog", async (t) => {

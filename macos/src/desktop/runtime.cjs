@@ -1034,18 +1034,26 @@ function createInferenceBridgeRuntime({
         error.code = "CODEX_INFERENCE_PROVIDER_UNAVAILABLE";
         throw error;
       }
+      let selectedConnectionGeneration = null;
+      if (typeof providerController.listConnections === "function") {
+        const connections = await providerController.listConnections();
+        const selectedConnection = connections.find((entry) => entry?.providerId === provider);
+        if (!selectedConnection || selectedConnection.state !== "connected"
+          || !Number.isSafeInteger(selectedConnection.generation)
+          || selectedConnection.generation < 1) {
+          const error = new Error("Codex inference provider is unavailable.");
+          error.code = "CODEX_INFERENCE_PROVIDER_UNAVAILABLE";
+          throw error;
+        }
+        selectedConnectionGeneration = selectedConnection.generation;
+      }
       const assertProviderCurrent = providerController.listConnections
         ? async () => {
-          const receipt = await providerController.readOnboarding();
           const connections = await providerController.listConnections();
           const connection = connections.find((entry) => entry?.providerId === provider);
           const currentCatalog = await providerController.catalog();
-          return Boolean(receipt?.schemaVersion === 1
-            && receipt.providerId === provider
-            && receipt.catalogGeneration === selection?.catalogGeneration
-            && connection?.state === "connected"
-            && Number.isSafeInteger(receipt.connectionGeneration)
-            && connection.generation === receipt.connectionGeneration
+          return Boolean(connection?.state === "connected"
+            && connection.generation === selectedConnectionGeneration
             && currentCatalog?.status === "ready"
             && currentCatalog.generation === selection?.catalogGeneration
             && currentCatalog.models.some((model) => (model?.provider ?? "openai-codex") === provider

@@ -63,6 +63,7 @@ function sameConfig(left, right) {
     right != null &&
     left.botId === right.botId &&
     left.generation === right.generation &&
+    left.catalogGeneration === right.catalogGeneration &&
     left.provider === right.provider &&
     left.endpoint === right.endpoint &&
     left.credential === right.credential &&

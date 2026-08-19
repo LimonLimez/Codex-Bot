@@ -64,6 +64,7 @@ function safeConfig(value) {
   const result = {
     botId: read("botId"),
     generation: read("generation"),
+    catalogGeneration: read("catalogGeneration"),
     provider: read("provider"),
     model: read("model"),
     reasoningEffort: read("reasoningEffort"),
@@ -82,6 +83,7 @@ function safeConfig(value) {
     || (provider === "openai-api-key" && result.reasoningEffort === "ultra")
     || (provider === "anthropic-claude" && result.reasoningEffort === "ultra-code");
   if (!BOT_UUID.test(result.botId) || !Number.isSafeInteger(result.generation) || result.generation < 0
+    || !Number.isSafeInteger(result.catalogGeneration) || result.catalogGeneration < 0
     || typeof result.model !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(result.model) || !modelKnown
     || typeof result.reasoningEffort !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(result.reasoningEffort)
     || !reasoningKnown
@@ -221,6 +223,7 @@ class InferenceSocketClient {
       selection: {
         botId: `bot-${this.#config.botId}`,
         generation: this.#config.generation,
+        catalogGeneration: this.#config.catalogGeneration,
         provider: this.#config.provider,
         model: this.#config.model,
         reasoningEffort: this.#config.reasoningEffort,

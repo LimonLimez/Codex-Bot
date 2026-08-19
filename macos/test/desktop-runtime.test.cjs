@@ -409,6 +409,97 @@ test("explicit inference rehydrates API connection and Keychain state after prov
   assert.deepEqual(Object.keys(capturedConnection), ["endpoint"]);
 });
 
+test("inference fences the selected provider generation independently of the onboarding provider", async (t) => {
+  const { createInferenceBridgeRuntime } = require(runtimePath);
+  const root = tempRoot(t);
+  const stateRoot = path.join(root, "state");
+  let selected = {
+    botId: BOT_A,
+    generation: 1,
+    provider: "xai",
+    model: "grok-4.5",
+    reasoningEffort: "high",
+    serviceTier: null,
+    catalogGeneration: 2,
+  };
+  let xaiConnection = { providerId: "xai", state: "connected", generation: 2 };
+  let xaiCatalogGeneration = 2;
+  let mutateBeforeFence = null;
+  let sends = 0;
+  class DirectFixture { constructor() {} }
+  class OptionalFixture {
+    constructor(options) { this.options = options; }
+    async stream() {
+      await this.options.resolveConnection();
+      mutateBeforeFence?.();
+      if (this.options.assertConnectionCurrent
+        && await this.options.assertConnectionCurrent() !== true) {
+        const error = new Error("stale selected provider");
+        error.code = "CODEX_INFERENCE_STALE";
+        throw error;
+      }
+      sends += 1;
+      return { fullStream: (async function* () { yield { type: "finish" }; })() };
+    }
+    dispose() {}
+  }
+  class BridgeFixture { constructor(options) { this.router = options.router; } }
+  const providerController = {
+    async readOnboarding() {
+      return { schemaVersion: 1, providerId: "openai-codex", connectionGeneration: 1, catalogGeneration: 1, completedAt: "2026-08-19T00:00:00.000Z" };
+    },
+    async listConnections() {
+      return [
+        { providerId: "openai-codex", state: "connected", generation: 1 },
+        xaiConnection,
+      ];
+    },
+    async catalog() {
+      return {
+        status: "ready",
+        generation: xaiCatalogGeneration,
+        models: [{ provider: "xai", model: "grok-4.5" }],
+      };
+    },
+  };
+  const selectionStore = { async read() { return selected; } };
+  const inference = createInferenceBridgeRuntime({
+    codexManager: {}, selectionStore,
+    sidecarManager: {
+      async start() {
+        const session = { endpoint: "http://127.0.0.1:43211/v1" };
+        Object.defineProperty(session, "credential", { value: "x".repeat(64), enumerable: false });
+        return Object.freeze(session);
+      },
+    },
+    providerController,
+    stateRoot,
+    computerTargetRouter: { async resolve() {} },
+    DirectTransportClass: DirectFixture,
+    OptionalTransportClass: OptionalFixture,
+    BridgeClass: BridgeFixture,
+  });
+  t.after(() => inference.dispose?.());
+  const request = () => ({
+    selection: { ...selected },
+    conversationId: "conversation-1",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [], toolChoice: "none", invocationId: `invocation-${selected.catalogGeneration}`,
+  });
+
+  mutateBeforeFence = () => { xaiConnection = { ...xaiConnection, state: "disconnected" }; };
+  await assert.rejects(inference.router.stream(request()), { code: "CODEX_INFERENCE_UNAVAILABLE" });
+  assert.equal(sends, 0);
+
+  xaiConnection = { providerId: "xai", state: "connected", generation: 3 };
+  xaiCatalogGeneration = 3;
+  selected = { ...selected, generation: 2, catalogGeneration: 3 };
+  mutateBeforeFence = null;
+  const healthy = await inference.router.stream(request());
+  for await (const _event of healthy.fullStream) {}
+  assert.equal(sends, 1);
+});
+
 test("production direct Codex snapshots the host environment into a plain launch DTO", (t) => {
   const { createDirectCodexManager } = require(runtimePath);
   const { CodexAppServerManager } = require(path.join(__dirname, "..", "src", "desktop", "codex-app-server-manager.cjs"));

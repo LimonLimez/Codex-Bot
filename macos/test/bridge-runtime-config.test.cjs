@@ -297,7 +297,7 @@ test("official and optional selections use only the private main-process inferen
   };
   const direct = loadRuntimeConfig(environment, { conversationId: "official" });
   assert.deepEqual(Object.keys(direct), [
-    "botId", "generation", "provider", "model", "reasoningEffort", "serviceTier",
+    "botId", "generation", "catalogGeneration", "provider", "model", "reasoningEffort", "serviceTier",
   ]);
   assert.equal(direct.provider, "openai-codex");
   assert.equal(direct.reasoningEffort, "ultra");
@@ -346,6 +346,33 @@ test("the private inference bridge accepts a live official model not compiled in
   assert.equal(config.provider, "openai-codex");
   assert.equal(config.model, "gpt-live-only");
   assert.equal(config.reasoningEffort, "high");
+});
+
+test("provider-aware runtime config preserves the exact catalog generation", (t) => {
+  const { loadRuntimeConfig } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  fs.writeFileSync(registry, `${JSON.stringify({
+    schemaVersion: 2,
+    activeBotId: `bot-${BOT_ID}`,
+    selections: {
+      [`bot-${BOT_ID}`]: {
+        provider: "xai",
+        model: "grok-4.5",
+        reasoningEffort: "high",
+        serviceTier: null,
+        catalogGeneration: 17,
+        generation: 4,
+        updatedAt: null,
+      },
+    },
+    unavailableSelections: {},
+  })}\n`, { mode: 0o600 });
+  const config = loadRuntimeConfig({
+    CODEX_BOT_MODEL_SELECTIONS: registry,
+    CODEX_BOT_INFERENCE_ENDPOINT: "tcp://127.0.0.1:43210",
+    CODEX_BOT_INFERENCE_CAPABILITY: "c".repeat(64),
+  });
+  assert.equal(config.catalogGeneration, 17);
 });
 
 test("CLIProxyAPI-backed Fable Ultra Code stays distinct in UI storage and maps to upstream max reasoning", (t) => {

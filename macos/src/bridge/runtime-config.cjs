@@ -133,6 +133,7 @@ function normalizeInferenceEndpoint(value) {
 function createInferenceRuntimeConfig({
   botId,
   generation,
+  catalogGeneration,
   endpoint,
   credential,
   provider,
@@ -141,7 +142,8 @@ function createInferenceRuntimeConfig({
   serviceTier = null,
 }) {
   if (typeof botId !== "string" || !BOT_UUID.test(botId)
-    || !Number.isSafeInteger(generation) || generation < 0) fail();
+    || !Number.isSafeInteger(generation) || generation < 0
+    || !Number.isSafeInteger(catalogGeneration) || catalogGeneration < 0) fail();
   let canonicalProvider;
   try { canonicalProvider = canonicalProviderId(provider); } catch { fail(); }
   const descriptor = providerDescriptor(canonicalProvider);
@@ -161,6 +163,7 @@ function createInferenceRuntimeConfig({
   const config = {
     botId,
     generation,
+    catalogGeneration,
     provider: canonicalProvider,
     model,
     reasoningEffort,
@@ -392,6 +395,7 @@ function loadRuntimeConfig(environment = process.env, options = {}) {
       return createInferenceRuntimeConfig({
         botId: selectedBot.slice(4),
         generation: selection.generation,
+        catalogGeneration: selection.catalogGeneration ?? 0,
         endpoint: environment.CODEX_BOT_INFERENCE_ENDPOINT,
         credential: environment.CODEX_BOT_INFERENCE_CAPABILITY,
         provider: selection.provider ?? (OPTIONAL_MODELS.has(selection.model)
