@@ -17,6 +17,7 @@ const STRICT_PRIVATE_SECRET = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----
 const PLAIN_PRIVATE_SECRET = /\b(?:access_token|refresh_token|auth_token|client_secret|oauth_token|csrf_token|private_token|secret_token|password|passwd|cookie|session_cookie)\s*["'`]?\s*[:=]\s*(?:["'`][A-Za-z0-9_./+\-=]{3,}["'`]|[A-Za-z]{8,})(?=[^A-Za-z0-9_./+\-=]|$)/i;
 const GENERIC_TOKEN_SECRET = /\b(?:ghp|github_pat|sk|sess)-[A-Za-z0-9_\-]{20,}\b|\bBearer\s+[A-Za-z0-9_./+\-=]{6,}\b/i;
 const MANIFEST_RELATIVE = "Contents/Resources/INSTALLER-MANIFEST.json";
+const PATCHER_KEYCHAIN_SOURCE_RELATIVE = "Contents/Resources/Patcher/src/desktop/keychain-secret-store.cjs";
 const PROVENANCE_RELATIVE = "Contents/Resources/INSTALLER-PROVENANCE.json";
 const AUTHORIZED_DEVELOPER_ID_TEAM = "HKCH65M45F";
 const AUTHORIZED_INSTALLER_REQUIREMENT = '=anchor apple generic and certificate leaf[subject.OU] = "HKCH65M45F" and certificate leaf[field.1.2.840.113635.100.6.1.13] exists';
@@ -471,7 +472,8 @@ function auditTreeContents(app, expected, trustedMembers) {
       fileCount += 1;
       totalBytes += stat.size;
       const normalized = entry.name.toLowerCase();
-      if (forbiddenPathName(entry.name) || FORBIDDEN_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
+      if ((relative !== PATCHER_KEYCHAIN_SOURCE_RELATIVE && forbiddenPathName(entry.name))
+        || FORBIDDEN_SUFFIXES.some((suffix) => normalized.endsWith(suffix))) {
         fail(`development, credential, or user-state file is forbidden: ${relative}`);
       }
       if (containsBytes(absolute, localHome)) {

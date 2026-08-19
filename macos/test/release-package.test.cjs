@@ -355,6 +355,61 @@ test("release audit distinguishes reviewed user-data source from an actual user 
   });
 });
 
+test("release audit narrowly permits only the manifest-bound patcher keychain source filename", async (t) => {
+  const keychainSource = "Resources/Patcher/src/desktop/keychain-secret-store.cjs";
+
+  await t.test("exact regular file remains content-scanned", (subtest) => {
+    const fixture = auditFixture(subtest, [[
+      keychainSource,
+      '"use strict";\nmodule.exports = {};\n',
+    ]]);
+    assert.doesNotThrow(fixture.audit);
+  });
+
+  await t.test("same basename outside the exact path remains forbidden", (subtest) => {
+    const fixture = auditFixture(subtest, [[
+      "Resources/Patcher/src/renderer/keychain-secret-store.cjs",
+      '"use strict";\nmodule.exports = {};\n',
+    ]]);
+    assert.throws(fixture.audit, /privacy audit.*(?:development|credential|user-state).*keychain-secret-store/i);
+  });
+
+  await t.test("exact regular file with credential material remains forbidden", (subtest) => {
+    const fixture = auditFixture(subtest, [[keychainSource, "password=huntertwo\n"]]);
+    assert.throws(fixture.audit, /privacy audit.*credential material.*keychain-secret-store/i);
+  });
+
+  await t.test("exact path symlink remains forbidden", (subtest) => {
+    const fixture = auditFixture(subtest, [[
+      "Resources/Patcher/src/desktop/placeholder.cjs",
+      "safe\n",
+    ]]);
+    const target = path.join(fixture.app, "Contents", ...keychainSource.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.symlinkSync("../../../../Info.plist", target);
+    assert.throws(fixture.audit, /privacy audit.*symlink.*keychain-secret-store/i);
+  });
+
+  await t.test("exact path absent from the manifest remains forbidden", (subtest) => {
+    const fixture = auditFixture(subtest, [[
+      "Resources/Patcher/src/desktop/placeholder.cjs",
+      "safe\n",
+    ]]);
+    const target = path.join(fixture.app, "Contents", ...keychainSource.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, '"use strict";\nmodule.exports = {};\n');
+    assert.throws(fixture.audit, /privacy audit.*unexpected installer member.*keychain-secret-store/i);
+  });
+
+  await t.test("exact path with a manifest type mismatch remains forbidden", (subtest) => {
+    const fixture = auditFixture(subtest, [[keychainSource, "safe\n"]]);
+    const target = path.join(fixture.app, "Contents", ...keychainSource.split("/"));
+    fs.rmSync(target);
+    fs.mkdirSync(target);
+    assert.throws(fixture.audit, /privacy audit.*installer member type mismatch.*keychain-secret-store/i);
+  });
+});
+
 test("release audit rejects symlinks and extra image roots", (t) => {
   const { auditTree } = require(auditPath);
   const fixture = auditFixture(t);
