@@ -8362,6 +8362,66 @@ test("failed authority refresh surfaces stale retry state and clears after a suc
   assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
 });
 
+test("a valid receipt followed by a null receipt announces stale authority and retries visibly", async (context) => {
+  const connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true }),
+  ], 1);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const valid = authoritySnapshot({ connections, catalog, onboarding: receipt });
+  const stale = authoritySnapshot({ connections, catalog, onboarding: null });
+  let phase = "valid";
+  let emitCatalog = () => {};
+  const facade = {
+    async readAuthoritySnapshot() { return phase === "stale" ? stale : valid; },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return receipt; },
+    onConnectionsChanged() { return () => {}; },
+    onCatalogChanged(listener) { emitCatalog = listener; return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 3,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  phase = "stale";
+  emitCatalog(catalog);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const status = harness.findPanel("codex-ai-connections-status");
+  const retry = harness.findPanel("codex-ai-connections-retry");
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+  assert.equal(harness.mounted.controller.snapshot().modelCatalog.length, 1);
+  assert.equal(status.hidden, false);
+  assert.equal(retry.hidden, false);
+  assert.equal(retry.disabled, false);
+  phase = "valid";
+  retry.listeners.get("click")();
+  retry.listeners.get("click")();
+  for (let index = 0; index < 10; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(status.hidden, true);
+  assert.equal(retry.hidden, true);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+});
+
 test("stale authority retry is single-flight and disposal-safe", async (context) => {
   const connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
   const catalog = providerCatalog([

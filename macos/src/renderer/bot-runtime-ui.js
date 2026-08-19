@@ -3776,8 +3776,7 @@
               if (mountDisposed) break;
               if (providerRefreshTicket !== requestTicket) continue;
               if (error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE" && providerOnboarding !== null) {
-                updateConnectionPresentation(lastSnapshot);
-                deferred.resolve(true);
+                deferred.resolve(markProviderRefreshFailure());
               } else {
                 deferred.resolve(markProviderRefreshFailure());
               }
