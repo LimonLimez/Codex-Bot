@@ -234,12 +234,14 @@ test("provider authority snapshot and active bot identity use exact narrow prelo
 
   assert.ok(providers, "the renderer must discover the provider facade");
   assert.equal(Object.isFrozen(providers), true);
+  assert.equal(Object.keys(providers).length, 7);
   assert.deepEqual(Object.keys(providers).sort(), [
     "completeOnboarding",
     "connect",
     "disconnect",
     "onCatalogChanged",
     "onConnectionsChanged",
+    "onLoginPrompt",
     "readAuthoritySnapshot",
   ]);
   assert.equal(Object.isFrozen(runtime), true);
@@ -260,36 +262,62 @@ test("provider authority snapshot and active bot identity use exact narrow prelo
 
   const connectionPayloads = [];
   const catalogPayloads = [];
+  const loginPrompts = [];
   assert.throws(() => providers.onConnectionsChanged(null), (error) => error?.name === "TypeError");
   assert.throws(() => providers.onCatalogChanged("not-a-function"), (error) => error?.name === "TypeError");
+  assert.throws(() => providers.onLoginPrompt(null), (error) => error?.name === "TypeError");
   const removeConnections = providers.onConnectionsChanged((value) => connectionPayloads.push(value));
   const removeCatalog = providers.onCatalogChanged((value) => catalogPayloads.push(value));
+  const removeLoginPrompt = providers.onLoginPrompt((value) => loginPrompts.push(value));
   const connectionListener = harness.listeners.get("openbot-provider:changed")[0];
   const catalogListener = harness.listeners.get("openbot-provider:catalog-changed")[0];
+  const loginPromptListener = harness.listeners.get("openbot-provider:login-prompt")[0];
   harness.ipcRenderer.emit("openbot-provider:changed", { generation: 1 });
   harness.ipcRenderer.emit("openbot-provider:catalog-changed", { generation: 2 });
+  const prompt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    generation: 3,
+    mode: "device-code",
+    verificationUrl: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-1234",
+  };
+  harness.ipcRenderer.emit("openbot-provider:login-prompt", prompt);
   assert.deepEqual(connectionPayloads, [{ generation: 1 }]);
   assert.deepEqual(catalogPayloads, [{ generation: 2 }]);
+  assert.deepEqual(loginPrompts, [prompt]);
   removeConnections();
   removeCatalog();
+  removeLoginPrompt();
   assert.deepEqual(harness.removals, [
     { channel: "openbot-provider:changed", listener: connectionListener },
     { channel: "openbot-provider:catalog-changed", listener: catalogListener },
+    { channel: "openbot-provider:login-prompt", listener: loginPromptListener },
   ]);
   harness.ipcRenderer.emit("openbot-provider:changed", { generation: 3 });
   harness.ipcRenderer.emit("openbot-provider:catalog-changed", { generation: 4 });
+  harness.ipcRenderer.emit("openbot-provider:login-prompt", { generation: 5 });
   assert.deepEqual(connectionPayloads, [{ generation: 1 }]);
   assert.deepEqual(catalogPayloads, [{ generation: 2 }]);
+  assert.deepEqual(loginPrompts, [prompt]);
 });
 
 test("provider preload facade has no controller, state, secret, path, endpoint, or command access", () => {
   const { patchPreloadSource } = require(patchPath);
   const source = patchPreloadSource(STOCK_PRELOAD);
   const providers = runSyntheticPreload(source).exposed.get("openbotProviders");
-  for (const forbidden of ["controller", "stateStore", "keychain", "secret", "path", "endpoint", "command"]) {
+  for (const forbidden of [
+    "controller", "stateStore", "keychain", "secret", "path", "endpoint", "command",
+    "url", "account",
+  ]) {
     assert.equal(Object.prototype.hasOwnProperty.call(providers, forbidden), false, forbidden);
   }
   assert.doesNotMatch(source, /openbotProviders[^;]*(?:controller|stateStore|keychain|secret|endpoint|command|path)/i);
+  assert.doesNotMatch(source, /openbot-provider:login-prompt[^;]*invoke\(/);
+  assert.match(
+    source,
+    /onLoginPrompt:callback=>\{if\(typeof callback!=="function"\)throw new TypeError\([^)]+\);const listener=/,
+  );
 });
 
 test("packaged renderer contract discovers the exact provider facade methods", () => {
@@ -300,7 +328,7 @@ test("packaged renderer contract discovers the exact provider facade methods", (
   assert.match(preload, /exposeInMainWorld\("openbotProviders"/);
   for (const method of [
     "readAuthoritySnapshot", "connect", "disconnect", "completeOnboarding",
-    "onConnectionsChanged", "onCatalogChanged",
+    "onConnectionsChanged", "onCatalogChanged", "onLoginPrompt",
   ]) {
     assert.match(renderer, new RegExp(`"${method}"`));
     assert.match(preload, new RegExp(`${method}:`));
