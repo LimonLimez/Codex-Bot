@@ -487,10 +487,15 @@ class LocalDesktopManager extends EventEmitter {
         existing.fenced = true;
         try {
           await this.#assertCurrentComputer(computer);
+          this.#assertReusableEntry(existing, computer);
           existing.fenced = false;
           return publicSession(existing);
         } catch (error) {
-          try { await this.#closeEntry(existing, true); } catch {}
+          if (this.#entries.get(computer.botId) === existing) {
+            try { await this.#closeEntry(existing, true); } catch {}
+          } else if (existing.closePromise) {
+            try { await existing.closePromise; } catch {}
+          }
           throw error;
         }
       }
@@ -538,7 +543,7 @@ class LocalDesktopManager extends EventEmitter {
         if (window.webContents.getURL() !== LOCAL_DESKTOP_START_URL) {
           throw desktopError("Local Desktop start document is invalid.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
         }
-        const entry = {
+      const entry = {
           ...computer,
           partition,
           workspaceId: `workspace-${computer.profileUuid}`,
@@ -551,6 +556,7 @@ class LocalDesktopManager extends EventEmitter {
           operations: new Map(),
           closePromise: null,
           fenced: false,
+          closeRequested: false,
         };
         protocol = new LocalHelperProtocol({
           transport: helperTransport,
@@ -762,6 +768,8 @@ class LocalDesktopManager extends EventEmitter {
   async close(botId) {
     const normalizedBotId = normalizeBotId(botId);
     this.#assertBotAvailable(normalizedBotId);
+    const current = this.#entries.get(normalizedBotId);
+    if (current) current.closeRequested = true;
     return this.#enqueue(normalizedBotId, async () => {
       this.#assertBotAvailable(normalizedBotId);
       const entry = this.#entries.get(normalizedBotId);
@@ -1021,6 +1029,16 @@ class LocalDesktopManager extends EventEmitter {
     return current;
   }
 
+  #assertReusableEntry(entry, expected) {
+    this.#assertBotAvailable(expected.botId);
+    let destroyed = false;
+    try { destroyed = Boolean(entry.window.isDestroyed?.()); } catch { destroyed = true; }
+    if (this.#entries.get(expected.botId) !== entry || entry.closePromise || entry.closeRequested || destroyed
+      || !this.#sameIdentity(entry, expected)) {
+      throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
+    }
+  }
+
   #profileOwner(targetId) {
     const claimed = this.#profileOwners.get(targetId);
     if (claimed) return claimed;
@@ -1047,6 +1065,7 @@ class LocalDesktopManager extends EventEmitter {
   #closeEntry(entry, cancelPermissions) {
     if (entry.closePromise) return entry.closePromise;
     entry.fenced = true;
+    entry.closeRequested = true;
     if (this.#entries.get(entry.botId) === entry) this.#entries.delete(entry.botId);
     for (const operation of entry.operations.values()) operation.cancelled = true;
     if (cancelPermissions) this.#permissionBroker.cancelBot(entry.botId);

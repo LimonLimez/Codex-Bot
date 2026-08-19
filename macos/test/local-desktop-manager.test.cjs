@@ -274,6 +274,28 @@ async function fixture(t, overrides = {}) {
   return { ...electron, helpers, manager, permissionBroker, root };
 }
 
+async function heldReuseFixture(t) {
+  let reads = 0;
+  const held = deferred();
+  const value = await fixture(t, {
+    readCurrentComputer: async (botId) => {
+      reads += 1;
+      if (reads === 7) return held.promise;
+      return botId === BOT_B
+        ? localComputer(BOT_B, LOCAL_B, 1)
+        : localComputer(BOT_A, LOCAL_A, 1);
+    },
+  });
+  const a = await value.manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  const b = await value.manager.open(localComputer(BOT_B, LOCAL_B, 1));
+  const reuse = value.manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
+  for (let attempt = 0; attempt < 50 && reads < 7; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(reads, 7);
+  return { ...value, a, b, held, reuse };
+}
+
 test("open loads and captures the exact CSP start document before reporting ready", async (t) => {
   const { manager, windows } = await fixture(t);
   const session = await manager.open(localComputer());
@@ -343,6 +365,54 @@ test("captureDisplayFrame rechecks authority before returning bytes and fences d
       assert.equal(value.windows[0].destroyed, true);
     });
   }
+});
+
+test("same-identity reuse rejects every lifecycle interruption without returning a dead session", async (t) => {
+  await t.test("window close", async (subtest) => {
+    const value = await heldReuseFixture(subtest);
+    value.windows[0].destroy();
+    value.held.resolve(localComputer(BOT_A, LOCAL_A, 1));
+    const failure = await value.reuse;
+    assert.equal(failure.code, "OPENBOT_LOCAL_DESKTOP_STALE");
+    assert.equal(value.windows[0].destroyed, true);
+    assert.equal(value.windows[1].destroyed, false);
+    await value.manager.dispose();
+  });
+
+  await t.test("manager close", async (subtest) => {
+    const value = await heldReuseFixture(subtest);
+    const closing = value.manager.close(BOT_A);
+    value.held.resolve(localComputer(BOT_A, LOCAL_A, 1));
+    const failure = await value.reuse;
+    await closing;
+    assert.equal(failure.code, "OPENBOT_LOCAL_DESKTOP_STALE");
+    assert.equal(value.windows[0].destroyed, true);
+    assert.equal(value.windows[1].destroyed, false);
+    await value.manager.dispose();
+  });
+
+  await t.test("delete fence", async (subtest) => {
+    const value = await heldReuseFixture(subtest);
+    const deleting = value.manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A });
+    value.held.resolve(localComputer(BOT_A, LOCAL_A, 1));
+    const failure = await value.reuse;
+    await deleting;
+    assert.equal(failure.code, "OPENBOT_LOCAL_BOT_DELETING");
+    assert.equal(value.windows[0].destroyed, true);
+    assert.equal(value.windows[1].destroyed, false);
+    await value.manager.dispose();
+  });
+
+  await t.test("manager disposal", async (subtest) => {
+    const value = await heldReuseFixture(subtest);
+    const disposing = value.manager.dispose();
+    value.held.resolve(localComputer(BOT_A, LOCAL_A, 1));
+    const failure = await value.reuse;
+    await disposing;
+    assert.equal(failure.code, "OPENBOT_LOCAL_DESKTOP_DISPOSED");
+    assert.equal(value.windows[0].destroyed, true);
+    assert.equal(value.windows[1].destroyed, true);
+  });
 });
 
 test("an untouched about:blank window fails with the public capture code", async (t) => {
