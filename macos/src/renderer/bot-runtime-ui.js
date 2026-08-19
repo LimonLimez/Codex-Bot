@@ -1246,7 +1246,10 @@
       }
       prunePermissionRequests(record.botId);
       synchronizeActiveSetupStage(record);
-      if (activeBotId == null) requestBotSelection(record.botId);
+      // Native mode has no renderer-owned default active bot. A later
+      // authoritative active-bot event may select one, but an ordinary bot
+      // update must never persist the first roster member by accident.
+      if (activeBotId == null && !nativeMode) requestBotSelection(record.botId);
       else publish();
       return record;
     }
@@ -3113,7 +3116,6 @@
       status: "unavailable",
       models: Object.freeze([]),
     });
-    let providerCatalogSourceGenerations = new Map();
     let providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
     let providerOnboarding = null;
     let providerConnectionsUnsubscribe = null;
@@ -3123,14 +3125,15 @@
     let providerOnboardingLoaded = false;
     let providerInitialFocusDone = false;
     let providerAuthorityInvalid = providerFacadeInvalid;
-    let providerRefreshSequence = 0;
-    let providerRefreshCommitSequence = 0;
-    let providerAuthorityOrder = 0;
-    let providerCatalogOrder = -1;
     let providerActionSequence = 0;
     const providerOperations = new Map();
     const providerReceiptRetry = new Set();
-    const providerConnectionOrders = new Map();
+    let providerRefreshFlight = null;
+    let providerRefreshDirty = false;
+    let resolveProviderRefreshDisposed = null;
+    const providerRefreshDisposed = new Promise((resolve) => {
+      resolveProviderRefreshDisposed = resolve;
+    });
     let localDesktopView = null;
     let localDesktopSelection = undefined;
     let lastSnapshot = null;
@@ -3513,19 +3516,13 @@
       return Object.freeze(request);
     }
 
-    function filterProviderCatalog(source) {
-      const connected = new Map(providerConnections
+    function filterProviderCatalog(source, connections = providerConnections) {
+      const connected = new Set(connections
         .filter((entry) => entry.state === "connected")
-        .map((entry) => [entry.providerId, entry]));
-      const models = source.models.filter((entry) => {
-        const connection = connected.get(entry.provider);
-        if (!connection) return false;
-        if (providerCatalogSourceGenerations.get(entry.provider) !== connection.generation) return false;
-        // Dynamic API-key/local catalogs use generation zero. Provider-backed
-        // catalogs are tied to the exact connection generation and stale
-        // reconnect catalogs must not become usable again.
-        return entry.catalogGeneration === 0 || entry.catalogGeneration === connection.generation;
-      });
+        .map((entry) => entry.providerId));
+      const models = source.status === "ready"
+        ? source.models.filter((entry) => connected.has(entry.provider))
+        : [];
       return Object.freeze({
         generation: source.generation,
         status: source.status === "ready" && models.length > 0 ? "ready" : "unavailable",
@@ -3533,132 +3530,183 @@
       });
     }
 
-    function rebuildProviderCatalog() {
-      providerCatalog = filterProviderCatalog(providerCatalogSource);
-      return providerCatalog;
+    function providerConnectionsEqual(left, right) {
+      if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+      return left.every((entry, index) => {
+        const other = right[index];
+        return entry.providerId === other.providerId
+          && entry.label === other.label
+          && entry.loginKind === other.loginKind
+          && entry.state === other.state
+          && entry.generation === other.generation
+          && entry.errorCode === other.errorCode
+          && entry.capabilities.reasoning === other.capabilities.reasoning
+          && entry.capabilities.fast === other.capabilities.fast;
+      });
     }
 
-    function reconcileProviderOnboarding() {
-      if (providerOnboarding === null) return false;
-      try {
-        normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
-        return true;
-      } catch {
-        providerOnboarding = null;
-        return true;
+    function validateProviderSnapshot(connections, catalog, onboarding) {
+      const connected = connections.filter((entry) => entry.state === "connected");
+      const expectedCatalogGeneration = connected.reduce(
+        (generation, entry) => Math.max(generation, entry.generation),
+        0,
+      );
+      if (catalog.generation !== expectedCatalogGeneration) {
+        throw new Error("Provider authority changed while reading.");
       }
-    }
-
-    function acceptProviderConnections(value, {
-      reconcile = true,
-      order = ++providerAuthorityOrder,
-    } = {}) {
-      providerAuthorityOrder = Math.max(providerAuthorityOrder, order);
-      const incoming = normalizeProviderConnections(value);
-      const current = new Map(providerConnections.map((entry) => [entry.providerId, entry]));
-      providerConnections = Object.freeze(incoming.map((entry) => {
-        const prior = current.get(entry.providerId);
-        const priorOrder = providerConnectionOrders.get(entry.providerId) ?? -1;
-        if (prior && (prior.generation > entry.generation
-          || (prior.generation === entry.generation && order < priorOrder))) return prior;
-        providerConnectionOrders.set(entry.providerId, order);
-        return entry;
-      }));
-      rebuildProviderCatalog();
-      if (reconcile) reconcileProviderOnboarding();
-      return true;
-    }
-
-    function acceptProviderCatalog(value, { order = ++providerAuthorityOrder } = {}) {
-      providerAuthorityOrder = Math.max(providerAuthorityOrder, order);
-      const incoming = normalizeProviderCatalog(value);
-      if (providerCatalogSource.generation > incoming.generation
-        || (providerCatalogSource.generation === incoming.generation && order < providerCatalogOrder)) return false;
-      // The latest ordered snapshot is the sole catalog authority. Equal
-      // generations are replacements, never unions of stale provider rows.
-      providerCatalogSource = incoming;
-      providerCatalogOrder = order;
-      providerCatalogSourceGenerations = new Map(incoming.models.map((entry) => {
-        const connection = providerConnections.find((candidate) => candidate.providerId === entry.provider);
-        return [entry.provider, connection?.state === "connected" ? connection.generation : null];
-      }).filter(([, generation]) => generation !== null));
-      rebuildProviderCatalog();
-      return true;
-    }
-
-    function acceptProviderOnboarding(value) {
-      if (value === null) {
-        if (providerOnboarding === null) return true;
-        try {
-          normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
-          // A null read cannot outrank a currently valid receipt from a
-          // concurrent older refresh.
-          return false;
-        } catch {
-          providerOnboarding = null;
-          return true;
+      if (catalog.status === "ready") {
+        const connectedProviders = new Set(connected.map((entry) => entry.providerId));
+        const modelProviders = new Set();
+        for (const model of catalog.models) {
+          if (!connectedProviders.has(model.provider)) {
+            throw new Error("Model catalog is unavailable.");
+          }
+          modelProviders.add(model.provider);
+        }
+        if (connected.some((entry) => !modelProviders.has(entry.providerId))) {
+          throw new Error("Model catalog is unavailable.");
         }
       }
-      const next = normalizeProviderOnboarding(value, providerConnections, providerCatalog);
+      const nextReceipt = onboarding === null
+        ? null
+        : normalizeProviderOnboarding(onboarding, connections, catalog);
       if (providerOnboarding !== null) {
-        let current = null;
+        let currentReceipt = null;
         try {
-          current = normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
-        } catch {
-          current = null;
-        }
-        if (current !== null) {
-          if (next.providerId !== current.providerId) return false;
-          if (next.connectionGeneration < current.connectionGeneration
-            || next.catalogGeneration < current.catalogGeneration) return false;
+          currentReceipt = normalizeProviderOnboarding(providerOnboarding, connections, catalog);
+        } catch {}
+        if (currentReceipt !== null && (
+          nextReceipt === null
+          || nextReceipt.providerId !== currentReceipt.providerId
+          || nextReceipt.connectionGeneration < currentReceipt.connectionGeneration
+          || nextReceipt.catalogGeneration < currentReceipt.catalogGeneration
+        )) {
+          const error = new Error("Provider onboarding snapshot is stale.");
+          error.code = "OPENBOT_PROVIDER_SNAPSHOT_STALE";
+          throw error;
         }
       }
-      providerOnboarding = next;
-      return true;
+      return nextReceipt;
     }
 
-    async function refreshProviderAuthority() {
-      if (mountDisposed || !providerFacade || providerFacadeInvalid) return false;
-      const sequence = ++providerRefreshSequence;
-      const order = ++providerAuthorityOrder;
-      const results = await Promise.allSettled([
-        providerFacade.list(),
-        providerFacade.catalog(),
-        providerFacade.readOnboarding(),
+    function commitProviderSnapshot(snapshot) {
+      const previousConnections = providerConnections;
+      providerConnections = snapshot.connections;
+      providerCatalogSource = snapshot.catalog;
+      providerCatalog = filterProviderCatalog(snapshot.catalog, snapshot.connections);
+      providerOnboarding = snapshot.onboarding;
+      providerAuthorityInvalid = false;
+      providerAuthorityLoaded = true;
+      providerCatalogLoaded = true;
+      providerOnboardingLoaded = true;
+      for (const connection of snapshot.connections) {
+        const previous = previousConnections.find((entry) => entry.providerId === connection.providerId);
+        if (connection.state === "disconnected"
+          && (previous?.state !== "disconnected" || providerReceiptRetry.has(connection.providerId))) {
+          providerReceiptRetry.delete(connection.providerId);
+        }
+      }
+      controller?.applyCatalog?.(providerCatalog);
+      updateConnectionPresentation(lastSnapshot);
+    }
+
+    async function readProviderSnapshot() {
+      const results = await Promise.race([
+        Promise.allSettled([
+          providerFacade.list(),
+          providerFacade.catalog(),
+          providerFacade.readOnboarding(),
+          providerFacade.list(),
+        ]),
+        providerRefreshDisposed,
       ]);
-      if (mountDisposed) return false;
-      const [connectionsResult, catalogResult, onboardingResult] = results;
-      let valid = true;
-      const currentSequence = sequence === providerRefreshSequence;
+      if (results === null) throw new Error("Provider controls are unavailable.");
+      if (mountDisposed) throw new Error("Provider controls are unavailable.");
       try {
-        if (connectionsResult.status !== "fulfilled") throw new Error("Provider connections are unavailable.");
-        acceptProviderConnections(connectionsResult.value, { reconcile: currentSequence, order });
-      } catch {
-        valid = false;
-      }
-      if (currentSequence) {
-        try {
-          if (catalogResult.status !== "fulfilled") throw new Error("Model catalog is unavailable.");
-          acceptProviderCatalog(catalogResult.value, { order });
-        } catch {
-          valid = false;
+        if (results.some((result) => result.status !== "fulfilled")) {
+          throw new Error("Provider authority is unavailable.");
         }
-        try {
-          if (onboardingResult.status !== "fulfilled") throw new Error("Provider onboarding is unavailable.");
-          acceptProviderOnboarding(onboardingResult.value);
-        } catch {
-          valid = false;
+        const connectionsBefore = normalizeProviderConnections(results[0].value);
+        const catalog = normalizeProviderCatalog(results[1].value);
+        const onboardingValue = results[2].value;
+        const connectionsAfter = normalizeProviderConnections(results[3].value);
+        if (!providerConnectionsEqual(connectionsBefore, connectionsAfter)) {
+          const error = new Error("Provider authority changed while reading.");
+          error.code = "OPENBOT_PROVIDER_SNAPSHOT_UNSTABLE";
+          throw error;
         }
+        const onboarding = validateProviderSnapshot(connectionsBefore, catalog, onboardingValue);
+        return Object.freeze({
+          connections: connectionsBefore,
+          catalog,
+          onboarding,
+        });
+      } catch (error) {
+        if (error?.code === "OPENBOT_PROVIDER_SNAPSHOT_UNSTABLE"
+          || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE") throw error;
+        if (error && typeof error === "object") error.code = "OPENBOT_PROVIDER_SNAPSHOT_INVALID";
+        throw error;
       }
-      if (!currentSequence) return false;
-      providerRefreshCommitSequence = sequence;
-      providerAuthorityInvalid = !valid;
+    }
+
+    function markProviderRefreshInvalid() {
+      if (mountDisposed) return false;
+      providerAuthorityInvalid = true;
       providerAuthorityLoaded = true;
       providerCatalogLoaded = true;
       providerOnboardingLoaded = true;
       updateConnectionPresentation(lastSnapshot);
-      if (providerCatalogLoaded) controller?.applyCatalog?.(providerCatalog);
-      return valid;
+      return false;
+    }
+
+    function refreshProviderAuthority() {
+      if (mountDisposed || !providerFacade || providerFacadeInvalid) return Promise.resolve(false);
+      if (providerRefreshFlight) {
+        providerRefreshDirty = true;
+        return providerRefreshFlight;
+      }
+      let retryBudget = 1;
+      const flight = (async () => {
+        while (!mountDisposed) {
+          providerRefreshDirty = false;
+          let snapshot;
+          try {
+            snapshot = await readProviderSnapshot();
+          } catch (error) {
+            const retryable = providerRefreshDirty
+              || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_UNSTABLE"
+              || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE"
+              || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_INVALID";
+            if (retryable && retryBudget > 0) {
+              retryBudget -= 1;
+              continue;
+            }
+            if (error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE" && providerOnboarding !== null) {
+              // A same-generation receipt/null read is not authority. Keep
+              // the last valid receipt while the next subscription signal
+              // asks the main process for a fresh full snapshot.
+              updateConnectionPresentation(lastSnapshot);
+              return true;
+            }
+            return markProviderRefreshInvalid();
+          }
+          if (providerRefreshDirty && retryBudget > 0) {
+            retryBudget -= 1;
+            continue;
+          }
+          if (providerRefreshDirty) return markProviderRefreshInvalid();
+          commitProviderSnapshot(snapshot);
+          return true;
+        }
+        return false;
+      })();
+      providerRefreshFlight = flight;
+      void flight.then(() => {
+        if (providerRefreshFlight === flight) providerRefreshFlight = null;
+      }, () => {
+        if (providerRefreshFlight === flight) providerRefreshFlight = null;
+      });
+      return flight;
     }
 
     function beginProviderOperation(providerId, first, entry) {
@@ -3697,12 +3745,12 @@
       let receiptAttempted = false;
       try {
         if (receiptRetry) {
-          await refreshProviderAuthority();
+          if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
           if (!currentProviderOperation(operation)) return;
         } else {
           await providerFacade.connect(request);
           if (!currentProviderOperation(operation)) return;
-          await refreshProviderAuthority();
+          if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
           if (!currentProviderOperation(operation)) return;
         }
         const connection = providerConnection(providerId);
@@ -3758,11 +3806,8 @@
       try {
         await providerFacade.disconnect(providerId);
         if (!currentProviderOperation(operation)) return;
-        await refreshProviderAuthority();
+        if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
         if (!currentProviderOperation(operation)) return;
-        if (providerConnection(providerId).state !== "connected") {
-          providerReceiptRetry.delete(providerId);
-        }
       } catch (error) {
         if (entry && currentProviderOperation(operation)) {
           entry.error.textContent = providerErrorCopy(providerId, error).replace("connected", "disconnected");
@@ -4585,15 +4630,8 @@
         try {
           const candidate = providerFacade.onConnectionsChanged((value) => {
             if (mountDisposed) return;
-            const order = ++providerAuthorityOrder;
-            try {
-              acceptProviderConnections(value, { order });
-              acceptProviderOnboarding(providerOnboarding);
-            } catch {
-              providerAuthorityInvalid = true;
-              providerOnboarding = null;
-            }
-            controller?.applyCatalog?.(providerCatalog);
+            try { normalizeProviderConnections(value); } catch {}
+            providerRefreshDirty = providerRefreshFlight !== null;
             updateConnectionPresentation(lastSnapshot);
             void refreshProviderAuthority();
           });
@@ -4604,15 +4642,8 @@
         try {
           const candidate = providerFacade.onCatalogChanged((value) => {
             if (mountDisposed) return;
-            const order = ++providerAuthorityOrder;
-            try {
-              acceptProviderCatalog(value, { order });
-              acceptProviderOnboarding(providerOnboarding);
-            } catch {
-              providerAuthorityInvalid = true;
-              providerOnboarding = null;
-            }
-            controller?.applyCatalog?.(providerCatalog);
+            try { normalizeProviderCatalog(value); } catch {}
+            providerRefreshDirty = providerRefreshFlight !== null;
             updateConnectionPresentation(lastSnapshot);
             void refreshProviderAuthority();
           });
@@ -4637,6 +4668,8 @@
       dispose() {
         if (mountDisposed) return;
         mountDisposed = true;
+        resolveProviderRefreshDisposed?.(null);
+        resolveProviderRefreshDisposed = null;
         mountObserver?.disconnect();
         pickerResizeObserver?.disconnect();
         surfaceResizeObserver?.disconnect();
