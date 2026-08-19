@@ -79,7 +79,7 @@ test("optional inference keeps the verified sidecar session private and rechecks
   assert.ok(checks >= 2);
   assert.equal(ClientFixture.options.length, 1);
   const clientConfig = ClientFixture.options[0].config;
-  assert.deepEqual(Object.keys(clientConfig), ["botId", "generation", "model", "reasoningEffort"]);
+  assert.deepEqual(Object.keys(clientConfig), ["botId", "generation", "provider", "providerId", "model", "reasoningEffort", "serviceTier"]);
   assert.equal(clientConfig.endpoint, session.endpoint);
   assert.equal(clientConfig.credential, session.credential);
   assert.equal(clientConfig.model, "claude-fable-5");
@@ -127,4 +127,89 @@ test("provider-scoped CLIProxy transport resolves its private session lazily for
   assert.equal(resolves, 1);
   for await (const _event of result.fullStream) {}
   assert.equal(ClientFixture.options[0].config.model, "grok-4.5");
+});
+
+test("provider-scoped CLIProxy transport carries the canonical provider identity to its client", async () => {
+  const { CLIProxyInferenceTransport } = require(transportPath);
+  ClientFixture.options = [];
+  const transport = new CLIProxyInferenceTransport({
+    providerId: "xai",
+    resolveConnection: () => ({ endpoint: "http://127.0.0.1:43211/v1", credential: "x".repeat(64) }),
+    ClientClass: ClientFixture,
+  });
+  const result = await transport.stream(request({
+    selection: { ...request().selection, provider: "xai", model: "grok-4.5", reasoningEffort: "high" },
+  }));
+  for await (const _event of result.fullStream) {}
+  const config = ClientFixture.options[0].config;
+  assert.equal(config.provider, "xai");
+  assert.equal(config.providerId, "xai");
+});
+
+test("CLIProxy transport re-fences provider authority before client construction", async () => {
+  const { CLIProxyInferenceTransport } = require(transportPath);
+  ClientFixture.options = [];
+  const transport = new CLIProxyInferenceTransport({
+    providerId: "xai",
+    resolveConnection: () => ({ endpoint: "http://127.0.0.1:43211/v1", credential: "x".repeat(64) }),
+    assertConnectionCurrent: () => false,
+    ClientClass: ClientFixture,
+  });
+  assert.throws(() => transport.stream(request({
+    selection: { ...request().selection, provider: "xai", model: "grok-4.5", reasoningEffort: "high" },
+  })), { code: "CODEX_INFERENCE_STALE" });
+  assert.equal(ClientFixture.options.length, 0);
+});
+
+test("CLIProxy default client carries the canonical provider into the upstream request", async (t) => {
+  const { CLIProxyInferenceTransport } = require(transportPath);
+  const previousFetch = globalThis.fetch;
+  let captured;
+  globalThis.fetch = async (url, options) => {
+    captured = { url, options, payload: JSON.parse(options.body) };
+    return {
+      ok: true,
+      body: (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
+        yield new TextEncoder().encode("data: [DONE]\n\n");
+      })(),
+    };
+  };
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const transport = new CLIProxyInferenceTransport({
+    providerId: "xai",
+    resolveConnection: async () => ({ endpoint: "http://127.0.0.1:43211/v1", credential: "x".repeat(64) }),
+  });
+  const result = await transport.stream(request({
+    selection: { ...request().selection, provider: "xai", model: "grok-4.5", reasoningEffort: "high" },
+  }));
+  for await (const _event of result.fullStream) {}
+  assert.equal(captured.payload.provider, "xai");
+  assert.equal(captured.options.headers.get("X-OpenBot-Provider"), "xai");
+});
+
+test("CLIProxy transport re-fences again after client construction and before send", async () => {
+  const { CLIProxyInferenceTransport } = require(transportPath);
+  let checks = 0;
+  let constructed = 0;
+  let sends = 0;
+  class SendFixture {
+    constructor() { constructed += 1; }
+    stream() { sends += 1; return { fullStream: (async function* () {})() }; }
+    dispose() {}
+  }
+  const transport = new CLIProxyInferenceTransport({
+    providerId: "xai",
+    resolveConnection: () => ({ endpoint: "http://127.0.0.1:43211/v1", credential: "x".repeat(64) }),
+    assertConnectionCurrent: () => {
+      checks += 1;
+      return checks < 3;
+    },
+    ClientClass: SendFixture,
+  });
+  assert.throws(() => transport.stream(request({
+    selection: { ...request().selection, provider: "xai", model: "grok-4.5", reasoningEffort: "high" },
+  })), { code: "CODEX_INFERENCE_STALE" });
+  assert.equal(constructed, 1);
+  assert.equal(sends, 0);
 });

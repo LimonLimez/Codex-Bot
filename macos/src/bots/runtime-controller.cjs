@@ -328,8 +328,20 @@ class BotRuntimeController extends EventEmitter {
     return true;
   }
 
-  async createBot(input) {
-    const created = await this.#store.create(input);
+  async createBot(input, options = undefined) {
+    let validOptions = options === undefined;
+    if (!validOptions) {
+      try {
+        validOptions = Boolean(options && typeof options === "object" && !Array.isArray(options)
+          && Object.getPrototypeOf(options) === Object.prototype
+          && Object.keys(options).length === 1
+          && typeof options.commitFence === "function");
+      } catch { validOptions = false; }
+    }
+    if (!validOptions) {
+      throw new ControllerError("Bot create commit options are invalid.", "RUNTIME_CREATE_OPTIONS_INVALID");
+    }
+    const created = await this.#store.create(input, options);
     this.#publishBot(created);
     try {
       return publicBot(await this.ensureRuntime(created.botId));

@@ -711,7 +711,15 @@ function nativeCatalogModel({
       isDefaultNonMaxConfig: isDefault,
     };
   }));
-  const anthropic = provider === "anthropic-claude" || provider === "cliproxy-anthropic";
+  let canonicalProvider;
+  try { canonicalProvider = canonicalProviderId(provider); } catch { throw sanitizedFailure(); }
+  const descriptor = providerDescriptor(canonicalProvider);
+  const anthropic = canonicalProvider === "anthropic-claude";
+  const vendorId = canonicalProvider === "openai-codex"
+    ? "MODEL_VENDOR_ID_OPENAI"
+    : canonicalProvider === "anthropic-claude"
+      ? "MODEL_VENDOR_ID_ANTHROPIC"
+      : `MODEL_VENDOR_ID_${canonicalProvider.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}`;
   return {
     name: id,
     defaultOn: defaultOn === true,
@@ -722,10 +730,10 @@ function nativeCatalogModel({
     supportsNonMaxMode: false,
     clientDisplayName: displayName,
     inputboxShortModelName: displayName,
-    vendorName: anthropic ? "CLIProxyAPI · Anthropic" : "OpenAI Codex",
+    vendorName: descriptor.label,
     vendor: {
-      id: anthropic ? "MODEL_VENDOR_ID_ANTHROPIC" : "MODEL_VENDOR_ID_OPENAI",
-      displayName: anthropic ? "CLIProxyAPI · Anthropic" : "OpenAI Codex",
+      id: vendorId,
+      displayName: descriptor.label,
     },
     parameterDefinitions,
     variants,
@@ -958,6 +966,8 @@ function createInferenceBridgeRuntime({
   sidecarManager,
   providerController = null,
   openaiProvider = null,
+  providerStateStore = null,
+  keychain = null,
   readCatalog = null,
   stateRoot,
   toolBridge = null,
@@ -978,6 +988,8 @@ function createInferenceBridgeRuntime({
     || (providerController !== null && (!providerController || typeof providerController.catalog !== "function"
       || typeof providerController.readOnboarding !== "function"))
     || (openaiProvider !== null && typeof openaiProvider.streamConfiguration !== "function")
+    || (providerStateStore !== null && (!providerStateStore || typeof providerStateStore.read !== "function"))
+    || (keychain !== null && (!keychain || typeof keychain.read !== "function"))
     || !(readCatalog === null || typeof readCatalog === "function")
     || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
     || typeof capability !== "string" || !/^[a-f0-9]{64}$/.test(capability)
@@ -1003,6 +1015,7 @@ function createInferenceBridgeRuntime({
     return Object.freeze({
       botId: stored.botId,
       generation: stored.generation,
+      catalogGeneration: stored.catalogGeneration,
       provider: canonicalProviderId(stored.provider),
       model: stored.model,
       reasoningEffort: stored.reasoningEffort,
@@ -1021,18 +1034,81 @@ function createInferenceBridgeRuntime({
         error.code = "CODEX_INFERENCE_PROVIDER_UNAVAILABLE";
         throw error;
       }
-      if (provider === "openai-codex") return directTransport;
+      const assertProviderCurrent = providerController.listConnections
+        ? async () => {
+          const receipt = await providerController.readOnboarding();
+          const connections = await providerController.listConnections();
+          const connection = connections.find((entry) => entry?.providerId === provider);
+          const currentCatalog = await providerController.catalog();
+          return Boolean(receipt?.schemaVersion === 1
+            && receipt.providerId === provider
+            && receipt.catalogGeneration === selection?.catalogGeneration
+            && connection?.state === "connected"
+            && Number.isSafeInteger(receipt.connectionGeneration)
+            && connection.generation === receipt.connectionGeneration
+            && currentCatalog?.status === "ready"
+            && currentCatalog.generation === selection?.catalogGeneration
+            && currentCatalog.models.some((model) => (model?.provider ?? "openai-codex") === provider
+              && (model?.model ?? model?.id) === selection?.model));
+        }
+        : null;
+      if (provider === "openai-codex") {
+        if (!assertProviderCurrent) return directTransport;
+        return {
+          async stream(request) {
+            if (await assertProviderCurrent() !== true) {
+              const error = new Error("Codex inference provider is unavailable.");
+              error.code = "CODEX_INFERENCE_PROVIDER_UNAVAILABLE";
+              throw error;
+            }
+            return directTransport.stream(request);
+          },
+          dispose() {},
+        };
+      }
       const descriptor = providerDescriptor(provider);
       if (descriptor.loginKind === "api-key" || descriptor.loginKind === "local") {
-        if (openaiProvider === null) throw sanitizedFailure();
+        if (openaiProvider === null && providerStateStore === null) throw sanitizedFailure();
         return new OpenAITransportClass({
           providerId: provider,
-          resolveConnection: () => openaiProvider.streamConfiguration(provider),
+          resolveConnection: () => {
+            if (providerStateStore !== null) {
+              return providerStateStore.read().then((state) => {
+                const connection = state?.connections?.find((entry) => entry?.providerId === provider);
+                if (!connection || connection.state !== "connected") throw new Error("provider unavailable");
+                return (async () => {
+                  const credential = keychain === null ? null : await keychain.read(provider);
+                  const endpoint = connection.baseUrl
+                    || (provider === "openai-api-key" ? "https://api.openai.com/v1" : null);
+                  if (typeof endpoint !== "string") throw new Error("provider unavailable");
+                  const result = { endpoint };
+                  Object.defineProperty(result, "credential", {
+                    configurable: false,
+                    enumerable: false,
+                    writable: false,
+                    value: credential,
+                  });
+                  return Object.freeze(result);
+                })();
+              });
+            }
+            const privateConfiguration = openaiProvider.streamConfiguration(provider);
+            const result = { endpoint: privateConfiguration.baseUrl };
+            Object.defineProperty(result, "credential", {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: privateConfiguration.apiKey,
+            });
+            return Object.freeze(result);
+          },
+          ...(assertProviderCurrent ? { assertConnectionCurrent: assertProviderCurrent } : {}),
         });
       }
       return new OptionalTransportClass({
         providerId: provider,
         resolveConnection: () => sidecarManager.start(),
+        ...(assertProviderCurrent ? { assertConnectionCurrent: assertProviderCurrent } : {}),
       });
     };
   } else {
@@ -1270,6 +1346,8 @@ function productionDependencies(electron) {
     sidecarManager,
     providerController,
     openaiProvider,
+    providerStateStore,
+    keychain,
     readCatalog: () => providerController.catalog(),
     stateRoot,
     toolBridge: computer.toolBridge,
@@ -1461,6 +1539,7 @@ function installDesktopRuntime(electron, injected = {}) {
   let disposed = false;
   let activeIdentityMutation = Promise.resolve();
   let latestProviderCatalog = null;
+  let providerAuthorityEpoch = 0;
   const startupReady = botDeletionCoordinator === null
     ? Promise.resolve()
     : Promise.resolve().then(() => botDeletionCoordinator.reconcilePending());
@@ -1579,9 +1658,34 @@ function installDesktopRuntime(electron, injected = {}) {
     return accountController.catalogState();
   }
 
+  function providerAuthorityToken({ providerId = null, connectionGeneration = null, catalogGeneration = null } = {}) {
+    const token = {
+      providerId,
+      connectionGeneration,
+      catalogGeneration,
+      epoch: providerAuthorityEpoch,
+    };
+    Object.defineProperty(token, "commitFence", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: () => !disposed && providerAuthorityEpoch === token.epoch,
+    });
+    return Object.freeze(token);
+  }
+
+  function providerCreateOptions(authority) {
+    if (!authority || typeof authority !== "object" || typeof authority.commitFence !== "function") return undefined;
+    return { commitFence: authority.commitFence };
+  }
+
   async function canCreateAgent() {
     if (typeof dependencies.canCreateAgent === "function") {
-      try { return (await dependencies.canCreateAgent()) === true; } catch { return false; }
+      try {
+        const result = await dependencies.canCreateAgent();
+        if (result !== true) return null;
+        return providerController === null ? true : providerAuthorityToken();
+      } catch { return null; }
     }
     if (providerController === null) return true;
     try {
@@ -1594,10 +1698,15 @@ function installDesktopRuntime(electron, injected = {}) {
       if (!connection || connection.state !== "connected"
         || connection.generation !== receipt.connectionGeneration) return false;
       const catalog = await providerController.catalog();
-      return catalog?.status === "ready"
+      if (!(catalog?.status === "ready"
         && catalog.generation === receipt.catalogGeneration
         && Array.isArray(catalog.models)
-        && catalog.models.some((model) => model?.provider === receipt.providerId);
+        && catalog.models.some((model) => model?.provider === receipt.providerId))) return null;
+      return providerAuthorityToken({
+        providerId: receipt.providerId,
+        connectionGeneration: receipt.connectionGeneration,
+        catalogGeneration: receipt.catalogGeneration,
+      });
     } catch { return false; }
   }
 
@@ -1912,10 +2021,12 @@ function installDesktopRuntime(electron, injected = {}) {
   }, { requireMainFrame: true });
   handle(IPC_CHANNELS.providerConnect, async (value) => {
     if (providerController === null) throw sanitizedFailure();
+    providerAuthorityEpoch += 1;
     return providerController.connect(providerConnectInput(value));
   }, { requireMainFrame: true });
   handle(IPC_CHANNELS.providerDisconnect, async (value) => {
     if (providerController === null) throw sanitizedFailure();
+    providerAuthorityEpoch += 1;
     return providerController.disconnect(providerIdInput(value));
   }, { requireMainFrame: true });
   handle(IPC_CHANNELS.providerCatalog, async () => {
@@ -1928,6 +2039,7 @@ function installDesktopRuntime(electron, injected = {}) {
   }, { requireMainFrame: true });
   handle(IPC_CHANNELS.providerOnboardingComplete, async (value) => {
     if (providerController === null) throw sanitizedFailure();
+    providerAuthorityEpoch += 1;
     return providerController.completeOnboarding(providerIdInput(value));
   }, { requireMainFrame: true });
   handle(IPC_CHANNELS.accountLogin, async (mode) => {
@@ -1948,9 +2060,11 @@ function installDesktopRuntime(electron, injected = {}) {
   handle(IPC_CHANNELS.accountLogout, () => accountController.logout());
   handle(IPC_CHANNELS.accountRetry, () => accountController.refresh());
   handle(IPC_CHANNELS.create, async () => {
-    if (!(await canCreateAgent())) throw sanitizedFailure();
+    const authority = await canCreateAgent();
+    if (!authority) throw sanitizedFailure();
     if (disposed) throw sanitizedFailure();
-    return controller.createBot();
+    const options = providerCreateOptions(authority);
+    return options === undefined ? controller.createBot() : controller.createBot(undefined, options);
   });
   handle(IPC_CHANNELS.adoptLegacy, async (value) => {
     if (!store || typeof store.adoptLegacy !== "function") throw sanitizedFailure();
@@ -2074,8 +2188,12 @@ function installDesktopRuntime(electron, injected = {}) {
   const onRuntimeEvent = (event) => broadcastRuntimeEvent(event);
   const onAccountChanged = (event) => broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
   const onCatalogChanged = (event) => broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
-  const onProviderChanged = (event) => broadcastChannel(PROVIDER_CHANGE_CHANNEL, event);
+  const onProviderChanged = (event) => {
+    providerAuthorityEpoch += 1;
+    broadcastChannel(PROVIDER_CHANGE_CHANNEL, event);
+  };
   const onProviderCatalogChanged = (event) => {
+    providerAuthorityEpoch += 1;
     latestProviderCatalog = event;
     broadcastChannel(PROVIDER_CATALOG_CHANGE_CHANNEL, event);
   };

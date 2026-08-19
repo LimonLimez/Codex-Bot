@@ -31,6 +31,7 @@ const REQUEST_KEYS = new Set([
 const SELECTION_KEYS = new Set([
   "botId",
   "generation",
+  "catalogGeneration",
   "provider",
   "model",
   "reasoningEffort",
@@ -90,11 +91,15 @@ function normalizeSelection(value) {
   const raw = ownData(value, SELECTION_KEYS);
   let provider;
   if (
-    Object.keys(raw).length !== SELECTION_KEYS.size ||
+    Object.keys(raw).some((key) => !["botId", "generation", "catalogGeneration", "provider", "model", "reasoningEffort", "serviceTier"].includes(key))
+    || Object.keys(raw).length < SELECTION_KEYS.size - 1
+    || Object.keys(raw).length > SELECTION_KEYS.size ||
     typeof raw.botId !== "string" ||
     !BOT_ID.test(raw.botId) ||
     !Number.isSafeInteger(raw.generation) ||
     raw.generation < 0 ||
+    (raw.catalogGeneration !== undefined
+      && (!Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0)) ||
     typeof raw.provider !== "string" ||
     typeof raw.model !== "string" ||
     !MODEL_ID.test(raw.model) ||
@@ -128,14 +133,16 @@ function normalizeSelection(value) {
     || (raw.serviceTier !== null && descriptor.fastModeSupported !== true)) {
     throw inferenceError("CODEX_INFERENCE_PROVIDER_INVALID", "Codex inference provider is unavailable.");
   }
-  return Object.freeze({
+  const normalized = {
     botId: raw.botId,
     generation: raw.generation,
     provider,
     model: raw.model,
     reasoningEffort: raw.reasoningEffort,
     serviceTier: raw.serviceTier,
-  });
+  };
+  if (raw.catalogGeneration !== undefined) normalized.catalogGeneration = raw.catalogGeneration;
+  return Object.freeze(normalized);
 }
 
 function sameSelection(left, right) {
@@ -145,7 +152,8 @@ function sameSelection(left, right) {
     left.provider === right.provider &&
     left.model === right.model &&
     left.reasoningEffort === right.reasoningEffort &&
-    left.serviceTier === right.serviceTier;
+    left.serviceTier === right.serviceTier &&
+    left.catalogGeneration === right.catalogGeneration;
 }
 
 function transport(value) {
@@ -171,6 +179,7 @@ class InferenceProviderRouter {
   #descriptorForProvider;
   #legacyFactory = false;
   #optional = new Map();
+  #activeTransports = new Map();
   #disposed = false;
 
   constructor(rawOptions = {}) {
@@ -224,7 +233,7 @@ class InferenceProviderRouter {
       && selected.provider === "anthropic-claude"
       ? descriptor.reasoningMap?.[selected.reasoningEffort] ?? "max"
       : selected.reasoningEffort;
-    const upstreamSelection = Object.freeze({
+    const upstreamSelection = {
       botId: selected.botId,
       generation: selected.generation,
       provider: selected.provider,
@@ -234,7 +243,9 @@ class InferenceProviderRouter {
         || (selected.provider === "openai-codex" && selected.reasoningEffort === "ultra")
         || (selected.provider === "anthropic-claude" && selected.reasoningEffort === "ultra-code")
         ? { reasoningEffort: upstreamReasoning } : {}),
-    });
+    };
+    if (selected.catalogGeneration !== undefined) upstreamSelection.catalogGeneration = selected.catalogGeneration;
+    Object.freeze(upstreamSelection);
     let selectedTransport;
     try { selectedTransport = await this.#transportForProvider(selected.provider, selected); }
     catch (error) {
@@ -245,9 +256,25 @@ class InferenceProviderRouter {
       throw inferenceError("CODEX_INFERENCE_PROVIDER_UNAVAILABLE", "Codex inference provider is unavailable.");
     }
     if (this.#disposed) {
+      try { selectedTransport.dispose?.(); } catch {}
       throw inferenceError("CODEX_INFERENCE_DISPOSED", "Codex inference was disposed.");
     }
-    await this.#assertCurrent(selected);
+    const owned = !this.#legacyFactory && selectedTransport !== this.#directTransport;
+    if (owned) this.#retainTransport(selectedTransport);
+    if (this.#disposed) {
+      if (owned) this.#releaseTransport(selectedTransport);
+      else { try { selectedTransport.dispose?.(); } catch {} }
+      throw inferenceError("CODEX_INFERENCE_DISPOSED", "Codex inference was disposed.");
+    }
+    try { await this.#assertCurrent(selected); }
+    catch (error) {
+      if (owned) this.#releaseTransport(selectedTransport);
+      throw error;
+    }
+    if (this.#disposed) {
+      if (owned) this.#releaseTransport(selectedTransport);
+      throw inferenceError("CODEX_INFERENCE_DISPOSED", "Codex inference was disposed.");
+    }
     let result;
     try {
       const transportRequest = {
@@ -265,14 +292,32 @@ class InferenceProviderRouter {
       }
       result = await selectedTransport.stream(Object.freeze(transportRequest));
     } catch (error) {
+      if (owned) this.#releaseTransport(selectedTransport);
       if (error instanceof InferenceProviderError) throw error;
       throw inferenceError("CODEX_INFERENCE_UNAVAILABLE", "Codex inference is unavailable.");
     }
+    if (this.#disposed) {
+      if (owned) this.#releaseTransport(selectedTransport);
+      throw inferenceError("CODEX_INFERENCE_DISPOSED", "Codex inference was disposed.");
+    }
     if (!result || typeof result !== "object" || types.isProxy(result)
       || !result.fullStream || typeof result.fullStream[Symbol.asyncIterator] !== "function") {
+      if (owned) this.#releaseTransport(selectedTransport);
       throw inferenceError("CODEX_INFERENCE_UNAVAILABLE", "Codex inference is unavailable.");
     }
-    return result;
+    if (!owned) return result;
+    const owner = this;
+    const fullStream = (async function* () {
+      try {
+        for await (const value of result.fullStream) {
+          if (owner.#disposed) throw inferenceError("CODEX_INFERENCE_DISPOSED", "Codex inference was disposed.");
+          yield value;
+        }
+      } finally {
+        owner.#releaseTransport(selectedTransport);
+      }
+    })();
+    return Object.freeze({ ...result, fullStream });
   }
 
   async #optionalTransport(provider) {
@@ -316,6 +361,21 @@ class InferenceProviderRouter {
     }
   }
 
+  #retainTransport(value) {
+    const current = this.#activeTransports.get(value);
+    if (current) current.references += 1;
+    else this.#activeTransports.set(value, { references: 1 });
+  }
+
+  #releaseTransport(value) {
+    const current = this.#activeTransports.get(value);
+    if (!current) return;
+    current.references -= 1;
+    if (current.references > 0) return;
+    this.#activeTransports.delete(value);
+    try { value.dispose?.(); } catch {}
+  }
+
   dispose() {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -323,6 +383,10 @@ class InferenceProviderRouter {
       void flight.then((value) => value.dispose?.(), () => {});
     }
     this.#optional.clear();
+    for (const value of this.#activeTransports.keys()) {
+      try { value.dispose?.(); } catch {}
+    }
+    this.#activeTransports.clear();
   }
 }
 

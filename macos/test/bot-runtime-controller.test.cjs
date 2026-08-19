@@ -344,6 +344,17 @@ test("bot facade preserves trusted native setup-stage transactions", async (t) =
   assertDeepFrozen(botEvents.findLast(({ botId }) => botId === native.botId));
 });
 
+test("bot controller passes the provider authority fence to the durable create commit", async (t) => {
+  const store = await temporaryStore(t);
+  const controller = new BotRuntimeController({ store, provider: unavailableProvider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  await assert.rejects(
+    controller.createBot({ setupStage: "complete" }, { commitFence: () => false }),
+    { code: "BOT_STORE_PROVIDER_AUTHORITY_STALE" },
+  );
+  assert.deepEqual(await store.list(), []);
+});
+
 test("a committed-uncertain setup stage is reread and published only at its exact successor", async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-setup-stage-controller-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

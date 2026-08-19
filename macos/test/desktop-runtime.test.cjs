@@ -195,6 +195,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   assert.deepEqual(await constructed[1][1].readSelection(BOT_A), {
     botId: BOT_A,
     generation: 4,
+    catalogGeneration: 7,
     provider: "openai-codex",
     model: "gpt-5.6-sol",
     reasoningEffort: "ultra",
@@ -204,6 +205,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   assert.deepEqual(await constructed[1][1].readSelection(optionalBot), {
     botId: optionalBot,
     generation: 4,
+    catalogGeneration: 1,
     provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
@@ -213,6 +215,198 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   assert.equal(optional.kind, "optional");
   assert.equal(starts, 2);
   assert.deepEqual(constructed.map(([name]) => name), ["direct", "router", "bridge", "optional"]);
+});
+
+test("provider-controller inference preserves catalog generation and streams through the production router branch", async (t) => {
+  const { createInferenceBridgeRuntime } = require(runtimePath);
+  const root = tempRoot(t);
+  const stateRoot = path.join(root, "state");
+  const calls = [];
+  class DirectFixture {
+    constructor() {}
+    stream(request) {
+      calls.push(request);
+      return {
+        fullStream: (async function* () { yield { type: "finish", finishReason: "stop" }; })(),
+      };
+    }
+    dispose() {}
+  }
+  class BridgeFixture {
+    constructor(options) { this.router = options.router; }
+  }
+  const providerController = {
+    async catalog() {
+      return { status: "ready", generation: 7, models: [{ provider: "openai-codex", model: "gpt-5.6-sol" }] };
+    },
+    async readOnboarding() { return null; },
+  };
+  const selectionStore = {
+    async read() {
+      return {
+        botId: BOT_A,
+        generation: 3,
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "ultra",
+        serviceTier: null,
+        catalogGeneration: 7,
+      };
+    },
+  };
+  const inference = createInferenceBridgeRuntime({
+    codexManager: {},
+    selectionStore,
+    sidecarManager: { async start() { throw new Error("sidecar must remain unused"); } },
+    providerController,
+    stateRoot,
+    computerTargetRouter: { async resolve() {} },
+    DirectTransportClass: DirectFixture,
+    BridgeClass: BridgeFixture,
+  });
+  t.after(() => inference.dispose?.());
+  const result = await inference.router.stream({
+    selection: {
+      botId: BOT_A,
+      generation: 3,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "ultra",
+      serviceTier: null,
+      catalogGeneration: 7,
+    },
+    conversationId: "conversation-1",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [],
+    toolChoice: "none",
+    invocationId: "invocation-1",
+  });
+  for await (const _event of result.fullStream) {}
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].selection.catalogGeneration, 7);
+});
+
+test("provider-controller API inference adapts the private durable connection DTO", async (t) => {
+  const { createInferenceBridgeRuntime } = require(runtimePath);
+  const root = tempRoot(t);
+  const stateRoot = path.join(root, "state");
+  let capturedConnection;
+  class DirectFixture { constructor() {} }
+  class OpenAIFixture {
+    constructor(options) { this.options = options; }
+    async stream() {
+      capturedConnection = await this.options.resolveConnection();
+      return { fullStream: (async function* () {})() };
+    }
+    dispose() {}
+  }
+  class BridgeFixture {
+    constructor(options) { this.router = options.router; }
+  }
+  const providerController = {
+    async catalog() {
+      return { status: "ready", generation: 9, models: [{ provider: "openai-api-key", model: "gpt-live-only" }] };
+    },
+    async readOnboarding() { return null; },
+  };
+  const selectionStore = {
+    async read() {
+      return {
+        botId: BOT_A,
+        generation: 1,
+        provider: "openai-api-key",
+        model: "gpt-live-only",
+        reasoningEffort: "high",
+        serviceTier: "priority",
+        catalogGeneration: 9,
+      };
+    },
+  };
+  const openaiProvider = {
+    streamConfiguration() {
+      const result = { providerId: "openai-api-key", baseUrl: "https://api.openai.com/v1" };
+      Object.defineProperty(result, "apiKey", { value: "k".repeat(64), enumerable: false });
+      return Object.freeze(result);
+    },
+  };
+  const inference = createInferenceBridgeRuntime({
+    codexManager: {}, selectionStore,
+    sidecarManager: { async start() { throw new Error("sidecar must remain unused"); } },
+    providerController, openaiProvider, stateRoot,
+    computerTargetRouter: { async resolve() {} },
+    DirectTransportClass: DirectFixture,
+    OpenAITransportClass: OpenAIFixture,
+    BridgeClass: BridgeFixture,
+  });
+  t.after(() => inference.dispose?.());
+  const result = await inference.router.stream({
+    selection: {
+      botId: BOT_A, generation: 1, provider: "openai-api-key", model: "gpt-live-only",
+      reasoningEffort: "high", serviceTier: "priority", catalogGeneration: 9,
+    },
+    conversationId: "conversation-1", messages: [{ role: "user", content: "hello" }],
+    tools: [], toolChoice: "none", invocationId: "invocation-1",
+  });
+  for await (const _event of result.fullStream) {}
+  assert.deepEqual(Object.keys(capturedConnection), ["endpoint"]);
+  assert.equal(capturedConnection.endpoint, "https://api.openai.com/v1");
+  assert.equal(capturedConnection.credential, "k".repeat(64));
+  assert.equal(Object.prototype.propertyIsEnumerable.call(capturedConnection, "credential"), false);
+});
+
+test("explicit inference rehydrates API connection and Keychain state after provider restart", async (t) => {
+  const { createInferenceBridgeRuntime } = require(runtimePath);
+  const root = tempRoot(t);
+  const stateRoot = path.join(root, "state");
+  let capturedConnection;
+  let keychainReads = 0;
+  class DirectFixture { constructor() {} }
+  class OpenAIFixture {
+    constructor(options) { this.options = options; }
+    async stream() {
+      capturedConnection = await this.options.resolveConnection();
+      return { fullStream: (async function* () {})() };
+    }
+    dispose() {}
+  }
+  class BridgeFixture { constructor(options) { this.router = options.router; } }
+  const providerController = {
+    async catalog() { return { status: "ready", generation: 12, models: [{ provider: "openai-api-key", model: "gpt-rehydrated" }] }; },
+    async readOnboarding() {
+      return { schemaVersion: 1, providerId: "openai-api-key", connectionGeneration: 5, catalogGeneration: 12, completedAt: "2026-08-19T00:00:00.000Z" };
+    },
+    async listConnections() { return [{ providerId: "openai-api-key", state: "connected", generation: 5 }]; },
+  };
+  const selectionStore = {
+    async read() {
+      return { botId: BOT_A, generation: 2, provider: "openai-api-key", model: "gpt-rehydrated", reasoningEffort: "high", serviceTier: "priority", catalogGeneration: 12 };
+    },
+  };
+  const providerStateStore = {
+    async read() {
+      return { connections: [{ providerId: "openai-api-key", state: "connected", generation: 5, baseUrl: "https://api.openai.com/v1" }] };
+    },
+  };
+  const keychain = { async read(provider) { keychainReads += 1; assert.equal(provider, "openai-api-key"); return "r".repeat(64); } };
+  const inference = createInferenceBridgeRuntime({
+    codexManager: {}, selectionStore,
+    sidecarManager: { async start() { throw new Error("sidecar must remain unused"); } },
+    providerController, providerStateStore, keychain, stateRoot,
+    computerTargetRouter: { async resolve() {} },
+    DirectTransportClass: DirectFixture,
+    OpenAITransportClass: OpenAIFixture,
+    BridgeClass: BridgeFixture,
+  });
+  t.after(() => inference.dispose?.());
+  const result = await inference.router.stream({
+    selection: { botId: BOT_A, generation: 2, provider: "openai-api-key", model: "gpt-rehydrated", reasoningEffort: "high", serviceTier: "priority", catalogGeneration: 12 },
+    conversationId: "conversation-1", messages: [{ role: "user", content: "hello" }], tools: [], toolChoice: "none", invocationId: "invocation-1",
+  });
+  for await (const _event of result.fullStream) {}
+  assert.equal(keychainReads, 1);
+  assert.equal(capturedConnection.endpoint, "https://api.openai.com/v1");
+  assert.equal(capturedConnection.credential, "r".repeat(64));
+  assert.deepEqual(Object.keys(capturedConnection), ["endpoint"]);
 });
 
 test("production direct Codex snapshots the host environment into a plain launch DTO", (t) => {
@@ -575,6 +769,61 @@ test("matching provider onboarding receipt permits IPC create after generation r
   assert.deepEqual(await handlers.get(IPC_CHANNELS.create)({}), bot);
   assert.equal(calls.at(-1), "create");
   assert.deepEqual(calls.slice(0, 3), ["receipt", "connections", "catalog"]);
+});
+
+test("provider authority invalidated after the final catalog read fences IPC before the durable create boundary", async (t) => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  const providerListeners = new Map();
+  const calls = [];
+  const providerController = {
+    async readOnboarding() {
+      return { schemaVersion: 1, providerId: "openai-codex", connectionGeneration: 4, catalogGeneration: 4, completedAt: "2026-08-19T00:00:00.000Z" };
+    },
+    async listConnections() { return [{ providerId: "openai-codex", state: "connected", generation: 4 }]; },
+    async catalog() {
+      return { status: "ready", generation: 4, models: [{ provider: "openai-codex", model: "gpt-live" }] };
+    },
+    async connect() {}, async disconnect() {}, async completeOnboarding() {},
+    on(event, listener) { providerListeners.set(event, listener); },
+    off(event) { providerListeners.delete(event); },
+    dispose() {},
+  };
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async listBots() { return []; },
+    async createBot(_input, options) {
+      providerListeners.get("catalog-changed")?.({ generation: 5, status: "unavailable", models: [] });
+      calls.push(["create", options]);
+      if (options?.commitFence?.() !== true) {
+        const error = new Error("stale provider authority");
+        error.code = "BOT_STORE_PROVIDER_AUTHORITY_STALE";
+        throw error;
+      }
+      calls.push(["mutated"]);
+      return { botId: BOT_A };
+    },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: { handle(channel, handler) { handlers.set(channel, handler); }, removeHandler(channel) { handlers.delete(channel); } },
+    BrowserWindow: { getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    store: {},
+    selectionStore: {},
+    providerController,
+  });
+  t.after(() => installed.dispose());
+  assert.equal(providerListeners.has("catalog-changed"), true);
+  let createOutcome;
+  try { createOutcome = await handlers.get(IPC_CHANNELS.create)({}); } catch (error) { createOutcome = error; }
+  assert.equal(calls.length, 1);
+  assert.equal(typeof calls[0][1]?.commitFence, "function");
+  assert.equal(calls[0][1].commitFence(), false);
+  assert.equal(createOutcome?.code, "CODEX_BOT_OPERATION_FAILED");
+  assert.equal(calls[0][0], "create");
 });
 
 test("setup completion consumes a fresh authoritative Computer selection for the same bot", async () => {
@@ -2214,4 +2463,37 @@ test("native model projection exposes only connected provider catalogs and prefi
   assert.equal(apiSelection.modelId, "openai-api-key--shared-model");
   assert.equal(resolveNativeModelSelection(apiSelection, BOT_A, catalog).provider, "openai-api-key");
   assert.equal(resolveNativeModelSelection(localSelection, BOT_A, catalog).provider, "local-openai-compatible");
+});
+
+test("native provider projection keeps every provider label and vendor identity distinct", () => {
+  const { nativeAvailableModels } = require(runtimePath);
+  const providers = [
+    ["openai-codex", "gpt-5.6-sol"],
+    ["anthropic-claude", "claude-fable-5"],
+    ["google-antigravity", "gemini-3.6-flash-high"],
+    ["moonshot-kimi", "kimi-k3"],
+    ["xai", "grok-4.5"],
+    ["google-vertex-ai", "gemini-3.1-pro"],
+    ["openai-api-key", "gpt-api"],
+    ["local-openai-compatible", "local-model"],
+  ];
+  const response = nativeAvailableModels({
+    generation: 3,
+    status: "ready",
+    models: providers.map(([provider, model]) => ({
+      provider, model, label: model, efforts: ["none"], serviceTiers: [],
+      defaultReasoningEffort: "none", defaultServiceTier: null,
+    })),
+  });
+  assert.deepEqual(response.models.map((entry) => [entry.vendorName, entry.vendor.displayName]), [
+    ["OpenAI Codex", "OpenAI Codex"],
+    ["Anthropic Claude", "Anthropic Claude"],
+    ["Google Antigravity", "Google Antigravity"],
+    ["Moonshot Kimi", "Moonshot Kimi"],
+    ["xAI", "xAI"],
+    ["Google Vertex AI", "Google Vertex AI"],
+    ["OpenAI API key", "OpenAI API key"],
+    ["Local models", "Local models"],
+  ]);
+  assert.equal(new Set(response.models.map((entry) => entry.vendor.id)).size, providers.length);
 });

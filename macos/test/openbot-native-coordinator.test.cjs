@@ -516,6 +516,7 @@ test("protocol v1 hello becomes ready and proactively publishes exact native age
   const coordinator = new OpenBotNativeCoordinator({
     botRuntimeController: bots,
     conversationController: conversations,
+    canCreateAgent: async () => true,
     deleteBots: async (ids) => {
       bots.remove(ids);
       return Object.freeze({
@@ -648,6 +649,7 @@ test("native roster requests preserve correlation and route create, rename, prof
   const coordinator = new OpenBotNativeCoordinator({
     botRuntimeController: bots,
     conversationController: conversations,
+    canCreateAgent: async () => true,
     deleteBots: async (ids) => {
       bots.remove(ids);
       return Object.freeze({
@@ -759,6 +761,25 @@ test("native create requires a current provider onboarding receipt before mutati
   await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
   const reply = await request(port, "create-gated", "createAgent", {
     name: "Blocked", description: "Provider is unavailable.",
+  });
+  assert.equal(reply.outcome.status, "failed");
+  assert.deepEqual(bots.calls.filter(([name]) => name === "createBot"), []);
+});
+
+test("native coordinator construction without a provider gate fails closed", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const reply = await request(port, "create-no-gate", "createAgent", {
+    name: "Blocked", description: "No provider gate was supplied.",
   });
   assert.equal(reply.outcome.status, "failed");
   assert.deepEqual(bots.calls.filter(([name]) => name === "createBot"), []);

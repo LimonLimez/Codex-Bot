@@ -39,16 +39,39 @@ function sessionValues(value) {
   return { endpoint, credential };
 }
 
+function upstreamFetch(providerId, serviceTier) {
+  const baseFetch = globalThis.fetch;
+  return async (input, init = {}) => {
+    const headers = new Headers(init.headers);
+    headers.set("X-OpenBot-Provider", providerId);
+    if (serviceTier !== null) headers.set("X-OpenBot-Service-Tier", serviceTier);
+    let body = init.body;
+    if (typeof body === "string") {
+      try {
+        const payload = JSON.parse(body);
+        if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+          payload.provider = providerId;
+          if (serviceTier !== null) payload.service_tier = serviceTier;
+          body = JSON.stringify(payload);
+        }
+      } catch {}
+    }
+    if (typeof baseFetch !== "function") throw new Error();
+    return baseFetch(input, { ...init, headers, body });
+  };
+}
+
 class CLIProxyInferenceTransport {
   #providerId;
   #session;
   #resolveConnection;
+  #assertConnectionCurrent;
   #ClientClass;
   #clients = new Set();
   #disposed = false;
 
   constructor({ providerId = "anthropic-claude", session = undefined, resolveConnection = null,
-    ClientClass = CodexClient } = {}) {
+    assertConnectionCurrent = null, ClientClass = CodexClient } = {}) {
     let canonical;
     try { canonical = canonicalProviderId(providerId); } catch {
       throw optionalError("CODEX_INFERENCE_CONFIGURATION", "Optional inference configuration is invalid.");
@@ -57,11 +80,13 @@ class CLIProxyInferenceTransport {
     if (!new Set(["oauth", "device", "service-account"]).has(descriptor.loginKind)
       || typeof ClientClass !== "function"
       || (resolveConnection !== null && typeof resolveConnection !== "function")
+      || (assertConnectionCurrent !== null && typeof assertConnectionCurrent !== "function")
       || (session !== undefined && resolveConnection !== null)) {
       throw optionalError("CODEX_INFERENCE_CONFIGURATION", "Optional inference configuration is invalid.");
     }
     this.#providerId = canonical;
     this.#resolveConnection = resolveConnection;
+    this.#assertConnectionCurrent = assertConnectionCurrent || (() => true);
     this.#session = session === undefined ? null : sessionValues(session);
     this.#ClientClass = ClientClass;
   }
@@ -102,26 +127,87 @@ class CLIProxyInferenceTransport {
       if (error instanceof CLIProxyInferenceError) throw error;
       throw optionalError("CODEX_INFERENCE_UNAVAILABLE", "Optional inference is unavailable.");
     }
-    const config = {
-      botId: selection.botId,
-      generation: selection.generation,
-      model: selection.model,
-      reasoningEffort: selection.reasoningEffort,
+    const verifyProvider = () => {
+      let current;
+      try { current = this.#assertConnectionCurrent(selection, session); }
+      catch { throw optionalError("CODEX_INFERENCE_STALE", "Codex inference provider generation changed."); }
+      if (current && typeof current.then === "function") {
+        return Promise.resolve(current).then((value) => {
+          if (value !== true) throw optionalError("CODEX_INFERENCE_STALE", "Codex inference provider generation changed.");
+        });
+      }
+      if (current !== true) throw optionalError("CODEX_INFERENCE_STALE", "Codex inference provider generation changed.");
+      return undefined;
     };
-    Object.defineProperties(config, {
-      endpoint: { value: session.endpoint, enumerable: false },
-      credential: { value: session.credential, enumerable: false },
+    const construct = () => {
+      const config = {
+        botId: selection.botId,
+        generation: selection.generation,
+        provider: this.#providerId,
+        providerId: this.#providerId,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
+        serviceTier: selection.serviceTier,
+      };
+      Object.defineProperties(config, {
+        endpoint: { value: session.endpoint, enumerable: false },
+        credential: { value: session.credential, enumerable: false },
+      });
+      Object.freeze(config);
+      let client;
+      try {
+        const clientOptions = { config, isCurrent: () => !this.#disposed };
+        if (this.#ClientClass === CodexClient) {
+          clientOptions.fetchImpl = upstreamFetch(this.#providerId, selection.serviceTier);
+        }
+        client = new this.#ClientClass(clientOptions);
+        this.#clients.add(client);
+      } catch {
+        try { client?.dispose?.(); } catch {}
+        if (client) this.#clients.delete(client);
+        throw optionalError("CODEX_INFERENCE_UNAVAILABLE", "Optional inference is unavailable.");
+      }
+      const send = () => {
+        let result;
+        try {
+          result = client.stream(request);
+          return this.#wrapResult(request, result, client);
+        } catch (error) {
+          try { client?.dispose?.(); } catch {}
+          this.#clients.delete(client);
+          if (error instanceof CLIProxyInferenceError) throw error;
+          throw optionalError("CODEX_INFERENCE_UNAVAILABLE", "Optional inference is unavailable.");
+        }
+      };
+      try {
+        const beforeSend = verifyProvider();
+        return beforeSend && typeof beforeSend.then === "function"
+          ? beforeSend.then(send, (error) => {
+            try { client?.dispose?.(); } catch {}
+            this.#clients.delete(client);
+            throw error;
+          })
+          : send();
+      } catch (error) {
+        try { client?.dispose?.(); } catch {}
+        this.#clients.delete(client);
+        throw error;
+      }
+    };
+    const first = verifyProvider();
+    if (first && typeof first.then === "function") return first.then(() => {
+      const second = verifyProvider();
+      return second && typeof second.then === "function" ? second.then(construct) : construct();
     });
-    Object.freeze(config);
-    let client;
-    let result;
-    try {
-      client = new this.#ClientClass({ config, isCurrent: () => !this.#disposed });
-      this.#clients.add(client);
-      result = client.stream(request);
-    } catch {
+    const second = verifyProvider();
+    return second && typeof second.then === "function" ? second.then(construct) : construct();
+  }
+
+  #wrapResult(request, result, client) {
+    if (!result || typeof result !== "object" || types.isProxy(result)
+      || !result.fullStream || typeof result.fullStream[Symbol.asyncIterator] !== "function") {
       try { client?.dispose?.(); } catch {}
-      if (client) this.#clients.delete(client);
+      this.#clients.delete(client);
       throw optionalError("CODEX_INFERENCE_UNAVAILABLE", "Optional inference is unavailable.");
     }
     const owner = this;

@@ -393,6 +393,29 @@ function normalizeCreateInput(value) {
   };
 }
 
+function normalizeCreateCommitOptions(value) {
+  if (value === undefined) return null;
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw new TypeError("Bot create commit options must be a plain object.");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || prototype !== Object.prototype) {
+    throw new TypeError("Bot create commit options must be a plain object.");
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.length !== 1 || keys[0] !== "commitFence"
+    || !descriptors.commitFence || !("value" in descriptors.commitFence)
+    || typeof descriptors.commitFence.value !== "function") {
+    throw new TypeError("Bot create commit options require a commit fence.");
+  }
+  return descriptors.commitFence.value;
+}
+
 function normalizeConversationRef(value) {
   const ref = assertPlainObject(value, "Conversation reference");
   if (ref.source === "chatgpt") {
@@ -1275,8 +1298,9 @@ class BotStore {
     }));
   }
 
-  async create(input = undefined) {
+  async create(input = undefined, options = undefined) {
     const { appearance, notifications, setupStage } = normalizeCreateInput(input);
+    const commitFence = normalizeCreateCommitOptions(options);
 
     return this.#mutate((next) => {
       const timestamp = safeNow(this.#now);
@@ -1295,7 +1319,7 @@ class BotStore {
       };
       next.bots.push(record);
       return record.botId;
-    });
+    }, commitFence);
   }
 
   async adoptLegacy(value) {
@@ -1563,7 +1587,7 @@ class BotStore {
     return enqueuePath(this.#filePath, operation);
   }
 
-  async #mutate(operation) {
+  async #mutate(operation, commitFence = null) {
     return this.#enqueue(() => this.#withPathLock(async () => {
       const current = await this.#readFile();
       const next = cloneData(current);
@@ -1573,12 +1597,21 @@ class BotStore {
       }
       const botId = typeof outcome === "string" ? outcome : outcome.botId;
       const validated = normalizeStore(next);
-      await this.#commitState(current, validated);
+      await this.#commitState(current, validated, commitFence);
       return publicSnapshot(this.#requiredBot(validated, botId));
     }));
   }
 
-  async #commitState(current, committed) {
+  async #commitState(current, committed, commitFence = null) {
+    if (commitFence !== null) {
+      let valid = false;
+      try { valid = commitFence() === true; } catch { valid = false; }
+      if (!valid) {
+        const error = new Error("Bot create provider authority is stale.");
+        error.code = "BOT_STORE_PROVIDER_AUTHORITY_STALE";
+        throw error;
+      }
+    }
     try {
       await this.#writeFile(committed);
     } catch (error) {

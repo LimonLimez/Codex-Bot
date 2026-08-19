@@ -890,7 +890,7 @@ class OpenBotNativeCoordinator {
     deleteBots = null,
     onSelectAgent = null,
     readActiveAgentId = null,
-    canCreateAgent = async () => true,
+    canCreateAgent = async () => false,
     now = Date.now,
   } = {}) {
     if (!botRuntimeController
@@ -1614,16 +1614,23 @@ class OpenBotNativeCoordinator {
       title: "",
       description,
     };
-    let allowed = false;
-    try { allowed = (await this.#canCreateAgent()) === true; } catch { allowed = false; }
-    if (this.#disposed || !allowed) {
+    let authority = null;
+    try { authority = await this.#canCreateAgent(); } catch { authority = null; }
+    if (this.#disposed || !authority) {
       throw coordinatorFailure("source/provider-unavailable", "OpenBot provider onboarding is unavailable.");
     }
-    let created = await this.#bots.createBot({
+    const createOptions = authority && typeof authority === "object"
+      && typeof authority.commitFence === "function"
+      ? { commitFence: authority.commitFence }
+      : undefined;
+    const createInput = {
       appearance,
       notifications: true,
       setupStage: "complete",
-    });
+    };
+    let created = createOptions === undefined
+      ? await this.#bots.createBot(createInput)
+      : await this.#bots.createBot(createInput, createOptions);
     const id = botId(created.botId);
     const token = this.#captureBot(id);
     created = await this.#bots.renameBot(id, name);

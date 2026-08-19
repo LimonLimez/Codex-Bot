@@ -269,3 +269,59 @@ test("disconnected selection fails before transport construction", async () => {
   });
   assert.equal(transportCalls, 0);
 });
+
+test("router disposes a provider transport that resolves after router disposal", async () => {
+  const { InferenceProviderRouter } = require(routerPath);
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let factoryStarted;
+  const factoryEntered = new Promise((resolve) => { factoryStarted = resolve; });
+  let disposed = 0;
+  let streamCalls = 0;
+  const router = new InferenceProviderRouter({
+    readSelection: async () => selection(),
+    descriptorForProvider: () => ({ reasoningEfforts: ["ultra"], fastModeSupported: true, models: [] }),
+    transportForProvider: async () => {
+      factoryStarted();
+      const result = await gate;
+      return {
+        stream() { streamCalls += 1; return result; },
+        dispose() { disposed += 1; },
+      };
+    },
+  });
+  const pending = router.stream(request());
+  await factoryEntered;
+  router.dispose();
+  release({
+    stream() {
+      streamCalls += 1;
+      return { fullStream: (async function* () { yield { type: "finish" }; })() };
+    },
+    dispose() { disposed += 1; },
+  });
+  await assert.rejects(pending, { code: "CODEX_INFERENCE_DISPOSED" });
+  assert.equal(streamCalls, 0);
+  assert.equal(disposed, 1);
+});
+
+test("router owns a provider transport until its returned stream settles", async () => {
+  const { InferenceProviderRouter } = require(routerPath);
+  let disposed = 0;
+  const router = new InferenceProviderRouter({
+    readSelection: async () => selection(),
+    descriptorForProvider: () => ({ reasoningEfforts: ["ultra"], fastModeSupported: true, models: [] }),
+    transportForProvider: async () => ({
+      stream() {
+        return {
+          fullStream: (async function* () { yield { type: "finish" }; })(),
+        };
+      },
+      dispose() { disposed += 1; },
+    }),
+  });
+  const result = await router.stream(request());
+  router.dispose();
+  await assert.rejects(async () => { for await (const _event of result.fullStream) {} }, { code: "CODEX_INFERENCE_DISPOSED" });
+  assert.equal(disposed, 1);
+});

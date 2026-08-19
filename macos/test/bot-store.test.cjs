@@ -241,6 +241,23 @@ test("trusted native creation may start complete while ordinary creation remains
   );
 });
 
+test("provider authority fences the durable create commit immediately before the store write", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  let checks = 0;
+  await assert.rejects(
+    store.create({ setupStage: "complete" }, {
+      commitFence: () => {
+        checks += 1;
+        return false;
+      },
+    }),
+    { code: "BOT_STORE_PROVIDER_AUTHORITY_STALE" },
+  );
+  assert.equal(checks, 1);
+  assert.deepEqual(await store.list(), []);
+  assert.equal(await fs.stat(filePath).then(() => true, () => false), false);
+});
+
 test("setup stage advances only through exact monotonic expected-stage transactions", async (t) => {
   const { filePath, store } = await temporaryStore(t);
   const created = await store.create();
