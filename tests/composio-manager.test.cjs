@@ -11,13 +11,27 @@ const {
   createComposioManager,
 } = require("../src/composio-manager.cjs");
 
+test("Composio uses the production launcher state-root contract", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "src", "composio-manager.cjs"),
+    "utf8",
+  );
+  const launcher = fs.readFileSync(
+    path.join(__dirname, "..", "src", "runtime", "Launch-Codex-Bot.ps1"),
+    "utf8",
+  );
+  assert.match(source, /process\.env\.CODEX_BOT_STATE_ROOT/);
+  assert.doesNotMatch(source, /process\.env\.GROK_BOT_STATE_ROOT/);
+  assert.match(launcher, /\$env:CODEX_BOT_STATE_ROOT = \$stateRoot/);
+});
+
 function fixture(t, overrides = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-composio-"));
-  const prior = process.env.GROK_BOT_STATE_ROOT;
-  process.env.GROK_BOT_STATE_ROOT = root;
+  const prior = process.env.CODEX_BOT_STATE_ROOT;
+  process.env.CODEX_BOT_STATE_ROOT = root;
   t.after(() => {
-    if (prior == null) delete process.env.GROK_BOT_STATE_ROOT;
-    else process.env.GROK_BOT_STATE_ROOT = prior;
+    if (prior == null) delete process.env.CODEX_BOT_STATE_ROOT;
+    else process.env.CODEX_BOT_STATE_ROOT = prior;
     fs.rmSync(root, { recursive: true, force: true });
   });
   const calls = [];

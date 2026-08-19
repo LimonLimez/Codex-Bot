@@ -37,7 +37,7 @@ function isPlainObject(value) {
 }
 
 function stateDirectory() {
-  const root = String(process.env.GROK_BOT_STATE_ROOT || "").trim();
+  const root = String(process.env.CODEX_BOT_STATE_ROOT || "").trim();
   if (!path.isAbsolute(root))
     throw new ComposioError(
       "Open Bot's protected state directory is unavailable.",
