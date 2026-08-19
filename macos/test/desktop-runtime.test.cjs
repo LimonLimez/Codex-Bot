@@ -48,6 +48,44 @@ function accountWithCatalog(catalog = readyCatalog(), onStart = async () => {}) 
   };
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function runtimeFixture(t, {
+  providerController = null,
+  selectionStore = {},
+  botDeletionCoordinator = null,
+} = {}) {
+  const { installDesktopRuntime } = require(runtimePath);
+  const handlers = new Map();
+  const frame = { processId: 31, routingId: 47, isDestroyed: () => false };
+  const sender = { mainFrame: frame, isDestroyed: () => false, send() {} };
+  const window = { isDestroyed: () => false, webContents: sender };
+  const controller = { on() {}, off() {}, dispose() {} };
+  const electron = {
+    app: { once() {}, on() {}, off() {} },
+    ipcMain: {
+      on() {},
+      removeListener() {},
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(value) { return value === sender ? window : null; },
+      getAllWindows() { return [window]; },
+    },
+  };
+  const injected = { controller, selectionStore };
+  if (providerController !== null) injected.providerController = providerController;
+  if (botDeletionCoordinator !== null) injected.botDeletionCoordinator = botDeletionCoordinator;
+  const installed = installDesktopRuntime(electron, injected);
+  t.after(() => installed.dispose());
+  return Object.freeze({ electron, handlers, frame, sender, window, installed });
+}
+
 function tempRoot(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-desktop-runtime-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -640,11 +678,11 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
     "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy", "advanceSetup",
     "catalogList", "computerRead", "computerSelectMode", "connectProvider", "create", "list",
     "permissionDecide", "permissionRequestsList", "permissionRevoke", "permissionsList",
-    "providerCatalog", "providerConnect", "providerDisconnect", "providerList", "providerOnboardingComplete", "providerOnboardingRead",
-    "read", "readModel", "rename",
+    "providerAuthoritySnapshot", "providerCatalog", "providerConnect", "providerDisconnect", "providerList", "providerOnboardingComplete", "providerOnboardingRead",
+    "read", "readActiveBotId", "readModel", "rename",
     "retryRuntime", "selectBot", "selectModel", "updateProfile",
   ]);
-  assert.equal(handlers.size, 30);
+  assert.equal(handlers.size, 32);
   assert.equal(Object.isFrozen(installed), true);
   assert.equal(typeof installed.releaseEarlySyncIpc, "function");
   assert.deepEqual([...synchronousListeners.keys()].sort(), [
@@ -794,6 +832,7 @@ test("provider IPC is main-frame scoped and codex-bot creation is gated before m
     },
   };
   const providerController = {
+    async readAuthoritySnapshot() { return { schemaVersion: 1, connections: [], catalog: { generation: 0, status: "unavailable", models: [] }, onboarding: null }; },
     async listConnections() { calls.push("list"); return []; },
     async connect() { calls.push("connect"); },
     async disconnect() { calls.push("disconnect"); },
@@ -829,11 +868,146 @@ test("provider IPC is main-frame scoped and codex-bot creation is gated before m
   assert.deepEqual(calls.filter((value) => value === "create"), []);
 });
 
+test("authority snapshot delegates exactly once without provider mutation", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const calls = [];
+  const snapshot = Object.freeze({
+    schemaVersion: 1,
+    connections: Object.freeze([]),
+    catalog: Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) }),
+    onboarding: null,
+  });
+  const providerController = {
+    async readAuthoritySnapshot() { calls.push("authority"); return snapshot; },
+    async listConnections() { calls.push("list"); return []; },
+    async connect() { calls.push("connect"); },
+    async disconnect() { calls.push("disconnect"); },
+    async catalog() { calls.push("catalog"); return snapshot.catalog; },
+    async readOnboarding() { calls.push("onboarding-read"); return null; },
+    async completeOnboarding() { calls.push("onboarding-complete"); },
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController });
+  const event = { sender: fixture.sender, senderFrame: fixture.frame };
+  assert.equal(IPC_CHANNELS.providerAuthoritySnapshot, "openbot-provider:authority-snapshot");
+  const result = await fixture.handlers.get(IPC_CHANNELS.providerAuthoritySnapshot)(event);
+  assert.strictEqual(result, snapshot);
+  assert.deepEqual(calls, ["authority"]);
+});
+
+test("active bot identity read returns only a valid ID or null", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  for (const activeBotId of [BOT_A, null]) {
+    const calls = [];
+    const fixture = runtimeFixture(t, {
+      selectionStore: {
+        async readActiveBotId() { calls.push("read"); return activeBotId; },
+        async selectBot() { calls.push("select"); throw new Error("must remain read-only"); },
+      },
+    });
+    const event = { sender: fixture.sender, senderFrame: fixture.frame };
+    assert.equal(IPC_CHANNELS.readActiveBotId, "codex-bot:read-active-bot-id");
+    assert.equal(
+      await fixture.handlers.get(IPC_CHANNELS.readActiveBotId)(event),
+      activeBotId,
+    );
+    assert.deepEqual(calls, ["read"]);
+  }
+});
+
+test("malformed active bot identity fails closed without selecting a bot", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const calls = [];
+  const fixture = runtimeFixture(t, {
+    selectionStore: {
+      async readActiveBotId() { calls.push("read"); return { botId: BOT_A }; },
+      async selectBot() { calls.push("select"); },
+    },
+  });
+  const event = { sender: fixture.sender, senderFrame: fixture.frame };
+  await assert.rejects(
+    fixture.handlers.get(IPC_CHANNELS.readActiveBotId)(event),
+    { code: "CODEX_BOT_OPERATION_FAILED" },
+  );
+  assert.deepEqual(calls, ["read"]);
+});
+
+test("read-only authority handlers reject a navigated main frame while startup is held", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const startup = deferred();
+  let authorityReads = 0;
+  let activeReads = 0;
+  const snapshot = Object.freeze({
+    schemaVersion: 1,
+    connections: Object.freeze([]),
+    catalog: Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) }),
+    onboarding: null,
+  });
+  const providerController = {
+    async readAuthoritySnapshot() { authorityReads += 1; return snapshot; },
+    async listConnections() { return []; },
+    async connect() {}, async disconnect() {}, async catalog() { return snapshot.catalog; },
+    async readOnboarding() { return null; }, async completeOnboarding() {},
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, {
+    providerController,
+    selectionStore: { async readActiveBotId() { activeReads += 1; return null; } },
+    botDeletionCoordinator: {
+      async reconcilePending() { return startup.promise; },
+      async deleteBots() {},
+      dispose() {},
+    },
+  });
+  const event = { sender: fixture.sender, senderFrame: fixture.frame };
+  const authorityPending = fixture.handlers.get(IPC_CHANNELS.providerAuthoritySnapshot)(event);
+  const activePending = fixture.handlers.get(IPC_CHANNELS.readActiveBotId)(event);
+  fixture.sender.mainFrame = { processId: 31, routingId: 48, isDestroyed: () => false };
+  startup.resolve();
+  await assert.rejects(authorityPending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  await assert.rejects(activePending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(authorityReads, 0);
+  assert.equal(activeReads, 0);
+});
+
+test("read-only authority handlers fail closed when disposed before startup is ready", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const startup = deferred();
+  let authorityReads = 0;
+  let activeReads = 0;
+  const providerController = {
+    async readAuthoritySnapshot() { authorityReads += 1; return null; },
+    async listConnections() { return []; },
+    async connect() {}, async disconnect() {}, async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; }, async completeOnboarding() {},
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, {
+    providerController,
+    selectionStore: { async readActiveBotId() { activeReads += 1; return null; } },
+    botDeletionCoordinator: {
+      async reconcilePending() { return startup.promise; },
+      async deleteBots() {},
+      dispose() {},
+    },
+  });
+  const event = { sender: fixture.sender, senderFrame: fixture.frame };
+  const authorityPending = fixture.handlers.get(IPC_CHANNELS.providerAuthoritySnapshot)(event);
+  const activePending = fixture.handlers.get(IPC_CHANNELS.readActiveBotId)(event);
+  await fixture.installed.dispose();
+  startup.resolve();
+  await assert.rejects(authorityPending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  await assert.rejects(activePending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(authorityReads, 0);
+  assert.equal(activeReads, 0);
+});
+
 test("matching provider onboarding receipt permits IPC create after generation re-read", async (t) => {
   const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
   const handlers = new Map();
   const calls = [];
   const providerController = {
+    async readAuthoritySnapshot() { return { schemaVersion: 1, connections: [], catalog: { generation: 0, status: "unavailable", models: [] }, onboarding: null }; },
     async readOnboarding() { calls.push("receipt"); return { schemaVersion: 1, providerId: "openai-codex", connectionGeneration: 4, catalogGeneration: 4, completedAt: "2026-08-19T00:00:00.000Z" }; },
     async catalog() { calls.push("catalog"); return { status: "ready", generation: 4, models: [{ provider: "openai-codex", model: "gpt-live" }] }; },
     async listConnections() { calls.push("connections"); return [{ providerId: "openai-codex", state: "connected", generation: 4 }]; },
@@ -868,6 +1042,7 @@ test("provider authority invalidated after the final catalog read fences IPC bef
   const providerListeners = new Map();
   const calls = [];
   const providerController = {
+    async readAuthoritySnapshot() { return { schemaVersion: 1, connections: [], catalog: { generation: 0, status: "unavailable", models: [] }, onboarding: null }; },
     async readOnboarding() {
       return { schemaVersion: 1, providerId: "openai-codex", connectionGeneration: 4, catalogGeneration: 4, completedAt: "2026-08-19T00:00:00.000Z" };
     },

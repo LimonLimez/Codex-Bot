@@ -62,6 +62,7 @@ const IPC_CHANNELS = Object.freeze({
   providerCatalog: "openbot-provider:catalog",
   providerOnboardingRead: "openbot-provider:onboarding-read",
   providerOnboardingComplete: "openbot-provider:onboarding-complete",
+  providerAuthoritySnapshot: "openbot-provider:authority-snapshot",
   list: "codex-bot:list",
   create: "codex-bot:create",
   adoptLegacy: "codex-bot:adopt-legacy",
@@ -72,6 +73,7 @@ const IPC_CHANNELS = Object.freeze({
   advanceSetup: "codex-bot:advance-setup",
   retryRuntime: "codex-bot:retry-runtime",
   selectBot: "codex-bot:select-bot",
+  readActiveBotId: "codex-bot:read-active-bot-id",
   readModel: "codex-bot:read-model",
   selectModel: "codex-bot:select-model",
   computerSelectMode: "openbot-computer:select-mode",
@@ -1476,7 +1478,7 @@ function installDesktopRuntime(electron, injected = {}) {
   const providerController = dependencies.providerController || null;
   if (providerController !== null
     && (!providerController || typeof providerController !== "object"
-      || ["listConnections", "connect", "disconnect", "catalog", "readOnboarding", "completeOnboarding"]
+      || ["listConnections", "connect", "disconnect", "catalog", "readOnboarding", "completeOnboarding", "readAuthoritySnapshot"]
         .some((name) => typeof providerController[name] !== "function"))) throw sanitizedFailure();
   const codexManager = dependencies.codexManager || Object.freeze({
     async start() {},
@@ -1664,6 +1666,13 @@ function installDesktopRuntime(electron, injected = {}) {
       return catalog;
     }
     return accountController.catalogState();
+  }
+
+  async function readActiveBotId() {
+    if (!selectionStore || typeof selectionStore.readActiveBotId !== "function") throw sanitizedFailure();
+    const value = await selectionStore.readActiveBotId();
+    if (value !== null && (typeof value !== "string" || !BOT_ID.test(value))) throw sanitizedFailure();
+    return value;
   }
 
   function providerAuthorityToken({ providerId = null, connectionGeneration = null, catalogGeneration = null } = {}) {
@@ -2045,6 +2054,12 @@ function installDesktopRuntime(electron, injected = {}) {
     if (providerController === null) throw sanitizedFailure();
     return providerController.readOnboarding();
   }, { requireMainFrame: true });
+  handle(IPC_CHANNELS.providerAuthoritySnapshot, async () => {
+    if (providerController === null || typeof providerController.readAuthoritySnapshot !== "function") {
+      throw sanitizedFailure();
+    }
+    return providerController.readAuthoritySnapshot();
+  }, { requireMainFrame: true });
   handle(IPC_CHANNELS.providerOnboardingComplete, async (value) => {
     if (providerController === null) throw sanitizedFailure();
     providerAuthorityEpoch += 1;
@@ -2115,6 +2130,7 @@ function installDesktopRuntime(electron, injected = {}) {
     await selectionStore.selectBot(bot.botId);
     return selection;
   }));
+  handle(IPC_CHANNELS.readActiveBotId, readActiveBotId, { requireMainFrame: true });
   handle(IPC_CHANNELS.readModel, (botId) => serializeActiveIdentityMutation(async () => {
     const bot = await controller.readBot(botId);
     if (!bot || bot.botId !== botId) throw sanitizedFailure();
