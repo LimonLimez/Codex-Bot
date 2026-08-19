@@ -542,6 +542,26 @@ function providerOwnedAccountPublic(value) {
   });
 }
 
+function providerAccountSettlementObserved(value) {
+  let descriptors;
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch { return false; }
+  const statusDescriptor = descriptors.status;
+  const loginDescriptor = descriptors.login;
+  if ((statusDescriptor && !("value" in statusDescriptor))
+    || (loginDescriptor && !("value" in loginDescriptor))) return false;
+  const status = statusDescriptor?.value;
+  const login = loginDescriptor?.value;
+  if (!new Set(["starting", "signed-out", "signing-in", "ready", "offline"]).has(status)
+    || status === "signing-in" || (login !== null && login !== undefined)) return false;
+  return ["verificationUrl", "userCode", "loginId", "authUrl", "browserUrl", "openUrl"]
+    .every((field) => !Object.hasOwn(descriptors, field));
+}
+
 function catalogModels(catalog) {
   if (!catalog || typeof catalog !== "object" || catalog.status !== "ready"
     || !Number.isSafeInteger(catalog.generation) || catalog.generation < 1
@@ -1621,11 +1641,10 @@ function installDesktopRuntime(electron, injected = {}) {
       generation: ++providerLoginGeneration,
       references: 1,
       flightSettled: false,
+      ceremonyObserved: false,
       cancellationPending: false,
       cancellationSettled: false,
       cancellationEventSettled: false,
-      cancellationWaitForEvent: false,
-      cancellationPromises: 0,
       cancellationWait: null,
       cancellationResolve: null,
       abortListener: null,
@@ -1649,49 +1668,37 @@ function installDesktopRuntime(electron, injected = {}) {
   }
 
   function settleProviderLoginCancellation(owner) {
-    if (!owner || owner.cancellationSettled || owner.cancellationPromises > 0
-      || (owner.cancellationWaitForEvent && !owner.cancellationEventSettled)) return;
+    if (!owner || owner.cancellationSettled || !owner.cancellationEventSettled) return;
     owner.cancellationSettled = true;
     try { owner.cancellationResolve?.(); } catch {}
     finalizeProviderLoginOwnership(owner);
   }
 
   function providerAccountCancellationSettled(owner, event = null) {
-    if (!owner?.cancellationPending || owner.cancellationSettled) return;
-    let status = null;
-    try { status = event?.status; } catch { status = null; }
-    if (typeof status !== "string") {
-      try { status = accountController.accountState?.()?.status; } catch { status = null; }
-    }
-    if (status !== "signing-in") {
-      owner.cancellationEventSettled = true;
-      settleProviderLoginCancellation(owner);
-    }
+    if (!owner || owner.finalized || !event) return;
+    const settled = providerAccountSettlementObserved(event);
+    owner.ceremonyObserved ||= !settled;
+    owner.cancellationEventSettled = settled;
+    if (!settled && owner.cancellationPending) owner.cancellationSettled = false;
+    if (owner.cancellationEventSettled && owner.cancellationPending) settleProviderLoginCancellation(owner);
   }
 
   function holdProviderLoginCancellation(owner, cancellation = null) {
     if (!owner || owner.finalized) return Promise.resolve();
     owner.cancellationPending = true;
+    if (owner.cancellationSettled) owner.cancellationSettled = false;
     if (!owner.cancellationWait) {
       owner.cancellationWait = new Promise((resolve) => { owner.cancellationResolve = resolve; });
     }
+    // A cleanup Promise is only an attempted operation. Even a resolved or
+    // rejected cleanup can leave the provider account signing in, so ownership
+    // cannot clear until the account observer has published a settled state.
     if (cancellation && typeof cancellation.then === "function") {
       if (owner.cancellationSettled && !owner.finalized) owner.cancellationSettled = false;
-      owner.cancellationWaitForEvent = false;
-      owner.cancellationPromises += 1;
       Promise.resolve(cancellation).then(
-        () => {
-          owner.cancellationPromises = Math.max(0, owner.cancellationPromises - 1);
-          settleProviderLoginCancellation(owner);
-        },
-        () => {
-          owner.cancellationPromises = Math.max(0, owner.cancellationPromises - 1);
-          settleProviderLoginCancellation(owner);
-        },
+        () => settleProviderLoginCancellation(owner),
+        () => settleProviderLoginCancellation(owner),
       );
-    } else {
-      owner.cancellationWaitForEvent = true;
-      providerAccountCancellationSettled(owner);
     }
     return owner.cancellationWait;
   }
@@ -1707,6 +1714,9 @@ function installDesktopRuntime(electron, injected = {}) {
     Promise.resolve(flight).then(
       () => {
         owner.flightSettled = true;
+        if (owner.ceremonyObserved && !owner.cancellationEventSettled) {
+          void holdProviderLoginCancellation(owner);
+        }
         releaseProviderLoginOwnership(owner);
       },
       () => {
