@@ -1286,3 +1286,134 @@ test("I3 onboarding write acknowledgement survives disposal during held post-wri
   assert.deepEqual(receipt, state.state.onboarding);
   assert.equal(writes, 1);
 });
+
+test("C7 queued offline invalidation converges durably after a held ready reconciliation and survives fresh projection", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 1);
+  const account = new FakeDirectAccount();
+  let releaseRead;
+  let reads = 0;
+  const originalRead = state.read.bind(state);
+  state.read = async () => {
+    reads += 1;
+    if (reads === 1) await new Promise((resolve) => { releaseRead = resolve; });
+    return originalRead();
+  };
+  const controller = new ProviderController({ stateStore: state, account });
+  account.emit("catalog-changed", account.catalog);
+  while (typeof releaseRead !== "function") await new Promise((resolve) => setImmediate(resolve));
+  account.account = { ...account.account, status: "offline", authMode: null, login: null };
+  account.emit("account-changed", account.account);
+  releaseRead();
+  for (let attempt = 0; attempt < 30 && state.state.connections[0]?.state === "connected"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(reads < 12, `finite signal suffix must converge, reads=${reads}`);
+  assert.equal(state.state.connections[0]?.state, "unavailable");
+  assert.deepEqual(state.state.connections[0]?.models, []);
+  const fresh = new ProviderController({ stateStore: state, account: new FakeDirectAccount({ signedOut: true }) });
+  const snapshot = await fresh.readAuthoritySnapshot();
+  assert.equal(snapshot.catalog.status, "unavailable");
+  assert.deepEqual(snapshot.catalog.models, []);
+  assert.equal(snapshot.connections[0].state, "unavailable");
+  controller.dispose();
+  fresh.dispose();
+});
+
+test("C7 queued ready signal restores the latest qualified Direct authority after held invalidation", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 2);
+  const account = new FakeDirectAccount();
+  let releaseRead;
+  let reads = 0;
+  const originalRead = state.read.bind(state);
+  state.read = async () => {
+    reads += 1;
+    if (reads === 1) await new Promise((resolve) => { releaseRead = resolve; });
+    return originalRead();
+  };
+  const controller = new ProviderController({ stateStore: state, account });
+  account.account = { ...account.account, status: "offline", authMode: null, login: null };
+  account.emit("account-changed", account.account);
+  while (typeof releaseRead !== "function") await new Promise((resolve) => setImmediate(resolve));
+  account.account = { ...account.account, status: "ready", authMode: "chatgpt", login: null };
+  account.catalog = { generation: 12, status: "ready", models: [directAccountModel("gpt-live-sol")] };
+  account.emit("account-changed", account.account);
+  account.emit("catalog-changed", account.catalog);
+  releaseRead();
+  for (let attempt = 0; attempt < 30 && state.state.connections[0]?.models[0]?.model !== "gpt-live-sol"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(reads < 14, `finite signal suffix must converge, reads=${reads}`);
+  assert.equal(state.state.connections[0]?.state, "connected");
+  assert.equal(state.state.connections[0]?.models[0]?.model, "gpt-live-sol");
+  controller.dispose();
+});
+
+test("M2 hosted/API/local publication disposal compensation is classified as DISPOSED", async (t) => {
+  const { ProviderController } = require(controllerPath);
+  const cases = [
+    {
+      name: "hosted Claude",
+      providerId: "anthropic-claude",
+      request: { providerId: "anthropic-claude" },
+      dependencies: () => ({
+        cliproxy: {
+          connectProvider: async () => {}, importVertex: async () => {},
+          connectionStatus: async () => ({ state: "connected" }),
+          listModels: async () => [descriptorModel("anthropic-claude")],
+          disconnectProvider: async () => {},
+        },
+      }),
+    },
+    {
+      name: "OpenAI API key",
+      providerId: "openai-api-key",
+      request: { providerId: "openai-api-key", apiKey: "sk-test" },
+      dependencies: () => ({
+        openai: {
+          discover: async () => ({ models: [{ provider: "openai-api-key", model: "gpt-live", label: "Live" }] }),
+          streamConfiguration: () => ({ providerId: "openai-api-key", baseUrl: "https://api.openai.com/v1", apiKey: null }),
+        },
+      }),
+    },
+    {
+      name: "local OpenAI-compatible",
+      providerId: "local-openai-compatible",
+      request: { providerId: "local-openai-compatible", baseUrl: "http://127.0.0.1:11434/v1" },
+      dependencies: () => ({
+        openai: {
+          discover: async () => ({ models: [{ provider: "local-openai-compatible", model: "local-model", label: "Local" }] }),
+          streamConfiguration: () => ({ providerId: "local-openai-compatible", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null }),
+        },
+      }),
+    },
+  ];
+  for (const entry of cases) {
+    await t.test(entry.name, async () => {
+      const state = new FakeStateStore();
+      let releasePublication;
+      let reads = 0;
+      const originalRead = state.read.bind(state);
+      state.read = async () => {
+        reads += 1;
+        if (reads === 2) await new Promise((resolve) => { releasePublication = resolve; });
+        return originalRead();
+      };
+      const controller = new ProviderController({ stateStore: state, ...entry.dependencies() });
+      const pending = controller.connect(entry.request);
+      void pending.catch(() => {});
+      while (typeof releasePublication !== "function") await new Promise((resolve) => setImmediate(resolve));
+      const disposing = controller.dispose();
+      releasePublication();
+      await disposing;
+      await assert.rejects(pending, { code: "OPENBOT_PROVIDER_DISPOSED" });
+      const row = state.state.connections.find(({ providerId }) => providerId === entry.providerId);
+      assert.equal(row?.state, "unavailable");
+      assert.equal(row?.errorCode, "OPENBOT_PROVIDER_DISPOSED");
+      assert.deepEqual(row?.models || [], []);
+    });
+  }
+});

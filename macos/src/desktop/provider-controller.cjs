@@ -882,10 +882,15 @@ class ProviderController extends EventEmitter {
       return;
     }
     const run = async () => {
-      do {
+      while (!this.#disposed) {
         this.#directReconcileQueued = false;
-        await this.#reconcileDirectLifecycle();
-      } while (this.#directReconcileQueued && !this.#disposed);
+        try {
+          await this.#reconcileDirectLifecycle();
+        } catch (error) {
+          if (!this.#directReconcileQueued || this.#disposed) throw error;
+        }
+        if (!this.#directReconcileQueued) return;
+      }
     };
     const flight = run().catch(() => {}).finally(() => {
       if (this.#directReconcileFlight === flight) this.#directReconcileFlight = null;
@@ -1096,9 +1101,13 @@ class ProviderController extends EventEmitter {
       }
       return (await this.listConnections()).find(({ providerId: current }) => current === providerId);
     } catch (error) {
-      const publicError = this.#publicError(error,
-        error?.code === "OPENBOT_PROVIDER_CANCELLED" || /CANCELLED$/i.test(String(error?.code || ""))
-          ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_FAILED");
+      const publicError = this.#disposed
+        ? unavailable("OPENBOT_PROVIDER_DISPOSED")
+        : request.signal?.aborted
+          ? unavailable("OPENBOT_PROVIDER_CANCELLED")
+          : this.#publicError(error,
+            error?.code === "OPENBOT_PROVIDER_CANCELLED" || /CANCELLED$/i.test(String(error?.code || ""))
+              ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_FAILED");
       this.#errors.set(providerId, publicError.code);
       if (committed && !compensated
         && (this.#disposed || epoch !== this.#lifecycleEpoch || request.signal?.aborted)) {
