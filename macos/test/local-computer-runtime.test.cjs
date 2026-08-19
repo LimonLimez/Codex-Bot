@@ -101,6 +101,9 @@ test("production local runtime owns the exact store broker manager and boundary 
   assert.equal(made.boundary.manager instanceof FakeManager, true);
   assert.equal(made.boundary.broker instanceof FakeBroker, true);
   assert.equal(typeof made.manager.helperFactory, "function");
+  assert.equal(typeof made.manager.readCurrentComputer, "function");
+  await made.manager.readCurrentComputer(BOT_A);
+  assert.deepEqual(store.read.mock.calls.at(-1).arguments, [BOT_A]);
 });
 
 test("local runtime components expose one private manager without changing the boundary factory", async (t) => {
@@ -134,4 +137,29 @@ test("local runtime components expose one private manager without changing the b
   assert.equal(components.manager instanceof FakeManager, true);
   assert.equal(components.boundary.options.manager, components.manager);
   assert.equal(createLocalComputerRuntime(options) instanceof FakeBoundary, true);
+});
+
+test("runtime manager reads the authoritative Computer identity from the supplied store", async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-local-runtime-reader-"));
+  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
+  const current = { botId: BOT_A, computer: { mode: "local", state: "ready", generation: 1,
+    localProfileId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" } };
+  const store = { read: mock.fn(async (botId) => botId === BOT_A ? current : null), updateComputer: mock.fn() };
+  const made = {};
+  class PermissionStore {}
+  class Broker { constructor(options) { Object.assign(this, { on() {}, off() {}, dispose() {}, decide() {}, list() {}, revoke() {}, request() {}, cancelBot() {} }); made.broker = options; } }
+  class Manager { constructor(options) { made.manager = options; } }
+  class Boundary { constructor(options) { made.boundary = options; } }
+  const electron = {
+    BrowserWindow: class {}, session: { fromPartition() {} }, utilityProcess: { fork() {} },
+    dialog: { showOpenDialog() {} }, systemPreferences: {},
+  };
+  const { createLocalComputerRuntimeComponents } = require(runtimePath);
+  createLocalComputerRuntimeComponents({
+    electron, stateRoot, store, PermissionStoreClass: PermissionStore,
+    BrokerClass: Broker, ManagerClass: Manager, BoundaryClass: Boundary,
+  });
+  assert.equal(typeof made.manager.readCurrentComputer, "function");
+  assert.deepEqual(await made.manager.readCurrentComputer(BOT_A), current);
+  assert.deepEqual(store.read.mock.calls.at(-1).arguments, [BOT_A]);
 });

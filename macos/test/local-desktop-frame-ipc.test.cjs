@@ -58,7 +58,11 @@ function frameEvents(value) {
   return value.first.sent.filter((entry) => entry.channel === "openbot-local-frame:frame");
 }
 
-function fixture({ captureDisplayFrame } = {}) {
+function statusEvents(value) {
+  return value.first.sent.filter((entry) => entry.channel === "openbot-local-frame:status");
+}
+
+function fixture({ captureDisplayFrame, read } = {}) {
   const handlers = new Map();
   const timers = [];
   const windows = [];
@@ -97,7 +101,10 @@ function fixture({ captureDisplayFrame } = {}) {
   ]);
   const readCalls = [];
   class Boundary extends EventEmitter {
-    async read(botId) { readCalls.push(botId); return states.get(botId); }
+    async read(botId) {
+      readCalls.push(botId);
+      return read ? read(botId, readCalls.length) : states.get(botId);
+    }
   }
   const computerBoundary = new Boundary();
   const manager = {
@@ -244,6 +251,130 @@ test("retry invalidates the old timer and cannot publish its late frame", async 
     channel === "openbot-local-frame:frame" && sent.viewGeneration === 1), false);
   assert.equal(value.first.sent.some(({ channel, value: sent }) =>
     channel === "openbot-local-frame:frame" && sent.viewGeneration === 2), true);
+  installed.dispose();
+});
+
+test("synchronous duplicate select and retry calls share the exact Promise", async () => {
+  const value = fixture();
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const select = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select);
+  const retry = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry);
+  const selected = select(event, { botId: BOT_A, viewGeneration: 1 });
+  const duplicateSelection = select(event, { botId: BOT_A, viewGeneration: 1 });
+  assert.strictEqual(duplicateSelection, selected);
+  await selected;
+  const retried = retry(event, { botId: BOT_A, viewGeneration: 2 });
+  const duplicateRetry = retry(event, { botId: BOT_A, viewGeneration: 2 });
+  assert.strictEqual(duplicateRetry, retried);
+  await retried;
+  installed.dispose();
+});
+
+test("connecting, retrying, and terminal status events precede their awaited returns", async () => {
+  const first = deferred();
+  const value = fixture({ captureDisplayFrame: (_identity, call) => call === 1 ? first.promise : frame(BOT_A, LOCAL_A, 1, "frame-retry", 7) });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const selected = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  await tick();
+  assert.deepEqual(statusEvents(value).map((entry) => entry.value.state), ["connecting"]);
+  first.reject(Object.assign(new Error("private token"), { code: "OPENBOT_LOCAL_CAPTURE_FAILED" }));
+  const unavailable = await selected;
+  assert.equal(unavailable.state, "unavailable");
+  const retried = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry)(event, { botId: BOT_A, viewGeneration: 2 });
+  await retried;
+  assert.deepEqual(statusEvents(value).map((entry) => entry.value.state), ["connecting", "unavailable", "retrying", "live"]);
+  installed.dispose();
+});
+
+test("capture completion racing retry or clear cannot publish a late frame or status", async () => {
+  const held = deferred();
+  const value = fixture({ captureDisplayFrame: (_identity, call) => call === 1 ? held.promise : frame(BOT_A, LOCAL_A, 1, "frame-fresh", 8) });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const selected = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  await tick();
+  const cleared = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(event, { viewGeneration: 2 });
+  held.resolve(frame(BOT_A, LOCAL_A, 1, "frame-stale", 3));
+  await Promise.all([selected, cleared]);
+  assert.equal(frameEvents(value).some((entry) => entry.value.viewGeneration === 1), false);
+  assert.equal(statusEvents(value).some((entry) => entry.value.viewGeneration === 1 && entry.value.state === "unavailable"), false);
+  installed.dispose();
+});
+
+test("equal clear wins over a retry and adjacent retry remains isolated", async () => {
+  const held = deferred();
+  const value = fixture({ captureDisplayFrame: (_identity, call) => call === 1 ? frame(BOT_A, LOCAL_A, 1, "frame-first", 1) : held.promise });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  const retry = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry)(event, { botId: BOT_A, viewGeneration: 2 });
+  const clear = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(event, { viewGeneration: 2 });
+  held.resolve(frame(BOT_A, LOCAL_A, 1, "frame-stale-retry", 2));
+  await Promise.allSettled([retry, clear]);
+  assert.equal(frameEvents(value).some((entry) => entry.value.viewGeneration === 2), false);
+  const adjacentRetry = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry)(event, { botId: BOT_A, viewGeneration: 3 });
+  await adjacentRetry;
+  assert.equal(frameEvents(value).some((entry) => entry.value.viewGeneration === 3), true);
+  installed.dispose();
+});
+
+test("a held timer capture is silent after invalidation", async () => {
+  const held = deferred();
+  const value = fixture({ captureDisplayFrame: (_identity, call) => call === 1 ? frame(BOT_A, LOCAL_A, 1, "frame-first", 1) : held.promise });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  value.timers[0].callback();
+  await tick();
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(event, { viewGeneration: 2 });
+  held.resolve(frame(BOT_A, LOCAL_A, 1, "frame-late", 9));
+  await tick();
+  assert.equal(value.timers[0].cleared, true);
+  assert.equal(frameEvents(value).some((entry) => entry.value.frameId === "frame-late"), false);
+  assert.equal(statusEvents(value).some((entry) => entry.value.state === "unavailable"), false);
+  installed.dispose();
+});
+
+test("dispose before readiness suppresses pending status and frame publication", async () => {
+  const readiness = deferred();
+  const value = fixture();
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc({ ...value, ready: readiness.promise });
+  const pending = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(
+    ipcEvent(value.first.sender),
+    { botId: BOT_A, viewGeneration: 1 },
+  );
+  installed.dispose();
+  readiness.resolve();
+  await assert.rejects(pending, { code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED" });
+  assert.equal(value.first.sent.length, 0);
+});
+
+test("deletion errors fence a pending capture without publishing terminal status", async () => {
+  const held = deferred();
+  const value = fixture({ captureDisplayFrame: () => held.promise });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const selected = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  await tick();
+  value.computerBoundary.read = async (botId) => {
+    value.readCalls.push(botId);
+    const error = new Error("private /Users/token");
+    error.code = "OPENBOT_COMPUTER_BOT_DELETING";
+    throw error;
+  };
+  held.resolve(frame(BOT_A, LOCAL_A, 1, "frame-before-delete", 4));
+  await selected;
+  assert.equal(frameEvents(value).some((entry) => entry.value.frameId === "frame-before-delete"), false);
+  assert.equal(statusEvents(value).some((entry) => entry.value.state === "unavailable"), false);
   installed.dispose();
 });
 

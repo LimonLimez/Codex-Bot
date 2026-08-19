@@ -115,6 +115,7 @@ function createLocalComputerRuntimeComponents({
     electron,
     userDataPath: stateRoot,
     permissionBroker: broker,
+    readCurrentComputer: (botId) => store.read(botId),
     helperFactory: async (identity) => createLocalHelperTransport({
       spawnHelper: electron.utilityProcess.fork.bind(electron.utilityProcess),
       childPath,

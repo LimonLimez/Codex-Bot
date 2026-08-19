@@ -11,8 +11,9 @@ const LOCAL_B = "local-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 async function tick() {
@@ -20,7 +21,7 @@ async function tick() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-function fixture({ decode, htmlCollection = false } = {}) {
+function fixture({ decode, htmlCollection = false, select, retry, clear } = {}) {
   const calls = { clear: [], clearRect: [], drawImage: [], retry: [], select: [], status: [] };
   let frameListener = null;
   let statusListener = null;
@@ -55,9 +56,18 @@ function fixture({ decode, htmlCollection = false } = {}) {
   const documentRef = { createElement: element };
   const container = element("div");
   const openbotLocalDesktop = {
-    async select(value) { calls.select.push(value); },
-    async retry(value) { calls.retry.push(value); },
-    async clear(value) { calls.clear.push(value); },
+    async select(value) {
+      calls.select.push(value);
+      return select ? select(value) : undefined;
+    },
+    async retry(value) {
+      calls.retry.push(value);
+      return retry ? retry(value) : undefined;
+    },
+    async clear(value) {
+      calls.clear.push(value);
+      return clear ? clear(value) : undefined;
+    },
     onFrame(callback) { frameListener = callback; return () => { if (frameListener === callback) frameListener = null; }; },
     onStatus(callback) { statusListener = callback; return () => { if (statusListener === callback) statusListener = null; }; },
   };
@@ -193,6 +203,48 @@ test("status states expose four labels and retry is offered only when unavailabl
   });
   assert.equal(status.textContent, "Live local desktop");
   assert.equal(retry.hidden, true);
+  mounted.dispose();
+});
+
+test("a stale rejected selection cannot overwrite the current bot generation", async () => {
+  const stale = deferred();
+  const value = fixture({
+    select(request) {
+      return request.botId === BOT_A ? stale.promise : Promise.resolve();
+    },
+  });
+  const { createLocalDesktopView } = require(viewPath);
+  const mounted = createLocalDesktopView(value);
+  mounted.selectBot(BOT_A);
+  mounted.selectBot(BOT_B);
+  const status = value.nodes.find((node) => node.className === "openbot-local-desktop-view-status");
+  const retry = value.nodes.find((node) => node.className === "openbot-local-desktop-retry");
+  assert.equal(status.textContent, "Connecting to local desktop…");
+  assert.equal(retry.hidden, true);
+  stale.reject(new Error("stale private /Users/token=secret"));
+  await tick();
+  assert.equal(status.textContent, "Connecting to local desktop…");
+  assert.equal(retry.hidden, true);
+  mounted.dispose();
+});
+
+test("renderer rejects a transparent Proxy status without changing the current state", async () => {
+  const value = fixture();
+  const { createLocalDesktopView } = require(viewPath);
+  const mounted = createLocalDesktopView(value);
+  mounted.selectBot(BOT_A);
+  const status = value.nodes.find((node) => node.className === "openbot-local-desktop-view-status");
+  const valid = {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    viewGeneration: 1,
+    state: "live",
+    code: null,
+  };
+  value.emitStatus(new Proxy(valid, {}));
+  await tick();
+  assert.equal(status.textContent, "Connecting to local desktop…");
   mounted.dispose();
 });
 

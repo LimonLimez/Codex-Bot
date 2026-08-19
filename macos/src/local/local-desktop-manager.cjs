@@ -169,12 +169,13 @@ function normalizeGeneration(value) {
   return value;
 }
 
-function normalizeComputer(value) {
+function normalizeComputer(value, { allowStarting = false } = {}) {
   const input = assertPlainObject(cloneInput(value, "Local Computer"), "Local Computer");
   const botId = normalizeBotId(input.botId);
   const computer = assertPlainObject(input.computer, "Local Computer state");
   const target = normalizeTargetId(computer.localProfileId);
-  if (computer.mode !== "local" || computer.state !== "ready") {
+  if (computer.mode !== "local"
+    || (computer.state !== "ready" && (!allowStarting || computer.state !== "starting"))) {
     throw desktopError("Local Computer is unavailable.", "OPENBOT_LOCAL_DESKTOP_UNAVAILABLE");
   }
   return {
@@ -407,6 +408,7 @@ class LocalDesktopManager extends EventEmitter {
   #electron;
   #userDataPath;
   #permissionBroker;
+  #readCurrentComputer;
   #helperFactory;
   #randomUUID;
   #helperTimeoutMs;
@@ -423,6 +425,7 @@ class LocalDesktopManager extends EventEmitter {
     electron,
     userDataPath,
     permissionBroker,
+    readCurrentComputer,
     helperFactory,
     randomUUID = crypto.randomUUID,
     helperTimeoutMs = 30_000,
@@ -440,6 +443,9 @@ class LocalDesktopManager extends EventEmitter {
       || typeof permissionBroker.deleteBot !== "function") {
       throw new TypeError("Local Desktop manager requires a permission broker.");
     }
+    if (typeof readCurrentComputer !== "function") {
+      throw new TypeError("Local Desktop manager requires an authoritative current Computer reader.");
+    }
     if (typeof helperFactory !== "function" || typeof randomUUID !== "function"
       || !Number.isSafeInteger(helperTimeoutMs) || helperTimeoutMs < 1 || helperTimeoutMs > 120_000) {
       throw new TypeError("Local Desktop helper configuration is invalid.");
@@ -447,6 +453,7 @@ class LocalDesktopManager extends EventEmitter {
     this.#electron = electron;
     this.#userDataPath = path.resolve(userDataPath);
     this.#permissionBroker = permissionBroker;
+    this.#readCurrentComputer = readCurrentComputer;
     this.#helperFactory = helperFactory;
     this.#randomUUID = randomUUID;
     this.#helperTimeoutMs = helperTimeoutMs;
@@ -476,10 +483,17 @@ class LocalDesktopManager extends EventEmitter {
     return this.#enqueue(computer.botId, async () => {
       this.#assertBotAvailable(computer.botId);
       const existing = this.#entries.get(computer.botId);
-      if (existing && this.#sameIdentity(existing, computer)) return publicSession(existing);
-      if (existing) await this.#closeEntry(existing, true);
+      if (existing && this.#sameIdentity(existing, computer)) {
+        await this.#assertCurrentComputer(computer);
+        return publicSession(existing);
+      }
+      if (existing) {
+        await this.#closeEntry(existing, true);
+        await this.#assertCurrentComputer(computer);
+      }
 
       const profilePath = await this.#ensureProfile(computer.profileUuid);
+      await this.#assertCurrentComputer(computer);
       this.#assertBotAvailable(computer.botId);
       const partition = `persist:openbot-local-${computer.profileUuid}`;
       const browserSession = this.#electron.session.fromPartition(partition);
@@ -503,7 +517,7 @@ class LocalDesktopManager extends EventEmitter {
       try {
         this.#secureWindow(window);
         await window.webContents.loadURL(LOCAL_DESKTOP_START_URL);
-        this.#assertBotAvailable(computer.botId);
+        await this.#assertCurrentComputer(computer);
         if (window.webContents.getURL() !== LOCAL_DESKTOP_START_URL) {
           throw desktopError("Local Desktop start document is invalid.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
         }
@@ -513,7 +527,7 @@ class LocalDesktopManager extends EventEmitter {
           targetGeneration: computer.targetGeneration,
           workspacePath: profilePath.workspacePath,
         }));
-        this.#assertBotAvailable(computer.botId);
+        await this.#assertCurrentComputer(computer);
         if (window.webContents.getURL() !== LOCAL_DESKTOP_START_URL) {
           throw desktopError("Local Desktop start document is invalid.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
         }
@@ -555,7 +569,7 @@ class LocalDesktopManager extends EventEmitter {
       } catch (error) {
         try { await protocol?.dispose(); } catch {}
         if (!protocol) {
-          try { helperTransport?.dispose?.(); } catch {}
+          try { await helperTransport?.dispose?.(); } catch {}
         }
         try { if (!window.isDestroyed?.()) window.destroy(); } catch {}
         this.#assertBotAvailable(computer.botId);
@@ -966,6 +980,27 @@ class LocalDesktopManager extends EventEmitter {
   #assertBotAvailable(botId) {
     this.#assertActive();
     if (this.#deletions.has(botId)) throw botDeletingError();
+  }
+
+  async #assertCurrentComputer(expected) {
+    this.#assertBotAvailable(expected.botId);
+    let value;
+    try {
+      value = await this.#readCurrentComputer(expected.botId);
+    } catch {
+      throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
+    }
+    this.#assertBotAvailable(expected.botId);
+    let current;
+    try {
+      current = normalizeComputer(value, { allowStarting: true });
+    } catch {
+      throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
+    }
+    if (!this.#sameIdentity(expected, current)) {
+      throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
+    }
+    return current;
   }
 
   #profileOwner(targetId) {

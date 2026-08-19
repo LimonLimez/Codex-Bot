@@ -240,6 +240,8 @@ async function fixture(t, overrides = {}) {
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const electron = electronFixture();
   const helpers = [];
+  const current = new Map();
+  const hasCurrentReader = Object.prototype.hasOwnProperty.call(overrides, "readCurrentComputer");
   const permissionBroker = overrides.permissionBroker || {
     request: mock.fn(async (_request, effect) => effect(Buffer.from("private-bookmark"))),
     cancelTask: mock.fn(),
@@ -251,6 +253,9 @@ async function fixture(t, overrides = {}) {
     electron: electron.electron,
     userDataPath: root,
     permissionBroker,
+    readCurrentComputer: hasCurrentReader
+      ? overrides.readCurrentComputer
+      : async (botId) => current.get(botId) || localComputer(botId === BOT_B ? BOT_B : BOT_A, botId === BOT_B ? LOCAL_B : LOCAL_A, 1),
     helperFactory: overrides.helperFactory || (async () => {
       const helper = new FakeHelperTransport();
       helpers.push(helper);
@@ -259,6 +264,13 @@ async function fixture(t, overrides = {}) {
     randomUUID: overrides.randomUUID || sequence([REQUEST_A, REQUEST_B]),
     helperTimeoutMs: 100,
   });
+  if (!hasCurrentReader) {
+    const open = manager.open.bind(manager);
+    manager.open = async (value) => {
+      current.set(value.botId, value);
+      return open(value);
+    };
+  }
   return { ...electron, helpers, manager, permissionBroker, root };
 }
 
@@ -274,6 +286,17 @@ test("open loads and captures the exact CSP start document before reporting read
   );
   const frame = await manager.captureDisplayFrame(identity(session));
   assert.equal(frame.bytes.byteLength > 0, true);
+});
+
+test("authoritative current Computer checks accept the boundary's in-flight starting state", async (t) => {
+  const current = localComputer(BOT_A, LOCAL_A, 1);
+  current.computer.state = "starting";
+  const { manager, windows } = await fixture(t, {
+    readCurrentComputer: async () => current,
+  });
+  const session = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  assert.equal(session.state, "ready");
+  assert.equal(windows.length, 1);
 });
 
 test("an untouched about:blank window fails with the public capture code", async (t) => {
@@ -1035,6 +1058,89 @@ test("manager construction requires durable permission deletion support", async 
     }),
     /permission broker/i,
   );
+});
+
+test("manager construction requires an authoritative current Computer reader", async (t) => {
+  await assert.rejects(
+    fixture(t, { readCurrentComputer: null }),
+    /current Computer|current computer/i,
+  );
+});
+
+test("open fences a superseded Computer generation before helper and entry publication", async (t) => {
+  const helperCalled = [];
+  const current = deferred();
+  const { manager, windows } = await fixture(t, {
+    readCurrentComputer: async () => current.promise,
+    helperFactory: async () => {
+      helperCalled.push(true);
+      return new FakeHelperTransport();
+    },
+  });
+  const opening = manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+  current.resolve(localComputer(BOT_A, LOCAL_A, 2));
+  const failure = await opening;
+  assert.equal(failure.code, "OPENBOT_LOCAL_DESKTOP_STALE");
+  assert.equal(helperCalled.length, 0);
+  assert.equal(windows.length, 0);
+});
+
+test("open rechecks the authoritative generation after the start document and helper awaits", async (t) => {
+  await t.test("after start document", async (subtest) => {
+    const afterLoad = deferred();
+    let reads = 0;
+    const helperCalled = [];
+    const value = await fixture(subtest, {
+      readCurrentComputer: async () => {
+        reads += 1;
+        return reads === 2 ? afterLoad.promise : localComputer(BOT_A, LOCAL_A, 1);
+      },
+      helperFactory: async () => {
+        helperCalled.push(true);
+        return new FakeHelperTransport();
+      },
+    });
+    const opening = value.manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
+    for (let attempt = 0; attempt < 50 && reads < 2; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reads, 2);
+    afterLoad.resolve(localComputer(BOT_A, LOCAL_A, 2));
+    const failure = await opening;
+    assert.equal(failure.code, "OPENBOT_LOCAL_DESKTOP_STALE");
+    assert.equal(helperCalled.length, 0);
+    assert.equal(value.windows[0].destroyed, true);
+  });
+
+  await t.test("after helper", async (subtest) => {
+    const afterHelper = deferred();
+    const releaseHelper = deferred();
+    let reads = 0;
+    const helpers = [];
+    subtest.after(() => releaseHelper.resolve());
+    const value = await fixture(subtest, {
+      readCurrentComputer: async () => {
+        reads += 1;
+        return reads === 3 ? afterHelper.promise : localComputer(BOT_A, LOCAL_A, 1);
+      },
+      helperFactory: async () => {
+        const helper = new FakeHelperTransport();
+        helpers.push(helper);
+        await releaseHelper.promise;
+        return helper;
+      },
+    });
+    const opening = value.manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
+    for (let attempt = 0; attempt < 50 && helpers.length < 1; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(helpers.length, 1);
+    releaseHelper.resolve();
+    for (let attempt = 0; attempt < 50 && reads < 3; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(reads, 3);
+    afterHelper.resolve(localComputer(BOT_A, LOCAL_A, 2));
+    const failure = await opening;
+    assert.equal(failure.code, "OPENBOT_LOCAL_DESKTOP_STALE");
+    assert.equal(helpers[0].disposed, true);
+    assert.equal(value.windows[0].destroyed, true);
+  });
 });
 
 test("manager disposal awaits an already-started exact bot deletion and its profile cleanup", async (t) => {

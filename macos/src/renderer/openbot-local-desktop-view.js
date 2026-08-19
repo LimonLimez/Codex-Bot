@@ -25,6 +25,14 @@
     return node;
   }
 
+  function structuredCloneBoundary(value) {
+    if (typeof structuredClone !== "function") return false;
+    try {
+      structuredClone(value);
+      return true;
+    } catch { return false; }
+  }
+
   function exactFrame(value) {
     try {
       if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -34,7 +42,8 @@
       if ((prototype !== Object.prototype && prototype !== null) || keys.length !== FRAME_FIELDS.size
         || keys.some((key) => typeof key !== "string" || !FRAME_FIELDS.has(key)
           || !("value" in descriptors[key]))
-        || [...FRAME_FIELDS].some((key) => !descriptors[key])) return null;
+        || [...FRAME_FIELDS].some((key) => !descriptors[key])
+        || !structuredCloneBoundary(value)) return null;
       const frame = Object.fromEntries([...FRAME_FIELDS].map((key) => [key, descriptors[key].value]));
       if (typeof frame.botId !== "string" || !BOT_ID.test(frame.botId)
         || typeof frame.targetId !== "string" || !TARGET_ID.test(frame.targetId)
@@ -58,7 +67,8 @@
       if ((prototype !== Object.prototype && prototype !== null) || keys.length !== STATUS_FIELDS.size
         || keys.some((key) => typeof key !== "string" || !STATUS_FIELDS.has(key)
           || !("value" in descriptors[key]))
-        || [...STATUS_FIELDS].some((key) => !descriptors[key])) return null;
+        || [...STATUS_FIELDS].some((key) => !descriptors[key])
+        || !structuredCloneBoundary(value)) return null;
       const status = Object.fromEntries([...STATUS_FIELDS].map((key) => [key, descriptors[key].value]));
       if (typeof status.botId !== "string" || !BOT_ID.test(status.botId)
         || typeof status.targetId !== "string" || !TARGET_ID.test(status.targetId)
@@ -128,6 +138,7 @@
     let decodeGeneration = 0;
     let state = "none";
     let retryPending = false;
+    let operationToken = 0;
 
     function clearCanvas() {
       decodeGeneration += 1;
@@ -163,16 +174,20 @@
       return next;
     }
 
-    function failedCurrentOperation() {
-      if (disposed || !selectedBotId) return;
+    function failedCurrentOperation(botId, generation, token) {
+      if (disposed || !selectedBotId || selectedBotId !== botId
+        || viewGeneration !== generation || operationToken !== token) return;
       retryPending = false;
       setStatus("unavailable");
     }
 
-    function invokeSelection(operation) {
+    function invokeSelection(operation, botId, generation) {
+      const token = ++operationToken;
       void Promise.resolve(operation).then((value) => {
-        if (value) applyStatus(value);
-      }, () => failedCurrentOperation());
+        if (value && operationToken === token && selectedBotId === botId && viewGeneration === generation) {
+          applyStatus(value);
+        }
+      }, () => failedCurrentOperation(botId, generation, token));
     }
 
     function selectBot(value) {
@@ -189,10 +204,11 @@
           ? facade.select(Object.freeze({ botId: selectedBotId, viewGeneration }))
           : facade.clear(request);
       } catch {
-        failedCurrentOperation();
+        const token = ++operationToken;
+        failedCurrentOperation(selectedBotId, viewGeneration, token);
         return;
       }
-      invokeSelection(operation);
+      invokeSelection(operation, selectedBotId, viewGeneration);
     }
 
     function retrySelectedBot() {
@@ -202,9 +218,14 @@
       clearCanvas();
       setStatus("retrying");
       try {
-        invokeSelection(facade.retry(Object.freeze({ botId: selectedBotId, viewGeneration })));
+        invokeSelection(
+          facade.retry(Object.freeze({ botId: selectedBotId, viewGeneration })),
+          selectedBotId,
+          viewGeneration,
+        );
       } catch {
-        failedCurrentOperation();
+        const token = ++operationToken;
+        failedCurrentOperation(selectedBotId, viewGeneration, token);
       }
     }
 
@@ -267,6 +288,7 @@
       dispose() {
         if (disposed) return;
         disposed = true;
+        operationToken += 1;
         viewGeneration += 1;
         selectedBotId = null;
         retryPending = false;
