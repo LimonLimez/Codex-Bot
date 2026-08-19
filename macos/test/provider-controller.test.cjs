@@ -1081,3 +1081,208 @@ test("M1 disposal awaits the underlying provider tail rather than a public race"
   await disposing;
   assert.equal(settled, true);
 });
+
+function holdConnectedCommit(state, providerId) {
+  let release;
+  let held = false;
+  const originalCommit = state.commitConnection.bind(state);
+  state.commitConnection = async (value) => {
+    if (!held && value.providerId === providerId && value.state === "connected" && value.models.length > 0) {
+      held = true;
+      await new Promise((resolve) => { release = resolve; });
+    }
+    return originalCommit(value);
+  };
+  const control = () => release?.();
+  control.isHeld = () => held;
+  return control;
+}
+
+test("C5 Direct connect held commit compensates after abort", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount();
+  const release = holdConnectedCommit(state, "openai-codex");
+  const controller = new ProviderController({ stateStore: state, account });
+  const abortController = new AbortController();
+  const pending = controller.connect({ providerId: "openai-codex", signal: abortController.signal });
+  while (!release.isHeld()) await new Promise((resolve) => setImmediate(resolve));
+  // The held writer is reached asynchronously; release is intentionally only
+  // called after the abort to pressure the post-write signal fence.
+  abortController.abort();
+  release();
+  await assert.rejects(pending, /cancel|supersed|unavailable/i);
+  const row = state.state.connections.find(({ providerId }) => providerId === "openai-codex");
+  assert.notEqual(row?.state, "connected");
+  assert.deepEqual(row?.models || [], []);
+});
+
+test("C5 Direct connect held commit compensates after disposal", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount();
+  const release = holdConnectedCommit(state, "openai-codex");
+  const controller = new ProviderController({ stateStore: state, account });
+  const pending = controller.connect({ providerId: "openai-codex" });
+  void pending.catch(() => {});
+  while (!release.isHeld()) await new Promise((resolve) => setImmediate(resolve));
+  const disposing = controller.dispose();
+  release();
+  await disposing;
+  await assert.rejects(pending, { code: "OPENBOT_PROVIDER_DISPOSED" });
+  const row = state.state.connections.find(({ providerId }) => providerId === "openai-codex");
+  assert.notEqual(row?.state, "connected");
+  assert.deepEqual(row?.models || [], []);
+});
+
+test("C5 Direct reconciliation held commit compensates after disposal", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 5);
+  const account = new FakeDirectAccount();
+  const release = holdConnectedCommit(state, "openai-codex");
+  const controller = new ProviderController({ stateStore: state, account });
+  account.catalog = { generation: 9, status: "ready", models: [directAccountModel("gpt-live-sol")] };
+  account.emit("catalog-changed", account.catalog);
+  while (!release.isHeld()) await new Promise((resolve) => setImmediate(resolve));
+  const disposing = controller.dispose();
+  release();
+  await disposing;
+  const row = state.state.connections.find(({ providerId }) => providerId === "openai-codex");
+  assert.notEqual(row?.state, "connected");
+  assert.deepEqual(row?.models || [], []);
+});
+
+test("C5 Direct held commit remains fail-closed across offline and disconnect signals", async () => {
+  const { ProviderController } = require(controllerPath);
+  for (const mode of ["offline", "disconnect"]) {
+    const state = new FakeStateStore();
+    const account = new FakeDirectAccount();
+    const release = holdConnectedCommit(state, "openai-codex");
+    const controller = new ProviderController({ stateStore: state, account });
+    const pending = controller.connect({ providerId: "openai-codex" });
+    void pending.catch(() => {});
+    while (!release.isHeld()) await new Promise((resolve) => setImmediate(resolve));
+    const followup = mode === "offline"
+      ? (() => {
+        account.account = { ...account.account, status: "offline", authMode: null };
+        account.emit("account-changed", account.account);
+        return Promise.resolve();
+      })()
+      : controller.disconnect("openai-codex");
+    release();
+    await followup.catch(() => {});
+    await pending.catch(() => {});
+    if (mode === "disconnect") await controller.dispose();
+    const row = state.state.connections.find(({ providerId }) => providerId === "openai-codex");
+    assert.notEqual(row?.state, "connected");
+    assert.deepEqual(row?.models || [], []);
+    if (mode === "offline") controller.dispose();
+  }
+});
+
+test("C5 hosted/API/local held commits compensate after abort and disposal without foreign cleanup", async (t) => {
+  const { ProviderController } = require(controllerPath);
+  const cases = [
+    {
+      name: "hosted Claude",
+      providerId: "anthropic-claude",
+      request: { providerId: "anthropic-claude" },
+      dependencies: (state) => ({
+        cliproxy: {
+          disconnects: 0,
+          connectProvider: async () => {}, importVertex: async () => {},
+          connectionStatus: async () => ({ state: "connected" }),
+          listModels: async () => [descriptorModel("anthropic-claude")],
+          disconnectProvider: async () => {},
+        },
+      }),
+    },
+    {
+      name: "OpenAI API key",
+      providerId: "openai-api-key",
+      request: { providerId: "openai-api-key", apiKey: "sk-test" },
+      dependencies: () => ({
+        openai: {
+          discover: async () => ({ models: [{ provider: "openai-api-key", model: "gpt-live", label: "Live" }] }),
+          streamConfiguration: () => ({ providerId: "openai-api-key", baseUrl: "https://api.openai.com/v1", apiKey: null }),
+        },
+      }),
+    },
+    {
+      name: "local OpenAI-compatible",
+      providerId: "local-openai-compatible",
+      request: { providerId: "local-openai-compatible", baseUrl: "http://127.0.0.1:11434/v1" },
+      dependencies: () => ({
+        openai: {
+          discover: async () => ({ models: [{ provider: "local-openai-compatible", model: "local-model", label: "Local" }] }),
+          streamConfiguration: () => ({ providerId: "local-openai-compatible", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null }),
+        },
+      }),
+    },
+  ];
+  for (const entry of cases) {
+    await t.test(`${entry.name} abort`, async () => {
+      const state = new FakeStateStore();
+      const abortController = new AbortController();
+      const dependencies = entry.dependencies(state);
+      const release = holdConnectedCommit(state, entry.providerId);
+      const controller = new ProviderController({ stateStore: state, ...dependencies });
+      const pending = controller.connect({ ...entry.request, signal: abortController.signal });
+      void pending.catch(() => {});
+      while (!release.isHeld()) await new Promise((resolve) => setImmediate(resolve));
+      abortController.abort();
+      release();
+      await assert.rejects(pending, /cancel|supersed|unavailable/i);
+      const row = state.state.connections.find(({ providerId }) => providerId === entry.providerId);
+      assert.notEqual(row?.state, "connected");
+      assert.deepEqual(row?.models || [], []);
+      controller.dispose();
+    });
+    await t.test(`${entry.name} disposal`, async () => {
+      const state = new FakeStateStore();
+      const dependencies = entry.dependencies(state);
+      const release = holdConnectedCommit(state, entry.providerId);
+      const controller = new ProviderController({ stateStore: state, ...dependencies });
+      const pending = controller.connect(entry.request);
+      void pending.catch(() => {});
+      while (!release.isHeld()) await new Promise((resolve) => setImmediate(resolve));
+      const disposing = controller.dispose();
+      release();
+      await disposing;
+      await assert.rejects(pending, { code: "OPENBOT_PROVIDER_DISPOSED" });
+      const row = state.state.connections.find(({ providerId }) => providerId === entry.providerId);
+      assert.notEqual(row?.state, "connected");
+      assert.deepEqual(row?.models || [], []);
+    });
+  }
+});
+
+test("I3 onboarding write acknowledgement survives disposal during held post-write publication", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("anthropic-claude", 1);
+  let reads = 0;
+  let releasePublication;
+  const originalRead = state.read.bind(state);
+  state.read = async () => {
+    reads += 1;
+    if (reads === 5) await new Promise((resolve) => { releasePublication = resolve; });
+    return originalRead();
+  };
+  let writes = 0;
+  const originalWrite = state.writeOnboarding.bind(state);
+  state.writeOnboarding = async (receipt) => {
+    writes += 1;
+    return originalWrite(receipt);
+  };
+  const controller = new ProviderController({ stateStore: state, now: () => "2026-08-19T00:00:00.000Z" });
+  const pending = controller.completeOnboarding("anthropic-claude");
+  while (typeof releasePublication !== "function") await new Promise((resolve) => setImmediate(resolve));
+  const disposing = controller.dispose();
+  releasePublication();
+  const receipt = await pending;
+  await disposing;
+  assert.deepEqual(receipt, state.state.onboarding);
+  assert.equal(writes, 1);
+});

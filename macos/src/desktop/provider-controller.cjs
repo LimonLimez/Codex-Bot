@@ -433,10 +433,12 @@ class ProviderController extends EventEmitter {
   completeOnboarding(rawProviderId) {
     const providerId = this.#canonical(rawProviderId);
     if (this.#disposed) return Promise.reject(unavailable("OPENBOT_PROVIDER_DISPOSED"));
-    return this.#schedule(providerId, "onboarding", (epoch) => this.#completeOnboarding(providerId, epoch));
+    return this.#schedule(providerId, "onboarding", (epoch, flightState) => (
+      this.#completeOnboarding(providerId, epoch, flightState)
+    ));
   }
 
-  async #completeOnboarding(providerId, epoch) {
+  async #completeOnboarding(providerId, epoch, flightState) {
     const stateBefore = await this.#readState();
     this.#assertLive(epoch);
     const connectionBefore = stateBefore.connections.find(({ providerId: current }) => current === providerId);
@@ -466,6 +468,7 @@ class ProviderController extends EventEmitter {
     let result;
     try {
       result = await this.#stateStore.writeOnboarding(receipt);
+      if (flightState) flightState.acknowledged = true;
     } catch (error) {
       throw this.#publicError(error, "OPENBOT_PROVIDER_ONBOARDING_FAILED");
     }
@@ -616,15 +619,30 @@ class ProviderController extends EventEmitter {
       connectedAt: previous?.connectedAt || this.#now(),
     };
     await this.#stateStore.commitConnection(connection);
-    if (this.#directAuthorityEpoch !== authorityEpoch) {
-      await this.#forceDirectUnavailable(DIRECT_ACCOUNT_UNAVAILABLE, epoch);
-      throw unavailable("OPENBOT_PROVIDER_SUPERSEDED");
+    const stale = this.#disposed || epoch !== this.#lifecycleEpoch
+      || ceremonyEpoch !== this.#directCeremonyEpoch
+      || this.#directAuthorityEpoch !== authorityEpoch || signal?.aborted;
+    if (stale) {
+      const code = this.#disposed ? "OPENBOT_PROVIDER_DISPOSED"
+        : signal?.aborted ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_SUPERSEDED";
+      await this.#compensateCommittedConnection(DIRECT_PROVIDER_ID, connection, code);
+      throw unavailable(code);
     }
     if (!this.#disposed) {
       this.#errors.delete(DIRECT_PROVIDER_ID);
       this.#setDirectPresentation(null);
     }
+    const publicationAuthorityEpoch = this.#directAuthorityEpoch;
     try { await this.#publish(); } catch { /* committed connection remains authoritative */ }
+    const staleAfterPublication = this.#disposed || epoch !== this.#lifecycleEpoch
+      || ceremonyEpoch !== this.#directCeremonyEpoch
+      || this.#directAuthorityEpoch !== publicationAuthorityEpoch || signal?.aborted;
+    if (staleAfterPublication) {
+      const code = this.#disposed ? "OPENBOT_PROVIDER_DISPOSED"
+        : signal?.aborted ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_SUPERSEDED";
+      await this.#compensateCommittedConnection(DIRECT_PROVIDER_ID, connection, code);
+      throw unavailable(code);
+    }
     try {
       const connections = await this.listConnections();
       return connections.find(({ providerId }) => providerId === DIRECT_PROVIDER_ID);
@@ -714,12 +732,44 @@ class ProviderController extends EventEmitter {
   }
 
   async #forceDirectUnavailable(errorCode, epoch) {
-    if (this.#disposed) throw unavailable("OPENBOT_PROVIDER_DISPOSED");
+    if (this.#disposed) {
+      await this.#compensateCommittedConnection(DIRECT_PROVIDER_ID, null, errorCode);
+      return;
+    }
     const state = await this.#readState();
     this.#assertLive(epoch);
     const previous = state.connections.find(({ providerId }) => providerId === DIRECT_PROVIDER_ID);
     if (!previous || previous.errorCode === DIRECT_DISCONNECT_PENDING) return;
     await this.#commitDirectUnavailable(previous, errorCode, epoch, null);
+  }
+
+  async #compensateCommittedConnection(providerId, committed, errorCode) {
+    let current = committed;
+    try {
+      const state = await this.#readState();
+      current = state.connections.find(({ providerId: currentProvider }) => currentProvider === providerId) || current;
+    } catch { /* use the committed record as the fail-closed fallback */ }
+    if (!current) return;
+    const marker = {
+      ...current,
+      providerId,
+      generation: Math.max(1, Number.isSafeInteger(current.generation) ? current.generation + 1 : 1),
+      state: "unavailable",
+      models: [],
+      errorCode,
+    };
+    try {
+      await this.#stateStore.commitConnection(marker);
+    } catch {
+      try { await this.#stateStore.removeConnectionAndOnboarding(providerId); } catch { /* retain best effort */ }
+    }
+    this.#errors.set(providerId, errorCode);
+    if (providerId === DIRECT_PROVIDER_ID) {
+      this.#setDirectPresentation({ state: "unavailable", generation: marker.generation, errorCode });
+    }
+    if (!this.#disposed) {
+      try { await this.#publish(); } catch { /* durable compensation is authoritative */ }
+    }
   }
 
   async #disconnectDirect(epoch) {
@@ -881,7 +931,13 @@ class ProviderController extends EventEmitter {
       this.#assertLive(lifecycleEpoch);
       this.#errors.delete(DIRECT_PROVIDER_ID);
       this.#setDirectPresentation(null);
+      const publicationAuthorityEpoch = this.#directAuthorityEpoch;
       try { await this.#publish(); } catch { /* durable refresh remains authoritative */ }
+      if (this.#disposed || lifecycleEpoch !== this.#lifecycleEpoch
+        || publicationAuthorityEpoch !== this.#directAuthorityEpoch) {
+        await this.#compensateCommittedConnection(DIRECT_PROVIDER_ID, previous, this.#disposed
+          ? "OPENBOT_PROVIDER_DISPOSED" : "OPENBOT_PROVIDER_SUPERSEDED");
+      }
       return;
     }
     if (previous && previous.errorCode !== DIRECT_DISCONNECT_PENDING) {
@@ -964,6 +1020,7 @@ class ProviderController extends EventEmitter {
     let secretMutated = false;
     let externalRollback = null;
     let committed = false;
+    let compensated = false;
     try {
       this.#assertSignal(request.signal);
       if (descriptor.loginKind === "api-key" || descriptor.loginKind === "local") {
@@ -1020,15 +1077,34 @@ class ProviderController extends EventEmitter {
       };
       await this.#stateStore.commitConnection(connection);
       committed = true;
+      if (this.#disposed || epoch !== this.#lifecycleEpoch || request.signal?.aborted) {
+        const code = this.#disposed ? "OPENBOT_PROVIDER_DISPOSED"
+          : request.signal?.aborted ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_SUPERSEDED";
+        await this.#compensateCommittedConnection(providerId, connection, code);
+        compensated = true;
+        throw unavailable(code);
+      }
       this.#assertLive(epoch);
       this.#errors.delete(providerId);
       await this.#publish();
+      if (this.#disposed || epoch !== this.#lifecycleEpoch || request.signal?.aborted) {
+        const code = this.#disposed ? "OPENBOT_PROVIDER_DISPOSED"
+          : request.signal?.aborted ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_SUPERSEDED";
+        await this.#compensateCommittedConnection(providerId, connection, code);
+        compensated = true;
+        throw unavailable(code);
+      }
       return (await this.listConnections()).find(({ providerId: current }) => current === providerId);
     } catch (error) {
       const publicError = this.#publicError(error,
         error?.code === "OPENBOT_PROVIDER_CANCELLED" || /CANCELLED$/i.test(String(error?.code || ""))
           ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_FAILED");
       this.#errors.set(providerId, publicError.code);
+      if (committed && !compensated
+        && (this.#disposed || epoch !== this.#lifecycleEpoch || request.signal?.aborted)) {
+        await this.#compensateCommittedConnection(providerId, null, publicError.code);
+        compensated = true;
+      }
       if (secretMutated && this.#keychain) {
         try {
           if (previousSecret === null || previousSecret === undefined) await this.#keychain.delete(providerId);
@@ -1038,7 +1114,7 @@ class ProviderController extends EventEmitter {
       if (externalRollback) {
         try { await externalRollback(); } catch { /* provider cleanup is best effort */ }
       }
-      if (committed) {
+      if (committed && !compensated) {
         try {
           if (previous) await this.#stateStore.commitConnection(previous);
           else await this.#stateStore.removeConnection(providerId);
@@ -1061,9 +1137,14 @@ class ProviderController extends EventEmitter {
     if (existing) return existing;
     const epoch = this.#lifecycleEpoch;
     const previous = this.#providerTails.get(providerId) || Promise.resolve();
+    const flightState = { acknowledged: false };
     let rejectFlight;
-    const cancellation = new Promise((_resolve, reject) => { rejectFlight = reject; });
-    const operationPromise = previous.catch(() => {}).then(() => operation(epoch));
+    const cancellation = new Promise((_resolve, reject) => {
+      rejectFlight = (error) => {
+        if (!flightState.acknowledged) reject(error);
+      };
+    });
+    const operationPromise = previous.catch(() => {}).then(() => operation(epoch, flightState));
     const clearTail = () => {
       if (this.#providerTails.get(providerId) === operationPromise) this.#providerTails.delete(providerId);
     };
