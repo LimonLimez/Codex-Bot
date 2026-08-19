@@ -302,13 +302,21 @@ class CLIProxyManager {
     const runPath = this.#runStableDirectory || configDirectory;
     const configPath = path.join(runPath, "config.yaml");
     const temporary = path.join(runPath, `.config.${process.pid}.${this.#randomBytes(8).toString("hex")}.tmp`);
+    this.#assertPrivateDirectory(authDirectory, this.#authDirectoryFd);
     this.#assertPrivateDirectory(configDirectory, this.#runDirectoryFd);
-    fs.writeFileSync(temporary, configText({ authDirectory, credential, port }), { mode: 0o600, flag: "wx" });
+    fs.writeFileSync(temporary, configText({
+      authDirectory: this.#configAuthDirectory(authDirectory, this.#authDirectoryFd),
+      credential,
+      port,
+    }), { mode: 0o600, flag: "wx" });
+    this.#assertPrivateDirectory(authDirectory, this.#authDirectoryFd);
     this.#assertPrivateDirectory(configDirectory, this.#runDirectoryFd);
     fs.renameSync(temporary, configPath);
     fs.chmodSync(configPath, 0o600);
     let child;
     try {
+      this.#assertPrivateDirectory(authDirectory, this.#authDirectoryFd);
+      this.#assertPrivateDirectory(configDirectory, this.#runDirectoryFd);
       child = this.#spawn(this.#binaryPath, ["-config", configPath, "-local-model"], {
         cwd: configDirectory,
         env: spawnEnvironment(),
@@ -882,6 +890,12 @@ class CLIProxyManager {
       if (sameDirectory(directoryIdentity(stat), directoryIdentity(named))) return candidate;
     } catch { /* Linux test hosts do not expose macOS VolFS identities. */ }
     return directory;
+  }
+
+  #configAuthDirectory(directory, descriptor) {
+    if (this.#authStableDirectory && this.#authStableDirectory !== directory) return this.#authStableDirectory;
+    if (descriptor === null || descriptor === undefined) throw new Error("auth descriptor missing");
+    return process.platform === "darwin" ? `/dev/fd/${descriptor}` : `/proc/self/fd/${descriptor}`;
   }
 
   #openPrivateDirectory(directory) {

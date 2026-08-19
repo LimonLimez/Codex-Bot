@@ -483,3 +483,35 @@ test("CLIProxy config writes reject a run-directory swap instead of writing outs
   } finally { fs.renameSync = realRename; }
   assert.equal(fs.existsSync(path.join(outside, "config.yaml")), false);
 });
+
+test("CLIProxy config passes the held auth identity when authDirectory is swapped before spawn", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  const stateRoot = path.join(root, "state");
+  const auth = path.join(stateRoot, "auth");
+  const held = path.join(root, "auth-held");
+  const outside = path.join(root, "outside");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  fs.mkdirSync(outside, { mode: 0o700 });
+  let configTextSeen = "";
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot,
+    spawnImpl(_executable, args) {
+      const configPath = args[args.indexOf("-config") + 1];
+      fs.renameSync(auth, held);
+      fs.symlinkSync(outside, auth, "dir");
+      configTextSeen = fs.readFileSync(configPath, "utf8");
+      const configuredAuth = /auth-dir: "([^"]+)"/.exec(configTextSeen)?.[1];
+      try { fs.writeFileSync(path.join(configuredAuth, "xai-outside.json"), "outside", { mode: 0o600 }); } catch {}
+      return fakeChild();
+    },
+    probeImpl: async () => true,
+  });
+  await manager.start();
+  assert.doesNotMatch(configTextSeen, new RegExp(auth.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.equal(fs.existsSync(path.join(outside, "xai-outside.json")), false);
+  manager.stop();
+});
