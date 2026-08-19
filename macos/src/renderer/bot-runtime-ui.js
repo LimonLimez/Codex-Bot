@@ -276,6 +276,52 @@
     return Array.from({ length }, (_, index) => descriptors[String(index)].value);
   }
 
+  function clonePlainData(value, message) {
+    const seen = new Set();
+    const inspect = (candidate) => {
+      if (candidate === null || typeof candidate !== "object") return;
+      if (seen.has(candidate)) throw new Error(message);
+      seen.add(candidate);
+      let descriptors;
+      let prototype;
+      try {
+        prototype = Object.getPrototypeOf(candidate);
+        descriptors = Object.getOwnPropertyDescriptors(candidate);
+      } catch {
+        throw new Error(message);
+      }
+      if (Array.isArray(candidate)) {
+        const lengthDescriptor = descriptors.length;
+        const length = lengthDescriptor && "value" in lengthDescriptor ? lengthDescriptor.value : -1;
+        if (prototype !== Array.prototype || !Number.isSafeInteger(length) || length < 0
+          || Reflect.ownKeys(descriptors).length !== length + 1) throw new Error(message);
+        for (let index = 0; index < length; index += 1) {
+          const descriptor = descriptors[String(index)];
+          if (!descriptor || !("value" in descriptor)) throw new Error(message);
+          inspect(descriptor.value);
+        }
+        if (!("value" in lengthDescriptor)) throw new Error(message);
+        return;
+      }
+      if (prototype !== Object.prototype && prototype !== null) throw new Error(message);
+      for (const key of Reflect.ownKeys(descriptors)) {
+        const descriptor = descriptors[key];
+        if (typeof key !== "string" || !("value" in descriptor)) throw new Error(message);
+        inspect(descriptor.value);
+      }
+    };
+    try { inspect(value); }
+    catch { throw new Error(message); }
+    let clone;
+    try {
+      if (typeof structuredClone !== "function") throw new Error();
+      clone = structuredClone(value);
+    } catch {
+      throw new Error(message);
+    }
+    return clone;
+  }
+
   function validTimestamp(value) {
     if (typeof value !== "string") return false;
     const time = Date.parse(value);
@@ -723,8 +769,9 @@
   }
 
   function normalizeProviderAuthoritySnapshot(value) {
+    const cloned = clonePlainData(value, "Provider authority is unavailable.");
     const raw = exactDataObject(
-      value,
+      cloned,
       new Set(["schemaVersion", "connections", "catalog", "onboarding"]),
       ["schemaVersion", "connections", "catalog", "onboarding"],
       "Provider authority is unavailable.",
@@ -3064,10 +3111,24 @@
       "codex-ai-connections-copy",
       "Connect the AI services you want OpenBot to use. Models remain bot-specific.",
     );
+    const connectionsStatus = element(documentRef, "p", "codex-ai-connections-status");
+    connectionsStatus.setAttribute("role", "status");
+    connectionsStatus.setAttribute("aria-live", "polite");
+    connectionsStatus.hidden = true;
+    const connectionsRetry = element(documentRef, "button", "codex-ai-connections-retry", "Retry");
+    connectionsRetry.type = "button";
+    connectionsRetry.setAttribute("aria-label", "Retry AI connections");
+    connectionsRetry.hidden = true;
     const connectionsActions = element(documentRef, "div", "codex-ai-connections-actions");
     const connectionsList = element(documentRef, "div", "codex-ai-connections-list");
     connectionsActions.append(connectionsList);
-    connectionsSettings.append(connectionsTitle, connectionsCopy, connectionsActions);
+    connectionsSettings.append(
+      connectionsTitle,
+      connectionsCopy,
+      connectionsStatus,
+      connectionsRetry,
+      connectionsActions,
+    );
     const firstConnectionSetup = element(documentRef, "dialog", "codex-first-connection-setup");
     firstConnectionSetup.setAttribute("role", "dialog");
     firstConnectionSetup.setAttribute("aria-modal", "true");
@@ -3092,11 +3153,21 @@
     const firstConnectionError = element(documentRef, "p", "codex-first-connection-error");
     firstConnectionError.setAttribute("role", "alert");
     firstConnectionError.hidden = true;
+    const firstConnectionStatus = element(documentRef, "p", "codex-first-connection-status");
+    firstConnectionStatus.setAttribute("role", "status");
+    firstConnectionStatus.setAttribute("aria-live", "polite");
+    firstConnectionStatus.hidden = true;
+    const firstConnectionRetry = element(documentRef, "button", "codex-first-connection-retry", "Retry");
+    firstConnectionRetry.type = "button";
+    firstConnectionRetry.setAttribute("aria-label", "Retry AI connections");
+    firstConnectionRetry.hidden = true;
     firstConnectionSetup.append(
       firstConnectionTitle,
       firstConnectionCopy,
       firstConnectionChoices,
       firstConnectionError,
+      firstConnectionStatus,
+      firstConnectionRetry,
     );
     if (nativeProtocolMode) {
       popover.append(
@@ -3511,6 +3582,17 @@
       const gateActive = providerFacade !== null || providerFacadeInvalid || providerAuthorityInvalid;
       const shouldOpen = gateActive
         && (providerFacadeInvalid || providerAuthorityInvalid || providerOnboarding === null);
+      const retryable = providerAuthorityRetryable && !providerFacadeInvalid;
+      const refreshPending = providerRefreshFlight !== null;
+      const retryCopy = "AI connection data is stale. Retry to refresh.";
+      connectionsStatus.textContent = retryCopy;
+      connectionsStatus.hidden = !retryable;
+      connectionsRetry.hidden = !retryable;
+      connectionsRetry.disabled = refreshPending;
+      firstConnectionStatus.textContent = retryCopy;
+      firstConnectionStatus.hidden = !(retryable && shouldOpen);
+      firstConnectionRetry.hidden = !(retryable && shouldOpen);
+      firstConnectionRetry.disabled = refreshPending;
       setDialogOpen(firstConnectionSetup, shouldOpen);
       panel.inert = shouldOpen;
       modelDock.inert = shouldOpen;
@@ -3711,7 +3793,10 @@
         } catch (error) {
           deferred.reject(error);
         } finally {
-          if (providerRefreshFlight === promise) providerRefreshFlight = null;
+          if (providerRefreshFlight === promise) {
+            providerRefreshFlight = null;
+            if (!mountDisposed) updateConnectionPresentation(lastSnapshot);
+          }
           if (providerRefreshDeferred === deferred) providerRefreshDeferred = null;
         }
       };
@@ -4648,6 +4733,13 @@
       paintFast(desiredServiceTier === activeFastTier);
       void submitSelectionIntent(nextSelection, { fastTier: activeFastTier });
     });
+    const retryProviderAuthority = () => {
+      if (mountDisposed || (providerRefreshFlight && connectionsRetry.disabled)) return;
+      void refreshProviderAuthority().catch(() => {});
+      updateConnectionPresentation(lastSnapshot);
+    };
+    connectionsRetry.addEventListener("click", retryProviderAuthority);
+    firstConnectionRetry.addEventListener("click", retryProviderAuthority);
     if (providerFacade) {
       if (typeof providerFacade.onConnectionsChanged === "function") {
         try {

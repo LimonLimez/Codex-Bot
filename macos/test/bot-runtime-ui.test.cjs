@@ -8232,3 +8232,194 @@ test("R5-N5 synchronous authority signal reentry cannot start a second reader", 
   assert.equal(maxConcurrentReads, 1);
   assert.ok(reads >= 2);
 });
+
+test("atomic authority rejects transparent Proxy wrappers at every snapshot nesting level", async (context) => {
+  const connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
+  const model = providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true });
+  const catalog = providerCatalog([model], 1);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const transparent = (value) => new Proxy(value, {});
+  const cases = [
+    ["snapshot", transparent(authoritySnapshot({ connections, catalog, onboarding: receipt }))],
+    ["connections", authoritySnapshot({ connections: transparent(connections), catalog, onboarding: receipt })],
+    ["catalog", authoritySnapshot({ connections, catalog: transparent(catalog), onboarding: receipt })],
+    ["models", authoritySnapshot({
+      connections,
+      catalog: providerCatalog(transparent([model]), 1),
+      onboarding: receipt,
+    })],
+    ["model", authoritySnapshot({
+      connections,
+      catalog: providerCatalog([transparent(model)], 1),
+      onboarding: receipt,
+    })],
+    ["onboarding", authoritySnapshot({ connections, catalog, onboarding: transparent(receipt) })],
+  ];
+  for (const [, hostileSnapshot] of cases) {
+    const facade = {
+      async readAuthoritySnapshot() { return hostileSnapshot; },
+      async connect() {},
+      async disconnect() {},
+      async completeOnboarding() { return receipt; },
+      onConnectionsChanged() { return () => {}; },
+      onCatalogChanged() { return () => {}; },
+    };
+    const harness = createMountedUiHarness({
+      catalog,
+      initialSelection: Object.freeze({
+        botId: BOT_A,
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        serviceTier: null,
+        catalogGeneration: 3,
+        generation: 1,
+      }),
+      nativeProtocol: true,
+      nativeHost: true,
+      providerFacade: facade,
+    });
+    context.after(() => harness.mounted.dispose());
+    for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
+    assert.deepEqual(harness.mounted.controller.snapshot().modelCatalog, []);
+    harness.mounted.dispose();
+  }
+});
+
+test("failed authority refresh surfaces stale retry state and clears after a successful quiet retry", async (context) => {
+  const connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true }),
+  ], 1);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const snapshot = authoritySnapshot({ connections, catalog, onboarding: receipt });
+  let phase = "valid";
+  let reads = 0;
+  let emitConnections = () => {};
+  const facade = {
+    async readAuthoritySnapshot() {
+      reads += 1;
+      if (phase === "failed") throw new Error("temporary authority failure");
+      return snapshot;
+    },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return receipt; },
+    onConnectionsChanged(listener) { emitConnections = listener; return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 3,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  phase = "failed";
+  emitConnections(connections);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const status = harness.findPanel("codex-ai-connections-status");
+  const retry = harness.findPanel("codex-ai-connections-retry");
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+  assert.equal(harness.mounted.controller.snapshot().modelCatalog.length, 1);
+  assert.equal(status.hidden, false);
+  assert.match(status.textContent, /stale|retry|unavailable/i);
+  assert.equal(status.attributes.role, "status");
+  assert.equal(retry.hidden, false);
+  assert.equal(retry.disabled, false);
+
+  const readsAfterFailure = reads;
+  phase = "valid";
+  retry.listeners.get("click")();
+  retry.listeners.get("click")();
+  for (let index = 0; index < 10; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(reads > readsAfterFailure);
+  assert.equal(status.hidden, true);
+  assert.equal(retry.hidden, true);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+});
+
+test("stale authority retry is single-flight and disposal-safe", async (context) => {
+  const connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true }),
+  ], 1);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const snapshot = authoritySnapshot({ connections, catalog, onboarding: receipt });
+  const held = deferred();
+  let phase = "valid";
+  let reads = 0;
+  let emitConnections = () => {};
+  const facade = {
+    async readAuthoritySnapshot() {
+      reads += 1;
+      if (phase === "failed") throw new Error("temporary authority failure");
+      if (phase === "held") return held.promise;
+      return snapshot;
+    },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return receipt; },
+    onConnectionsChanged(listener) { emitConnections = listener; return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 3,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  phase = "failed";
+  emitConnections(connections);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const retry = harness.findPanel("codex-ai-connections-retry");
+  phase = "held";
+  const beforeRetry = reads;
+  retry.listeners.get("click")();
+  retry.listeners.get("click")();
+  for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, beforeRetry + 1);
+  harness.mounted.dispose();
+  held.resolve(snapshot);
+  for (let index = 0; index < 4; index += 1) await new Promise((resolve) => setImmediate(resolve));
+});
