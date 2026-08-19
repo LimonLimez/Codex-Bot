@@ -62,6 +62,10 @@ function canonicalDirectoryPath(requested) {
   throw new Error("directory path is not stable");
 }
 
+function isVolFSDirectoryPath(value) {
+  return typeof value === "string" && /^\/\.vol\/\d+\/\d+$/.test(value);
+}
+
 function plainOwn(value, allowed, required = []) {
   if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) throw new Error();
   let prototype;
@@ -294,8 +298,24 @@ class CLIProxyManager {
     this.#runDirectory = configDirectory;
     this.#authDirectoryFd = authFd;
     this.#runDirectoryFd = runFd;
-    this.#authStableDirectory = this.#stableDirectory(authDirectory, authFd);
-    this.#runStableDirectory = this.#stableDirectory(configDirectory, runFd);
+    try {
+      this.#authStableDirectory = this.#stableDirectory(authDirectory, authFd);
+      this.#runStableDirectory = this.#stableDirectory(configDirectory, runFd);
+    } catch {
+      this.#authDirectory = null;
+      this.#runDirectory = null;
+      this.#authStableDirectory = null;
+      this.#runStableDirectory = null;
+      for (const descriptor of [this.#authDirectoryFd, this.#runDirectoryFd]) {
+        if (descriptor !== null && descriptor !== undefined) { try { fs.closeSync(descriptor); } catch {} }
+      }
+      this.#authDirectoryFd = null;
+      this.#runDirectoryFd = null;
+      throw new CLIProxyError(
+        "CLIProxyAPI private state directory has no supported stable identity.",
+        "CLIPROXY_PRIVATE_STATE_FAILED",
+      );
+    }
     const credential = this.#randomBytes(32).toString("hex");
     const port = this.#randomInt(49152, 65536);
     const endpoint = `http://127.0.0.1:${port}/v1`;
@@ -882,20 +902,20 @@ class CLIProxyManager {
   }
 
   #stableDirectory(directory, descriptor) {
-    try {
-      const stat = fs.fstatSync(descriptor);
-      const candidate = `/.vol/${stat.dev}/${stat.ino}`;
-      const named = fs.lstatSync(candidate);
-      fs.realpathSync.native(candidate);
-      if (sameDirectory(directoryIdentity(stat), directoryIdentity(named))) return candidate;
-    } catch { /* Linux test hosts do not expose macOS VolFS identities. */ }
-    return directory;
+    if (process.platform !== "darwin") throw new Error("VolFS stable identity is unsupported");
+    const opened = directoryIdentity(fs.fstatSync(descriptor));
+    const candidate = `/.vol/${opened.dev}/${opened.ino}`;
+    // VolFS anchors intentionally do not resolve through realpath(3). The
+    // fstat/lstat identity comparison is the complete stable-path check.
+    const named = directoryIdentity(fs.lstatSync(candidate));
+    if (!sameDirectory(opened, named)) throw new Error("VolFS identity changed");
+    return candidate;
   }
 
   #configAuthDirectory(directory, descriptor) {
     if (this.#authStableDirectory && this.#authStableDirectory !== directory) return this.#authStableDirectory;
     if (descriptor === null || descriptor === undefined) throw new Error("auth descriptor missing");
-    return process.platform === "darwin" ? `/dev/fd/${descriptor}` : `/proc/self/fd/${descriptor}`;
+    throw new Error("stable auth directory unavailable");
   }
 
   #openPrivateDirectory(directory) {
@@ -917,7 +937,11 @@ class CLIProxyManager {
     const opened = directoryIdentity(fs.fstatSync(descriptor));
     const named = directoryIdentity(fs.lstatSync(directory));
     if (!sameDirectory(opened, named)) throw new Error("directory identity changed");
-    canonicalDirectoryPath(directory);
+    if (isVolFSDirectoryPath(directory)) {
+      if (directory !== `/.vol/${opened.dev}/${opened.ino}`) throw new Error("VolFS identity changed");
+    } else {
+      canonicalDirectoryPath(directory);
+    }
   }
 
   #hasAuth(descriptor) {

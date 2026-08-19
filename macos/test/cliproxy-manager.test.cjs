@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -431,7 +432,7 @@ test("CLIProxy disconnect quarantines the expected inode and never removes a rep
   const originalLstat = fs.lstatSync;
   fs.lstatSync = (value, ...args) => {
     const stat = originalLstat(value, ...args);
-    if (value === target) {
+    if (typeof value === "string" && path.basename(value) === "xai-race.json") {
       targetChecks += 1;
       if (targetChecks === 2) {
         realRename(target, held);
@@ -513,5 +514,83 @@ test("CLIProxy config passes the held auth identity when authDirectory is swappe
   await manager.start();
   assert.doesNotMatch(configTextSeen, new RegExp(auth.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.equal(fs.existsSync(path.join(outside, "xai-outside.json")), false);
+  manager.stop();
+});
+
+test("CLIProxy real exec child reads and writes the held auth directory while a swapped pathname stays untouched", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  const stateRoot = path.join(root, "state");
+  const auth = path.join(stateRoot, "auth");
+  const held = path.join(root, "auth-held");
+  const outside = path.join(root, "outside");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  fs.mkdirSync(outside, { mode: 0o700 });
+  const script = [
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    "const config = fs.readFileSync(process.argv[1], 'utf8');",
+    "const match = /^auth-dir: \\\"([^\\\"]+)\\\"$/m.exec(config);",
+    "if (!match) process.exit(12);",
+    "fs.writeFileSync(path.join(JSON.parse('\\\"' + match[1] + '\\\"'), 'real-exec-auth.json'), 'held', { mode: 0o600 });",
+    "setInterval(() => {}, 1000);",
+  ].join("\n");
+  let child;
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot,
+    spawnImpl(_executable, args, options) {
+      const configPath = args[args.indexOf("-config") + 1];
+      fs.renameSync(auth, held);
+      fs.symlinkSync(outside, auth, "dir");
+      child = childProcess.spawn(process.execPath, ["-e", script, configPath], options);
+      return child;
+    },
+    probeImpl: async () => {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (fs.existsSync(path.join(held, "real-exec-auth.json"))) return true;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return false;
+    },
+  });
+  await manager.start();
+  assert.equal(fs.readFileSync(path.join(held, "real-exec-auth.json"), "utf8"), "held");
+  assert.equal(fs.existsSync(path.join(outside, "real-exec-auth.json")), false);
+  manager.stop();
+  assert.equal(child.killed, true);
+});
+
+test("CLIProxy fails closed when the held auth directory has no supported stable identity", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  const stateRoot = path.join(root, "state");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  let spawned = false;
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot,
+    spawnImpl() { spawned = true; return fakeChild(); },
+    probeImpl: async () => true,
+  });
+  const realLstat = fs.lstatSync;
+  fs.lstatSync = (value, ...args) => {
+    if (typeof value === "string" && value.startsWith("/.vol/")) {
+      const error = new Error("unsupported stable identity");
+      error.code = "ENOENT";
+      throw error;
+    }
+    return realLstat(value, ...args);
+  };
+  try {
+    await assert.rejects(manager.start(), { code: "CLIPROXY_PRIVATE_STATE_FAILED" });
+  } finally {
+    fs.lstatSync = realLstat;
+  }
+  assert.equal(spawned, false);
   manager.stop();
 });
