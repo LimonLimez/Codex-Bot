@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const childProcess = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { BotStore } = require("../bots/bot-store.cjs");
@@ -11,6 +12,16 @@ const { CodexAccountController } = require("./codex-account-controller.cjs");
 const { CodexAppServerManager } = require("./codex-app-server-manager.cjs");
 const { CodexDirectInferenceTransport } = require("./codex-direct-inference-transport.cjs");
 const { CLIProxyInferenceTransport } = require("./cliproxy-inference-transport.cjs");
+const { OpenAICompatibleInferenceTransport } = require("./openai-compatible-inference-transport.cjs");
+const { KeychainSecretStore, KEYCHAIN_SERVICE } = require("./keychain-secret-store.cjs");
+const { OpenAICompatibleProvider } = require("./openai-compatible-provider.cjs");
+const { ProviderController } = require("./provider-controller.cjs");
+const { ProviderStateStore } = require("./provider-state-store.cjs");
+const {
+  PROVIDER_IDS,
+  canonicalProviderId,
+  providerDescriptor,
+} = require("../provider-descriptors.cjs");
 const { InferenceBridgeServer } = require("./inference-bridge-server.cjs");
 const { InferenceProviderRouter } = require("./inference-provider-router.cjs");
 const { BotDeletionCoordinator } = require("./bot-deletion-coordinator.cjs");
@@ -45,6 +56,12 @@ const IPC_CHANNELS = Object.freeze({
   accountLogout: "codex-account:logout",
   accountRetry: "codex-account:retry",
   catalogList: "codex-catalog:list",
+  providerList: "openbot-provider:list",
+  providerConnect: "openbot-provider:connect",
+  providerDisconnect: "openbot-provider:disconnect",
+  providerCatalog: "openbot-provider:catalog",
+  providerOnboardingRead: "openbot-provider:onboarding-read",
+  providerOnboardingComplete: "openbot-provider:onboarding-complete",
   list: "codex-bot:list",
   create: "codex-bot:create",
   adoptLegacy: "codex-bot:adopt-legacy",
@@ -68,16 +85,12 @@ const CHANGE_CHANNEL = "codex-bot:changed";
 const RUNTIME_EVENT_CHANNEL = "codex-runtime:event";
 const ACCOUNT_CHANGE_CHANNEL = "codex-account:changed";
 const CATALOG_CHANGE_CHANNEL = "codex-catalog:changed";
+const PROVIDER_CHANGE_CHANNEL = "openbot-provider:changed";
+const PROVIDER_CATALOG_CHANGE_CHANNEL = "openbot-provider:catalog-changed";
 const COMPUTER_CHANGE_CHANNEL = "openbot-computer:changed";
 const COMPUTER_PERMISSION_CHANNEL = "openbot-computer:permission-requested";
 const INSTALLED = Symbol.for("codex.bot.macos.desktop-runtime");
 const QUIT_HANDOFF_TIMEOUT_MS = 5_000;
-const OPTIONAL_MODEL_EFFORTS = Object.freeze({
-  "claude-fable-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-  "claude-opus-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-  "claude-sonnet-5": Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-});
-const OPTIONAL_NATIVE_MODEL_PREFIX = "cliproxy-anthropic--";
 const LOCAL_AUTOMATION_METHODS = Object.freeze([
   "getAgentAutomations",
   "listAllAutomations",
@@ -97,6 +110,17 @@ function sanitizedFailure() {
 function invalidNativeModelSelection() {
   const error = new Error("Codex bot operation failed.");
   error.code = "CODEX_BOT_INVALID_NATIVE_MODEL_SELECTION";
+  return error;
+}
+
+function unavailableCatalogFailure() {
+  const error = new Error("Codex provider catalog is unavailable.");
+  error.code = "CODEX_BOT_OPERATION_FAILED";
+  Object.defineProperty(error, "stack", {
+    configurable: true,
+    enumerable: false,
+    value: "Error: Codex provider catalog is unavailable.",
+  });
   return error;
 }
 
@@ -411,58 +435,90 @@ function selectionRequest(value) {
   const result = Object.fromEntries(fields
     .filter((field) => descriptors[field])
     .map((field) => [field, descriptors[field].value]));
+  let provider = undefined;
+  if (result.provider !== undefined) {
+    try { provider = canonicalProviderId(result.provider); } catch { throw sanitizedFailure(); }
+  }
   if (typeof result.botId !== "string" || !BOT_ID.test(result.botId)
-    || !(result.provider === undefined || result.provider === "openai-codex"
-      || result.provider === "cliproxy-anthropic")
     || !(result.serviceTier === undefined || result.serviceTier === null
       || (typeof result.serviceTier === "string"
         && /^[a-z][a-z0-9_-]{0,31}$/.test(result.serviceTier)))) throw sanitizedFailure();
-  return result;
+  return Object.freeze({ ...result, ...(provider === undefined ? {} : { provider }) });
+}
+
+function providerInput(value, fields, required = fields) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw sanitizedFailure();
+  let descriptors;
+  let prototype;
+  try {
+    descriptors = Object.getOwnPropertyDescriptors(value);
+    prototype = Object.getPrototypeOf(value);
+  } catch { throw sanitizedFailure(); }
+  const keys = Reflect.ownKeys(descriptors);
+  if ((prototype !== Object.prototype && prototype !== null)
+    || keys.some((key) => typeof key !== "string" || !fields.has(key) || !("value" in descriptors[key]))
+    || required.some((key) => !Object.hasOwn(descriptors, key))) throw sanitizedFailure();
+  return Object.fromEntries(keys.map((key) => [key, descriptors[key].value]));
+}
+
+function providerIdInput(value) {
+  if (typeof value !== "string") throw sanitizedFailure();
+  try {
+    const provider = canonicalProviderId(value);
+    if (provider !== value) throw new Error();
+    return provider;
+  } catch { throw sanitizedFailure(); }
+}
+
+function providerConnectInput(value) {
+  const request = providerInput(value, new Set(["providerId", "authMode", "baseUrl", "apiKey", "sourcePath"]), ["providerId"]);
+  request.providerId = providerIdInput(request.providerId);
+  if (request.authMode !== undefined && !new Set(["browser", "device-code"]).has(request.authMode)) throw sanitizedFailure();
+  if (request.baseUrl !== undefined && typeof request.baseUrl !== "string") throw sanitizedFailure();
+  if (request.apiKey !== undefined && (typeof request.apiKey !== "string" || request.apiKey.length > 16 * 1024)) throw sanitizedFailure();
+  if (request.sourcePath !== undefined && (typeof request.sourcePath !== "string" || !path.isAbsolute(request.sourcePath))) throw sanitizedFailure();
+  return Object.freeze(request);
 }
 
 function catalogModels(catalog) {
   if (!catalog || typeof catalog !== "object" || catalog.status !== "ready"
     || !Number.isSafeInteger(catalog.generation) || catalog.generation < 1
-    || !Array.isArray(catalog.models) || catalog.models.length < 1) throw sanitizedFailure();
+    || !Array.isArray(catalog.models) || catalog.models.length < 1) throw unavailableCatalogFailure();
   return catalog.models;
 }
 
 function resolveModelSelection(rawSelection, catalog) {
   const requested = selectionRequest(rawSelection);
-  const optionalEfforts = OPTIONAL_MODEL_EFFORTS[requested.model];
-  const officialModels = catalog?.status === "ready" ? catalogModels(catalog) : null;
-  const officialModel = officialModels?.find((entry) => entry?.id === requested.model) ?? null;
-  const choosesOptional = requested.provider === "cliproxy-anthropic"
-    || (requested.provider === undefined && optionalEfforts && !officialModel);
-  if (choosesOptional) {
-    if (!optionalEfforts || !optionalEfforts.includes(requested.reasoningEffort)
-      || (requested.serviceTier !== undefined && requested.serviceTier !== null)) throw sanitizedFailure();
-    return Object.freeze({
-      botId: requested.botId,
-      provider: "cliproxy-anthropic",
-      model: requested.model,
-      reasoningEffort: requested.reasoningEffort,
-      serviceTier: null,
-      catalogGeneration: 1,
-    });
-  }
-  if (requested.provider === undefined && optionalEfforts && officialModel) throw sanitizedFailure();
-  if (requested.provider === "cliproxy-anthropic"
-    || (requested.provider === "openai-codex" && !officialModel)) {
+  const models = catalogModels(catalog);
+  const matches = models.filter((entry) => {
+    const modelId = entry?.model ?? entry?.id;
+    const provider = entry?.provider ?? "openai-codex";
+    return modelId === requested.model && (requested.provider === undefined || provider === requested.provider);
+  });
+  if (matches.length !== 1) throw sanitizedFailure();
+  const model = matches[0];
+  const provider = model.provider ?? "openai-codex";
+  let descriptor;
+  try { descriptor = providerDescriptor(provider); } catch { throw sanitizedFailure(); }
+  const efforts = model.supportedReasoningEfforts ?? model.reasoningEfforts ?? model.efforts ?? descriptor.reasoningEfforts;
+  const normalizedEfforts = Array.isArray(efforts)
+    ? efforts.map((entry) => typeof entry === "string" ? entry : entry?.reasoningEffort).filter(Boolean)
+    : [];
+  const reasoningValid = normalizedEfforts.includes(requested.reasoningEffort)
+    || (provider === "anthropic-claude" && requested.reasoningEffort === "ultra-code"
+      && normalizedEfforts.includes("max"));
+  if (!reasoningValid || (requested.reasoningEffort === "ultra-code" && provider !== "anthropic-claude")) {
     throw sanitizedFailure();
   }
-  const model = officialModel;
-  if (!model || !Array.isArray(model.supportedReasoningEfforts)
-    || !model.supportedReasoningEfforts.includes(requested.reasoningEffort)) throw sanitizedFailure();
+  const tiers = Array.isArray(model.serviceTiers) ? model.serviceTiers : [];
   const serviceTier = requested.serviceTier === undefined
-    ? model.defaultServiceTier ?? null
-    : requested.serviceTier;
-  if (serviceTier !== null && (!Array.isArray(model.serviceTiers)
-    || !model.serviceTiers.some((entry) => entry?.id === serviceTier))) throw sanitizedFailure();
+    ? model.defaultServiceTier ?? null : requested.serviceTier;
+  if (serviceTier !== null && (descriptor.fastModeSupported !== true
+    || !tiers.some((entry) => entry?.id === serviceTier))) throw sanitizedFailure();
   return Object.freeze({
     botId: requested.botId,
-    provider: "openai-codex",
-    model: requested.model,
+    provider,
+    model: model.model ?? model.id,
     reasoningEffort: requested.reasoningEffort,
     serviceTier,
     catalogGeneration: catalog.generation,
@@ -487,22 +543,15 @@ function selectionMatchesCatalog(value, catalog) {
 }
 
 function defaultModelSelection(botId, catalog) {
-  if (catalog?.status !== "ready") {
-    return resolveModelSelection({
-      botId,
-      provider: "cliproxy-anthropic",
-      model: "claude-fable-5",
-      reasoningEffort: "medium",
-      serviceTier: null,
-    }, catalog);
-  }
   const models = catalogModels(catalog);
   const model = models.find((entry) => entry?.isDefault === true) ?? models[0];
   return resolveModelSelection({
     botId,
-    provider: "openai-codex",
-    model: model.id,
-    reasoningEffort: model.defaultReasoningEffort,
+    provider: model.provider ?? "openai-codex",
+    model: model.model ?? model.id,
+    reasoningEffort: model.defaultReasoningEffort
+      ?? model.defaultReasoningEffort
+      ?? (model.supportedReasoningEfforts ?? model.efforts ?? ["none"])[0],
     serviceTier: model.defaultServiceTier ?? null,
   }, catalog);
 }
@@ -596,21 +645,6 @@ function nativeEffortLabel(value) {
   return labels[value] ?? String(value).replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function optionalNativeModelId(model) {
-  if (typeof model !== "string" || !Object.hasOwn(OPTIONAL_MODEL_EFFORTS, model)) {
-    throw sanitizedFailure();
-  }
-  return `${OPTIONAL_NATIVE_MODEL_PREFIX}${model}`;
-}
-
-function optionalModelFromNativeId(modelId) {
-  if (typeof modelId !== "string" || !modelId.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)) return null;
-  const model = modelId.slice(OPTIONAL_NATIVE_MODEL_PREFIX.length);
-  return Object.hasOwn(OPTIONAL_MODEL_EFFORTS, model) && optionalNativeModelId(model) === modelId
-    ? model
-    : null;
-}
-
 function nativeCatalogModel({
   id,
   displayName,
@@ -677,7 +711,7 @@ function nativeCatalogModel({
       isDefaultNonMaxConfig: isDefault,
     };
   }));
-  const anthropic = provider === "cliproxy-anthropic";
+  const anthropic = provider === "anthropic-claude" || provider === "cliproxy-anthropic";
   return {
     name: id,
     defaultOn: defaultOn === true,
@@ -698,30 +732,55 @@ function nativeCatalogModel({
   };
 }
 
+function catalogModelProvider(entry) {
+  try { return canonicalProviderId(entry?.provider ?? "openai-codex"); }
+  catch { throw sanitizedFailure(); }
+}
+
+function catalogModelId(entry) {
+  const model = entry?.model ?? entry?.id;
+  if (typeof model !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(model)) throw sanitizedFailure();
+  if (PROVIDER_IDS.some((provider) => model.startsWith(`${provider}--`))) throw sanitizedFailure();
+  return model;
+}
+
+function nativeCatalogIdentity(catalog, entry) {
+  const provider = catalogModelProvider(entry);
+  const raw = catalogModelId(entry);
+  const count = catalog.models.filter((candidate) => catalogModelId(candidate) === raw).length;
+  return count > 1 ? `${provider}--${raw}` : raw;
+}
+
 function nativeAvailableModels(catalog) {
-  const official = catalog?.status === "ready" ? catalogModels(catalog) : [];
-  if (official.some((entry) => typeof entry?.id === "string"
-    && entry.id.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX))) throw sanitizedFailure();
-  const models = official.map((entry, index) => nativeCatalogModel({
-    id: entry?.id,
-    displayName: entry?.displayName,
-    efforts: entry?.supportedReasoningEfforts,
-    serviceTiers: entry?.serviceTiers ?? [],
-    defaultEffort: entry?.defaultReasoningEffort,
-    defaultServiceTier: entry?.defaultServiceTier ?? null,
-    defaultOn: entry?.isDefault === true || (!official.some((model) => model?.isDefault === true) && index === 0),
-    provider: "openai-codex",
-    supportsImages: entry?.inputModalities?.includes?.("image") === true,
-  }));
-  for (const [id, efforts] of Object.entries(OPTIONAL_MODEL_EFFORTS)) {
-    models.push(nativeCatalogModel({
-      id: optionalNativeModelId(id),
-      displayName: id.replace(/[-_.]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()),
-      efforts,
-      defaultEffort: efforts.includes("medium") ? "medium" : efforts[0],
-      provider: "cliproxy-anthropic",
-    }));
+  const official = catalogModels(catalog);
+  const seenTuples = new Set();
+  for (const entry of official) {
+    const tuple = `${catalogModelProvider(entry)}\0${catalogModelId(entry)}`;
+    if (seenTuples.has(tuple)) throw sanitizedFailure();
+    seenTuples.add(tuple);
   }
+  const defaults = official.some((entry) => entry?.isDefault === true);
+  const models = official.map((entry, index) => {
+    const provider = catalogModelProvider(entry);
+    const descriptor = providerDescriptor(provider);
+    const rawEfforts = entry?.supportedReasoningEfforts ?? entry?.reasoningEfforts ?? entry?.efforts
+      ?? descriptor.reasoningEfforts;
+    const efforts = provider === "anthropic-claude" && Array.isArray(rawEfforts)
+      && rawEfforts.includes("max") && !rawEfforts.includes("ultra-code")
+      ? [...rawEfforts, "ultra-code"] : rawEfforts;
+    const defaultEffort = entry?.defaultReasoningEffort ?? (Array.isArray(efforts) ? efforts[0] : null);
+    return nativeCatalogModel({
+      id: nativeCatalogIdentity(catalog, entry),
+      displayName: entry?.displayName ?? entry?.label ?? catalogModelId(entry),
+      efforts,
+      serviceTiers: entry?.serviceTiers ?? [],
+      defaultEffort,
+      defaultServiceTier: entry?.defaultServiceTier ?? null,
+      defaultOn: entry?.isDefault === true || (!defaults && index === 0),
+      provider,
+      supportsImages: entry?.inputModalities?.includes?.("image") === true,
+    });
+  });
   if (models.length < 1 || new Set(models.map((model) => model.name)).size !== models.length) {
     throw sanitizedFailure();
   }
@@ -734,7 +793,7 @@ function nativeAvailableModels(catalog) {
 
 function nativeModelSelection(selection, catalog = null) {
   if (!selection || typeof selection !== "object"
-    || !new Set(["openai-codex", "cliproxy-anthropic"]).has(selection.provider)
+    || !PROVIDER_IDS.includes(selection.provider)
     || typeof selection.model !== "string"
     || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(selection.model)
     || typeof selection.reasoningEffort !== "string"
@@ -742,29 +801,21 @@ function nativeModelSelection(selection, catalog = null) {
     || !(selection.serviceTier === null || typeof selection.serviceTier === "string")) {
     throw sanitizedFailure();
   }
-  const optional = selection.provider === "cliproxy-anthropic";
-  if (optional && (!Object.hasOwn(OPTIONAL_MODEL_EFFORTS, selection.model)
-    || !OPTIONAL_MODEL_EFFORTS[selection.model].includes(selection.reasoningEffort)
-    || selection.serviceTier !== null)) throw sanitizedFailure();
-  if (!optional && selection.model.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)) throw sanitizedFailure();
-  const official = !optional && catalog?.status === "ready"
-    ? catalogModels(catalog).find((entry) => entry?.id === selection.model)
-    : null;
-  if (!optional && catalog?.status === "ready") {
-    if (!official || !Array.isArray(official.supportedReasoningEfforts)
-      || !official.supportedReasoningEfforts.includes(selection.reasoningEffort)
-      || !Array.isArray(official.serviceTiers)
-      || official.serviceTiers.some((entry) => entry?.id === "standard")
-      || new Set(official.serviceTiers.map((entry) => entry?.id)).size !== official.serviceTiers.length
-      || (selection.serviceTier !== null && (!Array.isArray(official.serviceTiers)
-        || !official.serviceTiers.some((entry) => entry?.id === selection.serviceTier)))) {
-      throw sanitizedFailure();
-    }
-  }
-  const hasSpeedParameter = !optional && (selection.serviceTier !== null
-    || (Array.isArray(official?.serviceTiers) && official.serviceTiers.length > 0));
+  const official = catalogModels(catalog).find((entry) => catalogModelProvider(entry) === selection.provider
+    && catalogModelId(entry) === selection.model);
+  if (!official) throw sanitizedFailure();
+  const efforts = official.supportedReasoningEfforts ?? official.reasoningEfforts ?? official.efforts ?? [];
+  const normalizedEfforts = Array.isArray(efforts)
+    ? efforts.map((value) => typeof value === "string" ? value : value?.reasoningEffort)
+    : [];
+  if (!normalizedEfforts.includes(selection.reasoningEffort)
+    && !(selection.provider === "anthropic-claude" && selection.reasoningEffort === "ultra-code"
+      && normalizedEfforts.includes("max"))) throw sanitizedFailure();
+  const tiers = official.serviceTiers ?? [];
+  if (selection.serviceTier !== null && !tiers.some((entry) => entry?.id === selection.serviceTier)) throw sanitizedFailure();
+  const hasSpeedParameter = selection.serviceTier !== null || tiers.length > 0;
   return freezeNativeModelValue({
-    modelId: optional ? optionalNativeModelId(selection.model) : selection.model,
+    modelId: nativeCatalogIdentity(catalog, official),
     maxMode: true,
     parameters: [
       { id: "effort", value: selection.reasoningEffort },
@@ -837,47 +888,30 @@ function resolveNativeModelSelection(value, botId, catalog) {
   const modelId = descriptors.modelId.value;
   const parameters = exactNativeModelParameters(descriptors.parameters.value);
   const effort = parameters[0].value;
-  const readyModels = catalog?.status === "ready" ? catalogModels(catalog) : null;
-  if (readyModels && (new Set(readyModels.map((entry) => entry?.id)).size !== readyModels.length
-    || readyModels.some((entry) => typeof entry?.id === "string"
-      && entry.id.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)))) throw sanitizedFailure();
-  if (modelId.startsWith(OPTIONAL_NATIVE_MODEL_PREFIX)) {
-    const model = optionalModelFromNativeId(modelId);
-    if (model === null || parameters.length !== 1
-      || !OPTIONAL_MODEL_EFFORTS[model].includes(effort)) throw invalidNativeModelSelection();
-    return Object.freeze({
-      botId,
-      provider: "cliproxy-anthropic",
-      model,
-      reasoningEffort: effort,
-      serviceTier: null,
-      catalogGeneration: 1,
-    });
-  }
-  const models = readyModels ?? catalogModels(catalog);
-  const model = models.find((entry) => entry?.id === modelId);
+  const models = catalogModels(catalog);
+  const model = models.find((entry) => nativeCatalogIdentity(catalog, entry) === modelId);
   if (!model) throw invalidNativeModelSelection();
-  if (!Array.isArray(model.supportedReasoningEfforts) || !Array.isArray(model.serviceTiers)) {
-    throw sanitizedFailure();
-  }
-  if (model.serviceTiers.some((entry) => entry?.id === "standard")
-    || new Set(model.serviceTiers.map((entry) => entry?.id)).size !== model.serviceTiers.length) {
-    throw sanitizedFailure();
-  }
-  if (!model.supportedReasoningEfforts.includes(effort)) throw invalidNativeModelSelection();
+  const efforts = model.supportedReasoningEfforts ?? model.reasoningEfforts ?? model.efforts ?? [];
+  const normalizedEfforts = Array.isArray(efforts)
+    ? efforts.map((value) => typeof value === "string" ? value : value?.reasoningEffort)
+    : [];
+  if (!normalizedEfforts.includes(effort)
+    && !(catalogModelProvider(model) === "anthropic-claude" && effort === "ultra-code"
+      && normalizedEfforts.includes("max"))) throw invalidNativeModelSelection();
+  const tiers = Array.isArray(model.serviceTiers) ? model.serviceTiers : [];
   let serviceTier = null;
-  if (model.serviceTiers.length > 0) {
+  if (tiers.length > 0) {
     if (parameters.length !== 2) throw invalidNativeModelSelection();
     const speed = parameters[1].value;
     serviceTier = speed === "standard" ? null : speed;
-    if (serviceTier !== null && !model.serviceTiers.some((entry) => entry?.id === serviceTier)) {
+    if (serviceTier !== null && !tiers.some((entry) => entry?.id === serviceTier)) {
       throw invalidNativeModelSelection();
     }
   } else if (parameters.length !== 1) throw invalidNativeModelSelection();
   return Object.freeze({
     botId,
-    provider: "openai-codex",
-    model: modelId,
+    provider: catalogModelProvider(model),
+    model: catalogModelId(model),
     reasoningEffort: effort,
     serviceTier,
     catalogGeneration: catalog.generation,
@@ -909,6 +943,10 @@ function createLazySidecarManager({
   }
   return Object.freeze({
     connectProvider(provider) { return current().connectProvider(provider); },
+    importVertex(sourcePath) { return current().importVertex(sourcePath); },
+    disconnectProvider(provider) { return current().disconnectProvider(provider); },
+    listModels(provider) { return current().listModels(provider); },
+    connectionStatus(provider) { return current().connectionStatus(provider); },
     start() { return current().start(); },
     stop() { manager?.stop(); },
   });
@@ -918,6 +956,8 @@ function createInferenceBridgeRuntime({
   codexManager,
   selectionStore,
   sidecarManager,
+  providerController = null,
+  openaiProvider = null,
   readCatalog = null,
   stateRoot,
   toolBridge = null,
@@ -925,6 +965,7 @@ function createInferenceBridgeRuntime({
   capability = crypto.randomBytes(32).toString("hex"),
   DirectTransportClass = CodexDirectInferenceTransport,
   OptionalTransportClass = CLIProxyInferenceTransport,
+  OpenAITransportClass = OpenAICompatibleInferenceTransport,
   RouterClass = InferenceProviderRouter,
   StandaloneControllerClass = StandaloneConversationController,
   StandaloneStoreClass = StandaloneConversationStore,
@@ -934,13 +975,16 @@ function createInferenceBridgeRuntime({
   if (!codexManager || typeof codexManager !== "object"
     || !selectionStore || typeof selectionStore.read !== "function"
     || !sidecarManager || typeof sidecarManager.start !== "function"
+    || (providerController !== null && (!providerController || typeof providerController.catalog !== "function"
+      || typeof providerController.readOnboarding !== "function"))
+    || (openaiProvider !== null && typeof openaiProvider.streamConfiguration !== "function")
     || !(readCatalog === null || typeof readCatalog === "function")
     || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)
     || typeof capability !== "string" || !/^[a-f0-9]{64}$/.test(capability)
     || !(toolBridge === null || (toolBridge && typeof toolBridge.open === "function"))
     || !computerTargetRouter || typeof computerTargetRouter !== "object"
     || typeof computerTargetRouter.resolve !== "function"
-    || [DirectTransportClass, OptionalTransportClass, RouterClass, StandaloneControllerClass,
+    || [DirectTransportClass, OptionalTransportClass, OpenAITransportClass, RouterClass, StandaloneControllerClass,
       StandaloneStoreClass, StandaloneSubagentRunnerClass, BridgeClass]
       .some((value) => typeof value !== "function")) throw sanitizedFailure();
   const directTransport = new DirectTransportClass({
@@ -948,29 +992,58 @@ function createInferenceBridgeRuntime({
     workspacePath: path.join(stateRoot, "direct-codex", "empty-workspace"),
   });
   const readSelection = async (botId) => {
-    const stored = await selectionStore.read(botId);
+    const status = typeof selectionStore.readStatus === "function"
+      ? await selectionStore.readStatus(botId) : null;
+    if (status?.state === "unavailable") throw sanitizedFailure();
+    const stored = status?.state === "selected" ? status.selection : await selectionStore.read(botId);
     if (!stored || typeof stored !== "object") throw sanitizedFailure();
-    if (readCatalog !== null && !selectionMatchesCatalog(stored, readCatalog())) {
+    if (readCatalog !== null && !selectionMatchesCatalog(stored, await readCatalog())) {
       throw sanitizedFailure();
     }
     return Object.freeze({
       botId: stored.botId,
       generation: stored.generation,
-      provider: stored.provider,
+      provider: canonicalProviderId(stored.provider),
       model: stored.model,
       reasoningEffort: stored.reasoningEffort,
       serviceTier: stored.serviceTier,
     });
   };
-  const router = new RouterClass({
-    readSelection,
-    directTransport,
-    async createOptionalTransport(provider) {
-      if (provider !== "cliproxy-anthropic") throw sanitizedFailure();
+  const routerOptions = { readSelection };
+  if (providerController !== null) {
+    routerOptions.descriptorForProvider = providerDescriptor;
+    routerOptions.transportForProvider = async (provider, selection) => {
+      const catalog = await providerController.catalog();
+      if (catalog?.status !== "ready" || catalog.generation !== selection?.catalogGeneration
+        || !catalog.models.some((model) => (model?.provider ?? "openai-codex") === provider
+          && (model?.model ?? model?.id) === selection?.model)) {
+        const error = new Error("Codex inference provider is unavailable.");
+        error.code = "CODEX_INFERENCE_PROVIDER_UNAVAILABLE";
+        throw error;
+      }
+      if (provider === "openai-codex") return directTransport;
+      const descriptor = providerDescriptor(provider);
+      if (descriptor.loginKind === "api-key" || descriptor.loginKind === "local") {
+        if (openaiProvider === null) throw sanitizedFailure();
+        return new OpenAITransportClass({
+          providerId: provider,
+          resolveConnection: () => openaiProvider.streamConfiguration(provider),
+        });
+      }
+      return new OptionalTransportClass({
+        providerId: provider,
+        resolveConnection: () => sidecarManager.start(),
+      });
+    };
+  } else {
+    routerOptions.directTransport = directTransport;
+    routerOptions.createOptionalTransport = async (provider) => {
+      if (provider !== "anthropic-claude" && provider !== "cliproxy-anthropic") throw sanitizedFailure();
       const session = await sidecarManager.start();
-      return new OptionalTransportClass({ session });
-    },
-  });
+      return new OptionalTransportClass({ providerId: "anthropic-claude", session });
+    };
+  }
+  const router = new RouterClass(routerOptions);
   const conversationStore = new StandaloneStoreClass({
     filePath: path.join(stateRoot, "standalone-conversations.v1.json"),
   });
@@ -1175,12 +1248,29 @@ function productionDependencies(electron) {
     resourcesPath: process.resourcesPath,
     stateRoot,
   });
+  const providerStateStore = new ProviderStateStore({
+    filePath: path.join(stateRoot, "provider-state.v1.json"),
+  });
+  const keychain = new KeychainSecretStore({
+    service: KEYCHAIN_SERVICE,
+    spawn: childProcess.spawn,
+  });
+  const openaiProvider = new OpenAICompatibleProvider();
+  const providerController = new ProviderController({
+    stateStore: providerStateStore,
+    keychain,
+    openai: openaiProvider,
+    cliproxy: sidecarManager,
+    account: accountController,
+  });
   const computer = createStandaloneComputerComposition({ electron, stateRoot, store: botStore });
   const inferenceBridge = createInferenceBridgeRuntime({
     codexManager,
     selectionStore,
     sidecarManager,
-    readCatalog: () => accountController.catalogState(),
+    providerController,
+    openaiProvider,
+    readCatalog: () => providerController.catalog(),
     stateRoot,
     toolBridge: computer.toolBridge,
     computerTargetRouter: computer.targetRouter,
@@ -1203,7 +1293,7 @@ function productionDependencies(electron) {
     conversationBindingsPath,
   });
   const nativeCoordinatorFactory = ({
-    onSelectAgent, deleteBots, readActiveAgentId, automationController, modelController,
+    onSelectAgent, deleteBots, readActiveAgentId, automationController, modelController, canCreateAgent,
   }) => new OpenBotNativeCoordinator({
     botRuntimeController: controller,
     conversationController: inferenceBridge.conversations,
@@ -1212,6 +1302,7 @@ function productionDependencies(electron) {
     deleteBots,
     onSelectAgent,
     readActiveAgentId,
+    canCreateAgent,
   });
   process.env.CODEX_BOT_BRIDGE = path.join(__dirname, "..", "bridge", "server.cjs");
   process.env.CODEX_BOT_CONVERSATION_BINDINGS = conversationBindingsPath;
@@ -1234,6 +1325,8 @@ function productionDependencies(electron) {
     standaloneConversations: inferenceBridge.conversations,
     selectionStore,
     sidecarManager,
+    providerController,
+    openaiProvider,
     store: botStore,
   };
 }
@@ -1294,6 +1387,11 @@ function installDesktopRuntime(electron, injected = {}) {
     ? injected
     : productionDependencies(electron);
   const { controller, selectionStore, store } = dependencies;
+  const providerController = dependencies.providerController || null;
+  if (providerController !== null
+    && (!providerController || typeof providerController !== "object"
+      || ["listConnections", "connect", "disconnect", "catalog", "readOnboarding", "completeOnboarding"]
+        .some((name) => typeof providerController[name] !== "function"))) throw sanitizedFailure();
   const codexManager = dependencies.codexManager || Object.freeze({
     async start() {},
     stop() {},
@@ -1308,6 +1406,7 @@ function installDesktopRuntime(electron, injected = {}) {
     async refresh() { throw sanitizedFailure(); },
     dispose() {},
   });
+  const openaiProvider = dependencies.openaiProvider || null;
   const sidecarManager = dependencies.sidecarManager || Object.freeze({
     async connectProvider() { throw sanitizedFailure(); },
     stop() {},
@@ -1361,6 +1460,7 @@ function installDesktopRuntime(electron, injected = {}) {
   let quitDeadlineHandle = null;
   let disposed = false;
   let activeIdentityMutation = Promise.resolve();
+  let latestProviderCatalog = null;
   const startupReady = botDeletionCoordinator === null
     ? Promise.resolve()
     : Promise.resolve().then(() => botDeletionCoordinator.reconcilePending());
@@ -1376,7 +1476,7 @@ function installDesktopRuntime(electron, injected = {}) {
     ? null
     : readyLocalAutomationController(localAutomationController, automationReady);
   const nativeModelController = Object.freeze({
-    getAvailableModels: () => Promise.resolve(nativeAvailableModels(accountController.catalogState())),
+    getAvailableModels: async () => nativeAvailableModels(await readProviderCatalog()),
     getAgentDefaultModel: () => readNativeModel(),
     setAgentDefaultModel: (model) => writeNativeModel(model),
     getComputerUseModel: () => readNativeModel(),
@@ -1389,6 +1489,7 @@ function installDesktopRuntime(electron, injected = {}) {
         deleteBots: botDeletionCoordinator === null ? null : deleteNativeBots,
         automationController: nativeAutomationController,
         modelController: nativeModelController,
+        canCreateAgent,
         readActiveAgentId: typeof selectionStore.readActiveBotId === "function"
           ? () => selectionStore.readActiveBotId()
           : null,
@@ -1417,7 +1518,6 @@ function installDesktopRuntime(electron, injected = {}) {
       ready: startupReady,
     })
     : null;
-  void accountController.start().catch(() => {});
   void startupReady.then(() => {
     if (disposed || typeof controller.reconcile !== "function") return;
     return controller.reconcile();
@@ -1468,6 +1568,37 @@ function installDesktopRuntime(electron, injected = {}) {
     const current = activeIdentityMutation.then(operation, operation);
     activeIdentityMutation = current.catch(() => {});
     return current;
+  }
+
+  async function readProviderCatalog() {
+    if (providerController !== null) {
+      const catalog = await providerController.catalog();
+      latestProviderCatalog = catalog;
+      return catalog;
+    }
+    return accountController.catalogState();
+  }
+
+  async function canCreateAgent() {
+    if (typeof dependencies.canCreateAgent === "function") {
+      try { return (await dependencies.canCreateAgent()) === true; } catch { return false; }
+    }
+    if (providerController === null) return true;
+    try {
+      const receipt = await providerController.readOnboarding();
+      if (!receipt || receipt.schemaVersion !== 1 || typeof receipt.providerId !== "string"
+        || !Number.isSafeInteger(receipt.connectionGeneration) || receipt.connectionGeneration < 1
+        || !Number.isSafeInteger(receipt.catalogGeneration) || receipt.catalogGeneration < 1) return false;
+      const connections = await providerController.listConnections();
+      const connection = connections.find((entry) => entry?.providerId === receipt.providerId);
+      if (!connection || connection.state !== "connected"
+        || connection.generation !== receipt.connectionGeneration) return false;
+      const catalog = await providerController.catalog();
+      return catalog?.status === "ready"
+        && catalog.generation === receipt.catalogGeneration
+        && Array.isArray(catalog.models)
+        && catalog.models.some((model) => model?.provider === receipt.providerId);
+    } catch { return false; }
   }
 
   function selectNativeAgent(botId) {
@@ -1549,11 +1680,16 @@ function installDesktopRuntime(electron, injected = {}) {
     } catch { return null; }
   }
 
-  function handle(channel, operation, { requireCurrentWindow = false, computer = false } = {}) {
+  function handle(channel, operation, { requireCurrentWindow = false, requireMainFrame = false, computer = false } = {}) {
     electron.ipcMain.handle(channel, async (event, ...args) => {
       if (disposed) throw computer ? sanitizedComputerFailure() : sanitizedFailure();
-      const view = botDeletionCoordinator === null ? null : currentWindowView(event);
-      if (botDeletionCoordinator !== null && !view) {
+      const needsWindow = requireCurrentWindow || requireMainFrame || botDeletionCoordinator !== null;
+      const view = requireMainFrame || botDeletionCoordinator !== null
+        ? currentWindowView(event) : null;
+      if ((requireMainFrame || botDeletionCoordinator !== null) && !view) {
+        throw computer ? sanitizedComputerFailure() : sanitizedFailure();
+      }
+      if (requireCurrentWindow && !currentWindowSender(event)) {
         throw computer ? sanitizedComputerFailure() : sanitizedFailure();
       }
       try {
@@ -1566,7 +1702,11 @@ function installDesktopRuntime(electron, injected = {}) {
             throw computer ? sanitizedComputerFailure() : sanitizedFailure();
           }
         }
-        if (requireCurrentWindow && !currentWindowSender(event)) throw sanitizedComputerFailure();
+        if (requireMainFrame || botDeletionCoordinator !== null) {
+          if (!currentWindowView(event)) throw computer ? sanitizedComputerFailure() : sanitizedFailure();
+        } else if (requireCurrentWindow && !currentWindowSender(event)) {
+          throw computer ? sanitizedComputerFailure() : sanitizedFailure();
+        }
         const result = await operation(...args);
         return computer ? computerPublic(result) : result;
       } catch {
@@ -1577,26 +1717,13 @@ function installDesktopRuntime(electron, injected = {}) {
   }
 
   async function currentModelSelection(botId) {
-    const catalog = accountController.catalogState();
-    const current = await selectionStore.read(botId);
-    if (current && catalog?.status !== "ready") return current;
-    if (current && selectionMatchesCatalog(current, catalog)) return current;
-    let requested;
-    if (current) {
-      try {
-        requested = resolveModelSelection({
-          botId,
-          provider: current.provider,
-          model: current.model,
-          reasoningEffort: current.reasoningEffort,
-          serviceTier: current.serviceTier,
-        }, catalog);
-      } catch {
-        requested = defaultModelSelection(botId, catalog);
-      }
-      return selectionStore.writeNext(requested);
-    }
-    requested = defaultModelSelection(botId, catalog);
+    const status = typeof selectionStore.readStatus === "function"
+      ? await selectionStore.readStatus(botId) : null;
+    if (status?.state === "unavailable") return null;
+    const current = status?.state === "selected" ? status.selection : await selectionStore.read(botId);
+    const catalog = await readProviderCatalog();
+    if (current) return selectionMatchesCatalog(current, catalog) ? current : null;
+    const requested = defaultModelSelection(botId, catalog);
     return selectionStore.ensure(botId, requested);
   }
 
@@ -1631,7 +1758,7 @@ function installDesktopRuntime(electron, injected = {}) {
       const bot = await activeNativeModelBot();
       if (!bot) return null;
       const selected = await currentModelSelection(bot.botId);
-      return nativeModelSelection(selected, accountController.catalogState());
+      return nativeModelSelection(selected, await readProviderCatalog());
     });
   }
 
@@ -1639,7 +1766,7 @@ function installDesktopRuntime(electron, injected = {}) {
     return serializeActiveIdentityMutation(async () => {
       const bot = await activeNativeModelBot();
       if (!bot) throw sanitizedFailure();
-      const catalog = accountController.catalogState();
+      const catalog = await readProviderCatalog();
       const requested = resolveNativeModelSelection(model, bot.botId, catalog);
       const selectWithinBarrier = async () => {
         const previousReceipt = profileSetupReceipts.get(bot.botId);
@@ -1707,7 +1834,7 @@ function installDesktopRuntime(electron, injected = {}) {
     const currentBot = typeof controller.readBot === "function"
       ? await controller.readBot(bot.botId)
       : null;
-    const currentCatalog = accountController.catalogState();
+    const currentCatalog = await readProviderCatalog();
     if (previous !== pendingReceipt
       || bot.setupStage !== "profile-model" || currentBot?.setupStage !== "profile-model"
       || previous?.renamed !== true || previous?.profiled !== true
@@ -1730,7 +1857,7 @@ function installDesktopRuntime(electron, injected = {}) {
   async function profileSetupCommitFence(botId) {
     const receipt = profileSetupReceipts.get(botId);
     const bot = typeof controller.readBot === "function" ? await controller.readBot(botId) : null;
-    const catalog = accountController.catalogState();
+    const catalog = await readProviderCatalog();
     const selected = typeof selectionStore.read === "function" ? await selectionStore.read(botId) : null;
     if (bot?.setupStage !== "profile-model" || receipt?.renamed !== true || receipt?.profiled !== true
       || !receipt.model || catalog?.generation !== receipt.catalogGeneration
@@ -1743,7 +1870,8 @@ function installDesktopRuntime(electron, injected = {}) {
     }
     return (currentBot) => {
       const currentReceipt = profileSetupReceipts.get(botId);
-      const currentCatalog = accountController.catalogState();
+      const currentCatalog = providerController !== null
+        ? latestProviderCatalog : accountController.catalogState();
       if (currentReceipt !== receipt || currentBot?.setupStage !== "profile-model"
         || currentCatalog?.generation !== receipt.catalogGeneration
         || !selectionMatchesCatalog(receipt.model, currentCatalog)) {
@@ -1778,6 +1906,30 @@ function installDesktopRuntime(electron, injected = {}) {
   handle(IPC_CHANNELS.list, () => controller.listBots());
   handle(IPC_CHANNELS.accountRead, () => accountController.accountState());
   handle(IPC_CHANNELS.catalogList, () => accountController.catalogState());
+  handle(IPC_CHANNELS.providerList, async () => {
+    if (providerController === null) throw sanitizedFailure();
+    return providerController.listConnections();
+  }, { requireMainFrame: true });
+  handle(IPC_CHANNELS.providerConnect, async (value) => {
+    if (providerController === null) throw sanitizedFailure();
+    return providerController.connect(providerConnectInput(value));
+  }, { requireMainFrame: true });
+  handle(IPC_CHANNELS.providerDisconnect, async (value) => {
+    if (providerController === null) throw sanitizedFailure();
+    return providerController.disconnect(providerIdInput(value));
+  }, { requireMainFrame: true });
+  handle(IPC_CHANNELS.providerCatalog, async () => {
+    if (providerController === null) throw sanitizedFailure();
+    return providerController.catalog();
+  }, { requireMainFrame: true });
+  handle(IPC_CHANNELS.providerOnboardingRead, async () => {
+    if (providerController === null) throw sanitizedFailure();
+    return providerController.readOnboarding();
+  }, { requireMainFrame: true });
+  handle(IPC_CHANNELS.providerOnboardingComplete, async (value) => {
+    if (providerController === null) throw sanitizedFailure();
+    return providerController.completeOnboarding(providerIdInput(value));
+  }, { requireMainFrame: true });
   handle(IPC_CHANNELS.accountLogin, async (mode) => {
     const login = await accountController.login(mode);
     if (typeof login?.openUrl === "string") {
@@ -1795,7 +1947,11 @@ function installDesktopRuntime(electron, injected = {}) {
   handle(IPC_CHANNELS.accountCancelLogin, () => accountController.cancelLogin());
   handle(IPC_CHANNELS.accountLogout, () => accountController.logout());
   handle(IPC_CHANNELS.accountRetry, () => accountController.refresh());
-  handle(IPC_CHANNELS.create, () => controller.createBot());
+  handle(IPC_CHANNELS.create, async () => {
+    if (!(await canCreateAgent())) throw sanitizedFailure();
+    if (disposed) throw sanitizedFailure();
+    return controller.createBot();
+  });
   handle(IPC_CHANNELS.adoptLegacy, async (value) => {
     if (!store || typeof store.adoptLegacy !== "function") throw sanitizedFailure();
     const adopted = await store.adoptLegacy(value);
@@ -1856,7 +2012,7 @@ function installDesktopRuntime(electron, injected = {}) {
         profileSetupReceipts.set(requested.botId, pendingReceipt);
         const bot = await controller.readBot(requested.botId);
         if (!bot || bot.botId !== requested.botId) throw sanitizedFailure();
-        const catalog = accountController.catalogState();
+        const catalog = await readProviderCatalog();
         const selected = await selectionStore.writeNext(resolveModelSelection(requested, catalog));
         await markModelForSetup(bot, selected, catalog, pendingReceipt);
         return selected;
@@ -1918,6 +2074,11 @@ function installDesktopRuntime(electron, injected = {}) {
   const onRuntimeEvent = (event) => broadcastRuntimeEvent(event);
   const onAccountChanged = (event) => broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
   const onCatalogChanged = (event) => broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
+  const onProviderChanged = (event) => broadcastChannel(PROVIDER_CHANGE_CHANNEL, event);
+  const onProviderCatalogChanged = (event) => {
+    latestProviderCatalog = event;
+    broadcastChannel(PROVIDER_CATALOG_CHANGE_CHANNEL, event);
+  };
   const onComputerChanged = (event) => {
     try { broadcastChannel(COMPUTER_CHANGE_CHANNEL, computerEnvelopePublic(event)); } catch {}
   };
@@ -1929,6 +2090,8 @@ function installDesktopRuntime(electron, injected = {}) {
   controller.on?.("runtime-event", onRuntimeEvent);
   accountController.on?.("account-changed", onAccountChanged);
   accountController.on?.("catalog-changed", onCatalogChanged);
+  providerController?.on?.("connections-changed", onProviderChanged);
+  providerController?.on?.("catalog-changed", onProviderCatalogChanged);
   computerBoundary.on?.("changed", onComputerChanged);
   computerBoundary.on?.("permission-requested", onComputerPermission);
 
@@ -1955,6 +2118,8 @@ function installDesktopRuntime(electron, injected = {}) {
       capture(() => controller.off?.("runtime-event", onRuntimeEvent));
       capture(() => accountController.off?.("account-changed", onAccountChanged));
       capture(() => accountController.off?.("catalog-changed", onCatalogChanged));
+      capture(() => providerController?.off?.("connections-changed", onProviderChanged));
+      capture(() => providerController?.off?.("catalog-changed", onProviderCatalogChanged));
       capture(() => computerBoundary.off?.("changed", onComputerChanged));
       capture(() => computerBoundary.off?.("permission-requested", onComputerPermission));
       capture(() => localFrameIpc?.dispose());
@@ -1973,6 +2138,7 @@ function installDesktopRuntime(electron, injected = {}) {
         captureOwner(() => computerBoundary.dispose?.());
         captureOwner(() => computerTargetRouter?.dispose?.());
         captureOwner(() => accountController.dispose());
+        captureOwner(() => providerController?.dispose?.());
         captureOwner(() => inferenceBridge?.dispose?.());
         captureOwner(() => codexManager.stop());
         captureOwner(() => sidecarManager.stop());
@@ -2056,6 +2222,8 @@ function installDesktopRuntime(electron, injected = {}) {
 module.exports = {
   ACCOUNT_CHANGE_CHANNEL,
   CATALOG_CHANGE_CHANNEL,
+  PROVIDER_CHANGE_CHANNEL,
+  PROVIDER_CATALOG_CHANGE_CHANNEL,
   CHANGE_CHANNEL,
   COMPUTER_CHANGE_CHANNEL,
   COMPUTER_PERMISSION_CHANNEL,

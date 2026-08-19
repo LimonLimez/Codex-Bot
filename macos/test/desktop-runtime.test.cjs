@@ -204,7 +204,7 @@ test("desktop factories own direct Codex immediately but keep CLIProxy entirely 
   assert.deepEqual(await constructed[1][1].readSelection(optionalBot), {
     botId: optionalBot,
     generation: 4,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
@@ -354,10 +354,12 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   assert.deepEqual(Object.keys(IPC_CHANNELS).sort(), [
     "accountCancelLogin", "accountLogin", "accountLogout", "accountRead", "accountRetry", "adoptLegacy", "advanceSetup",
     "catalogList", "computerRead", "computerSelectMode", "connectProvider", "create", "list",
-    "permissionDecide", "permissionRequestsList", "permissionRevoke", "permissionsList", "read", "readModel", "rename",
+    "permissionDecide", "permissionRequestsList", "permissionRevoke", "permissionsList",
+    "providerCatalog", "providerConnect", "providerDisconnect", "providerList", "providerOnboardingComplete", "providerOnboardingRead",
+    "read", "readModel", "rename",
     "retryRuntime", "selectBot", "selectModel", "updateProfile",
   ]);
-  assert.equal(handlers.size, 24);
+  assert.equal(handlers.size, 30);
   assert.equal(Object.isFrozen(installed), true);
   assert.equal(typeof installed.releaseEarlySyncIpc, "function");
   assert.deepEqual([...synchronousListeners.keys()].sort(), [
@@ -383,7 +385,7 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   installed.releaseEarlySyncIpc();
   assert.deepEqual([...synchronousListeners.keys()], [], "stock IPC handoff must remove exact bootstrap listeners once");
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(calls.filter(([name]) => name === "direct-start"), [["direct-start"]]);
+  assert.deepEqual(calls.filter(([name]) => name === "direct-start"), []);
   assert.deepEqual(calls.filter(([name]) => name === "sidecar-start"), []);
   assert.deepEqual(calls.filter(([name]) => name === "inference-bridge-start"), [["inference-bridge-start"]]);
   assert.equal(process.env.CODEX_BOT_INFERENCE_ENDPOINT, "tcp://127.0.0.1:43210");
@@ -486,6 +488,93 @@ test("desktop runtime registers the exact frozen bot/model boundary and keeps cr
   assert.deepEqual(calls.slice(-4), [
     ["inference-bridge-dispose"], ["direct-stop"], ["sidecar-stop"], ["dispose"],
   ]);
+});
+
+test("provider IPC is main-frame scoped and codex-bot creation is gated before mutation", async (t) => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  const calls = [];
+  const senderFrame = { processId: 3, routingId: 4, isDestroyed: () => false };
+  const sender = { mainFrame: senderFrame, isDestroyed: () => false, send() {} };
+  const window = { isDestroyed: () => false, webContents: sender };
+  const electron = {
+    app: { once() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: {
+      fromWebContents(value) { return value === sender ? window : null; },
+      getAllWindows() { return [window]; },
+    },
+  };
+  const providerController = {
+    async listConnections() { calls.push("list"); return []; },
+    async connect() { calls.push("connect"); },
+    async disconnect() { calls.push("disconnect"); },
+    async catalog() { calls.push("catalog"); return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { calls.push("onboarding-read"); return null; },
+    async completeOnboarding() { calls.push("onboarding-complete"); },
+    on() {}, off() {}, dispose() {},
+  };
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async listBots() { return []; },
+    async createBot() { calls.push("create"); throw new Error("must not mutate"); },
+    async readBot() { return null; },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore: { async read() { return null; }, async ensure() {}, async readActiveBotId() { return null; } },
+    providerController,
+    canCreateAgent: async () => false,
+  });
+  t.after(() => installed.dispose());
+  for (const key of ["providerList", "providerConnect", "providerDisconnect", "providerCatalog", "providerOnboardingRead", "providerOnboardingComplete"]) {
+    assert.equal(typeof IPC_CHANNELS[key], "string");
+    assert.equal(handlers.has(IPC_CHANNELS[key]), true);
+  }
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.providerList)({ sender, senderFrame }), []);
+  await assert.rejects(handlers.get(IPC_CHANNELS.providerList)({ sender: {}, senderFrame }), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  await assert.rejects(handlers.get(IPC_CHANNELS.create)({ sender, senderFrame }), {
+    code: "CODEX_BOT_OPERATION_FAILED",
+  });
+  assert.deepEqual(calls.filter((value) => value === "create"), []);
+});
+
+test("matching provider onboarding receipt permits IPC create after generation re-read", async (t) => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  const calls = [];
+  const providerController = {
+    async readOnboarding() { calls.push("receipt"); return { schemaVersion: 1, providerId: "openai-codex", connectionGeneration: 4, catalogGeneration: 4, completedAt: "2026-08-19T00:00:00.000Z" }; },
+    async catalog() { calls.push("catalog"); return { status: "ready", generation: 4, models: [{ provider: "openai-codex", model: "gpt-live" }] }; },
+    async listConnections() { calls.push("connections"); return [{ providerId: "openai-codex", state: "connected", generation: 4 }]; },
+    async connect() {}, async disconnect() {}, async completeOnboarding() {},
+    on() {}, off() {}, dispose() {},
+  };
+  const bot = { botId: BOT_A };
+  const controller = {
+    on() {}, off() {}, dispose() {},
+    async createBot() { calls.push("create"); return bot; },
+    async listBots() { return []; },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: { handle(channel, handler) { handlers.set(channel, handler); }, removeHandler(channel) { handlers.delete(channel); } },
+    BrowserWindow: { getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller,
+    selectionStore: {},
+    providerController,
+  });
+  t.after(() => installed.dispose());
+  assert.deepEqual(await handlers.get(IPC_CHANNELS.create)({}), bot);
+  assert.equal(calls.at(-1), "create");
+  assert.deepEqual(calls.slice(0, 3), ["receipt", "connections", "catalog"]);
 });
 
 test("setup completion consumes a fresh authoritative Computer selection for the same bot", async () => {
@@ -1105,7 +1194,7 @@ test("desktop account boundary opens browser login only in main and publishes fr
     codexManager: { stop() {} },
   });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(calls.shift(), ["account-start"]);
+  assert.equal(calls.some(([name]) => name === "account-start"), false);
   assert.equal(await handlers.get(IPC_CHANNELS.accountRead)({}), account);
   assert.equal(await handlers.get(IPC_CHANNELS.catalogList)({}), catalog);
   const browser = await handlers.get(IPC_CHANNELS.accountLogin)({}, "browser");
@@ -1221,7 +1310,7 @@ test("a temporarily unavailable official catalog never rewrites a stored Direct 
       models: Object.freeze([]),
     })),
   });
-  assert.equal(await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A), retained);
+  assert.equal(await handlers.get(IPC_CHANNELS.selectBot)({}, BOT_A), null);
   assert.equal(writes, 0);
   await installed.dispose();
 });
@@ -1700,7 +1789,7 @@ test("model selection registry is atomic, private, exact, and contains no runtim
   );
   assert.deepEqual(await store.write({
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
@@ -1708,7 +1797,7 @@ test("model selection registry is atomic, private, exact, and contains no runtim
     generation: 5,
   }), {
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
@@ -1786,6 +1875,16 @@ test("model selection policy persists the complete live-catalog routing tuple an
         supportsPersonality: false,
         isDefault: true,
       }),
+      Object.freeze({
+        provider: "anthropic-claude",
+        model: "claude-fable-5",
+        displayName: "Claude Fable 5",
+        defaultReasoningEffort: "max",
+        defaultServiceTier: null,
+        serviceTiers: Object.freeze([]),
+        supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+        isDefault: false,
+      }),
     ]),
   });
   const official = resolveModelSelection({
@@ -1807,8 +1906,8 @@ test("model selection policy persists the complete live-catalog routing tuple an
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
   }, catalog);
-  assert.equal(optional.provider, "cliproxy-anthropic");
-  assert.equal(optional.catalogGeneration, 1);
+  assert.equal(optional.provider, "anthropic-claude");
+  assert.equal(optional.catalogGeneration, 12);
   assert.equal(selectionMatchesCatalog({ ...official, generation: 4 }, catalog), true);
   assert.throws(() => resolveModelSelection({
     botId: BOT_A,
@@ -1858,6 +1957,42 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
       supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
       inputModalities: Object.freeze(["text", "image"]),
       isDefault: true,
+    }), Object.freeze({
+      id: "gpt-effort-only",
+      displayName: "GPT Effort Only",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+      inputModalities: Object.freeze(["text"]),
+      isDefault: false,
+    }), Object.freeze({
+      provider: "anthropic-claude",
+      model: "claude-fable-5",
+      displayName: "Claude Fable 5",
+      defaultReasoningEffort: "max",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+      isDefault: false,
+    }), Object.freeze({
+      provider: "anthropic-claude",
+      model: "claude-opus-5",
+      displayName: "Claude Opus 5",
+      defaultReasoningEffort: "max",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+      isDefault: false,
+    }), Object.freeze({
+      provider: "anthropic-claude",
+      model: "claude-sonnet-5",
+      displayName: "Claude Sonnet 5",
+      defaultReasoningEffort: "max",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
+      supportedReasoningEfforts: Object.freeze(["low", "medium", "high", "xhigh", "max"]),
+      isDefault: false,
     })]),
   });
   assert.equal(typeof nativeAvailableModels, "function");
@@ -1866,11 +2001,13 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
   assert.deepEqual(response.modelNames, response.models.map((model) => model.name));
   assert.deepEqual(response.models.map((model) => model.name), [
     "gpt-live-sol",
-    "cliproxy-anthropic--claude-fable-5",
-    "cliproxy-anthropic--claude-opus-5",
-    "cliproxy-anthropic--claude-sonnet-5",
+    "gpt-effort-only",
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
   ]);
   assert.deepEqual(response.models.map((model) => model.vendor.id), [
+    "MODEL_VENDOR_ID_OPENAI",
     "MODEL_VENDOR_ID_OPENAI",
     "MODEL_VENDOR_ID_ANTHROPIC",
     "MODEL_VENDOR_ID_ANTHROPIC",
@@ -1895,7 +2032,7 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
     model: "gpt-live-sol",
     reasoningEffort: "ultra",
     serviceTier: "priority",
-  });
+  }, catalog);
   assert.deepEqual(native, {
     modelId: "gpt-live-sol",
     maxMode: true,
@@ -1917,7 +2054,7 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
     model: "gpt-effort-only",
     reasoningEffort: "medium",
     serviceTier: null,
-  }), {
+  }, catalog), {
     modelId: "gpt-effort-only",
     maxMode: true,
     parameters: [{ id: "effort", value: "medium" }],
@@ -1933,19 +2070,19 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
   ]);
 
   const optionalNative = nativeModelSelection({
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
-  });
-  assert.equal(optionalNative.modelId, "cliproxy-anthropic--claude-fable-5");
+  }, catalog);
+  assert.equal(optionalNative.modelId, "claude-fable-5");
   assert.deepEqual(resolveNativeModelSelection(optionalNative, BOT_A, catalog), {
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "ultra-code",
     serviceTier: null,
-    catalogGeneration: 1,
+    catalogGeneration: 12,
   });
 
   const withoutMaxMode = structuredClone(native);
@@ -1981,38 +2118,46 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
       supportedReasoningEfforts: Object.freeze(["medium"]),
       inputModalities: Object.freeze(["text"]),
       isDefault: true,
+    }), Object.freeze({
+      provider: "anthropic-claude",
+      model: "claude-fable-5",
+      displayName: "Claude Fable 5",
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: Object.freeze([]),
+      supportedReasoningEfforts: Object.freeze(["medium", "max"]),
+      inputModalities: Object.freeze(["text"]),
+      isDefault: false,
     })]),
   });
   const collisionResponse = nativeAvailableModels(collisionCatalog);
   assert.equal(new Set(collisionResponse.modelNames).size, collisionResponse.modelNames.length);
   assert.deepEqual(collisionResponse.modelNames, [
-    "claude-fable-5",
-    "cliproxy-anthropic--claude-fable-5",
-    "cliproxy-anthropic--claude-opus-5",
-    "cliproxy-anthropic--claude-sonnet-5",
+    "openai-codex--claude-fable-5",
+    "anthropic-claude--claude-fable-5",
   ]);
   assert.equal(nativeModelSelection({
     provider: "openai-codex",
     model: "claude-fable-5",
     reasoningEffort: "medium",
     serviceTier: null,
-  }, collisionCatalog).modelId, "claude-fable-5");
+  }, collisionCatalog).modelId, "openai-codex--claude-fable-5");
   assert.equal(nativeModelSelection({
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "medium",
     serviceTier: null,
-  }, collisionCatalog).modelId, "cliproxy-anthropic--claude-fable-5");
+  }, collisionCatalog).modelId, "anthropic-claude--claude-fable-5");
   assert.equal(resolveNativeModelSelection({
-    modelId: "claude-fable-5",
+    modelId: "openai-codex--claude-fable-5",
     maxMode: true,
     parameters: [{ id: "effort", value: "medium" }],
   }, BOT_A, collisionCatalog).provider, "openai-codex");
   assert.equal(resolveNativeModelSelection({
-    modelId: "cliproxy-anthropic--claude-fable-5",
+    modelId: "anthropic-claude--claude-fable-5",
     maxMode: true,
     parameters: [{ id: "effort", value: "medium" }],
-  }, BOT_A, collisionCatalog).provider, "cliproxy-anthropic");
+  }, BOT_A, collisionCatalog).provider, "anthropic-claude");
   assert.equal(resolveModelSelection({
     botId: BOT_A,
     provider: "openai-codex",
@@ -2022,11 +2167,11 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
   }, collisionCatalog).provider, "openai-codex");
   assert.equal(resolveModelSelection({
     botId: BOT_A,
-    provider: "cliproxy-anthropic",
+    provider: "anthropic-claude",
     model: "claude-fable-5",
     reasoningEffort: "medium",
     serviceTier: null,
-  }, collisionCatalog).provider, "cliproxy-anthropic");
+  }, collisionCatalog).provider, "anthropic-claude");
   assert.throws(() => resolveModelSelection({
     botId: BOT_A,
     model: "claude-fable-5",
@@ -2037,7 +2182,7 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
     ...collisionCatalog,
     models: Object.freeze([Object.freeze({
       ...collisionCatalog.models[0],
-      id: "cliproxy-anthropic--claude-fable-5",
+      id: "anthropic-claude--claude-fable-5",
     })]),
   })), { code: "CODEX_BOT_OPERATION_FAILED" });
   assert.throws(() => nativeAvailableModels(Object.freeze({
@@ -2050,4 +2195,23 @@ test("native Grok model projection carries the Codex and CLIProxy catalogs throu
       ]),
     })]),
   })), { code: "CODEX_BOT_OPERATION_FAILED" });
+});
+
+test("native model projection exposes only connected provider catalogs and prefixes exact collisions", () => {
+  const { nativeAvailableModels, nativeModelSelection, resolveNativeModelSelection } = require(runtimePath);
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([
+      Object.freeze({ provider: "openai-api-key", model: "shared-model", label: "API shared", efforts: ["high"], serviceTiers: [], defaultReasoningEffort: "high", defaultServiceTier: null, isDefault: true }),
+      Object.freeze({ provider: "local-openai-compatible", model: "shared-model", label: "Local shared", efforts: ["none"], serviceTiers: [], defaultReasoningEffort: "none", defaultServiceTier: null, isDefault: false }),
+    ]),
+  });
+  const projected = nativeAvailableModels(catalog);
+  assert.deepEqual(projected.modelNames, ["openai-api-key--shared-model", "local-openai-compatible--shared-model"]);
+  const apiSelection = nativeModelSelection({ provider: "openai-api-key", model: "shared-model", reasoningEffort: "high", serviceTier: null }, catalog);
+  const localSelection = nativeModelSelection({ provider: "local-openai-compatible", model: "shared-model", reasoningEffort: "none", serviceTier: null }, catalog);
+  assert.equal(apiSelection.modelId, "openai-api-key--shared-model");
+  assert.equal(resolveNativeModelSelection(apiSelection, BOT_A, catalog).provider, "openai-api-key");
+  assert.equal(resolveNativeModelSelection(localSelection, BOT_A, catalog).provider, "local-openai-compatible");
 });

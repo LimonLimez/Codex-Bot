@@ -44,9 +44,10 @@ test("batch delete removes every requested selection and rehomes a deleted activ
   assert.equal(await store.read(BOT_A), null);
   assert.equal(await store.read(BOT_B), null);
   assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     activeBotId: BOT_C,
     selections: {},
+    unavailableSelections: {},
   });
 
   assert.deepEqual(await store.deleteBots({
@@ -131,4 +132,70 @@ test("batch delete is atomic before commit and retry-safe when commit success is
   assert.deepEqual(await committedUncertain.deleteBots({
     botIds: [BOT_A], successorBotId: BOT_B,
   }), { activeBotId: BOT_B });
+});
+
+test("legacy two-provider selections migrate to canonical shared provider IDs", async (t) => {
+  const { filePath, store } = await fixture(t);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId: BOT_A,
+    selections: {
+      [BOT_A]: {
+        provider: "cliproxy-anthropic",
+        model: "claude-fable-5",
+        reasoningEffort: "max",
+        serviceTier: null,
+        catalogGeneration: 1,
+        generation: 1,
+        updatedAt: null,
+      },
+    },
+  })}\n`);
+  assert.equal((await store.read(BOT_A)).provider, "anthropic-claude");
+  await store.writeNext({
+    botId: BOT_A,
+    provider: "anthropic-claude",
+    model: "claude-fable-5",
+    reasoningEffort: "max",
+    serviceTier: null,
+    catalogGeneration: 1,
+  });
+  assert.match(await fs.readFile(filePath, "utf8"), /"provider": "anthropic-claude"/);
+});
+
+test("malformed stored providers become unavailable and require an explicit choice", async (t) => {
+  const { filePath, store } = await fixture(t);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, `${JSON.stringify({
+    schemaVersion: 1,
+    activeBotId: BOT_A,
+    selections: {
+      [BOT_A]: {
+        provider: "display label",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        serviceTier: null,
+        catalogGeneration: 1,
+        generation: 1,
+        updatedAt: null,
+      },
+    },
+  })}\n`);
+  assert.deepEqual(await store.readStatus(BOT_A), {
+    state: "unavailable",
+    botId: BOT_A,
+    generation: 1,
+  });
+  assert.equal(await store.read(BOT_A), null);
+  assert.equal((await store.readStatus(BOT_A)).state, "unavailable");
+  await store.writeNext({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 2,
+  });
+  assert.equal((await store.readStatus(BOT_A)).state, "selected");
 });

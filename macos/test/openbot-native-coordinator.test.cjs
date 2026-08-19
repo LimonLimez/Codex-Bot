@@ -743,6 +743,27 @@ test("native roster requests preserve correlation and route create, rename, prof
   assert.equal((await request(port, "r-list-4", "listAgents")).outcome.value[0].isActive, true);
 });
 
+test("native create requires a current provider onboarding receipt before mutating the bot store", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness();
+  const conversations = new ConversationHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: conversations,
+    canCreateAgent: async () => false,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const reply = await request(port, "create-gated", "createAgent", {
+    name: "Blocked", description: "Provider is unavailable.",
+  });
+  assert.equal(reply.outcome.status, "failed");
+  assert.deepEqual(bots.calls.filter(([name]) => name === "createBot"), []);
+});
+
 test("native deletion adopts the authoritative active bot for background, active, and last-bot removal", async (t) => {
   const { OpenBotNativeCoordinator } = require(MODULE_PATH);
   const scenarios = [

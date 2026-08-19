@@ -105,3 +105,26 @@ test("official selections and malformed sidecar sessions fail before client cons
   })), { code: "CODEX_INFERENCE_PROVIDER_INVALID" });
   assert.equal(ClientFixture.options.length, 0);
 });
+
+test("provider-scoped CLIProxy transport resolves its private session lazily for hosted routes", async () => {
+  const { CLIProxyInferenceTransport } = require(transportPath);
+  ClientFixture.options = [];
+  let resolves = 0;
+  const transport = new CLIProxyInferenceTransport({
+    providerId: "xai",
+    resolveConnection: async () => {
+      resolves += 1;
+      const session = { endpoint: "http://127.0.0.1:43211/v1" };
+      Object.defineProperty(session, "credential", { value: "x".repeat(64), enumerable: false });
+      return Object.freeze(session);
+    },
+    ClientClass: ClientFixture,
+  });
+  assert.equal(resolves, 0);
+  const result = await transport.stream(request({
+    selection: { ...request().selection, provider: "xai", model: "grok-4.5", reasoningEffort: "high" },
+  }));
+  assert.equal(resolves, 1);
+  for await (const _event of result.fullStream) {}
+  assert.equal(ClientFixture.options[0].config.model, "grok-4.5");
+});

@@ -3,6 +3,7 @@
 const { types } = require("node:util");
 const { CodexClient } = require("../bridge/codex-client.cjs");
 const { normalizeInferenceSelection } = require("./inference-provider-router.cjs");
+const { canonicalProviderId, providerDescriptor } = require("../provider-descriptors.cjs");
 
 class CLIProxyInferenceError extends Error {
   constructor(code = "CODEX_INFERENCE_UNAVAILABLE", message = "Optional inference is unavailable.") {
@@ -39,16 +40,29 @@ function sessionValues(value) {
 }
 
 class CLIProxyInferenceTransport {
+  #providerId;
   #session;
+  #resolveConnection;
   #ClientClass;
   #clients = new Set();
   #disposed = false;
 
-  constructor({ session, ClientClass = CodexClient } = {}) {
-    if (typeof ClientClass !== "function") {
+  constructor({ providerId = "anthropic-claude", session = undefined, resolveConnection = null,
+    ClientClass = CodexClient } = {}) {
+    let canonical;
+    try { canonical = canonicalProviderId(providerId); } catch {
       throw optionalError("CODEX_INFERENCE_CONFIGURATION", "Optional inference configuration is invalid.");
     }
-    this.#session = sessionValues(session);
+    const descriptor = providerDescriptor(canonical);
+    if (!new Set(["oauth", "device", "service-account"]).has(descriptor.loginKind)
+      || typeof ClientClass !== "function"
+      || (resolveConnection !== null && typeof resolveConnection !== "function")
+      || (session !== undefined && resolveConnection !== null)) {
+      throw optionalError("CODEX_INFERENCE_CONFIGURATION", "Optional inference configuration is invalid.");
+    }
+    this.#providerId = canonical;
+    this.#resolveConnection = resolveConnection;
+    this.#session = session === undefined ? null : sessionValues(session);
     this.#ClientClass = ClientClass;
   }
 
@@ -57,8 +71,36 @@ class CLIProxyInferenceTransport {
     let selection;
     try { selection = normalizeInferenceSelection(request?.selection); }
     catch { throw optionalError("CODEX_INFERENCE_PROVIDER_INVALID", "Codex inference provider is unavailable."); }
-    if (selection.provider !== "cliproxy-anthropic" || typeof request?.assertCurrent !== "function") {
+    if (selection.provider !== this.#providerId || typeof request?.assertCurrent !== "function") {
       throw optionalError("CODEX_INFERENCE_PROVIDER_INVALID", "Codex inference provider is unavailable.");
+    }
+    if (this.#resolveConnection !== null) {
+      let connection;
+      try { connection = this.#resolveConnection(); }
+      catch { throw optionalError("CODEX_INFERENCE_UNAVAILABLE", "Optional inference is unavailable."); }
+      if (connection && typeof connection.then === "function") {
+        return Promise.resolve(connection)
+          .then(async (value) => {
+            try { await request.assertCurrent(); }
+            catch { throw optionalError("CODEX_INFERENCE_STALE", "Codex inference selection changed."); }
+            return this.#streamWithSession(request, selection, value);
+          })
+          .catch((error) => {
+            if (error instanceof CLIProxyInferenceError) throw error;
+            throw optionalError("CODEX_INFERENCE_UNAVAILABLE", "Optional inference is unavailable.");
+          });
+      }
+      return this.#streamWithSession(request, selection, connection);
+    }
+    return this.#streamWithSession(request, selection, this.#session);
+  }
+
+  #streamWithSession(request, selection, rawSession) {
+    let session;
+    try { session = sessionValues(rawSession); }
+    catch (error) {
+      if (error instanceof CLIProxyInferenceError) throw error;
+      throw optionalError("CODEX_INFERENCE_UNAVAILABLE", "Optional inference is unavailable.");
     }
     const config = {
       botId: selection.botId,
@@ -67,8 +109,8 @@ class CLIProxyInferenceTransport {
       reasoningEffort: selection.reasoningEffort,
     };
     Object.defineProperties(config, {
-      endpoint: { value: this.#session.endpoint, enumerable: false },
-      credential: { value: this.#session.credential, enumerable: false },
+      endpoint: { value: session.endpoint, enumerable: false },
+      credential: { value: session.credential, enumerable: false },
     });
     Object.freeze(config);
     let client;

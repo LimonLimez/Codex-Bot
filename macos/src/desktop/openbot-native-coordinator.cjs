@@ -853,6 +853,7 @@ class OpenBotNativeCoordinator {
   #deleteBots;
   #onSelectAgent;
   #readActiveAgentId;
+  #canCreateAgent;
   #now;
   #bindings = new Set();
   #conversationIds = new Map();
@@ -889,6 +890,7 @@ class OpenBotNativeCoordinator {
     deleteBots = null,
     onSelectAgent = null,
     readActiveAgentId = null,
+    canCreateAgent = async () => true,
     now = Date.now,
   } = {}) {
     if (!botRuntimeController
@@ -928,6 +930,9 @@ class OpenBotNativeCoordinator {
     if (readActiveAgentId !== null && typeof readActiveAgentId !== "function") {
       throw new TypeError("OpenBot native coordinator readActiveAgentId must be a function.");
     }
+    if (typeof canCreateAgent !== "function") {
+      throw new TypeError("OpenBot native coordinator canCreateAgent must be a function.");
+    }
     if (typeof now !== "function") throw new TypeError("OpenBot native coordinator now must be a function.");
     this.#bots = botRuntimeController;
     this.#conversations = conversationController;
@@ -936,6 +941,7 @@ class OpenBotNativeCoordinator {
     this.#deleteBots = deleteBots;
     this.#onSelectAgent = onSelectAgent;
     this.#readActiveAgentId = readActiveAgentId;
+    this.#canCreateAgent = canCreateAgent;
     this.#now = now;
     this.#botListener = () => {
       this.#advanceRosterEpoch();
@@ -1608,6 +1614,11 @@ class OpenBotNativeCoordinator {
       title: "",
       description,
     };
+    let allowed = false;
+    try { allowed = (await this.#canCreateAgent()) === true; } catch { allowed = false; }
+    if (this.#disposed || !allowed) {
+      throw coordinatorFailure("source/provider-unavailable", "OpenBot provider onboarding is unavailable.");
+    }
     let created = await this.#bots.createBot({
       appearance,
       notifications: true,

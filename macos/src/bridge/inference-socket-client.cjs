@@ -4,6 +4,10 @@ const crypto = require("node:crypto");
 const net = require("node:net");
 const { types } = require("node:util");
 const { cloneJsonValue } = require("./message-codec.cjs");
+const {
+  canonicalProviderId,
+  providerDescriptor,
+} = require("../provider-descriptors.cjs");
 
 const MAX_FRAME_BYTES = 1_250_000;
 const MAX_QUEUED_FRAMES = 2_048;
@@ -67,13 +71,26 @@ function safeConfig(value) {
     endpoint: read("endpoint"),
     credential: read("credential"),
   };
+  let provider;
+  try { provider = canonicalProviderId(result.provider); } catch { throw socketError(); }
+  let descriptor;
+  try { descriptor = providerDescriptor(provider); } catch { throw socketError(); }
+  const dynamic = new Set(["openai-codex", "openai-api-key", "local-openai-compatible"]).has(provider);
+  const modelKnown = dynamic || descriptor.models.some(({ id }) => id === result.model);
+  const reasoningKnown = descriptor.reasoningEfforts.includes(result.reasoningEffort)
+    || (provider === "openai-codex" && result.reasoningEffort === "ultra")
+    || (provider === "openai-api-key" && result.reasoningEffort === "ultra")
+    || (provider === "anthropic-claude" && result.reasoningEffort === "ultra-code");
   if (!BOT_UUID.test(result.botId) || !Number.isSafeInteger(result.generation) || result.generation < 0
-    || !["openai-codex", "cliproxy-anthropic"].includes(result.provider)
-    || typeof result.model !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(result.model)
+    || typeof result.model !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(result.model) || !modelKnown
     || typeof result.reasoningEffort !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(result.reasoningEffort)
+    || !reasoningKnown
+    || (result.reasoningEffort === "ultra-code" && provider !== "anthropic-claude")
     || !(result.serviceTier === null || (typeof result.serviceTier === "string"
       && /^[a-z][a-z0-9_-]{0,31}$/.test(result.serviceTier)))
+    || (result.serviceTier !== null && descriptor.fastModeSupported !== true)
     || !CAPABILITY.test(result.credential)) throw socketError();
+  result.provider = provider;
   result.port = endpoint(result.endpoint);
   return Object.freeze(result);
 }

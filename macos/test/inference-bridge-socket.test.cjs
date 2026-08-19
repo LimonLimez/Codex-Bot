@@ -75,6 +75,19 @@ function prompt(overrides = {}) {
   };
 }
 
+test("private socket config accepts canonical dynamic API and local model identities", () => {
+  const { InferenceSocketClient } = require(clientPath);
+  const fakeNet = { createConnection() { throw new Error("not reached"); } };
+  for (const provider of ["openai-api-key", "local-openai-compatible"]) {
+    assert.doesNotThrow(() => new InferenceSocketClient({
+      config: config({ endpoint: "tcp://127.0.0.1:43123", provider, model: provider === "openai-api-key" ? "gpt-live" : "llama-local", reasoningEffort: provider === "openai-api-key" ? "high" : "none", serviceTier: null }),
+      conversationId: "conversation-1",
+      taskId: "task-1",
+      netImpl: fakeNet,
+    }));
+  }
+});
+
 async function withBridge(t, router, computerTargetRouter = stableComputerTargetRouter()) {
   const { InferenceBridgeServer } = require(serverPath);
   const server = new InferenceBridgeServer({ router, computerTargetRouter, capability: CAPABILITY });
@@ -1062,7 +1075,7 @@ test("reviewed native child Computer continuations preserve optional Fable provi
   ]);
   assert.equal(runs, 1);
   assert.equal(requests.length, 2);
-  assert.equal(requests.every(({ selection }) => selection.provider === "cliproxy-anthropic"
+  assert.equal(requests.every(({ selection }) => selection.provider === "anthropic-claude"
     && selection.model === "claude-fable-5"
     && selection.reasoningEffort === "ultra-code"
     && selection.serviceTier === null), true);

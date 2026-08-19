@@ -3,6 +3,11 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const {
+  PROVIDER_IDS,
+  canonicalProviderId,
+  providerDescriptor,
+} = require("../provider-descriptors.cjs");
 
 const BOT_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -33,6 +38,7 @@ const SERVICE_TIER = /^[a-z][a-z0-9_-]{0,31}$/;
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const EFFORT = /^[a-z][a-z0-9_-]{0,31}$/;
 const OPTIONAL_MODELS = new Set(["claude-fable-5", "claude-opus-5", "claude-sonnet-5"]);
+const DYNAMIC_CATALOG_PROVIDERS = new Set(["openai-codex", "openai-api-key", "local-openai-compatible"]);
 
 class BridgeConfigError extends Error {
   constructor() {
@@ -136,15 +142,26 @@ function createInferenceRuntimeConfig({
 }) {
   if (typeof botId !== "string" || !BOT_UUID.test(botId)
     || !Number.isSafeInteger(generation) || generation < 0) fail();
-  if (!new Set(["openai-codex", "cliproxy-anthropic"]).has(provider)
-    || typeof model !== "string" || !MODEL_ID.test(model)
+  let canonicalProvider;
+  try { canonicalProvider = canonicalProviderId(provider); } catch { fail(); }
+  const descriptor = providerDescriptor(canonicalProvider);
+  const modelKnown = DYNAMIC_CATALOG_PROVIDERS.has(canonicalProvider)
+    || descriptor.models.some(({ id }) => id === model);
+  const reasoningKnown = descriptor.reasoningEfforts.includes(reasoningEffort)
+    || (canonicalProvider === "openai-codex" && reasoningEffort === "ultra")
+    || (canonicalProvider === "openai-api-key" && reasoningEffort === "ultra")
+    || (canonicalProvider === "anthropic-claude" && reasoningEffort === "ultra-code");
+  if (!PROVIDER_IDS.includes(canonicalProvider)
+    || typeof model !== "string" || !MODEL_ID.test(model) || !modelKnown
     || typeof reasoningEffort !== "string" || !EFFORT.test(reasoningEffort)
-    || (reasoningEffort === "ultra-code" && provider !== "cliproxy-anthropic")
-    || !(serviceTier === null || (typeof serviceTier === "string" && SERVICE_TIER.test(serviceTier)))) fail();
+    || !reasoningKnown
+    || (reasoningEffort === "ultra-code" && canonicalProvider !== "anthropic-claude")
+    || !(serviceTier === null || (typeof serviceTier === "string" && SERVICE_TIER.test(serviceTier)))
+    || (serviceTier !== null && descriptor.fastModeSupported !== true)) fail();
   const config = {
     botId,
     generation,
-    provider,
+    provider: canonicalProvider,
     model,
     reasoningEffort,
     serviceTier,
@@ -353,7 +370,7 @@ function loadRuntimeConfig(environment = process.env, options = {}) {
       fail();
     }
     const activeBotId = registry?.activeBotId;
-    if (registry?.schemaVersion !== 1
+    if (![1, 2].includes(registry?.schemaVersion)
       || typeof activeBotId !== "string"
       || !activeBotId.startsWith("bot-")
       || !BOT_UUID.test(activeBotId.slice(4))
@@ -364,6 +381,11 @@ function loadRuntimeConfig(environment = process.env, options = {}) {
     const selectedBot = selectedBotId(environment, registry, options);
     const selection = registry.selections[selectedBot];
     if (!selection || typeof selection !== "object" || Array.isArray(selection)) fail();
+    if (registry.schemaVersion === 2) {
+      if (!registry.unavailableSelections || typeof registry.unavailableSelections !== "object"
+        || Array.isArray(registry.unavailableSelections)) fail();
+      if (Object.hasOwn(registry.unavailableSelections, selectedBot)) fail();
+    }
     const hasInferenceBridge = environment.CODEX_BOT_INFERENCE_ENDPOINT !== undefined
       || environment.CODEX_BOT_INFERENCE_CAPABILITY !== undefined;
     if (hasInferenceBridge) {
@@ -373,7 +395,7 @@ function loadRuntimeConfig(environment = process.env, options = {}) {
         endpoint: environment.CODEX_BOT_INFERENCE_ENDPOINT,
         credential: environment.CODEX_BOT_INFERENCE_CAPABILITY,
         provider: selection.provider ?? (OPTIONAL_MODELS.has(selection.model)
-          ? "cliproxy-anthropic" : "openai-codex"),
+          ? "anthropic-claude" : "openai-codex"),
         model: selection.model,
         reasoningEffort: selection.reasoningEffort,
         serviceTier: selection.serviceTier ?? null,

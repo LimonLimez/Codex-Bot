@@ -295,7 +295,7 @@ test("desktop runtime installs standalone handlers only for current OpenBot wind
   assert.equal(targetDisposed, 1);
 });
 
-test("signed-out native Grok bot selection and local models remain available while remote Work is absent", async () => {
+test("signed-out native Grok does not invent a model or fallback provider while remote Work is absent", async () => {
   const { installDesktopRuntime } = require(runtimePath);
   const handlers = new Map();
   const sent = [];
@@ -354,34 +354,12 @@ test("signed-out native Grok bot selection and local models remain available whi
     },
   });
   assert.equal(typeof factoryOptions?.onSelectAgent, "function");
-  await factoryOptions.onSelectAgent(BOT_A);
-  assert.equal(ensured.length, 1);
-  assert.equal(ensured[0][0], BOT_A);
-  assert.deepEqual(ensured[0][1], {
-    botId: BOT_A,
-    provider: "cliproxy-anthropic",
-    model: "claude-fable-5",
-    reasoningEffort: "medium",
-    serviceTier: null,
-    catalogGeneration: 1,
-  });
-  assert.deepEqual(selected, [BOT_A]);
+  await assert.rejects(factoryOptions.onSelectAgent(BOT_A), { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(ensured.length, 0);
+  assert.deepEqual(selected, []);
   assert.equal(typeof factoryOptions.modelController?.getAvailableModels, "function");
-  const nativeCatalog = await factoryOptions.modelController.getAvailableModels();
-  assert.deepEqual(nativeCatalog.modelNames, [
-    "cliproxy-anthropic--claude-fable-5",
-    "cliproxy-anthropic--claude-opus-5",
-    "cliproxy-anthropic--claude-sonnet-5",
-  ]);
-  assert.deepEqual(await factoryOptions.modelController.getAgentDefaultModel(), {
-    modelId: "cliproxy-anthropic--claude-fable-5",
-    maxMode: true,
-    parameters: [{ id: "effort", value: "medium" }],
-  });
-  assert.deepEqual(sent, [["codex-runtime:event", {
-    type: "active-bot-changed",
-    botId: BOT_A,
-  }]]);
+  await assert.rejects(factoryOptions.modelController.getAvailableModels(), { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.deepEqual(sent, []);
   await installed.dispose();
 });
 

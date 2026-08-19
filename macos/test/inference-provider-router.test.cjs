@@ -154,7 +154,7 @@ test("reviewed Fable selections create one lazy optional transport and map Ultra
   assert.deepEqual(calls.map(([name]) => name), ["optional", "optional"]);
   assert.equal(calls[0][1].selection.reasoningEffort, "max");
   assert.equal(stored.reasoningEffort, "ultra-code");
-  assert.equal(calls[0][1].selection.provider, "cliproxy-anthropic");
+  assert.equal(calls[0][1].selection.provider, "anthropic-claude");
 });
 
 test("unknown providers and stale or mismatched tuples fail closed before either transport", async () => {
@@ -211,4 +211,61 @@ test("hostile requests and disposed routers fail with a fixed sanitized boundary
   router.dispose();
   router.dispose();
   await assert.rejects(router.stream(request()), { code: "CODEX_INFERENCE_DISPOSED" });
+});
+
+test("every canonical provider selects only its declared transport and omits unsupported options", async () => {
+  const { InferenceProviderRouter } = require(routerPath);
+  const providers = [
+    ["openai-codex", "gpt-5.6-sol", "ultra"],
+    ["anthropic-claude", "claude-fable-5", "max"],
+    ["google-antigravity", "gemini-3.6-flash-high", "high"],
+    ["moonshot-kimi", "kimi-k3", "high"],
+    ["xai", "grok-4.5", "high"],
+    ["google-vertex-ai", "gemini-3.1-pro", "high"],
+    ["openai-api-key", "gpt-5.6-sol", "high"],
+    ["local-openai-compatible", "local-model", "none"],
+  ];
+  const calls = [];
+  let current;
+  const descriptorForProvider = (provider) => ({
+    providerId: provider,
+    reasoningEfforts: provider === "local-openai-compatible" ? ["none"] : ["none", "high", "max", "ultra"],
+    reasoningMap: provider === "anthropic-claude" ? { "ultra-code": "max" } : undefined,
+    fastModeSupported: provider === "openai-codex" || provider === "openai-api-key",
+    models: [],
+  });
+  const router = new InferenceProviderRouter({
+    readSelection: async () => current,
+    descriptorForProvider,
+    transportForProvider: async (provider) => {
+      calls.push(provider);
+      return transport(provider, []);
+    },
+  });
+  for (const [provider, model, reasoningEffort] of providers) {
+    current = selection({ provider, model, reasoningEffort, serviceTier: null });
+    const result = await router.stream(request({ selection: current }));
+    for await (const _event of result.fullStream) {}
+  }
+  assert.deepEqual(calls, providers.map(([provider]) => provider));
+});
+
+test("disconnected selection fails before transport construction", async () => {
+  const { InferenceProviderRouter } = require(routerPath);
+  let transportCalls = 0;
+  const current = selection({ provider: "moonshot-kimi", model: "kimi-k3", reasoningEffort: "high" });
+  const router = new InferenceProviderRouter({
+    readSelection: async () => current,
+    descriptorForProvider: () => ({ reasoningEfforts: ["high"], fastModeSupported: false, models: [] }),
+    transportForProvider: async () => {
+      throw new (require(routerPath).InferenceProviderError)(
+        "CODEX_INFERENCE_PROVIDER_UNAVAILABLE",
+        "Codex inference provider is unavailable.",
+      );
+    },
+  });
+  await assert.rejects(router.stream(request({ selection: current })), {
+    code: "CODEX_INFERENCE_PROVIDER_UNAVAILABLE",
+  });
+  assert.equal(transportCalls, 0);
 });

@@ -4,14 +4,25 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { types } = require("node:util");
+const {
+  PROVIDER_IDS,
+  canonicalProviderId,
+  providerDescriptor,
+} = require("../provider-descriptors.cjs");
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 const MAX_BOT_IDS = 256;
 const BOT_ID = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const EFFORT = /^[a-z][a-z0-9_-]{0,31}$/;
 const SERVICE_TIER = /^[a-z][a-z0-9_-]{0,31}$/;
-const PROVIDERS = new Set(["openai-codex", "cliproxy-anthropic"]);
+const PROVIDERS = new Set(PROVIDER_IDS);
+const DYNAMIC_CATALOG_PROVIDERS = new Set([
+  "openai-codex",
+  "openai-api-key",
+  "local-openai-compatible",
+]);
 const SELECTION_FIELDS = new Set([
   "botId", "provider", "model", "reasoningEffort", "serviceTier",
   "catalogGeneration", "generation",
@@ -20,6 +31,7 @@ const REQUEST_FIELDS = new Set([
   "botId", "provider", "model", "reasoningEffort", "serviceTier", "catalogGeneration",
 ]);
 const DELETE_FIELDS = new Set(["botIds", "successorBotId"]);
+const UNAVAILABLE_FIELDS = new Set(["generation", "updatedAt"]);
 
 function ownData(value, allowed, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -48,6 +60,37 @@ function ownData(value, allowed, label) {
 function normalizeBotId(value) {
   if (typeof value !== "string" || !BOT_ID.test(value)) throw new Error("Bot selection is invalid.");
   return value;
+}
+
+function normalizeProvider(value) {
+  try {
+    const provider = canonicalProviderId(value);
+    if (!PROVIDERS.has(provider)) throw new Error();
+    return provider;
+  } catch {
+    throw new Error("Model selection provider is invalid.");
+  }
+}
+
+function providerModelIsUsable(provider, model) {
+  if (DYNAMIC_CATALOG_PROVIDERS.has(provider)) return true;
+  return providerDescriptor(provider).models.some(({ id }) => id === model);
+}
+
+function providerEffortIsUsable(provider, effort) {
+  const descriptor = providerDescriptor(provider);
+  return descriptor.reasoningEfforts.includes(effort)
+    || (provider === "openai-codex" && effort === "ultra")
+    || (provider === "openai-api-key" && effort === "ultra")
+    || (provider === "anthropic-claude" && effort === "ultra-code");
+}
+
+function validateProviderTuple(provider, model, reasoningEffort) {
+  if (!providerModelIsUsable(provider, model)
+    || !providerEffortIsUsable(provider, reasoningEffort)
+    || (reasoningEffort === "ultra-code" && provider !== "anthropic-claude")) {
+    throw new Error("Model selection is invalid.");
+  }
 }
 
 function normalizeDeleteRequest(value) {
@@ -83,7 +126,9 @@ function normalizeDeleteRequest(value) {
 function normalizeSelection(value) {
   const selection = ownData(value, SELECTION_FIELDS, "Model selection");
   const botId = normalizeBotId(selection.botId);
-  if (!PROVIDERS.has(selection.provider) || typeof selection.model !== "string"
+  let provider;
+  try { provider = normalizeProvider(selection.provider); } catch { provider = null; }
+  if (!provider || typeof selection.model !== "string"
     || !MODEL_ID.test(selection.model) || typeof selection.reasoningEffort !== "string"
     || !EFFORT.test(selection.reasoningEffort)
     || !(selection.serviceTier === null || (typeof selection.serviceTier === "string"
@@ -91,12 +136,13 @@ function normalizeSelection(value) {
     || !Number.isSafeInteger(selection.catalogGeneration) || selection.catalogGeneration < 0) {
     throw new Error("Model selection is invalid.");
   }
+  validateProviderTuple(provider, selection.model, selection.reasoningEffort);
   if (!Number.isSafeInteger(selection.generation) || selection.generation < 0) {
     throw new Error("Model selection generation is invalid.");
   }
   return Object.freeze({
     botId,
-    provider: selection.provider,
+    provider,
     model: selection.model,
     reasoningEffort: selection.reasoningEffort,
     serviceTier: selection.serviceTier,
@@ -108,7 +154,9 @@ function normalizeSelection(value) {
 function normalizeSelectionRequest(value) {
   const selection = ownData(value, REQUEST_FIELDS, "Model selection");
   const botId = normalizeBotId(selection.botId);
-  if (!PROVIDERS.has(selection.provider) || typeof selection.model !== "string"
+  let provider;
+  try { provider = normalizeProvider(selection.provider); } catch { provider = null; }
+  if (!provider || typeof selection.model !== "string"
     || !MODEL_ID.test(selection.model) || typeof selection.reasoningEffort !== "string"
     || !EFFORT.test(selection.reasoningEffort)
     || !(selection.serviceTier === null || (typeof selection.serviceTier === "string"
@@ -116,9 +164,10 @@ function normalizeSelectionRequest(value) {
     || !Number.isSafeInteger(selection.catalogGeneration) || selection.catalogGeneration < 0) {
     throw new Error("Model selection is invalid.");
   }
+  validateProviderTuple(provider, selection.model, selection.reasoningEffort);
   return Object.freeze({
     botId,
-    provider: selection.provider,
+    provider,
     model: selection.model,
     reasoningEffort: selection.reasoningEffort,
     serviceTier: selection.serviceTier,
@@ -127,42 +176,97 @@ function normalizeSelectionRequest(value) {
 }
 
 function emptyState() {
-  return { schemaVersion: SCHEMA_VERSION, activeBotId: null, selections: Object.create(null) };
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    activeBotId: null,
+    selections: Object.create(null),
+    unavailableSelections: Object.create(null),
+  };
+}
+
+function normalizeUnavailable(raw) {
+  const value = ownData(raw, UNAVAILABLE_FIELDS, "Unavailable model selection");
+  if (!Number.isSafeInteger(value.generation) || value.generation < 0
+    || !(value.updatedAt === null || typeof value.updatedAt === "string")) {
+    throw new Error("Unavailable model selection is malformed.");
+  }
+  return { generation: value.generation, updatedAt: value.updatedAt };
+}
+
+function unavailableFromLegacy(botId, raw) {
+  const generation = Number.isSafeInteger(raw?.generation) && raw.generation >= 0
+    ? raw.generation : 0;
+  const updatedAt = typeof raw?.updatedAt === "string" ? raw.updatedAt : null;
+  return { generation, updatedAt };
+}
+
+function normalizeStoredSelection(botId, raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Model selection registry is malformed.");
+  return normalizeSelection({
+    botId,
+    provider: raw.provider ?? (String(raw.model).startsWith("claude-")
+      ? "anthropic-claude" : "openai-codex"),
+    model: raw.model,
+    reasoningEffort: raw.reasoningEffort,
+    serviceTier: raw.serviceTier ?? null,
+    catalogGeneration: raw.catalogGeneration ?? 0,
+    generation: raw.generation ?? 0,
+  });
+}
+
+function normalizedStoredValue(normalized, raw) {
+  return {
+    model: normalized.model,
+    reasoningEffort: normalized.reasoningEffort,
+    provider: normalized.provider,
+    serviceTier: normalized.serviceTier,
+    catalogGeneration: normalized.catalogGeneration,
+    generation: normalized.generation,
+    updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : null,
+  };
 }
 
 function normalizeState(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)
-    || value.schemaVersion !== SCHEMA_VERSION
+    || ![LEGACY_SCHEMA_VERSION, SCHEMA_VERSION].includes(value.schemaVersion)
     || (value.activeBotId !== null && (typeof value.activeBotId !== "string" || !BOT_ID.test(value.activeBotId)))
     || !value.selections || typeof value.selections !== "object" || Array.isArray(value.selections)) {
     throw new Error("Model selection registry is malformed.");
   }
+  const migrating = value.schemaVersion === LEGACY_SCHEMA_VERSION;
   const selections = Object.create(null);
+  const unavailableSelections = Object.create(null);
   for (const [botId, raw] of Object.entries(value.selections)) {
-    if (!BOT_ID.test(botId) || !raw || typeof raw !== "object" || Array.isArray(raw)) {
+    if (!BOT_ID.test(botId)) {
       throw new Error("Model selection registry is malformed.");
     }
-    const normalized = normalizeSelection({
-      botId,
-      provider: raw.provider ?? (String(raw.model).startsWith("claude-")
-        ? "cliproxy-anthropic" : "openai-codex"),
-      model: raw.model,
-      reasoningEffort: raw.reasoningEffort,
-      serviceTier: raw.serviceTier ?? null,
-      catalogGeneration: raw.catalogGeneration ?? 0,
-      generation: raw.generation,
-    });
-    selections[botId] = {
-      model: normalized.model,
-      reasoningEffort: normalized.reasoningEffort,
-      provider: normalized.provider,
-      serviceTier: normalized.serviceTier,
-      catalogGeneration: normalized.catalogGeneration,
-      generation: normalized.generation,
-      updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : null,
-    };
+    try {
+      const normalized = normalizeStoredSelection(botId, raw);
+      selections[botId] = normalizedStoredValue(normalized, raw);
+    } catch (error) {
+      if (!migrating) throw error;
+      unavailableSelections[botId] = unavailableFromLegacy(botId, raw);
+    }
   }
-  return { schemaVersion: SCHEMA_VERSION, activeBotId: value.activeBotId, selections };
+  if (!migrating) {
+    if (!Object.hasOwn(value, "unavailableSelections")
+      || !value.unavailableSelections || typeof value.unavailableSelections !== "object"
+      || Array.isArray(value.unavailableSelections)) {
+      throw new Error("Model selection registry is malformed.");
+    }
+    for (const [botId, raw] of Object.entries(value.unavailableSelections)) {
+      if (!BOT_ID.test(botId) || Object.hasOwn(selections, botId)) {
+        throw new Error("Model selection registry is malformed.");
+      }
+      unavailableSelections[botId] = normalizeUnavailable(raw);
+    }
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    activeBotId: value.activeBotId,
+    selections,
+    unavailableSelections,
+  };
 }
 
 class ModelSelectionStore {
@@ -191,6 +295,28 @@ class ModelSelectionStore {
         provider: selection.provider, reasoningEffort: selection.reasoningEffort,
         serviceTier: selection.serviceTier, catalogGeneration: selection.catalogGeneration,
         generation: selection.generation }) : null;
+    });
+  }
+
+  readStatus(botId) {
+    const normalizedBotId = normalizeBotId(botId);
+    return this.#enqueue(async () => {
+      const state = await this.#readState();
+      const selection = state.selections[normalizedBotId];
+      if (selection) {
+        return Object.freeze({
+          state: "selected",
+          selection: Object.freeze({ botId: normalizedBotId, model: selection.model,
+            provider: selection.provider, reasoningEffort: selection.reasoningEffort,
+            serviceTier: selection.serviceTier, catalogGeneration: selection.catalogGeneration,
+            generation: selection.generation }),
+        });
+      }
+      const unavailable = state.unavailableSelections[normalizedBotId];
+      if (unavailable) return Object.freeze({
+        state: "unavailable", botId: normalizedBotId, generation: unavailable.generation,
+      });
+      return Object.freeze({ state: "missing" });
     });
   }
 
@@ -225,6 +351,9 @@ class ModelSelectionStore {
           generation: current.generation,
         });
       }
+      if (state.unavailableSelections[requested.botId]) {
+        throw new Error("Model selection is unavailable; choose a provider explicitly.");
+      }
       const selection = Object.freeze({ ...requested, generation: 0 });
       state.selections[requested.botId] = {
         model: selection.model,
@@ -235,6 +364,7 @@ class ModelSelectionStore {
         generation: selection.generation,
         updatedAt: this.#now(),
       };
+      delete state.unavailableSelections[requested.botId];
       return selection;
     });
   }
@@ -256,6 +386,7 @@ class ModelSelectionStore {
         generation: selection.generation,
         updatedAt: this.#now(),
       };
+      delete state.unavailableSelections[selection.botId];
       return selection;
     });
   }
@@ -273,6 +404,7 @@ class ModelSelectionStore {
         generation: selection.generation,
         updatedAt: this.#now(),
       };
+      delete state.unavailableSelections[selection.botId];
       return selection;
     });
   }
@@ -282,6 +414,7 @@ class ModelSelectionStore {
     const ids = new Set(request.botIds);
     return this.#mutate((state) => {
       for (const id of ids) delete state.selections[id];
+      for (const id of ids) delete state.unavailableSelections[id];
       if (ids.has(state.activeBotId)) state.activeBotId = request.successorBotId;
       return Object.freeze({ activeBotId: state.activeBotId });
     });
@@ -306,7 +439,10 @@ class ModelSelectionStore {
     try {
       const stat = await this.#fs.lstat(this.#filePath);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Model selection registry is unsafe.");
-      return normalizeState(JSON.parse(await this.#fs.readFile(this.#filePath, "utf8")));
+      const parsed = JSON.parse(await this.#fs.readFile(this.#filePath, "utf8"));
+      const normalized = normalizeState(parsed);
+      if (parsed.schemaVersion === LEGACY_SCHEMA_VERSION) await this.#writeState(normalized);
+      return normalized;
     } catch (error) {
       if (error?.code === "ENOENT") return emptyState();
       if (error instanceof SyntaxError) throw new Error("Model selection registry is malformed.");

@@ -312,7 +312,7 @@ test("official and optional selections use only the private main-process inferen
     selections: JSON.parse(fs.readFileSync(registry, "utf8")).selections,
   })}\n`, { mode: 0o600 });
   const optional = loadRuntimeConfig(environment, { conversationId: "optional" });
-  assert.equal(optional.provider, "cliproxy-anthropic");
+  assert.equal(optional.provider, "anthropic-claude");
   assert.equal(optional.model, "claude-fable-5");
   assert.equal(optional.reasoningEffort, "ultra-code");
   assert.equal(optional.serviceTier, null);
@@ -371,6 +371,42 @@ test("CLIProxyAPI-backed Fable Ultra Code stays distinct in UI storage and maps 
   assert.equal(config.model, "claude-fable-5");
   assert.equal(config.reasoningEffort, "max");
   assert.match(fs.readFileSync(registry, "utf8"), /"reasoningEffort":"ultra-code"/);
+});
+
+test("private inference bridge accepts every canonical provider and dynamic API/local model identity", (t) => {
+  const { loadRuntimeConfig } = require(runtimePath);
+  const registry = temporaryRegistry(t);
+  const providers = [
+    ["openai-codex", "gpt-live-only", "high"],
+    ["anthropic-claude", "claude-fable-5", "max"],
+    ["google-antigravity", "gemini-3.6-flash-high", "high"],
+    ["moonshot-kimi", "kimi-k3", "high"],
+    ["xai", "grok-4.5", "high"],
+    ["google-vertex-ai", "gemini-3.1-pro", "high"],
+    ["openai-api-key", "gpt-live-api", "high"],
+    ["local-openai-compatible", "llama-local", "none"],
+  ];
+  const environment = {
+    CODEX_BOT_MODEL_SELECTIONS: registry,
+    CODEX_BOT_INFERENCE_ENDPOINT: "tcp://127.0.0.1:43210",
+    CODEX_BOT_INFERENCE_CAPABILITY: "a".repeat(64),
+  };
+  for (const [provider, model, reasoningEffort] of providers) {
+    fs.writeFileSync(registry, `${JSON.stringify({
+      schemaVersion: 2,
+      activeBotId: `bot-${BOT_ID}`,
+      selections: {
+        [`bot-${BOT_ID}`]: {
+          provider, model, reasoningEffort, serviceTier: null, catalogGeneration: 4, generation: 1,
+          updatedAt: null,
+        },
+      },
+      unavailableSelections: {},
+    })}\n`, { mode: 0o600 });
+    const config = loadRuntimeConfig(environment);
+    assert.equal(config.provider, provider);
+    assert.equal(config.model, model);
+  }
 });
 
 test("stock Grok conversations stay bound to their original bot across active-bot switches and restarts", (t) => {
