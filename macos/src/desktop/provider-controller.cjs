@@ -242,10 +242,11 @@ class ProviderController extends EventEmitter {
   #directCeremonyEpoch = 0;
   #directConnectActive = false;
   #directDisconnectPending = false;
+  #directReconcileQueued = false;
   #directWaiters = new Set();
   #directReconcileFlight = null;
-  #directReconcileQueued = false;
   #directLoginCancelFlight = null;
+  #disposePromise = null;
   #onAccountChanged = null;
   #onCatalogChanged = null;
   #disposed = false;
@@ -497,11 +498,15 @@ class ProviderController extends EventEmitter {
       await this.#account.start();
       this.#assertDirectFences(epoch, ceremonyEpoch, request.signal);
       let readiness = this.#directReadiness();
+      let readinessEpoch = this.#directAuthorityEpoch;
       if (readiness.ready) {
         const current = await this.#readState();
         this.#assertDirectFences(epoch, ceremonyEpoch, request.signal);
+        this.#assertDirectAuthority(readinessEpoch);
         const existing = current.connections.find(({ providerId }) => providerId === DIRECT_PROVIDER_ID);
-        const result = await this.#commitDirectReady(existing, readiness, epoch, ceremonyEpoch, request.signal);
+        const result = await this.#commitDirectReady(
+          existing, readiness, epoch, ceremonyEpoch, request.signal, readinessEpoch,
+        );
         committed = true;
         return result;
       }
@@ -533,10 +538,14 @@ class ProviderController extends EventEmitter {
       this.#assertDirectFences(epoch, ceremonyEpoch, request.signal);
       await this.#presentDirectLogin(login, context, epoch, ceremonyEpoch, request.signal);
       readiness = await this.#waitForDirectReadiness(request, epoch, ceremonyEpoch);
+      readinessEpoch = this.#directAuthorityEpoch;
       const latest = await this.#readState();
       this.#assertDirectFences(epoch, ceremonyEpoch, request.signal);
+      this.#assertDirectAuthority(readinessEpoch);
       previous = latest.connections.find(({ providerId }) => providerId === DIRECT_PROVIDER_ID);
-      const result = await this.#commitDirectReady(previous, readiness, epoch, ceremonyEpoch, request.signal);
+      const result = await this.#commitDirectReady(
+        previous, readiness, epoch, ceremonyEpoch, request.signal, readinessEpoch,
+      );
       committed = true;
       return result;
     } catch (error) {
@@ -560,6 +569,9 @@ class ProviderController extends EventEmitter {
     } finally {
       this.#directConnectActive = false;
       this.#notifyDirectWaiters();
+      if (this.#directReconcileQueued && !this.#disposed && !this.#directDisconnectPending) {
+        this.#queueDirectReconcile();
+      }
     }
   }
 
@@ -590,8 +602,9 @@ class ProviderController extends EventEmitter {
     };
   }
 
-  async #commitDirectReady(previous, readiness, epoch, ceremonyEpoch, signal) {
+  async #commitDirectReady(previous, readiness, epoch, ceremonyEpoch, signal, authorityEpoch) {
     this.#assertDirectFences(epoch, ceremonyEpoch, signal);
+    this.#assertDirectAuthority(authorityEpoch);
     const generation = previous?.generation || 1;
     if (!Number.isSafeInteger(generation) || generation < 1) throw unavailable();
     const connection = {
@@ -602,9 +615,12 @@ class ProviderController extends EventEmitter {
       authType: readiness.account.authMode,
       connectedAt: previous?.connectedAt || this.#now(),
     };
-    const presentationEpoch = this.#directAuthorityEpoch;
     await this.#stateStore.commitConnection(connection);
-    if (!this.#disposed && presentationEpoch === this.#directAuthorityEpoch) {
+    if (this.#directAuthorityEpoch !== authorityEpoch) {
+      await this.#forceDirectUnavailable(DIRECT_ACCOUNT_UNAVAILABLE, epoch);
+      throw unavailable("OPENBOT_PROVIDER_SUPERSEDED");
+    }
+    if (!this.#disposed) {
       this.#errors.delete(DIRECT_PROVIDER_ID);
       this.#setDirectPresentation(null);
     }
@@ -697,6 +713,15 @@ class ProviderController extends EventEmitter {
     try { await this.#publish(); } catch { /* durable suppression is authoritative */ }
   }
 
+  async #forceDirectUnavailable(errorCode, epoch) {
+    if (this.#disposed) throw unavailable("OPENBOT_PROVIDER_DISPOSED");
+    const state = await this.#readState();
+    this.#assertLive(epoch);
+    const previous = state.connections.find(({ providerId }) => providerId === DIRECT_PROVIDER_ID);
+    if (!previous || previous.errorCode === DIRECT_DISCONNECT_PENDING) return;
+    await this.#commitDirectUnavailable(previous, errorCode, epoch, null);
+  }
+
   async #disconnectDirect(epoch) {
     this.#assertLive(epoch);
     const state = await this.#readState();
@@ -752,6 +777,7 @@ class ProviderController extends EventEmitter {
 
   #handleAccountChanged(value) {
     if (this.#disposed) return;
+    this.#bumpDirectAuthority();
     if (this.#directDisconnectPending) {
       this.#notifyDirectWaiters();
       return;
@@ -759,6 +785,7 @@ class ProviderController extends EventEmitter {
     let status;
     try { status = value?.status; } catch { status = "offline"; }
     if (this.#directConnectActive && this.#directPresentation?.state === "connecting") {
+      if (status !== "ready") this.#directReconcileQueued = true;
       this.#notifyDirectWaiters();
       return;
     }
@@ -773,6 +800,7 @@ class ProviderController extends EventEmitter {
 
   #handleCatalogChanged(value) {
     if (this.#disposed) return;
+    this.#bumpDirectAuthority();
     if (this.#directDisconnectPending) {
       this.#notifyDirectWaiters();
       return;
@@ -780,6 +808,7 @@ class ProviderController extends EventEmitter {
     let ready = false;
     try { ready = value?.status === "ready" && Array.isArray(value?.models) && value.models.length > 0; } catch { /* fail closed */ }
     if (this.#directConnectActive && this.#directPresentation?.state === "connecting") {
+      if (!ready) this.#directReconcileQueued = true;
       this.#notifyDirectWaiters();
       return;
     }
@@ -793,7 +822,11 @@ class ProviderController extends EventEmitter {
   }
 
   #queueDirectReconcile() {
-    if (this.#disposed || this.#directConnectActive || this.#directDisconnectPending) return;
+    if (this.#disposed) return;
+    if (this.#directConnectActive || this.#directDisconnectPending) {
+      this.#directReconcileQueued = true;
+      return;
+    }
     if (this.#directReconcileFlight) {
       this.#directReconcileQueued = true;
       return;
@@ -816,11 +849,17 @@ class ProviderController extends EventEmitter {
     let readiness;
     try { readiness = this.#directReadiness(); }
     catch { readiness = { ready: false, account: { status: "offline" }, catalog: { status: "unavailable" }, models: [] }; }
+    const authorityEpoch = this.#directAuthorityEpoch;
     const state = await this.#readState();
     this.#assertLive(lifecycleEpoch);
+    this.#assertDirectAuthority(authorityEpoch);
     const previous = state.connections.find(({ providerId }) => providerId === DIRECT_PROVIDER_ID);
     if (readiness.ready) {
-      if (!previous || previous.errorCode === DIRECT_DISCONNECT_PENDING) {
+      const qualified = previous && (previous.state === "connected"
+        || (previous.state === "unavailable"
+          && previous.errorCode === DIRECT_ACCOUNT_UNAVAILABLE
+          && previous.generation > 0));
+      if (!qualified) {
         if (!previous) {
           this.#errors.delete(DIRECT_PROVIDER_ID);
           this.#setDirectPresentation(null);
@@ -833,8 +872,12 @@ class ProviderController extends EventEmitter {
         generation: previous.generation,
         state: "connected",
         models: readiness.models,
-        authType: readiness.account.authMode,
-      });
+          authType: readiness.account.authMode,
+        });
+      if (this.#directAuthorityEpoch !== authorityEpoch) {
+        await this.#forceDirectUnavailable(DIRECT_ACCOUNT_UNAVAILABLE, lifecycleEpoch);
+        return;
+      }
       this.#assertLive(lifecycleEpoch);
       this.#errors.delete(DIRECT_PROVIDER_ID);
       this.#setDirectPresentation(null);
@@ -866,6 +909,11 @@ class ProviderController extends EventEmitter {
     this.#notifyDirectWaiters();
   }
 
+  #bumpDirectAuthority() {
+    this.#directAuthorityEpoch += 1;
+    this.#notifyDirectWaiters();
+  }
+
   #notifyDirectWaiters() {
     for (const waiter of [...this.#directWaiters]) {
       try { waiter(); } catch { /* waiter isolation */ }
@@ -885,6 +933,7 @@ class ProviderController extends EventEmitter {
   #requestDirectCancellation(errorCode) {
     this.#directDisconnectPending = errorCode === DIRECT_DISCONNECT_PENDING;
     this.#directCeremonyEpoch += 1;
+    this.#bumpDirectAuthority();
     this.#setDirectPresentation({ state: "unavailable", generation: 0, errorCode });
     this.#notifyDirectWaiters();
     let loginPending = false;
@@ -1026,17 +1075,22 @@ class ProviderController extends EventEmitter {
     });
     this.#flights.set(key, promise);
     this.#flightRejectors.set(key, rejectFlight);
-    this.#providerTails.set(providerId, promise);
+    this.#providerTails.set(providerId, operationPromise);
     return promise;
   }
 
   dispose() {
-    if (this.#disposed) return;
+    if (this.#disposePromise) return this.#disposePromise;
+    let resolveDispose;
+    this.#disposePromise = new Promise((resolve) => { resolveDispose = resolve; });
+    let loginPending = this.#directConnectActive;
+    try { loginPending ||= this.#account?.accountState?.()?.status === "signing-in"; } catch { /* fail closed */ }
+    const reconciliation = this.#directReconcileFlight || Promise.resolve();
+    const providerTails = [...new Set(this.#providerTails.values())];
     this.#disposed = true;
     this.#lifecycleEpoch += 1;
     this.#directCeremonyEpoch += 1;
-    this.#directAuthorityEpoch += 1;
-    if (this.#directConnectActive) void this.#cancelDirectLogin();
+    this.#bumpDirectAuthority();
     this.#notifyDirectWaiters();
     if (this.#account && this.#onAccountChanged && typeof this.#account.removeListener === "function") {
       this.#account.removeListener("account-changed", this.#onAccountChanged);
@@ -1050,6 +1104,10 @@ class ProviderController extends EventEmitter {
       try { reject(unavailable("OPENBOT_PROVIDER_DISPOSED")); } catch {}
     }
     this.removeAllListeners();
+    const cancellation = loginPending ? this.#cancelDirectLogin() : Promise.resolve();
+    const waits = [cancellation, reconciliation, ...providerTails].map((tail) => Promise.resolve(tail).catch(() => {}));
+    void Promise.all(waits).then(() => resolveDispose(), () => resolveDispose());
+    return this.#disposePromise;
   }
 
   async #publish() {

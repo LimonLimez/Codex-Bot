@@ -913,3 +913,171 @@ test("postcommit onboarding publication/readback failure returns the committed r
   assert.deepEqual(receipt, state.state.onboarding);
   assert.equal(writes, 1);
 });
+
+test("C3 held final Direct connect read cannot return or store connected authority after account offline", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 3);
+  const account = new FakeDirectAccount();
+  let reads = 0;
+  let releaseRead;
+  const originalRead = state.read.bind(state);
+  state.read = async () => {
+    reads += 1;
+    if (reads === 2) await new Promise((resolve) => { releaseRead = resolve; });
+    return originalRead();
+  };
+  const controller = new ProviderController({ stateStore: state, account });
+  const pending = controller.connect({ providerId: "openai-codex" });
+  await new Promise((resolve) => setImmediate(resolve));
+  while (typeof releaseRead !== "function") await new Promise((resolve) => setImmediate(resolve));
+  account.account = { ...account.account, status: "offline", authMode: null, login: null };
+  account.emit("account-changed", account.account);
+  releaseRead();
+  await assert.rejects(pending, /offline|unavailable|supersed/i);
+  assert.notEqual(state.state.connections[0]?.state, "connected");
+  assert.deepEqual(state.state.connections[0]?.models, []);
+});
+
+test("C3 held ready reconciliation cannot publish connected authority after account offline", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 2);
+  const account = new FakeDirectAccount();
+  let releaseCommit;
+  const originalCommit = state.commitConnection.bind(state);
+  state.commitConnection = async (value) => {
+    if (value.providerId === "openai-codex" && value.state === "connected" && value.models.length > 0) {
+      await new Promise((resolve) => { releaseCommit = resolve; });
+    }
+    return originalCommit(value);
+  };
+  const controller = new ProviderController({ stateStore: state, account });
+  const events = [];
+  controller.on("connections-changed", (connections) => events.push(connections[0]));
+  account.catalog = { generation: 4, status: "ready", models: [directAccountModel("gpt-live-sol")] };
+  account.emit("catalog-changed", account.catalog);
+  while (typeof releaseCommit !== "function") await new Promise((resolve) => setImmediate(resolve));
+  account.account = { ...account.account, status: "offline", authMode: null, login: null };
+  account.emit("account-changed", account.account);
+  releaseCommit();
+  for (let attempt = 0; attempt < 20 && state.state.connections[0]?.state === "connected"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(events.some((row) => row?.state === "connected"), false);
+  assert.equal(state.state.connections[0]?.state, "unavailable");
+  assert.deepEqual(state.state.connections[0]?.models, []);
+});
+
+test("C4 ready reconciliation never promotes disconnected or unqualified unavailable Direct rows, but restores a qualified account marker", async () => {
+  const { ProviderController } = require(controllerPath);
+  const disconnectedState = new FakeStateStore();
+  disconnectedState.state = {
+    schemaVersion: 1,
+    connections: [{ providerId: "openai-codex", generation: 5, state: "disconnected", models: [] }],
+    onboarding: null,
+  };
+  const disconnectedAccount = new FakeDirectAccount();
+  const disconnectedController = new ProviderController({ stateStore: disconnectedState, account: disconnectedAccount });
+  disconnectedAccount.emit("catalog-changed", disconnectedAccount.catalog);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disconnectedState.state.connections[0].state, "disconnected");
+  assert.deepEqual(disconnectedState.state.connections[0].models, []);
+
+  const unqualifiedState = new FakeStateStore();
+  unqualifiedState.state = {
+    schemaVersion: 1,
+    connections: [{
+      providerId: "openai-codex", generation: 6, state: "unavailable", errorCode: "OTHER_ERROR", models: [],
+    }],
+    onboarding: null,
+  };
+  const unqualifiedAccount = new FakeDirectAccount();
+  const unqualifiedController = new ProviderController({ stateStore: unqualifiedState, account: unqualifiedAccount });
+  unqualifiedAccount.emit("catalog-changed", unqualifiedAccount.catalog);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(unqualifiedState.state.connections[0].state, "unavailable");
+  assert.deepEqual(unqualifiedState.state.connections[0].models, []);
+
+  const qualifiedState = new FakeStateStore();
+  qualifiedState.state = {
+    schemaVersion: 1,
+    connections: [{
+      providerId: "openai-codex", generation: 7, state: "unavailable",
+      errorCode: "OPENBOT_PROVIDER_ACCOUNT_UNAVAILABLE", models: [],
+    }],
+    onboarding: null,
+  };
+  const qualifiedAccount = new FakeDirectAccount();
+  const qualifiedController = new ProviderController({ stateStore: qualifiedState, account: qualifiedAccount });
+  qualifiedAccount.catalog = { generation: 8, status: "ready", models: [directAccountModel("gpt-live-sol")] };
+  qualifiedAccount.emit("catalog-changed", qualifiedAccount.catalog);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(qualifiedState.state.connections[0].state, "connected");
+  assert.equal(qualifiedState.state.connections[0].generation, 7);
+  assert.equal(qualifiedState.state.connections[0].models[0].model, "gpt-live-sol");
+  disconnectedController.dispose();
+  unqualifiedController.dispose();
+  qualifiedController.dispose();
+});
+
+test("I2 dispose is sentinel-first, idempotent, and awaits Direct login cancellation", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount({ signedOut: true });
+  let releaseCancel;
+  let cancelStarted = false;
+  account.cancelLogin = async () => {
+    cancelStarted = true;
+    account.cancelLogins += 1;
+    await new Promise((resolve) => { releaseCancel = resolve; });
+    account.account = { ...account.account, status: "signed-out", authMode: null, login: null };
+  };
+  const controller = new ProviderController({ stateStore: state, account });
+  const pending = controller.connect(
+    { providerId: "openai-codex", authMode: "browser" },
+    directContext({ openExternal: async () => {} }),
+  );
+  void pending.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  const first = controller.dispose();
+  const second = controller.dispose();
+  assert.equal(first, second);
+  assert.equal(typeof first?.then, "function");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(cancelStarted, true);
+  let settled = false;
+  first.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  releaseCancel();
+  await first;
+  assert.equal(settled, true);
+  await assert.rejects(pending, { code: "OPENBOT_PROVIDER_DISPOSED" });
+});
+
+test("M1 disposal awaits the underlying provider tail rather than a public race", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  let releaseConnect;
+  const cliproxy = {
+    connectProvider: async () => new Promise((resolve) => { releaseConnect = resolve; }),
+    importVertex: async () => {},
+    connectionStatus: async () => ({ state: "connected" }),
+    listModels: async () => [descriptorModel("anthropic-claude")],
+    disconnectProvider: async () => {},
+  };
+  const controller = new ProviderController({ stateStore: state, cliproxy });
+  const pending = controller.connect({ providerId: "anthropic-claude" });
+  void pending.catch(() => {});
+  while (typeof releaseConnect !== "function") await new Promise((resolve) => setImmediate(resolve));
+  const disposing = controller.dispose();
+  assert.equal(typeof disposing?.then, "function");
+  let settled = false;
+  disposing.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  releaseConnect();
+  await disposing;
+  assert.equal(settled, true);
+});
