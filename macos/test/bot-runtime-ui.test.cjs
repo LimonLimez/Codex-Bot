@@ -4761,7 +4761,7 @@ test("native composer Power surfaces use viewport coordinates outside Grok's cli
   assert.equal(flyout.style.top, "520px");
 });
 
-test("measured picker keeps stable Codex Advanced view panels and exact active height", async (context) => {
+test("compact simple content keeps stable Codex Advanced view panels and exact active height", async (context) => {
   const catalog = Object.freeze({
     generation: 12,
     status: "ready",
@@ -4786,7 +4786,7 @@ test("measured picker keeps stable Codex Advanced view panels and exact active h
     initialSelection: selection,
     nativeProtocol: true,
     viewMetrics: Object.freeze({
-      "codex-power-view-simple": 121,
+      "codex-power-view-simple": 48,
       "codex-power-view-advanced": 132,
       "codex-power-view-controls": 36,
     }),
@@ -4799,9 +4799,9 @@ test("measured picker keeps stable Codex Advanced view panels and exact active h
   const advanced = harness.find("codex-power-view-advanced");
   const controls = harness.find("codex-power-view-controls");
   const track = harness.find("codex-power-view-track");
-  assert.equal(menu.style.getPropertyValue("--simple-view-height"), "121px");
+  assert.equal(menu.style.getPropertyValue("--simple-view-height"), "48px");
   assert.equal(menu.style.getPropertyValue("--advanced-view-height"), "132px");
-  assert.equal(menu.style.height, "157px");
+  assert.equal(menu.style.height, "84px");
   assert.deepEqual(harness.resizeObservers[0].observed, [simple, advanced, controls]);
   assert.deepEqual(
     harness.resizeObservers[1].observed,
@@ -4848,7 +4848,7 @@ test("Codex Advanced view marks reduced motion without changing its measured own
     nativeProtocol: true,
     reducedMotion: true,
     viewMetrics: Object.freeze({
-      "codex-power-view-simple": 121,
+      "codex-power-view-simple": 48,
       "codex-power-view-advanced": 132,
       "codex-power-view-controls": 36,
     }),
@@ -4857,7 +4857,67 @@ test("Codex Advanced view marks reduced motion without changing its measured own
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(harness.find("codex-power-menu").dataset.reducedMotion, "true");
-  assert.equal(harness.find("codex-power-menu").style.height, "157px");
+  assert.equal(harness.find("codex-power-menu").style.height, "84px");
+});
+
+test("rapid Power view toggles settle on compact Simple geometry without moving focus or surfaces", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "max", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    viewMetrics: Object.freeze({
+      "codex-model-trigger": Object.freeze({ left: 850, top: 708, width: 130, height: 28 }),
+      "codex-power-popover": Object.freeze({ width: 224, height: 84 }),
+      "codex-power-view-simple": 48,
+      "codex-power-view-advanced": 132,
+      "codex-power-view-controls": 36,
+    }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const trigger = harness.find("codex-model-trigger");
+  const popover = harness.find("codex-power-popover");
+  const menu = harness.find("codex-power-menu");
+  const simple = harness.find("codex-power-view-simple");
+  const advanced = harness.find("codex-power-view-advanced");
+  const advancedToggle = harness.find("codex-power-advanced-toggle");
+  trigger.listeners.get("click")();
+  const initialCoordinates = { left: popover.style.left, top: popover.style.top };
+  advancedToggle.focus();
+
+  advancedToggle.listeners.get("click")();
+  advancedToggle.listeners.get("click")();
+  advancedToggle.listeners.get("click")();
+  advancedToggle.listeners.get("click")();
+
+  assert.equal(menu.dataset.view, "simple");
+  assert.equal(menu.style.height, "84px");
+  assert.equal(simple.attributes["aria-hidden"], "false");
+  assert.equal(simple.inert, false);
+  assert.equal(advanced.attributes["aria-hidden"], "true");
+  assert.equal(advanced.inert, true);
+  assert.deepEqual({ left: popover.style.left, top: popover.style.top }, initialCoordinates);
+  assert.equal(harness.documentRef.activeElement, advancedToggle);
 });
 
 test("Advanced flyout content and focus follow Codex menu semantics", async (context) => {

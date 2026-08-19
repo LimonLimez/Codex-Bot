@@ -792,8 +792,7 @@ body.light {
 .codex-power-view-simple {
   display: flex;
   align-items: flex-start;
-  min-height: 121px;
-  padding: 14px 6px 55px;
+  padding: 8px 6px;
 }
 
 .codex-power-view-advanced {

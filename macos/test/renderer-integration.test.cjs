@@ -454,6 +454,9 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(css, /\.codex-power-menu\s*\{[^}]*position:\s*relative[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.codex-power-menu\.transitions-ready\s*\{[^}]*transition:\s*height 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
   assert.match(css, /\.codex-power-menu\.transitions-ready \.codex-power-view-track\s*\{[^}]*transition:\s*transform 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
+  assert.match(css, /\.codex-power-view-simple\s*\{[^}]*display:\s*flex[^}]*align-items:\s*flex-start[^}]*padding:\s*8px 6px/s);
+  assert.doesNotMatch(css, /\.codex-power-view-simple\s*\{[^}]*min-height:\s*121px/s);
+  assert.doesNotMatch(css, /\.codex-power-view-simple\s*\{[^}]*55px/s);
   assert.match(css, /\.codex-power-view-panel\s*\{[^}]*width:\s*100%[^}]*opacity:\s*1[^}]*transition:\s*opacity 200ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
   assert.match(css, /\.codex-power-view-panel\[aria-hidden="true"\]\s*\{[^}]*opacity:\s*0[^}]*pointer-events:\s*none/s);
   assert.match(css, /\.codex-power-view-controls::before\s*\{[^}]*right:\s*6px[^}]*left:\s*6px/s);
