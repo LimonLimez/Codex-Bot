@@ -435,6 +435,40 @@ test("desktop runtime starts every owner before awaiting standalone and Local De
   ]);
 });
 
+test("desktop disposal cancels ProviderController before Codex account and manager shutdown", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const order = [];
+  const providerGate = deferred();
+  const providerController = {
+    async readAuthoritySnapshot() { return null; },
+    async listConnections() { return []; }, async connect() {}, async disconnect() {},
+    async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; }, async completeOnboarding() {},
+    on() {}, off() {},
+    async dispose() { order.push("provider-start"); await providerGate.promise; order.push("provider-done"); },
+  };
+  const accountController = {
+    async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+    on() {}, off() {}, dispose() { order.push("account"); },
+  };
+  const electron = {
+    app: { once() {} },
+    ipcMain: { handle() {}, removeHandler() {} },
+    BrowserWindow: { getAllWindows() { return []; } },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() { order.push("controller"); } },
+    selectionStore: {}, providerController, accountController,
+    codexManager: { stop() { order.push("codex"); } },
+  });
+  const disposal = installed.dispose();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ["provider-start"]);
+  providerGate.resolve();
+  await disposal;
+  assert.deepEqual(order.slice(0, 4), ["provider-start", "provider-done", "account", "codex"]);
+});
+
 test("top-level runtime disposal releases an adopted Computer source while merged subagent open stays hung", async () => {
   const { installDesktopRuntime } = require(runtimePath);
   const { StandaloneConversationController } = require("../src/desktop/standalone-conversation-controller.cjs");

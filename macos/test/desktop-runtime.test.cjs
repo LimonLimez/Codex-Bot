@@ -50,21 +50,48 @@ function accountWithCatalog(catalog = readyCatalog(), onStart = async () => {}) 
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function runtimeFixture(t, {
   providerController = null,
   selectionStore = {},
   botDeletionCoordinator = null,
+  accountController = null,
+  shell = null,
+  secondaryWindow = false,
+  controllerOverride = null,
+  canCreateAgent = null,
 } = {}) {
   const { installDesktopRuntime } = require(runtimePath);
   const handlers = new Map();
+  const sent = [];
   const frame = { processId: 31, routingId: 47, isDestroyed: () => false };
-  const sender = { mainFrame: frame, isDestroyed: () => false, send() {} };
+  const senderListeners = new Map();
+  const sender = {
+    mainFrame: frame,
+    isDestroyed: () => false,
+    send(...args) { sent.push(args); },
+    on(eventName, listener) {
+      const listeners = senderListeners.get(eventName) || new Set();
+      listeners.add(listener);
+      senderListeners.set(eventName, listeners);
+    },
+    removeListener(eventName, listener) {
+      senderListeners.get(eventName)?.delete(listener);
+    },
+    emit(eventName, ...args) {
+      for (const listener of [...(senderListeners.get(eventName) || [])]) listener(...args);
+    },
+  };
   const window = { isDestroyed: () => false, webContents: sender };
-  const controller = { on() {}, off() {}, dispose() {} };
+  const secondaryFrame = { processId: 32, routingId: 48, isDestroyed: () => false };
+  const secondarySent = [];
+  const secondarySender = { mainFrame: secondaryFrame, isDestroyed: () => false, send(...args) { secondarySent.push(args); } };
+  const secondary = { isDestroyed: () => false, webContents: secondarySender };
+  const controller = controllerOverride || { on() {}, off() {}, dispose() {} };
   const electron = {
     app: { once() {}, on() {}, off() {} },
     ipcMain: {
@@ -74,16 +101,26 @@ function runtimeFixture(t, {
       removeHandler(channel) { handlers.delete(channel); },
     },
     BrowserWindow: {
-      fromWebContents(value) { return value === sender ? window : null; },
-      getAllWindows() { return [window]; },
+      fromWebContents(value) {
+        if (value === sender) return window;
+        if (secondaryWindow && value === secondarySender) return secondary;
+        return null;
+      },
+      getAllWindows() { return secondaryWindow ? [window, secondary] : [window]; },
     },
   };
+  if (shell !== null) electron.shell = shell;
   const injected = { controller, selectionStore };
   if (providerController !== null) injected.providerController = providerController;
   if (botDeletionCoordinator !== null) injected.botDeletionCoordinator = botDeletionCoordinator;
+  if (accountController !== null) injected.accountController = accountController;
+  if (canCreateAgent !== null) injected.canCreateAgent = canCreateAgent;
   const installed = installDesktopRuntime(electron, injected);
   t.after(() => installed.dispose());
-  return Object.freeze({ electron, handlers, frame, sender, window, installed });
+  return Object.freeze({
+    electron, handlers, frame, sender, window, sent, senderListeners, installed,
+    secondaryFrame, secondarySender, secondarySent,
+  });
 }
 
 function tempRoot(t) {
@@ -866,6 +903,257 @@ test("provider IPC is main-frame scoped and codex-bot creation is gated before m
     code: "CODEX_BOT_OPERATION_FAILED",
   });
   assert.deepEqual(calls.filter((value) => value === "create"), []);
+});
+
+test("provider browser connect opens only the private URL in main and returns no login details", async (t) => {
+  const { IPC_CHANNELS, PROVIDER_LOGIN_PROMPT_CHANNEL } = require(runtimePath);
+  const opened = [];
+  const loginUrl = "https://chatgpt.com/auth/codex?state=private-login";
+  const providerController = {
+    async connect(request, context) {
+      assert.equal(request.providerId, "openai-codex");
+      assert.equal(request.authMode, "browser");
+      assert.equal(typeof context?.openExternal, "function");
+      await context.openExternal(loginUrl);
+      return {
+        providerId: "openai-codex", label: "OpenAI Codex", loginKind: "account",
+        state: "connected", generation: 1,
+        capabilities: { reasoning: true, fast: false }, errorCode: null,
+      };
+    },
+    async listConnections() { return []; }, async disconnect() {}, async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; }, async completeOnboarding() {}, async readAuthoritySnapshot() { return null; },
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, {
+    providerController,
+    shell: { async openExternal(url) { opened.push(url); } },
+  });
+  const result = await fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    { providerId: "openai-codex", authMode: "browser" },
+  );
+  assert.deepEqual(opened, [loginUrl]);
+  assert.equal(result.providerId, "openai-codex");
+  assert.doesNotMatch(JSON.stringify(result), /chatgpt\.com|loginId|private-login/);
+  assert.deepEqual(fixture.sent, []);
+  assert.equal(PROVIDER_LOGIN_PROMPT_CHANNEL, "openbot-provider:login-prompt");
+});
+
+test("device login prompt is delivered only to the initiating current frame", async (t) => {
+  const { IPC_CHANNELS, PROVIDER_LOGIN_PROMPT_CHANNEL } = require(runtimePath);
+  const flight = deferred();
+  const opened = [];
+  let firstContext = null;
+  let connectCalls = 0;
+  const prompt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    generation: 1,
+    mode: "device-code",
+    verificationUrl: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-1234",
+  };
+  const providerController = {
+    connect(_request, context) {
+      if (firstContext) return flight.promise;
+      connectCalls += 1;
+      firstContext = context;
+      return flight.promise;
+    },
+    async listConnections() { return []; }, async disconnect() {}, async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; }, async completeOnboarding() {}, async readAuthoritySnapshot() { return null; },
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, {
+    providerController,
+    secondaryWindow: true,
+    shell: { async openExternal(url) { opened.push(url); } },
+  });
+  const first = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    { providerId: "openai-codex", authMode: "device-code" },
+  );
+  const second = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.secondarySender, senderFrame: fixture.secondaryFrame },
+    { providerId: "openai-codex", authMode: "device-code" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  await firstContext.onLoginPrompt(prompt);
+  assert.deepEqual(opened, [prompt.verificationUrl]);
+  assert.deepEqual(fixture.sent, [[PROVIDER_LOGIN_PROMPT_CHANNEL, prompt]]);
+  assert.deepEqual(fixture.secondarySent, []);
+  assert.equal(connectCalls, 1);
+  flight.resolve({ providerId: "openai-codex", state: "connected", generation: 1 });
+  await Promise.all([first, second]);
+});
+
+test("provider connect admission aborts and rejects after the initiating main frame navigates", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  let request = null;
+  let context = null;
+  let commits = 0;
+  let settleConnect = null;
+  const providerController = {
+    connect(value, internalContext) {
+      request = value;
+      context = internalContext;
+      return new Promise((resolve) => {
+        settleConnect = () => {
+          if (!value.signal.aborted) commits += 1;
+          resolve({
+            providerId: "openai-codex", label: "OpenAI Codex", loginKind: "account",
+            state: "connected", generation: 1,
+            capabilities: { reasoning: true, fast: false }, errorCode: null,
+          });
+        };
+      });
+    },
+    async listConnections() { return []; }, async disconnect() {}, async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; }, async completeOnboarding() {}, async readAuthoritySnapshot() { return null; },
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController });
+  const pending = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    { providerId: "openai-codex", authMode: "device-code" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(request.signal.aborted, false);
+  assert.equal(context.isCurrent(), true);
+  fixture.sender.emit("did-navigate");
+  assert.equal(request.signal.aborted, true);
+  assert.equal(context.isCurrent(), false);
+  settleConnect();
+  await assert.rejects(pending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(commits, 0);
+  assert.deepEqual(fixture.sent, []);
+});
+
+test("provider connect admission aborts and rejects when runtime disposal wins the pending flight", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const flight = deferred();
+  let request = null;
+  let context = null;
+  const providerController = {
+    connect(value, internalContext) {
+      request = value;
+      context = internalContext;
+      return flight.promise;
+    },
+    async listConnections() { return []; }, async disconnect() {}, async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; }, async completeOnboarding() {}, async readAuthoritySnapshot() { return null; },
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController });
+  const pending = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    { providerId: "openai-codex", authMode: "browser" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  await fixture.installed.dispose();
+  assert.equal(request.signal.aborted, true);
+  assert.equal(context.isCurrent(), false);
+  flight.resolve({
+    providerId: "openai-codex", label: "OpenAI Codex", loginKind: "account",
+    state: "connected", generation: 1,
+    capabilities: { reasoning: true, fast: false }, errorCode: null,
+  });
+  await assert.rejects(pending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.deepEqual(fixture.sent, []);
+});
+
+test("device login prompt rejects malformed and navigated or destroyed frames", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  for (const scenario of ["malformed", "navigated", "destroyed"]) {
+    const flight = deferred();
+    let context = null;
+    const providerController = {
+      connect(_request, value) { context = value; return flight.promise; },
+      async listConnections() { return []; }, async disconnect() {}, async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+      async readOnboarding() { return null; }, async completeOnboarding() {}, async readAuthoritySnapshot() { return null; },
+      on() {}, off() {}, dispose() {},
+    };
+    const fixture = runtimeFixture(t, { providerController });
+    const pending = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+      { sender: fixture.sender, senderFrame: fixture.frame },
+      { providerId: "openai-codex", authMode: "device-code" },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    if (scenario === "navigated") fixture.sender.mainFrame = { processId: 31, routingId: 99, isDestroyed: () => false };
+    if (scenario === "destroyed") fixture.sender.isDestroyed = () => true;
+    const prompt = scenario === "malformed"
+      ? {
+        schemaVersion: 1, providerId: "openai-codex", generation: 1, mode: "device-code",
+        verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-1234", loginId: "private",
+      }
+      : {
+        schemaVersion: 1, providerId: "openai-codex", generation: 1, mode: "device-code",
+        verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-1234",
+      };
+    await assert.rejects(context.onLoginPrompt(prompt));
+    assert.deepEqual(fixture.sent, []);
+    flight.reject(new Error("prompt admission rejected"));
+    await assert.rejects(pending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  }
+});
+
+test("legacy account logout delegates to Direct Codex provider disconnect", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const calls = [];
+  const providerController = {
+    async disconnect(providerId) { calls.push(["provider-disconnect", providerId]); },
+    async connect() {}, async listConnections() { return []; }, async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; }, async completeOnboarding() {}, async readAuthoritySnapshot() { return null; },
+    on() {}, off() {}, dispose() {},
+  };
+  const accountController = {
+    async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+    async login() {}, async cancelLogin() {}, async logout() { calls.push(["account-logout"]); }, async refresh() {},
+    on() {}, off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController, accountController });
+  await fixture.handlers.get(IPC_CHANNELS.accountLogout)({});
+  assert.deepEqual(calls, [["provider-disconnect", "openai-codex"]]);
+});
+
+test("account authority invalidation fences a late create before durable mutation", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const listeners = new Map();
+  const providerController = {
+    async readOnboarding() { return null; },
+    async listConnections() { return []; },
+    async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async connect() {}, async disconnect() {}, async completeOnboarding() {}, async readAuthoritySnapshot() { return null; },
+    on(event, listener) { listeners.set(event, listener); }, off() {}, dispose() {},
+  };
+  const calls = [];
+  let fenceResult = null;
+  const controller = {
+    on() {}, off() {}, dispose() {}, async listBots() { return []; },
+    async createBot(_input, options) {
+      calls.push(options);
+      listeners.get("account:account-changed")?.({ status: "signed-out" });
+      fenceResult = options.commitFence();
+      throw new Error("late mutation");
+    },
+  };
+  const accountController = {
+    async start() {}, accountState() { return {}; }, catalogState() { return {}; },
+    async login() {}, async cancelLogin() {}, async logout() {}, async refresh() {},
+    on(event, listener) { listeners.set(`account:${event}`, listener); },
+    off() {}, dispose() {},
+  };
+  const fixture = runtimeFixture(t, {
+    providerController,
+    accountController,
+    controllerOverride: controller,
+    canCreateAgent: async () => true,
+  });
+  const pending = fixture.handlers.get(IPC_CHANNELS.create)({});
+  await assert.rejects(pending, { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(calls.length, 1);
+  assert.equal(fenceResult, false);
 });
 
 test("authority snapshot delegates exactly once without provider mutation", async (t) => {

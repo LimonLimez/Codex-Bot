@@ -89,6 +89,7 @@ const ACCOUNT_CHANGE_CHANNEL = "codex-account:changed";
 const CATALOG_CHANGE_CHANNEL = "codex-catalog:changed";
 const PROVIDER_CHANGE_CHANNEL = "openbot-provider:changed";
 const PROVIDER_CATALOG_CHANGE_CHANNEL = "openbot-provider:catalog-changed";
+const PROVIDER_LOGIN_PROMPT_CHANNEL = "openbot-provider:login-prompt";
 const COMPUTER_CHANGE_CHANNEL = "openbot-computer:changed";
 const COMPUTER_PERMISSION_CHANNEL = "openbot-computer:permission-requested";
 const INSTALLED = Symbol.for("codex.bot.macos.desktop-runtime");
@@ -102,6 +103,7 @@ const LOCAL_AUTOMATION_METHODS = Object.freeze([
   "deleteAgentAutomation",
   "runAgentAutomationNow",
 ]);
+const PROVIDER_LOGIN_USER_CODE = /^[A-Z0-9]{3,16}(?:-[A-Z0-9]{2,16})?$/;
 
 function sanitizedFailure() {
   const error = new Error("Codex bot operation failed.");
@@ -472,14 +474,42 @@ function providerIdInput(value) {
   } catch { throw sanitizedFailure(); }
 }
 
-function providerConnectInput(value) {
+function providerConnectInput(value, signal = null) {
   const request = providerInput(value, new Set(["providerId", "authMode", "baseUrl", "apiKey", "sourcePath"]), ["providerId"]);
   request.providerId = providerIdInput(request.providerId);
   if (request.authMode !== undefined && !new Set(["browser", "device-code"]).has(request.authMode)) throw sanitizedFailure();
   if (request.baseUrl !== undefined && typeof request.baseUrl !== "string") throw sanitizedFailure();
   if (request.apiKey !== undefined && (typeof request.apiKey !== "string" || request.apiKey.length > 16 * 1024)) throw sanitizedFailure();
   if (request.sourcePath !== undefined && (typeof request.sourcePath !== "string" || !path.isAbsolute(request.sourcePath))) throw sanitizedFailure();
+  if (signal !== null) {
+    if (!signal || typeof signal !== "object" || typeof signal.aborted !== "boolean"
+      || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function") {
+      throw sanitizedFailure();
+    }
+    request.signal = signal;
+  }
   return Object.freeze(request);
+}
+
+function providerLoginPromptPublic(value) {
+  const prompt = providerInput(value, new Set([
+    "schemaVersion", "providerId", "generation", "mode", "verificationUrl", "userCode",
+  ]), ["schemaVersion", "providerId", "generation", "mode", "verificationUrl", "userCode"]);
+  if (prompt.schemaVersion !== 1 || prompt.providerId !== "openai-codex"
+    || !Number.isSafeInteger(prompt.generation) || prompt.generation < 1
+    || prompt.mode !== "device-code"
+    || prompt.verificationUrl !== "https://auth.openai.com/codex/device"
+    || typeof prompt.userCode !== "string" || !PROVIDER_LOGIN_USER_CODE.test(prompt.userCode)) {
+    throw sanitizedFailure();
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    generation: prompt.generation,
+    mode: "device-code",
+    verificationUrl: prompt.verificationUrl,
+    userCode: prompt.userCode,
+  });
 }
 
 function catalogModels(catalog) {
@@ -1538,6 +1568,7 @@ function installDesktopRuntime(electron, injected = {}) {
   const profileSetupReceipts = new Map();
   const computerSetupReceipts = new Map();
   const registered = [];
+  const providerAdmissions = new Set();
   const releaseEarlySyncIpc = installEarlySyncIpc(electron);
   let disposePromise = null;
   let disposeComplete = false;
@@ -1806,7 +1837,91 @@ function installDesktopRuntime(electron, injected = {}) {
     } catch { return null; }
   }
 
-  function handle(channel, operation, { requireCurrentWindow = false, requireMainFrame = false, computer = false } = {}) {
+  function providerConnectAdmission(event, view) {
+    if (typeof AbortController !== "function") throw sanitizedFailure();
+    const abortController = new AbortController();
+    let closed = false;
+    let pollHandle = null;
+    let admission = null;
+    const registrations = [];
+    const stopMonitoring = () => {
+      if (pollHandle !== null) {
+        try { clearInterval(pollHandle); } catch {}
+        pollHandle = null;
+      }
+      for (const [target, eventName, listener] of registrations.splice(0)) {
+        try { target.removeListener?.(eventName, listener); } catch {}
+      }
+    };
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      stopMonitoring();
+      try { abortController.abort(); } catch {}
+      if (admission) providerAdmissions.delete(admission);
+    };
+    const isCurrent = () => {
+      if (closed || disposed) return false;
+      let current;
+      try { current = currentWindowView(event); } catch { current = null; }
+      const valid = Boolean(current && current.sender === view.sender
+        && sameMainFrame(current.senderFrame, view.senderFrame));
+      if (!valid) close();
+      return valid;
+    };
+    const openExternal = async (url) => {
+      if (!isCurrent() || !electron.shell || typeof electron.shell.openExternal !== "function") {
+        throw sanitizedFailure();
+      }
+      try {
+        const result = await electron.shell.openExternal(url);
+        if (result === false) throw new Error("External open failed.");
+      } catch { throw sanitizedFailure(); }
+      if (!isCurrent()) throw sanitizedFailure();
+    };
+    const onLoginPrompt = async (value) => {
+      if (!isCurrent()) throw sanitizedFailure();
+      const prompt = providerLoginPromptPublic(value);
+      if (!isCurrent()) throw sanitizedFailure();
+      await openExternal(prompt.verificationUrl);
+      if (!isCurrent()) throw sanitizedFailure();
+      try { view.sender.send(PROVIDER_LOGIN_PROMPT_CHANNEL, prompt); }
+      catch { throw sanitizedFailure(); }
+    };
+    const invalidateOnNavigation = (navigation = null) => {
+      if (navigation && navigation.isMainFrame === false) return;
+      close();
+    };
+    for (const eventName of [
+      "did-start-loading", "did-navigate", "did-frame-navigate", "will-navigate",
+      "destroyed", "render-process-gone",
+    ]) {
+      try {
+        if (typeof view.sender.on === "function") {
+          view.sender.on(eventName, invalidateOnNavigation);
+          registrations.push([view.sender, eventName, invalidateOnNavigation]);
+        }
+      } catch {}
+    }
+    try {
+      pollHandle = setInterval(invalidateOnNavigation, 50);
+      pollHandle?.unref?.();
+    } catch { pollHandle = null; }
+    admission = Object.freeze({
+      signal: abortController.signal,
+      context: Object.freeze({ openExternal, onLoginPrompt, isCurrent }),
+      dispose: close,
+    });
+    providerAdmissions.add(admission);
+    return admission;
+  }
+
+  function handle(channel, operation, {
+    requireCurrentWindow = false,
+    requireMainFrame = false,
+    computer = false,
+    providerContext = false,
+  } = {}) {
     electron.ipcMain.handle(channel, async (event, ...args) => {
       if (disposed) throw computer ? sanitizedComputerFailure() : sanitizedFailure();
       const needsWindow = requireCurrentWindow || requireMainFrame || botDeletionCoordinator !== null;
@@ -1833,8 +1948,18 @@ function installDesktopRuntime(electron, injected = {}) {
         } else if (requireCurrentWindow && !currentWindowSender(event)) {
           throw computer ? sanitizedComputerFailure() : sanitizedFailure();
         }
-        const result = await operation(...args);
-        return computer ? computerPublic(result) : result;
+        const admission = providerContext ? providerConnectAdmission(event, view) : null;
+        try {
+          const result = providerContext
+            ? await operation(...args, admission)
+            : await operation(...args);
+          if (providerContext && !admission.context.isCurrent()) {
+            throw sanitizedFailure();
+          }
+          return computer ? computerPublic(result) : result;
+        } finally {
+          admission?.dispose();
+        }
       } catch {
         throw computer ? sanitizedComputerFailure() : sanitizedFailure();
       }
@@ -2036,11 +2161,13 @@ function installDesktopRuntime(electron, injected = {}) {
     if (providerController === null) throw sanitizedFailure();
     return providerController.listConnections();
   }, { requireMainFrame: true });
-  handle(IPC_CHANNELS.providerConnect, async (value) => {
+  handle(IPC_CHANNELS.providerConnect, async (value, admission) => {
     if (providerController === null) throw sanitizedFailure();
     providerAuthorityEpoch += 1;
-    return providerController.connect(providerConnectInput(value));
-  }, { requireMainFrame: true });
+    if (!admission || typeof admission.signal?.aborted !== "boolean"
+      || !admission.context || typeof admission.context.isCurrent !== "function") throw sanitizedFailure();
+    return providerController.connect(providerConnectInput(value, admission.signal), admission.context);
+  }, { requireMainFrame: true, providerContext: true });
   handle(IPC_CHANNELS.providerDisconnect, async (value) => {
     if (providerController === null) throw sanitizedFailure();
     providerAuthorityEpoch += 1;
@@ -2080,7 +2207,13 @@ function installDesktopRuntime(electron, injected = {}) {
     return login.state;
   });
   handle(IPC_CHANNELS.accountCancelLogin, () => accountController.cancelLogin());
-  handle(IPC_CHANNELS.accountLogout, () => accountController.logout());
+  handle(IPC_CHANNELS.accountLogout, () => {
+    if (providerController !== null) {
+      providerAuthorityEpoch += 1;
+      return providerController.disconnect("openai-codex");
+    }
+    return accountController.logout();
+  });
   handle(IPC_CHANNELS.accountRetry, () => accountController.refresh());
   handle(IPC_CHANNELS.create, async () => {
     const authority = await canCreateAgent();
@@ -2210,8 +2343,14 @@ function installDesktopRuntime(electron, injected = {}) {
     void controller.readBot(event.botId).then(broadcast).catch(() => {});
   };
   const onRuntimeEvent = (event) => broadcastRuntimeEvent(event);
-  const onAccountChanged = (event) => broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
-  const onCatalogChanged = (event) => broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
+  const onAccountChanged = (event) => {
+    providerAuthorityEpoch += 1;
+    broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
+  };
+  const onCatalogChanged = (event) => {
+    providerAuthorityEpoch += 1;
+    broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
+  };
   const onProviderChanged = (event) => {
     providerAuthorityEpoch += 1;
     broadcastChannel(PROVIDER_CHANGE_CHANNEL, event);
@@ -2251,6 +2390,10 @@ function installDesktopRuntime(electron, injected = {}) {
       };
       capture(() => profileSetupReceipts.clear());
       capture(() => computerSetupReceipts.clear());
+      capture(() => {
+        for (const admission of [...providerAdmissions]) admission.dispose();
+        providerAdmissions.clear();
+      });
       capture(releaseEarlySyncIpc);
       for (const channel of registered) {
         capture(() => electron.ipcMain.removeHandler(channel));
@@ -2271,7 +2414,7 @@ function installDesktopRuntime(electron, injected = {}) {
       capture(() => { delete process.env.CODEX_BOT_INFERENCE_ENDPOINT; });
       capture(() => { delete process.env.CODEX_BOT_INFERENCE_CAPABILITY; });
       capture(() => standaloneIpc?.dispose?.());
-      const disposeOwners = () => {
+      const disposeOwners = async () => {
         const owners = [];
         const captureOwner = (effect) => {
           try { owners.push(Promise.resolve(effect()).catch(() => {})); } catch {}
@@ -2279,10 +2422,17 @@ function installDesktopRuntime(electron, injected = {}) {
         captureOwner(() => standaloneConversations?.dispose?.());
         captureOwner(() => computerBoundary.dispose?.());
         captureOwner(() => computerTargetRouter?.dispose?.());
+        if (providerController !== null) {
+          try { await providerController.dispose?.(); } catch {}
+        }
         captureOwner(() => accountController.dispose());
-        captureOwner(() => providerController?.dispose?.());
-        captureOwner(() => inferenceBridge?.dispose?.());
-        captureOwner(() => codexManager.stop());
+        if (providerController !== null) {
+          captureOwner(() => codexManager.stop());
+          captureOwner(() => inferenceBridge?.dispose?.());
+        } else {
+          captureOwner(() => inferenceBridge?.dispose?.());
+          captureOwner(() => codexManager.stop());
+        }
         captureOwner(() => sidecarManager.stop());
         captureOwner(() => controller.dispose());
         return Promise.all(owners).then(() => undefined);
@@ -2370,6 +2520,7 @@ module.exports = {
   COMPUTER_CHANGE_CHANNEL,
   COMPUTER_PERMISSION_CHANNEL,
   IPC_CHANNELS,
+  PROVIDER_LOGIN_PROMPT_CHANNEL,
   RUNTIME_EVENT_CHANNEL,
   createBotDeletionCoordinator,
   createLocalAutomationComposition,
