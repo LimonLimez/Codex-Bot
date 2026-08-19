@@ -512,6 +512,36 @@ function providerLoginPromptPublic(value) {
   });
 }
 
+function providerOwnedAccountPublic(value) {
+  let descriptors = null;
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid account");
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch { descriptors = null; }
+  const read = (field, fallback) => {
+    const descriptor = descriptors?.[field];
+    return descriptor && "value" in descriptor ? descriptor.value : fallback;
+  };
+  const generation = read("generation", 0);
+  const status = read("status", "offline");
+  const authMode = read("authMode", null);
+  const planType = read("planType", null);
+  const requiresOpenaiAuth = read("requiresOpenaiAuth", true);
+  const publicStatus = new Set(["starting", "signed-out", "signing-in", "ready", "offline"]);
+  return Object.freeze({
+    generation: Number.isSafeInteger(generation) && generation >= 0 ? generation : 0,
+    status: publicStatus.has(status) ? status : "offline",
+    authMode: authMode === null || (typeof authMode === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(authMode)) ? authMode : null,
+    planType: planType === null || (typeof planType === "string" && /^[A-Za-z0-9][A-Za-z0-9._ -]{0,63}$/.test(planType)) ? planType : null,
+    requiresOpenaiAuth: requiresOpenaiAuth === true,
+    login: null,
+    // Rate-limit state is not needed while a provider-owned login is active;
+    // dropping it also prevents arbitrary nested ceremony data from crossing
+    // the broad account channel.
+    rateLimits: null,
+  });
+}
+
 function catalogModels(catalog) {
   if (!catalog || typeof catalog !== "object" || catalog.status !== "ready"
     || !Number.isSafeInteger(catalog.generation) || catalog.generation < 1
@@ -1569,6 +1599,8 @@ function installDesktopRuntime(electron, injected = {}) {
   const computerSetupReceipts = new Map();
   const registered = [];
   const providerAdmissions = new Set();
+  const providerLoginOwners = new Map();
+  let providerLoginGeneration = 0;
   const releaseEarlySyncIpc = installEarlySyncIpc(electron);
   let disposePromise = null;
   let disposeComplete = false;
@@ -1578,6 +1610,135 @@ function installDesktopRuntime(electron, injected = {}) {
   let quitHandoffSettled = false;
   let quitDeadlineHandle = null;
   let disposed = false;
+
+  function providerLoginRequest(request) {
+    return request?.providerId === "openai-codex"
+      && new Set(["browser", "device-code"]).has(request?.authMode);
+  }
+
+  function beginProviderLoginOwnership() {
+    const owner = {
+      generation: ++providerLoginGeneration,
+      references: 1,
+      flightSettled: false,
+      cancellationPending: false,
+      cancellationSettled: false,
+      cancellationEventSettled: false,
+      cancellationWaitForEvent: false,
+      cancellationPromises: 0,
+      cancellationWait: null,
+      cancellationResolve: null,
+      abortListener: null,
+      releaseRequested: false,
+      finalized: false,
+    };
+    providerLoginOwners.set(owner.generation, owner);
+    return owner;
+  }
+
+  function finalizeProviderLoginOwnership(owner) {
+    if (!owner || owner.finalized || owner.references > 0
+      || (owner.cancellationPending && !owner.cancellationSettled)) return;
+    owner.finalized = true;
+    if (owner.abortListener) {
+      try { owner.abortSignal?.removeEventListener?.("abort", owner.abortListener); } catch {}
+      owner.abortListener = null;
+      owner.abortSignal = null;
+    }
+    if (providerLoginOwners.get(owner.generation) === owner) providerLoginOwners.delete(owner.generation);
+  }
+
+  function settleProviderLoginCancellation(owner) {
+    if (!owner || owner.cancellationSettled || owner.cancellationPromises > 0
+      || (owner.cancellationWaitForEvent && !owner.cancellationEventSettled)) return;
+    owner.cancellationSettled = true;
+    try { owner.cancellationResolve?.(); } catch {}
+    finalizeProviderLoginOwnership(owner);
+  }
+
+  function providerAccountCancellationSettled(owner, event = null) {
+    if (!owner?.cancellationPending || owner.cancellationSettled) return;
+    let status = null;
+    try { status = event?.status; } catch { status = null; }
+    if (typeof status !== "string") {
+      try { status = accountController.accountState?.()?.status; } catch { status = null; }
+    }
+    if (status !== "signing-in") {
+      owner.cancellationEventSettled = true;
+      settleProviderLoginCancellation(owner);
+    }
+  }
+
+  function holdProviderLoginCancellation(owner, cancellation = null) {
+    if (!owner || owner.finalized) return Promise.resolve();
+    owner.cancellationPending = true;
+    if (!owner.cancellationWait) {
+      owner.cancellationWait = new Promise((resolve) => { owner.cancellationResolve = resolve; });
+    }
+    if (cancellation && typeof cancellation.then === "function") {
+      if (owner.cancellationSettled && !owner.finalized) owner.cancellationSettled = false;
+      owner.cancellationWaitForEvent = false;
+      owner.cancellationPromises += 1;
+      Promise.resolve(cancellation).then(
+        () => {
+          owner.cancellationPromises = Math.max(0, owner.cancellationPromises - 1);
+          settleProviderLoginCancellation(owner);
+        },
+        () => {
+          owner.cancellationPromises = Math.max(0, owner.cancellationPromises - 1);
+          settleProviderLoginCancellation(owner);
+        },
+      );
+    } else {
+      owner.cancellationWaitForEvent = true;
+      providerAccountCancellationSettled(owner);
+    }
+    return owner.cancellationWait;
+  }
+
+  function releaseProviderLoginOwnership(owner) {
+    if (!owner || owner.releaseRequested) return;
+    owner.releaseRequested = true;
+    owner.references = Math.max(0, owner.references - 1);
+    finalizeProviderLoginOwnership(owner);
+  }
+
+  function settleProviderLoginFlight(owner, flight) {
+    Promise.resolve(flight).then(
+      () => {
+        owner.flightSettled = true;
+        releaseProviderLoginOwnership(owner);
+      },
+      () => {
+        owner.flightSettled = true;
+        // ProviderController may reject its public race before its internal
+        // account/login cancellation finishes. Keep the broad account channel
+        // sanitized until that cancellation publishes a settled state.
+        void holdProviderLoginCancellation(owner);
+        releaseProviderLoginOwnership(owner);
+      },
+    );
+  }
+
+  function watchProviderLoginAbort(owner, signal) {
+    if (!owner || !signal || typeof signal.addEventListener !== "function") return;
+    owner.abortSignal = signal;
+    owner.abortListener = () => {
+      if (!owner.flightSettled) void holdProviderLoginCancellation(owner);
+    };
+    try { signal.addEventListener("abort", owner.abortListener, { once: true }); } catch {}
+    if (signal.aborted) owner.abortListener();
+  }
+
+  function clearProviderLoginOwnership() {
+    for (const owner of [...providerLoginOwners.values()]) {
+      owner.references = 0;
+      owner.cancellationPending = false;
+      owner.cancellationSettled = true;
+      finalizeProviderLoginOwnership(owner);
+    }
+    providerLoginOwners.clear();
+  }
   let activeIdentityMutation = Promise.resolve();
   let latestProviderCatalog = null;
   let providerAuthorityEpoch = 0;
@@ -2166,12 +2327,35 @@ function installDesktopRuntime(electron, injected = {}) {
     providerAuthorityEpoch += 1;
     if (!admission || typeof admission.signal?.aborted !== "boolean"
       || !admission.context || typeof admission.context.isCurrent !== "function") throw sanitizedFailure();
-    return providerController.connect(providerConnectInput(value, admission.signal), admission.context);
+    const request = providerConnectInput(value, admission.signal);
+    const owner = providerLoginRequest(request) ? beginProviderLoginOwnership() : null;
+    if (owner) watchProviderLoginAbort(owner, admission.signal);
+    try {
+      const flight = providerController.connect(request, admission.context);
+      if (owner) settleProviderLoginFlight(owner, flight);
+      return flight;
+    } catch (error) {
+      if (owner) {
+        owner.flightSettled = true;
+        void holdProviderLoginCancellation(owner);
+        releaseProviderLoginOwnership(owner);
+      }
+      throw error;
+    }
   }, { requireMainFrame: true, providerContext: true });
   handle(IPC_CHANNELS.providerDisconnect, async (value) => {
     if (providerController === null) throw sanitizedFailure();
     providerAuthorityEpoch += 1;
-    return providerController.disconnect(providerIdInput(value));
+    const providerId = providerIdInput(value);
+    const owners = providerId === "openai-codex" ? [...providerLoginOwners.values()] : [];
+    let flight;
+    try { flight = providerController.disconnect(providerId); }
+    catch (error) {
+      for (const owner of owners) holdProviderLoginCancellation(owner);
+      throw error;
+    }
+    for (const owner of owners) holdProviderLoginCancellation(owner, Promise.resolve(flight));
+    return flight;
   }, { requireMainFrame: true });
   handle(IPC_CHANNELS.providerCatalog, async () => {
     if (providerController === null) throw sanitizedFailure();
@@ -2206,11 +2390,29 @@ function installDesktopRuntime(electron, injected = {}) {
     }
     return login.state;
   });
-  handle(IPC_CHANNELS.accountCancelLogin, () => accountController.cancelLogin());
+  handle(IPC_CHANNELS.accountCancelLogin, () => {
+    const owners = [...providerLoginOwners.values()];
+    let flight;
+    try { flight = accountController.cancelLogin(); }
+    catch (error) {
+      for (const owner of owners) holdProviderLoginCancellation(owner);
+      throw error;
+    }
+    for (const owner of owners) holdProviderLoginCancellation(owner, Promise.resolve(flight));
+    return flight;
+  });
   handle(IPC_CHANNELS.accountLogout, () => {
     if (providerController !== null) {
       providerAuthorityEpoch += 1;
-      return providerController.disconnect("openai-codex");
+      const owners = [...providerLoginOwners.values()];
+      let flight;
+      try { flight = providerController.disconnect("openai-codex"); }
+      catch (error) {
+        for (const owner of owners) holdProviderLoginCancellation(owner);
+        throw error;
+      }
+      for (const owner of owners) holdProviderLoginCancellation(owner, Promise.resolve(flight));
+      return flight;
     }
     return accountController.logout();
   });
@@ -2344,10 +2546,16 @@ function installDesktopRuntime(electron, injected = {}) {
   };
   const onRuntimeEvent = (event) => broadcastRuntimeEvent(event);
   const onAccountChanged = (event) => {
+    if (disposed) return;
     providerAuthorityEpoch += 1;
-    broadcastChannel(ACCOUNT_CHANGE_CHANNEL, event);
+    const publicEvent = providerLoginOwners.size > 0
+      ? providerOwnedAccountPublic(event)
+      : event;
+    for (const owner of [...providerLoginOwners.values()]) providerAccountCancellationSettled(owner, event);
+    broadcastChannel(ACCOUNT_CHANGE_CHANNEL, publicEvent);
   };
   const onCatalogChanged = (event) => {
+    if (disposed) return;
     providerAuthorityEpoch += 1;
     broadcastChannel(CATALOG_CHANGE_CHANNEL, event);
   };
@@ -2390,6 +2598,7 @@ function installDesktopRuntime(electron, injected = {}) {
       };
       capture(() => profileSetupReceipts.clear());
       capture(() => computerSetupReceipts.clear());
+      capture(clearProviderLoginOwnership);
       capture(() => {
         for (const admission of [...providerAdmissions]) admission.dispose();
         providerAdmissions.clear();

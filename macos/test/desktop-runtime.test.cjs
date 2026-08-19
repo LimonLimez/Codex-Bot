@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -1096,6 +1097,293 @@ test("device login prompt rejects malformed and navigated or destroyed frames", 
     flight.reject(new Error("prompt admission rejected"));
     await assert.rejects(pending, { code: "CODEX_BOT_OPERATION_FAILED" });
   }
+});
+
+test("provider-owned Direct login scrubs ceremony data from broad account events while keeping the exact prompt sender-scoped", async (t) => {
+  const {
+    ACCOUNT_CHANGE_CHANNEL,
+    IPC_CHANNELS,
+    PROVIDER_LOGIN_PROMPT_CHANNEL,
+  } = require(runtimePath);
+  const account = new EventEmitter();
+  const flight = deferred();
+  const prompt = Object.freeze({
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    generation: 1,
+    mode: "device-code",
+    verificationUrl: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-1234",
+  });
+  const ceremony = {
+    mode: "device-code",
+    verificationUrl: prompt.verificationUrl,
+    userCode: prompt.userCode,
+    loginId: "11111111-1111-4111-8111-111111111111",
+    authUrl: "https://chatgpt.com/auth/codex?private=browser",
+    browserUrl: "https://chatgpt.com/auth/codex?private=browser",
+  };
+  const accountState = Object.freeze({
+    generation: 2,
+    status: "signing-in",
+    authMode: null,
+    planType: null,
+    requiresOpenaiAuth: true,
+    login: Object.freeze(ceremony),
+    rateLimits: null,
+  });
+  account.start = async () => {};
+  account.accountState = () => accountState;
+  account.catalogState = () => ({ generation: 1, status: "unavailable", models: [] });
+  account.cancelLogin = async () => {};
+  account.logout = async () => {};
+  account.refresh = async () => {};
+  account.dispose = () => account.removeAllListeners();
+  let connectContext = null;
+  const providerController = {
+    async connect(_request, context) {
+      connectContext = context;
+      // ProviderController can synchronously re-enter the account observer
+      // from account.login before connect() returns its flight.
+      account.emit("account-changed", accountState);
+      await context.onLoginPrompt(prompt);
+      return flight.promise;
+    },
+    async listConnections() { return []; },
+    async disconnect() {},
+    async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; },
+    async completeOnboarding() {},
+    async readAuthoritySnapshot() { return null; },
+    on() {},
+    off() {},
+    dispose() {},
+  };
+  const fixture = runtimeFixture(t, {
+    providerController,
+    accountController: account,
+    secondaryWindow: true,
+    shell: { async openExternal() {} },
+  });
+  const pending = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    { providerId: "openai-codex", authMode: "device-code" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof connectContext?.isCurrent, "function");
+  const accountBroadcasts = fixture.sent.filter(([channel]) => channel === ACCOUNT_CHANGE_CHANNEL);
+  assert.equal(accountBroadcasts.length, 1);
+  assert.equal(accountBroadcasts[0][1].status, "signing-in");
+  assert.equal(accountBroadcasts[0][1].login, null);
+  assert.doesNotMatch(JSON.stringify(accountBroadcasts), /verificationUrl|userCode|loginId|authUrl|browserUrl|chatgpt\.com|auth\.openai\.com/);
+  assert.deepEqual(fixture.sent.filter(([channel]) => channel === PROVIDER_LOGIN_PROMPT_CHANNEL), [
+    [PROVIDER_LOGIN_PROMPT_CHANNEL, prompt],
+  ]);
+  assert.deepEqual(fixture.secondarySent, [[ACCOUNT_CHANGE_CHANNEL, accountBroadcasts[0][1]]]);
+  assert.doesNotMatch(JSON.stringify(fixture.secondarySent), /verificationUrl|userCode|loginId|authUrl|browserUrl|chatgpt\.com|auth\.openai\.com/);
+  flight.resolve({
+    providerId: "openai-codex",
+    label: "OpenAI Codex",
+    loginKind: "account",
+    state: "connected",
+    generation: 1,
+    capabilities: { reasoning: true, fast: false },
+    errorCode: null,
+  });
+  const result = await pending;
+  assert.doesNotMatch(JSON.stringify(result), /verificationUrl|userCode|loginId|authUrl|browserUrl|chatgpt\.com|auth\.openai\.com/);
+  assert.deepEqual(fixture.sent.filter(([channel]) => channel === PROVIDER_LOGIN_PROMPT_CHANNEL), [
+    [PROVIDER_LOGIN_PROMPT_CHANNEL, prompt],
+  ]);
+});
+
+test("provider-owned account-event sanitization survives coalesced callers and clears only after the shared flight settles", async (t) => {
+  const { ACCOUNT_CHANGE_CHANNEL, IPC_CHANNELS } = require(runtimePath);
+  const account = new EventEmitter();
+  const flight = deferred();
+  const events = [];
+  account.start = async () => {};
+  account.accountState = () => ({ status: "signing-in", authMode: null, login: null });
+  account.catalogState = () => ({ generation: 1, status: "unavailable", models: [] });
+  account.cancelLogin = async () => {};
+  account.logout = async () => {};
+  account.refresh = async () => {};
+  account.dispose = () => account.removeAllListeners();
+  const sensitive = {
+    status: "signing-in",
+    authMode: null,
+    login: {
+      mode: "browser",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "WXYZ-9876",
+      loginId: "22222222-2222-4222-8222-222222222222",
+      authUrl: "https://chatgpt.com/auth/codex?private=late",
+    },
+  };
+  const providerController = {
+    connect(_request, context) {
+      events.push(["connect", context]);
+      account.emit("account-changed", sensitive);
+      return flight.promise;
+    },
+    async listConnections() { return []; },
+    async disconnect() {},
+    async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; },
+    async completeOnboarding() {},
+    async readAuthoritySnapshot() { return null; },
+    on() {},
+    off() {},
+    dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController, accountController: account, secondaryWindow: true });
+  const first = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    { providerId: "openai-codex", authMode: "browser" },
+  );
+  const second = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.secondarySender, senderFrame: fixture.secondaryFrame },
+    { providerId: "openai-codex", authMode: "browser" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.length, 2);
+  const allBroadcasts = [
+    ...fixture.sent.filter(([channel]) => channel === ACCOUNT_CHANGE_CHANNEL),
+    ...fixture.secondarySent.filter(([channel]) => channel === ACCOUNT_CHANGE_CHANNEL),
+  ];
+  assert.equal(allBroadcasts.length, 4);
+  assert.ok(allBroadcasts.every(([, value]) => value.status === "signing-in" && value.login === null));
+  assert.doesNotMatch(JSON.stringify(allBroadcasts), /verificationUrl|userCode|loginId|authUrl|chatgpt\.com|auth\.openai\.com/);
+  flight.resolve({ providerId: "openai-codex", state: "connected", generation: 1 });
+  await Promise.all([first, second]);
+  // A fresh event after the shared provider promise settles is no longer owned
+  // by the provider ceremony and must not inherit stale ownership state.
+  account.emit("account-changed", { ...sensitive, status: "signed-out" });
+  const after = fixture.sent.filter(([channel]) => channel === ACCOUNT_CHANGE_CHANNEL).at(-1)?.[1];
+  assert.equal(after.status, "signed-out");
+  assert.deepEqual(after.login, sensitive.login);
+});
+
+test("provider-owned account-event sanitization stays active through disconnect cancellation and rejection", async (t) => {
+  const { ACCOUNT_CHANGE_CHANNEL, IPC_CHANNELS } = require(runtimePath);
+  const account = new EventEmitter();
+  const flight = deferred();
+  const cancellation = deferred();
+  const sensitive = {
+    status: "signing-in",
+    authMode: null,
+    login: {
+      mode: "device-code",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "LMNO-4567",
+      loginId: "33333333-3333-4333-8333-333333333333",
+      authUrl: "https://chatgpt.com/auth/codex?private=cancel",
+    },
+  };
+  account.start = async () => {};
+  account.accountState = () => ({ status: "signing-in", authMode: null, login: sensitive.login });
+  account.catalogState = () => ({ generation: 1, status: "unavailable", models: [] });
+  account.cancelLogin = async () => {};
+  account.logout = async () => {};
+  account.refresh = async () => {};
+  account.dispose = () => account.removeAllListeners();
+  const providerController = {
+    connect() {
+      account.emit("account-changed", sensitive);
+      return flight.promise;
+    },
+    async disconnect() {
+      account.emit("account-changed", sensitive);
+      await cancellation.promise;
+      account.emit("account-changed", { ...sensitive, status: "signed-out" });
+    },
+    async listConnections() { return []; },
+    async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; },
+    async completeOnboarding() {},
+    async readAuthoritySnapshot() { return null; },
+    on() {},
+    off() {},
+    dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController, accountController: account });
+  const connect = fixture.handlers.get(IPC_CHANNELS.providerConnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    { providerId: "openai-codex", authMode: "device-code" },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const disconnect = fixture.handlers.get(IPC_CHANNELS.providerDisconnect)(
+    { sender: fixture.sender, senderFrame: fixture.frame },
+    "openai-codex",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  const beforeCancel = fixture.sent.filter(([channel]) => channel === ACCOUNT_CHANGE_CHANNEL);
+  assert.ok(beforeCancel.length >= 2);
+  assert.doesNotMatch(JSON.stringify(beforeCancel), /verificationUrl|userCode|loginId|authUrl|chatgpt\.com|auth\.openai\.com/);
+  flight.reject(new Error("provider canceled"));
+  cancellation.resolve();
+  await assert.rejects(connect, { code: "CODEX_BOT_OPERATION_FAILED" });
+  await disconnect;
+  const late = { ...sensitive, status: "signed-out" };
+  account.emit("account-changed", late);
+  const last = fixture.sent.filter(([channel]) => channel === ACCOUNT_CHANGE_CHANNEL).at(-1)?.[1];
+  assert.deepEqual(last.login, late.login);
+});
+
+test("explicit legacy account login keeps its existing account-event payload outside provider ownership", async (t) => {
+  const { ACCOUNT_CHANGE_CHANNEL, IPC_CHANNELS } = require(runtimePath);
+  const account = new EventEmitter();
+  const state = {
+    generation: 3,
+    status: "signed-out",
+    authMode: null,
+    planType: null,
+    requiresOpenaiAuth: true,
+    login: null,
+    rateLimits: null,
+  };
+  account.start = async () => {};
+  account.accountState = () => state;
+  account.catalogState = () => ({ generation: 1, status: "unavailable", models: [] });
+  account.login = async () => {
+    const next = {
+      ...state,
+      generation: 4,
+      status: "signing-in",
+      login: {
+        mode: "device-code",
+        verificationUrl: "https://auth.openai.com/codex/device",
+        userCode: "ABCD-1234",
+      },
+    };
+    account.emit("account-changed", next);
+    return { state: next };
+  };
+  account.cancelLogin = async () => {};
+  account.logout = async () => {};
+  account.refresh = async () => {};
+  account.dispose = () => account.removeAllListeners();
+  const providerController = {
+    async listConnections() { return []; },
+    async connect() {},
+    async disconnect() {},
+    async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; },
+    async completeOnboarding() {},
+    async readAuthoritySnapshot() { return null; },
+    on() {},
+    off() {},
+    dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController, accountController: account });
+  await fixture.handlers.get(IPC_CHANNELS.accountLogin)({}, "device-code");
+  const event = fixture.sent.find(([channel]) => channel === ACCOUNT_CHANGE_CHANNEL)?.[1];
+  assert.equal(event.status, "signing-in");
+  assert.deepEqual(event.login, {
+    mode: "device-code",
+    verificationUrl: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-1234",
+  });
 });
 
 test("legacy account logout delegates to Direct Codex provider disconnect", async (t) => {
