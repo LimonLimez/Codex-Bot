@@ -79,6 +79,10 @@ test("CLIProxy provider connection accepts only fixed OAuth modes and never forw
     randomInt: () => 54322,
     spawnImpl(executable, args, options) {
       spawns.push({ executable, args, options });
+      if (args.includes("-claude-login")) {
+        fs.mkdirSync(path.join(root, "state", "auth"), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(root, "state", "auth", "claude-fixture.json"), "{}", { mode: 0o600 });
+      }
       return spawns.length === 1 ? serverChild : fakeChild({ exitImmediately: true });
     },
     probeImpl: async () => true,
@@ -163,16 +167,86 @@ test("CLIProxy provider login is one-flight and every login child is stopped wit
     stateRoot: path.join(root, "state"),
     randomBytes: () => Buffer.alloc(32, 0x12),
     randomInt: () => 54324,
-    spawnImpl() { spawnCount += 1; return spawnCount === 1 ? serverChild : loginChild; },
+    spawnImpl(executable, args) {
+      spawnCount += 1;
+      if (args.includes("-xai-login")) {
+        fs.mkdirSync(path.join(root, "state", "auth"), { recursive: true, mode: 0o700 });
+        fs.writeFileSync(path.join(root, "state", "auth", "xai-fixture.json"), "{}", { mode: 0o600 });
+      }
+      return spawnCount === 1 ? serverChild : loginChild;
+    },
     probeImpl: async () => true,
   });
   await manager.start();
-  const first = manager.connectProvider("codex");
-  const second = manager.connectProvider("codex");
+  const first = manager.connectProvider("xai");
+  const second = manager.connectProvider("xai");
   assert.equal(first, second);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(spawnCount, 2);
   manager.stop();
   assert.equal(loginChild.killed, true);
   await assert.rejects(first, { code: "CLIPROXY_PROVIDER_FAILED" });
+});
+
+test("CLIProxy canonical provider flows wait for an exact credential file and reject service accounts", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  const serverChild = fakeChild();
+  const spawns = [];
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot: path.join(root, "state"),
+    randomBytes: () => Buffer.alloc(32, 0x31),
+    randomInt: () => 54325,
+    spawnImpl(executable, args, options) {
+      spawns.push({ executable, args, options });
+      if (args.includes("-xai-login")) {
+        fs.writeFileSync(path.join(root, "state", "auth", "xai-fixture.json"), "{}", { mode: 0o600 });
+      }
+      return spawns.length === 1 ? serverChild : fakeChild({ exitImmediately: true });
+    },
+    probeImpl: async () => true,
+  });
+  await manager.start();
+  await manager.connectProvider("xai");
+  assert.deepEqual(spawns[1].args.slice(2), ["-xai-login"]);
+  await assert.rejects(manager.connectProvider("google-vertex-ai"), { code: "CLIPROXY_PROVIDER_INVALID" });
+  manager.stop();
+});
+
+test("Vertex import removes the exact private temporary and disconnect removes only real matching auth files", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  const sourcePath = path.join(root, "service-account.json");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  fs.writeFileSync(sourcePath, JSON.stringify({ type: "service_account", private_key: "private" }));
+  const serverChild = fakeChild();
+  const spawns = [];
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot: path.join(root, "state"),
+    randomBytes: () => Buffer.alloc(32, 0x41),
+    randomInt: () => 54326,
+    spawnImpl(executable, args, options) {
+      spawns.push({ executable, args, options });
+      if (args.includes("-vertex-import")) {
+        fs.writeFileSync(path.join(root, "state", "auth", "vertex-imported.json"), "{}", { mode: 0o600 });
+      }
+      return spawns.length === 1 ? serverChild : fakeChild({ exitImmediately: true });
+    },
+    probeImpl: async () => true,
+  });
+  await manager.start();
+  await manager.importVertex(sourcePath);
+  const temporary = spawns[1].args[spawns[1].args.indexOf("-vertex-import") + 1];
+  assert.equal(fs.existsSync(temporary), false);
+  assert.doesNotMatch(JSON.stringify(spawns), /private/);
+  await manager.disconnectProvider("google-vertex-ai");
+  assert.equal(fs.existsSync(path.join(root, "state", "auth", "vertex-imported.json")), false);
+  manager.stop();
 });

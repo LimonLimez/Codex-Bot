@@ -6,12 +6,39 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { types } = require("node:util");
+const { providerDescriptor } = require("../provider-descriptors.cjs");
 
-const PROVIDER_FLAGS = Object.freeze({
-  codex: "-codex-login",
-  claude: "-claude-login",
-  kimi: "-kimi-login",
-});
+const CLIPROXY_PROVIDER_IDS = Object.freeze([
+  "anthropic-claude", "google-antigravity", "moonshot-kimi", "xai", "google-vertex-ai",
+]);
+const CLIPROXY_PROVIDER_SET = new Set(CLIPROXY_PROVIDER_IDS);
+const PROVIDER_FLAGS = Object.freeze(Object.fromEntries(
+  CLIPROXY_PROVIDER_IDS
+    .filter((providerId) => providerDescriptor(providerId).loginKind !== "service-account")
+    .map((providerId) => [providerId, providerDescriptor(providerId).loginFlag]),
+));
+const AUTH_WAIT_MS = 10_000;
+const PROVIDER_TIMEOUT_MS = 10 * 60 * 1000;
+const MAX_PROVIDER_STDERR_BYTES = 16 * 1024;
+const MAX_MODEL_BYTES = 1_048_576;
+const MAX_MODELS = 200;
+const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+
+function plainOwn(value, allowed, required = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) throw new Error();
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch { throw new Error(); }
+  const keys = Reflect.ownKeys(descriptors);
+  if ((prototype !== Object.prototype && prototype !== null)
+    || keys.some((key) => typeof key !== "string" || !allowed.has(key) || !("value" in descriptors[key]))
+    || required.some((key) => !Object.hasOwn(descriptors, key))) throw new Error();
+  return Object.fromEntries(keys.map((key) => [key, descriptors[key].value]));
+}
 
 class CLIProxyError extends Error {
   constructor(message = "CLIProxyAPI is unavailable.", code = "CLIPROXY_UNAVAILABLE") {
@@ -126,12 +153,15 @@ class CLIProxyManager {
   #probe;
   #randomBytes;
   #randomInt;
+  #request;
   #expectedBinaryBytes;
   #expectedBinarySha256;
   #child = null;
   #session = null;
   #startPromise = null;
   #configPath = null;
+  #authDirectory = null;
+  #runDirectory = null;
   #lifecycleEpoch = 0;
   #providerChildren = new Set();
   #providerPromises = new Map();
@@ -143,6 +173,7 @@ class CLIProxyManager {
     probeImpl = defaultProbe,
     randomBytes = crypto.randomBytes,
     randomInt = crypto.randomInt,
+    requestImpl = null,
     expectedBinaryBytes,
     expectedBinarySha256,
   } = {}) {
@@ -166,6 +197,8 @@ class CLIProxyManager {
     this.#probe = probeImpl;
     this.#randomBytes = randomBytes;
     this.#randomInt = randomInt;
+    if (requestImpl !== null && typeof requestImpl !== "function") throw new CLIProxyError();
+    this.#request = requestImpl;
     this.#expectedBinaryBytes = expectedBinaryBytes;
     this.#expectedBinarySha256 = expectedBinarySha256;
   }
@@ -203,6 +236,8 @@ class CLIProxyManager {
     fs.mkdirSync(configDirectory, { recursive: true, mode: 0o700 });
     fs.chmodSync(authDirectory, 0o700);
     fs.chmodSync(configDirectory, 0o700);
+    this.#authDirectory = authDirectory;
+    this.#runDirectory = configDirectory;
     const credential = this.#randomBytes(32).toString("hex");
     const port = this.#randomInt(49152, 65536);
     const endpoint = `http://127.0.0.1:${port}/v1`;
@@ -219,8 +254,11 @@ class CLIProxyManager {
         stdio: ["ignore", "ignore", "ignore"],
         windowsHide: true,
       });
+      if (!child || typeof child.once !== "function") throw new Error();
     } catch {
       fs.rmSync(configPath, { force: true });
+      this.#authDirectory = null;
+      this.#runDirectory = null;
       throw new CLIProxyError();
     }
     this.#child = child;
@@ -262,6 +300,8 @@ class CLIProxyManager {
       this.#child = null;
       this.#session = null;
       if (this.#configPath === configPath) this.#configPath = null;
+      if (this.#authDirectory === authDirectory) this.#authDirectory = null;
+      if (this.#runDirectory === configDirectory) this.#runDirectory = null;
       try { fs.rmSync(configPath, { force: true }); } catch {}
     };
     child.once?.("error", onTermination);
@@ -271,42 +311,251 @@ class CLIProxyManager {
   }
 
   connectProvider(provider) {
-    if (typeof provider !== "string" || !Object.hasOwn(PROVIDER_FLAGS, provider)) {
+    let descriptor;
+    try { descriptor = providerDescriptor(provider); } catch {
       return Promise.reject(
         new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID"),
       );
     }
-    const existing = this.#providerPromises.get(provider);
+    if (!CLIPROXY_PROVIDER_SET.has(descriptor.providerId)
+      || descriptor.loginKind === "service-account" || !PROVIDER_FLAGS[descriptor.providerId]) {
+      return Promise.reject(
+        new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID"),
+      );
+    }
+    const providerId = descriptor.providerId;
+    const existing = this.#providerPromises.get(providerId);
     if (existing) return existing;
     let promise;
-    promise = this.#connectProvider(provider).finally(() => {
-      if (this.#providerPromises.get(provider) === promise) {
-        this.#providerPromises.delete(provider);
+    // Queue the body behind a microtask before invoking it. This makes the
+    // map write happen before any dependency can synchronously re-enter the
+    // manager and request the same provider.
+    promise = Promise.resolve().then(() => this.#connectProvider(descriptor)).finally(() => {
+      if (this.#providerPromises.get(providerId) === promise) {
+        this.#providerPromises.delete(providerId);
       }
     });
-    this.#providerPromises.set(provider, promise);
+    this.#providerPromises.set(providerId, promise);
     return promise;
   }
 
-  async #connectProvider(provider) {
+  async #connectProvider(descriptor) {
     await this.start();
     const epoch = this.#lifecycleEpoch;
     const configPath = this.#configPath;
-    if (!configPath) throw new CLIProxyError();
+    if (!configPath || !this.#authDirectory) throw new CLIProxyError();
+    const snapshot = this.#snapshotAuth(descriptor);
+    await this.#runProviderChild(
+      ["-config", configPath, descriptor.loginFlag],
+      epoch,
+    );
+    await this.#waitForAuth(descriptor, snapshot, epoch);
+    return this.connectionStatus(descriptor.providerId);
+  }
+
+  importVertex(sourcePath) {
+    const providerId = "google-vertex-ai";
+    let source;
+    try {
+      if (typeof sourcePath !== "string" || !path.isAbsolute(sourcePath)
+        || sourcePath.includes("\0") || path.normalize(sourcePath) !== sourcePath) throw new Error();
+      const stat = fs.lstatSync(sourcePath);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > 4 * 1024 * 1024) throw new Error();
+      source = sourcePath;
+    } catch {
+      return Promise.reject(new CLIProxyError("CLIProxyAPI provider source is invalid.", "CLIPROXY_PROVIDER_INVALID"));
+    }
+    const existing = this.#providerPromises.get(providerId);
+    if (existing) return existing;
+    let promise;
+    promise = Promise.resolve().then(async () => {
+      await this.start();
+      const epoch = this.#lifecycleEpoch;
+      const configPath = this.#configPath;
+      const runDirectory = this.#runDirectory;
+      if (!configPath || !runDirectory || !this.#authDirectory) throw new CLIProxyError();
+      let sourceStat;
+      try {
+        sourceStat = fs.lstatSync(source);
+        if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error();
+      } catch {
+        throw new CLIProxyError("CLIProxyAPI provider source is invalid.", "CLIPROXY_PROVIDER_INVALID");
+      }
+      const snapshot = this.#snapshotAuth(providerDescriptor(providerId));
+      const temporary = path.join(runDirectory, `.vertex-${process.pid}-${this.#randomBytes(12).toString("hex")}.json`);
+      try {
+        fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
+        fs.chmodSync(temporary, 0o600);
+        await this.#runProviderChild(["-vertex-import", temporary, "-config", configPath], epoch);
+        await this.#waitForAuth(providerDescriptor(providerId), snapshot, epoch);
+        return this.connectionStatus(providerId);
+      } finally {
+        try { fs.rmSync(temporary, { force: true }); } catch { /* exact temporary cleanup is best effort */ }
+      }
+    }).finally(() => {
+      if (this.#providerPromises.get(providerId) === promise) this.#providerPromises.delete(providerId);
+    });
+    this.#providerPromises.set(providerId, promise);
+    return promise;
+  }
+
+  async disconnectProvider(provider) {
+    let descriptor;
+    try { descriptor = providerDescriptor(provider); } catch {
+      throw new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID");
+    }
+    if (!CLIPROXY_PROVIDER_SET.has(descriptor.providerId)) {
+      throw new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID");
+    }
+    const directory = this.#authDirectory || path.join(this.#stateRoot, "auth");
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
+    catch (error) { if (error?.code === "ENOENT") return; throw new CLIProxyError(); }
+    for (const entry of entries) {
+      if (!descriptor.authFilePattern.test(entry.name)) continue;
+      const target = path.join(directory, entry.name);
+      let stat;
+      try { stat = fs.lstatSync(target); } catch { throw new CLIProxyError(); }
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new CLIProxyError(
+        "CLIProxyAPI provider credential is unsafe.", "CLIPROXY_PROVIDER_FAILED",
+      );
+      try { fs.rmSync(target, { force: true }); } catch { throw new CLIProxyError(); }
+    }
+  }
+
+  async listModels(provider) {
+    let descriptor;
+    try { descriptor = providerDescriptor(provider); } catch {
+      throw new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID");
+    }
+    if (!CLIPROXY_PROVIDER_SET.has(descriptor.providerId)) {
+      throw new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID");
+    }
+    const session = await this.start();
+    if (typeof this.#request === "function") {
+      try {
+        const requestOptions = {
+          providerId: descriptor.providerId,
+          endpoint: session.endpoint,
+          timeout: 5_000,
+          maxBytes: MAX_MODEL_BYTES,
+          redirects: 0,
+        };
+        Object.defineProperty(requestOptions, "credential", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: session.credential,
+        });
+        const response = await this.#request(requestOptions);
+        return this.#normalizeModels(descriptor.providerId, response);
+      } catch (error) {
+        if (error instanceof CLIProxyError) throw error;
+        throw new CLIProxyError("CLIProxyAPI model catalog is unavailable.", "CLIPROXY_PROVIDER_FAILED");
+      }
+    }
+    return new Promise((resolve, reject) => {
+      const parsed = new URL(`${session.endpoint}/models`);
+      const request = http.get(parsed, {
+        headers: { Authorization: `Bearer ${session.credential}`, Connection: "close" },
+        timeout: 5_000,
+      }, (response) => {
+        const chunks = [];
+        let total = 0;
+        response.on("data", (chunk) => {
+          total += Buffer.byteLength(chunk);
+          if (total > MAX_MODEL_BYTES) {
+            request.destroy();
+            reject(new CLIProxyError("CLIProxyAPI model catalog is unavailable.", "CLIPROXY_PROVIDER_FAILED"));
+            return;
+          }
+          chunks.push(Buffer.from(chunk));
+        });
+        response.once("end", () => {
+          if (response.statusCode !== 200) {
+            reject(new CLIProxyError("CLIProxyAPI model catalog is unavailable.", "CLIPROXY_PROVIDER_FAILED"));
+            return;
+          }
+          try {
+            resolve(this.#normalizeModels(descriptor.providerId, {
+              statusCode: response.statusCode,
+              body: Buffer.concat(chunks),
+            }));
+          } catch { reject(new CLIProxyError("CLIProxyAPI model catalog is unavailable.", "CLIPROXY_PROVIDER_FAILED")); }
+        });
+      });
+      request.once("timeout", () => request.destroy());
+      request.once("error", () => reject(new CLIProxyError("CLIProxyAPI model catalog is unavailable.", "CLIPROXY_PROVIDER_FAILED")));
+    });
+  }
+
+  async connectionStatus(provider) {
+    let descriptor;
+    try { descriptor = providerDescriptor(provider); } catch {
+      throw new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID");
+    }
+    if (!CLIPROXY_PROVIDER_SET.has(descriptor.providerId)) {
+      throw new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID");
+    }
+    const connected = this.#hasAuth(descriptor);
+    return Object.freeze({
+      providerId: descriptor.providerId,
+      state: connected ? "connected" : "disconnected",
+      models: Object.freeze([]),
+    });
+  }
+
+  #normalizeModels(providerId, response) {
+    const responseData = plainOwn(response, new Set(["statusCode", "body"]), ["body"]);
+    const statusCode = responseData.statusCode;
+    if (statusCode !== undefined && statusCode !== 200) throw new Error();
+    const body = responseData.body;
+    if (Buffer.byteLength(Buffer.isBuffer(body) ? body : String(body || ""), "utf8") > MAX_MODEL_BYTES) throw new Error();
+    const parsed = typeof body === "string" || Buffer.isBuffer(body) ? JSON.parse(body.toString()) : body;
+    const parsedData = plainOwn(parsed, new Set(["object", "data"]), ["data"]);
+    if (!Array.isArray(parsedData.data) || types.isProxy(parsedData.data)
+      || parsedData.data.length > MAX_MODELS) throw new Error();
+    const models = [];
+    const seen = new Set();
+    for (const entry of parsedData.data) {
+      const model = plainOwn(entry, new Set(["id", "object"]), ["id"]);
+      if (typeof model.id !== "string" || !MODEL_ID.test(model.id) || seen.has(model.id)) throw new Error();
+      if (model.object !== undefined && model.object !== "model") throw new Error();
+      seen.add(model.id);
+      models.push(Object.freeze({ provider: providerId, model: model.id, label: model.id }));
+    }
+    return Object.freeze(models);
+  }
+
+  #runProviderChild(args, epoch) {
+    const configPath = this.#configPath;
+    if (!configPath || epoch !== this.#lifecycleEpoch) {
+      return Promise.reject(new CLIProxyError());
+    }
     let child;
     try {
-      child = this.#spawn(this.#binaryPath, ["-config", configPath, PROVIDER_FLAGS[provider]], {
+      child = this.#spawn(this.#binaryPath, args, {
         cwd: path.dirname(configPath),
         env: spawnEnvironment(),
-        stdio: ["ignore", "ignore", "ignore"],
+        stdio: ["ignore", "ignore", "pipe"],
         windowsHide: true,
       });
+      if (!child || typeof child.once !== "function") throw new Error();
     } catch {
-      throw new CLIProxyError("CLIProxyAPI provider connection failed.", "CLIPROXY_PROVIDER_FAILED");
+      return Promise.reject(new CLIProxyError("CLIProxyAPI provider connection failed.", "CLIPROXY_PROVIDER_FAILED"));
     }
     this.#providerChildren.add(child);
-    await new Promise((resolve, reject) => {
+    const stderr = { bytes: 0 };
+    child.stderr?.on?.("data", (chunk) => { stderr.bytes = Math.min(MAX_PROVIDER_STDERR_BYTES + 1, stderr.bytes + Buffer.byteLength(chunk)); });
+    return new Promise((resolve, reject) => {
       let settled = false;
+      const timer = setTimeout(() => {
+        try { child.kill?.(); } catch { /* best effort */ }
+        finish(() => reject(new CLIProxyError(
+          "CLIProxyAPI provider connection timed out.", "CLIPROXY_PROVIDER_TIMEOUT",
+        )));
+      }, PROVIDER_TIMEOUT_MS);
+      timer.unref?.();
       const finish = (operation) => {
         if (settled) return;
         settled = true;
@@ -314,27 +563,65 @@ class CLIProxyManager {
         this.#providerChildren.delete(child);
         operation();
       };
-      const timer = setTimeout(() => {
-        try { child.kill(); } catch {}
-        finish(() => reject(new CLIProxyError(
-          "CLIProxyAPI provider connection timed out.",
-          "CLIPROXY_PROVIDER_TIMEOUT",
-        )));
-      }, 10 * 60 * 1000);
-      timer.unref?.();
-      child.once("error", () => {
-        finish(() => reject(new CLIProxyError(
-          "CLIProxyAPI provider connection failed.",
-          "CLIPROXY_PROVIDER_FAILED",
-        )));
-      });
-      child.once("exit", (code) => {
-        if (code === 0 && epoch === this.#lifecycleEpoch) finish(resolve);
+      child.once?.("error", () => finish(() => reject(new CLIProxyError(
+        "CLIProxyAPI provider connection failed.", "CLIPROXY_PROVIDER_FAILED",
+      ))));
+      child.once?.("exit", (code) => {
+        if (code === 0 && epoch === this.#lifecycleEpoch && stderr.bytes <= MAX_PROVIDER_STDERR_BYTES) finish(resolve);
         else finish(() => reject(new CLIProxyError(
-          "CLIProxyAPI provider connection failed.",
-          "CLIPROXY_PROVIDER_FAILED",
+          "CLIProxyAPI provider connection failed.", "CLIPROXY_PROVIDER_FAILED",
         )));
       });
+    });
+  }
+
+  #snapshotAuth(descriptor) {
+    const directory = this.#authDirectory;
+    const snapshot = new Map();
+    if (!directory) return snapshot;
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return snapshot; }
+    for (const entry of entries) {
+      if (!descriptor.authFilePattern.test(entry.name)) continue;
+      const target = path.join(directory, entry.name);
+      try {
+        const stat = fs.lstatSync(target);
+        if (stat.isFile() && !stat.isSymbolicLink()) {
+          snapshot.set(entry.name, `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.mode & 0o777}`);
+        }
+      } catch { /* unreadable candidates are not treated as credentials */ }
+    }
+    return snapshot;
+  }
+
+  #hasAuth(descriptor) {
+    const snapshot = this.#snapshotAuth(descriptor);
+    return snapshot.size > 0;
+  }
+
+  #waitForAuth(descriptor, before, epoch) {
+    const deadline = Date.now() + AUTH_WAIT_MS;
+    return new Promise((resolve, reject) => {
+      const poll = () => {
+        if (epoch !== this.#lifecycleEpoch) {
+          reject(new CLIProxyError("CLIProxyAPI provider connection was superseded.", "CLIPROXY_PROVIDER_FAILED"));
+          return;
+        }
+        const current = this.#snapshotAuth(descriptor);
+        const changed = [...current.entries()].filter(([name, signature]) => before.get(name) !== signature);
+        if (changed.length === 1) {
+          resolve();
+          return;
+        }
+        if (Date.now() >= deadline) {
+          reject(new CLIProxyError(
+            "CLIProxyAPI provider credentials were not installed.", "CLIPROXY_PROVIDER_NOT_READY",
+          ));
+          return;
+        }
+        setTimeout(poll, 50).unref?.();
+      };
+      poll();
     });
   }
 
@@ -354,7 +641,15 @@ class CLIProxyManager {
       try { fs.rmSync(this.#configPath, { force: true }); } catch {}
     }
     this.#configPath = null;
+    this.#authDirectory = null;
+    this.#runDirectory = null;
   }
 }
 
-module.exports = { CLIProxyError, CLIProxyManager, configText, defaultProbe };
+module.exports = {
+  CLIPROXY_PROVIDER_IDS,
+  CLIProxyError,
+  CLIProxyManager,
+  configText,
+  defaultProbe,
+};
