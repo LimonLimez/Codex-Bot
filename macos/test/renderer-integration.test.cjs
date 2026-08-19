@@ -465,6 +465,15 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.doesNotMatch(css, /codex-power-advanced-field\s+select/);
   assert.doesNotMatch(css, /\.codex-model-row[^}]*112px/s);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*animation:\s*none\s*!important/);
+  const reducedMotionCss = css.match(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.match(
+    reducedMotionCss,
+    /\.codex-model-dock\s*,\s*\.codex-model-dock \*\s*\{[^}]*transition:\s*none\s*!important/s,
+  );
+  for (const pickerSurface of ["codex-power-menu", "codex-power-popover", "codex-power-flyout"]) {
+    assert.match(css, new RegExp(`\\.${pickerSurface}\\b`));
+    assert.match(reducedMotionCss, /\.codex-model-dock \*/);
+  }
   assert.match(
     css,
     /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-power-particles,[\s\S]*\.codex-power-burst\s*\{[^}]*display:\s*none\s*!important/s,
