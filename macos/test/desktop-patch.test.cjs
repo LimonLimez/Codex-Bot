@@ -33,6 +33,49 @@ globalThis.__bootstrapDone=(async()=>{
 `;
 const STOCK_PRELOAD = "const stock='kept';const L=M({invokeRequest:()=>{s.ipcRenderer.invoke(\"sand:coordinator-port-request\")}});s.contextBridge.exposeInMainWorld(\"desktop\",Q);s.contextBridge.exposeInMainWorld(\"coordinatorPort\",X);s.ipcRenderer.on(\"sand:coordinator-port\",e=>{});\n";
 
+function runSyntheticPreload(source) {
+  const exposed = new Map();
+  const calls = [];
+  const listeners = new Map();
+  const removals = [];
+  const ipcRenderer = {
+    invoke(channel, ...args) {
+      calls.push({ channel, args });
+      return Promise.resolve({ channel, args });
+    },
+    on(channel, listener) {
+      const registered = listeners.get(channel) ?? [];
+      registered.push(listener);
+      listeners.set(channel, registered);
+    },
+    removeListener(channel, listener) {
+      removals.push({ channel, listener });
+      const registered = listeners.get(channel) ?? [];
+      const index = registered.indexOf(listener);
+      if (index >= 0) registered.splice(index, 1);
+      listeners.set(channel, registered);
+    },
+    emit(channel, value) {
+      for (const listener of [...(listeners.get(channel) ?? [])]) listener({}, value);
+    },
+  };
+  const context = {
+    M: (value) => value,
+    Q: Object.freeze({ stock: true }),
+    X: Object.freeze({ stock: true }),
+    s: {
+      contextBridge: {
+        exposeInMainWorld(name, value) {
+          exposed.set(name, value);
+        },
+      },
+      ipcRenderer,
+    },
+  };
+  vm.runInNewContext(source, context, { filename: "synthetic-preload.cjs" });
+  return { calls, exposed, ipcRenderer, listeners, removals };
+}
+
 function startSyntheticMain(remoteReady, overrides = {}) {
   const { patchMainSource } = require(patchPath);
   const startup = {
@@ -138,6 +181,89 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   }
   assert.throws(() => patchMainSource(main), /already|anchor/i);
   assert.throws(() => patchPreloadSource(preload), /already|anchor/i);
+});
+
+test("provider authority snapshot and active bot identity use exact narrow preload channels", async () => {
+  const { patchPreloadSource } = require(patchPath);
+  const source = patchPreloadSource(STOCK_PRELOAD);
+  const harness = runSyntheticPreload(source);
+  const providers = harness.exposed.get("openbotProviders");
+  const runtime = harness.exposed.get("codexRuntime");
+
+  assert.ok(providers, "the renderer must discover the provider facade");
+  assert.equal(Object.isFrozen(providers), true);
+  assert.deepEqual(Object.keys(providers).sort(), [
+    "completeOnboarding",
+    "connect",
+    "disconnect",
+    "onCatalogChanged",
+    "onConnectionsChanged",
+    "readAuthoritySnapshot",
+  ]);
+  assert.equal(Object.isFrozen(runtime), true);
+  assert.equal(typeof runtime.readActiveBotId, "function");
+
+  await providers.readAuthoritySnapshot();
+  await providers.connect({ providerId: "openai-codex", loginKind: "account" });
+  await providers.disconnect("openai-codex");
+  await providers.completeOnboarding("openai-codex");
+  await runtime.readActiveBotId();
+  assert.deepEqual(harness.calls.map(({ channel, args }) => ({ channel, args })), [
+    { channel: "openbot-provider:authority-snapshot", args: [] },
+    { channel: "openbot-provider:connect", args: [{ providerId: "openai-codex", loginKind: "account" }] },
+    { channel: "openbot-provider:disconnect", args: ["openai-codex"] },
+    { channel: "openbot-provider:onboarding-complete", args: ["openai-codex"] },
+    { channel: "codex-bot:read-active-bot-id", args: [] },
+  ]);
+
+  const connectionPayloads = [];
+  const catalogPayloads = [];
+  assert.throws(() => providers.onConnectionsChanged(null), (error) => error?.name === "TypeError");
+  assert.throws(() => providers.onCatalogChanged("not-a-function"), (error) => error?.name === "TypeError");
+  const removeConnections = providers.onConnectionsChanged((value) => connectionPayloads.push(value));
+  const removeCatalog = providers.onCatalogChanged((value) => catalogPayloads.push(value));
+  const connectionListener = harness.listeners.get("openbot-provider:changed")[0];
+  const catalogListener = harness.listeners.get("openbot-provider:catalog-changed")[0];
+  harness.ipcRenderer.emit("openbot-provider:changed", { generation: 1 });
+  harness.ipcRenderer.emit("openbot-provider:catalog-changed", { generation: 2 });
+  assert.deepEqual(connectionPayloads, [{ generation: 1 }]);
+  assert.deepEqual(catalogPayloads, [{ generation: 2 }]);
+  removeConnections();
+  removeCatalog();
+  assert.deepEqual(harness.removals, [
+    { channel: "openbot-provider:changed", listener: connectionListener },
+    { channel: "openbot-provider:catalog-changed", listener: catalogListener },
+  ]);
+  harness.ipcRenderer.emit("openbot-provider:changed", { generation: 3 });
+  harness.ipcRenderer.emit("openbot-provider:catalog-changed", { generation: 4 });
+  assert.deepEqual(connectionPayloads, [{ generation: 1 }]);
+  assert.deepEqual(catalogPayloads, [{ generation: 2 }]);
+});
+
+test("provider preload facade has no controller, state, secret, path, endpoint, or command access", () => {
+  const { patchPreloadSource } = require(patchPath);
+  const source = patchPreloadSource(STOCK_PRELOAD);
+  const providers = runSyntheticPreload(source).exposed.get("openbotProviders");
+  for (const forbidden of ["controller", "stateStore", "keychain", "secret", "path", "endpoint", "command"]) {
+    assert.equal(Object.prototype.hasOwnProperty.call(providers, forbidden), false, forbidden);
+  }
+  assert.doesNotMatch(source, /openbotProviders[^;]*(?:controller|stateStore|keychain|secret|endpoint|command|path)/i);
+});
+
+test("packaged renderer contract discovers the exact provider facade methods", () => {
+  const { patchPreloadSource } = require(patchPath);
+  const preload = patchPreloadSource(STOCK_PRELOAD);
+  const rendererPath = path.join(__dirname, "..", "src", "renderer", "bot-runtime-ui.js");
+  const renderer = fs.readFileSync(rendererPath, "utf8");
+  assert.match(preload, /exposeInMainWorld\("openbotProviders"/);
+  for (const method of [
+    "readAuthoritySnapshot", "connect", "disconnect", "completeOnboarding",
+    "onConnectionsChanged", "onCatalogChanged",
+  ]) {
+    assert.match(renderer, new RegExp(`"${method}"`));
+    assert.match(preload, new RegExp(`${method}:`));
+  }
+  assert.match(renderer, /windowRef\.openbotProviders/);
 });
 
 test("desktop patch creates the stock window while remote-service readiness is held", async () => {
