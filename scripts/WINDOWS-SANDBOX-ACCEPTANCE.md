@@ -1,6 +1,6 @@
 # Windows Sandbox acceptance harness
 
-This harness validates the **0.1.8 DEVELOPMENT TEST BUILD** in a disposable,
+This harness validates the **0.1.9 DEVELOPMENT TEST BUILD** in a disposable,
 fresh Windows environment. It is an acceptance aid, not a release-signing or
 publishing step. It never enables Windows Sandbox, changes host policy, bypasses
 SmartScreen, clicks a permission prompt, or automates authentication.
@@ -52,7 +52,7 @@ from the sidecar during this command:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\New-WindowsSandboxAcceptanceHarness.ps1 `
-  -InstallerPath 'C:\path\to\OpenBot-Setup-0.1.8-DEVELOPMENT-<build-id>.exe' `
+  -InstallerPath 'C:\path\to\OpenBot-Setup-0.1.9-DEVELOPMENT-<build-id>.exe' `
   -ExpectedSha256 '<independently-reviewed-64-character-sha256>' `
   -ExpectedBrandedExecutableSha256 '<independently-reviewed-branded-exe-sha256>' `
   -OutputRoot "$env:TEMP\CodexBot-Sandbox-Acceptance\review-001" `
@@ -79,7 +79,7 @@ the generator to launch exactly one scenario:
 ```powershell
 # Regenerate into a new OutputRoot, replacing Interactive with Silent as needed.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\New-WindowsSandboxAcceptanceHarness.ps1 `
-  -InstallerPath 'C:\path\to\OpenBot-Setup-0.1.8-DEVELOPMENT-<build-id>.exe' `
+  -InstallerPath 'C:\path\to\OpenBot-Setup-0.1.9-DEVELOPMENT-<build-id>.exe' `
   -ExpectedSha256 '<independently-reviewed-64-character-sha256>' `
   -ExpectedBrandedExecutableSha256 '<independently-reviewed-branded-exe-sha256>' `
   -OutputRoot "$env:TEMP\CodexBot-Sandbox-Acceptance\review-002" `
