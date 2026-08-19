@@ -3720,6 +3720,9 @@ test("mounted model controls use only the authoritative provider catalog", async
       onCatalogChanged() { return () => {}; },
     },
     openbotProviders: providerFacade({
+      connections: eightConnections({
+        "anthropic-claude": { state: "connected", generation: 1 },
+      }),
       catalog: providerCatalog([
         providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]),
       ]),
@@ -4561,7 +4564,12 @@ test("mounted Advanced summary keeps a same-id provider selection provider-scope
     catalog,
     initialSelection: current,
     runtimeFacade,
-    providerFacade: providerFacade({ catalog }),
+    providerFacade: providerFacade({
+      connections: eightConnections({
+        "anthropic-claude": { state: "connected", generation: 24 },
+      }),
+      catalog,
+    }),
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
@@ -4931,7 +4939,13 @@ test("canonical collision choices preserve provider identity and rebuild model d
         return current;
       },
     },
-    providerFacade: providerFacade({ catalog }),
+    providerFacade: providerFacade({
+      connections: eightConnections({
+        "openai-codex": { state: "connected", generation: 24 },
+        "anthropic-claude": { state: "connected", generation: 24 },
+      }),
+      catalog,
+    }),
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
@@ -5940,7 +5954,12 @@ test("mounted Power keeps an authoritative noncompact tuple visible until a proj
   const harness = createMountedUiHarness({
     catalog,
     initialSelection,
-    providerFacade: providerFacade({ catalog }),
+    providerFacade: providerFacade({
+      connections: eightConnections({
+        "openai-codex": { state: "connected", generation: 12 },
+      }),
+      catalog,
+    }),
   });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.find("codex-model-trigger-model").textContent, "GPT-5.5");
@@ -5985,6 +6004,9 @@ test("provider single-flight survives an unrelated Power repaint", async (contex
   const connection = deferred();
   let connectCalls = 0;
   const facade = providerFacade({
+    connections: eightConnections({
+      "openai-codex": { state: "connected", generation: 12 },
+    }),
     catalog,
     connect() {
       connectCalls += 1;
@@ -6918,7 +6940,13 @@ test("switching to a bot with persisted Ultra Code starts steady", async () => {
       async readModel(botId) { return selections.get(botId); },
       async selectModel() { throw new Error("not used"); },
     },
-    providerFacade: providerFacade({ catalog }),
+    providerFacade: providerFacade({
+      connections: eightConnections({
+        "openai-codex": { state: "connected", generation: 9 },
+        "anthropic-claude": { state: "connected", generation: 9 },
+      }),
+      catalog,
+    }),
   });
   await new Promise((resolve) => setImmediate(resolve));
   const botSelect = harness.findPanel("codex-bot-select");
@@ -7031,9 +7059,9 @@ test("concurrent provider operations keep out-of-order A and B refreshes indepen
     },
     async catalog() {
       catalogCalls += 1;
-      if (catalogCalls <= 2) return unavailable;
-      if (catalogCalls === 3) return aRefresh.catalog.promise;
-      if (catalogCalls === 4) return bRefresh.catalog.promise;
+      if (catalogCalls === 1) return unavailable;
+      if (catalogCalls === 2) return aRefresh.catalog.promise;
+      if (catalogCalls === 3) return bRefresh.catalog.promise;
       return catalogB;
     },
     async readOnboarding() {
@@ -7267,4 +7295,252 @@ test("native active identity read and future events are fenced by disposal", asy
   listed.resolve([bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]);
   await assert.rejects(initialization, /unavailable|changed/i);
   assert.deepEqual(selected, []);
+});
+
+test("R3-N1 older failed refresh cannot reopen a newer healthy gate", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 2, { isDefault: true }),
+  ], 2);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 2,
+    catalogGeneration: 2,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const connections = eightConnections({
+    "openai-codex": { state: "connected", generation: 2 },
+  });
+  const oldReads = [deferred(), deferred(), deferred()];
+  let readCount = 0;
+  let emitConnections;
+  const facade = {
+    async list() { return readCount++ === 0 ? oldReads[0].promise : connections; },
+    async catalog() { return readCount++ === 1 ? oldReads[1].promise : catalog; },
+    async readOnboarding() { return readCount++ === 2 ? oldReads[2].promise : receipt; },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return receipt; },
+    onConnectionsChanged(listener) { emitConnections = listener; return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 2,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  while (readCount < 3) await new Promise((resolve) => setImmediate(resolve));
+  emitConnections(connections);
+  while (readCount < 6) await new Promise((resolve) => setImmediate(resolve));
+  for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+
+  oldReads[0].reject(new Error("old list failed"));
+  oldReads[1].reject(new Error("old catalog failed"));
+  oldReads[2].reject(new Error("old receipt failed"));
+  for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+});
+
+test("R3-N2 same-generation stale receipt cannot switch onboarding provider", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 2, { isDefault: true }),
+    providerModel("anthropic-claude", "claude-fable-5", "Claude Fable 5", ["medium"], 2),
+  ], 2);
+  const connected = eightConnections({
+    "openai-codex": { state: "connected", generation: 2 },
+    "anthropic-claude": { state: "connected", generation: 2 },
+  });
+  const receiptA = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 2,
+    catalogGeneration: 2,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const receiptB = { ...receiptA, providerId: "anthropic-claude" };
+  let onboardingReads = 0;
+  let currentConnections = connected;
+  let emitConnections;
+  const facade = {
+    async list() { return currentConnections; },
+    async catalog() {
+      return providerCatalog(catalog.models.filter((entry) => currentConnections
+        .some((connection) => connection.providerId === entry.provider && connection.state === "connected")), 2);
+    },
+    async readOnboarding() {
+      onboardingReads += 1;
+      return onboardingReads === 2 ? receiptB : onboardingReads === 3 ? null : receiptA;
+    },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return receiptA; },
+    onConnectionsChanged(listener) { emitConnections = listener; return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 2,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  emitConnections(connected);
+  for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+
+  currentConnections = eightConnections({
+    "openai-codex": { state: "disconnected", generation: 3 },
+    "anthropic-claude": { state: "connected", generation: 2 },
+  });
+  emitConnections(currentConnections);
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
+});
+
+test("R3-N3 same-generation stale catalog cannot reintroduce disconnected models", async (context) => {
+  const currentCatalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 2, { isDefault: true }),
+  ], 2);
+  const staleCatalog = providerCatalog([
+    ...currentCatalog.models,
+    providerModel("anthropic-claude", "claude-stale", "Claude stale", ["medium"], 2),
+  ], 2);
+  const connections = eightConnections({
+    "openai-codex": { state: "connected", generation: 2 },
+    "anthropic-claude": { state: "disconnected", generation: 2 },
+  });
+  let emitCatalog;
+  const facade = providerFacade({
+    connections,
+    catalog: currentCatalog,
+    catalogSubscription(listener) { emitCatalog = listener; return () => {}; },
+  });
+  const harness = createMountedUiHarness({
+    catalog: currentCatalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 2,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  emitCatalog(staleCatalog);
+  for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    [...new Set(harness.mounted.controller.snapshot().modelCatalog.map((entry) => entry.provider))],
+    ["openai-codex"],
+  );
+});
+
+test("R3-N4 failed disconnect preserves the connected receipt-retry marker", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  let connections = eightConnections();
+  let completeCalls = 0;
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog,
+    connect() {
+      connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
+    },
+    complete(providerId) {
+      completeCalls += 1;
+      if (completeCalls === 1) throw new Error("receipt write failed");
+      return {
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      };
+    },
+    disconnect() { throw new Error("disconnect failed"); },
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const firstRoute = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  firstRoute.children.at(-1).children[0].listeners.get("click")();
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const settingsRoute = harness.findAllPanel("codex-provider-connection")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  settingsRoute.children.at(-1).children[1].listeners.get("click")();
+  for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const firstAction = firstRoute.children.at(-1).children[0];
+  assert.equal(firstAction.disabled, false);
+  assert.equal(firstAction.textContent, "Finish setup");
+});
+
+test("R3-N5 an active-bot event before or during the initial read wins over stale identity", async () => {
+  const { createBotUiController } = require(uiPath);
+  for (const readValue of [null, BOT_A]) {
+    const read = deferred();
+    let runtimeListener;
+    const selected = [];
+    const controller = createBotUiController({
+      nativeMode: true,
+      facade: {
+        async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
+        onChanged() { return () => {}; },
+      },
+      runtimeFacade: {
+        async readActiveBotId() { return read.promise; },
+        onEvent(listener) { runtimeListener = listener; return () => {}; },
+        async selectBot(botId) { selected.push(botId); return null; },
+      },
+    });
+    const initialization = controller.initialize();
+    await new Promise((resolve) => setImmediate(resolve));
+    runtimeListener({ type: "active-bot-changed", botId: BOT_B });
+    read.resolve(readValue);
+    await initialization;
+    assert.deepEqual(selected, [BOT_B]);
+    controller.dispose();
+  }
 });
