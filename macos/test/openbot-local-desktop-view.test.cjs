@@ -248,6 +248,52 @@ test("renderer rejects a transparent Proxy status without changing the current s
   mounted.dispose();
 });
 
+test("synchronous select reentry and throw cannot mark the reentrant selection unavailable", async () => {
+  let mounted;
+  const value = fixture({
+    select(request) {
+      if (request.botId === BOT_A) {
+        mounted.selectBot(BOT_B);
+        throw new Error("stale select failure");
+      }
+      return undefined;
+    },
+  });
+  const { createLocalDesktopView } = require(viewPath);
+  mounted = createLocalDesktopView(value);
+  mounted.selectBot(BOT_A);
+  const status = value.nodes.find((node) => node.className === "openbot-local-desktop-view-status");
+  await tick();
+  assert.equal(status.textContent, "Connecting to local desktop…");
+  mounted.dispose();
+});
+
+test("synchronous retry reentry and throw cannot mark the reentrant selection unavailable", async () => {
+  let mounted;
+  const value = fixture({
+    retry() {
+      mounted.selectBot(BOT_B);
+      throw new Error("stale retry failure");
+    },
+  });
+  const { createLocalDesktopView } = require(viewPath);
+  mounted = createLocalDesktopView(value);
+  mounted.selectBot(BOT_A);
+  value.emitStatus({
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    viewGeneration: 1,
+    state: "unavailable",
+    code: "OPENBOT_LOCAL_CAPTURE_FAILED",
+  });
+  mounted.retry();
+  const status = value.nodes.find((node) => node.className === "openbot-local-desktop-view-status");
+  await tick();
+  assert.equal(status.textContent, "Connecting to local desktop…");
+  mounted.dispose();
+});
+
 test("selection invalidates before decode so late bitmaps close without drawing and disposal clears immediately", async () => {
   const waiting = deferred();
   const bitmap = { closed: 0, close() { this.closed += 1; } };

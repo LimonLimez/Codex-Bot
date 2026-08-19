@@ -484,8 +484,15 @@ class LocalDesktopManager extends EventEmitter {
       this.#assertBotAvailable(computer.botId);
       const existing = this.#entries.get(computer.botId);
       if (existing && this.#sameIdentity(existing, computer)) {
-        await this.#assertCurrentComputer(computer);
-        return publicSession(existing);
+        existing.fenced = true;
+        try {
+          await this.#assertCurrentComputer(computer);
+          existing.fenced = false;
+          return publicSession(existing);
+        } catch (error) {
+          try { await this.#closeEntry(existing, true); } catch {}
+          throw error;
+        }
       }
       if (existing) {
         await this.#closeEntry(existing, true);
@@ -543,6 +550,7 @@ class LocalDesktopManager extends EventEmitter {
           protocol: null,
           operations: new Map(),
           closePromise: null,
+          fenced: false,
         };
         protocol = new LocalHelperProtocol({
           transport: helperTransport,
@@ -599,7 +607,7 @@ class LocalDesktopManager extends EventEmitter {
     this.#assertActive();
     const input = normalizeIdentity(value);
     const entry = this.#requiredEntry(input);
-    const image = await this.#captureCurrentImage(input, entry);
+      const image = await this.#captureCurrentImage(input, entry);
     let size;
     let bytes;
     try {
@@ -654,7 +662,7 @@ class LocalDesktopManager extends EventEmitter {
       } catch { continue; }
       if (!this.#validFrameSize(size, MAX_DISPLAY_FRAME_WIDTH, MAX_DISPLAY_FRAME_HEIGHT)
         || !Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_DISPLAY_FRAME_BYTES) continue;
-      return Object.freeze({
+      const frame = Object.freeze({
         botId: entry.botId,
         targetId: entry.targetId,
         targetGeneration: entry.targetGeneration,
@@ -664,6 +672,16 @@ class LocalDesktopManager extends EventEmitter {
         mimeType: "image/png",
         bytes: Uint8Array.from(bytes),
       });
+      try {
+        await this.#assertCurrentComputer(input);
+      } catch (error) {
+        if (this.#entries.get(entry.botId) === entry) {
+          try { await this.#closeEntry(entry, true); } catch {}
+        }
+        throw error;
+      }
+      this.#requiredEntry(input, entry);
+      return frame;
     }
     throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
   }
@@ -963,7 +981,7 @@ class LocalDesktopManager extends EventEmitter {
   #requiredEntry(identity, expected = null) {
     this.#assertBotAvailable(identity.botId);
     const entry = this.#entries.get(identity.botId);
-    if (!entry || (expected && entry !== expected) || !this.#sameIdentity(entry, identity)
+    if (!entry || (expected && entry !== expected) || entry.fenced || !this.#sameIdentity(entry, identity)
       || entry.window.isDestroyed?.()) {
       throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
     }
@@ -1028,6 +1046,7 @@ class LocalDesktopManager extends EventEmitter {
 
   #closeEntry(entry, cancelPermissions) {
     if (entry.closePromise) return entry.closePromise;
+    entry.fenced = true;
     if (this.#entries.get(entry.botId) === entry) this.#entries.delete(entry.botId);
     for (const operation of entry.operations.values()) operation.cancelled = true;
     if (cancelPermissions) this.#permissionBroker.cancelBot(entry.botId);

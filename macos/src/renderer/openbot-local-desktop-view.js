@@ -181,8 +181,7 @@
       setStatus("unavailable");
     }
 
-    function invokeSelection(operation, botId, generation) {
-      const token = ++operationToken;
+    function invokeSelection(operation, botId, generation, token) {
       void Promise.resolve(operation).then((value) => {
         if (value && operationToken === token && selectedBotId === botId && viewGeneration === generation) {
           applyStatus(value);
@@ -197,18 +196,20 @@
       retryPending = false;
       clearCanvas();
       setStatus(selectedBotId ? "connecting" : "none");
-      const request = Object.freeze({ viewGeneration });
+      const botId = selectedBotId;
+      const generation = viewGeneration;
+      const token = ++operationToken;
+      const request = Object.freeze({ viewGeneration: generation });
       let operation;
       try {
-        operation = selectedBotId
-          ? facade.select(Object.freeze({ botId: selectedBotId, viewGeneration }))
+        operation = botId
+          ? facade.select(Object.freeze({ botId, viewGeneration: generation }))
           : facade.clear(request);
       } catch {
-        const token = ++operationToken;
-        failedCurrentOperation(selectedBotId, viewGeneration, token);
+        failedCurrentOperation(botId, generation, token);
         return;
       }
-      invokeSelection(operation, selectedBotId, viewGeneration);
+      invokeSelection(operation, botId, generation, token);
     }
 
     function retrySelectedBot() {
@@ -217,15 +218,18 @@
       retryPending = true;
       clearCanvas();
       setStatus("retrying");
+      const botId = selectedBotId;
+      const generation = viewGeneration;
+      const token = ++operationToken;
       try {
         invokeSelection(
-          facade.retry(Object.freeze({ botId: selectedBotId, viewGeneration })),
-          selectedBotId,
-          viewGeneration,
+          facade.retry(Object.freeze({ botId, viewGeneration: generation })),
+          botId,
+          generation,
+          token,
         );
       } catch {
-        const token = ++operationToken;
-        failedCurrentOperation(selectedBotId, viewGeneration, token);
+        failedCurrentOperation(botId, generation, token);
       }
     }
 

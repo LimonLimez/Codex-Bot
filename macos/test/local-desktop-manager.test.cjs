@@ -299,6 +299,52 @@ test("authoritative current Computer checks accept the boundary's in-flight star
   assert.equal(windows.length, 1);
 });
 
+test("same-identity reuse closes the existing entry when authority changes mode, target, or errors", async (t) => {
+  for (const scenario of ["mode", "target", "error"]) {
+    await t.test(scenario, async (subtest) => {
+      const current = localComputer(BOT_A, LOCAL_A, 1);
+      let reads = 0;
+      const value = await fixture(subtest, {
+        readCurrentComputer: async () => {
+          reads += 1;
+          if (reads <= 3) return current;
+          if (scenario === "mode") return { ...current, computer: { ...current.computer, mode: "cursor", state: "unavailable" } };
+          if (scenario === "target") return localComputer(BOT_A, LOCAL_B, 1);
+          throw new Error("private /Users/reader-error token=secret");
+        },
+      });
+      const session = await value.manager.open(current);
+      const failure = await value.manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
+      assert.equal(failure.code, "OPENBOT_LOCAL_DESKTOP_STALE");
+      assert.equal(value.windows[0].destroyed, true);
+      await assert.rejects(value.manager.captureDisplayFrame(identity(session)),
+        (error) => error?.code === "OPENBOT_LOCAL_DESKTOP_STALE");
+    });
+  }
+});
+
+test("captureDisplayFrame rechecks authority before returning bytes and fences drift", async (t) => {
+  for (const scenario of ["mode", "target", "error"]) {
+    await t.test(scenario, async (subtest) => {
+      const current = localComputer(BOT_A, LOCAL_A, 1);
+      let reads = 0;
+      const value = await fixture(subtest, {
+        readCurrentComputer: async () => {
+          reads += 1;
+          if (reads <= 3) return current;
+          if (scenario === "mode") return { ...current, computer: { ...current.computer, mode: "cursor", state: "unavailable" } };
+          if (scenario === "target") return localComputer(BOT_A, LOCAL_B, 1);
+          throw new Error("private /Users/capture-reader token=secret");
+        },
+      });
+      const session = await value.manager.open(current);
+      const result = await value.manager.captureDisplayFrame(identity(session)).catch((error) => error);
+      assert.equal(result.code, "OPENBOT_LOCAL_DESKTOP_STALE");
+      assert.equal(value.windows[0].destroyed, true);
+    });
+  }
+});
+
 test("an untouched about:blank window fails with the public capture code", async (t) => {
   const { manager, windows } = await fixture(t);
   const session = await manager.open(localComputer());
