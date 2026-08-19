@@ -16,6 +16,11 @@
     : typeof require === "function"
       ? require("./reasoning-control.js")
       : null;
+  const NODE_UTIL_TYPES = typeof require === "function"
+    ? (() => {
+      try { return require("node:util").types; } catch { return null; }
+    })()
+    : null;
   const PROVIDER_IDS = Object.freeze([
     "openai-codex",
     "anthropic-claude",
@@ -37,6 +42,7 @@
     "local-openai-compatible": "Local models",
   });
   const PROVIDER_STATES = new Set(["connected", "connecting", "disconnected", "unavailable"]);
+  const PROVIDER_LOGIN_USER_CODE = /^[A-Z0-9]{3,16}(?:-[A-Z0-9]{2,16})?$/;
   const PROVIDER_LOGIN_KINDS = Object.freeze({
     "openai-codex": "account",
     "anthropic-claude": "oauth",
@@ -274,6 +280,39 @@
       throw new Error(message);
     }
     return Array.from({ length }, (_, index) => descriptors[String(index)].value);
+  }
+
+  function isProxyValue(value) {
+    try { return NODE_UTIL_TYPES?.isProxy(value) === true; } catch { return false; }
+  }
+
+  function normalizeProviderLoginPrompt(value) {
+    if (isProxyValue(value)) throw new Error("Provider login prompt is unavailable.");
+    const prompt = exactDataObject(
+      value,
+      new Set(["schemaVersion", "providerId", "generation", "mode", "verificationUrl", "userCode"]),
+      ["schemaVersion", "providerId", "generation", "mode", "verificationUrl", "userCode"],
+      "Provider login prompt is unavailable.",
+    );
+    if (!NODE_UTIL_TYPES && typeof structuredClone === "function") {
+      try { structuredClone(value); } catch { throw new Error("Provider login prompt is unavailable."); }
+    }
+    if (prompt.schemaVersion !== 1
+      || prompt.providerId !== "openai-codex"
+      || !Number.isSafeInteger(prompt.generation) || prompt.generation < 1
+      || prompt.mode !== "device-code"
+      || prompt.verificationUrl !== "https://auth.openai.com/codex/device"
+      || typeof prompt.userCode !== "string" || !PROVIDER_LOGIN_USER_CODE.test(prompt.userCode)) {
+      throw new Error("Provider login prompt is unavailable.");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      providerId: "openai-codex",
+      generation: prompt.generation,
+      mode: "device-code",
+      verificationUrl: prompt.verificationUrl,
+      userCode: prompt.userCode,
+    });
   }
 
   function clonePlainData(value, message) {
@@ -758,7 +797,7 @@
     if (value === null || value === undefined) return null;
     const methods = [
       "readAuthoritySnapshot", "connect", "disconnect", "completeOnboarding",
-      "onConnectionsChanged", "onCatalogChanged",
+      "onConnectionsChanged", "onCatalogChanged", "onLoginPrompt",
     ];
     const allowed = new Set([...methods, "list", "catalog", "readOnboarding"]);
     const raw = exactDataObject(value, allowed, methods, "Provider facade is unavailable.");
@@ -3119,6 +3158,22 @@
     connectionsRetry.type = "button";
     connectionsRetry.setAttribute("aria-label", "Retry AI connections");
     connectionsRetry.hidden = true;
+    const makeLoginPrompt = () => {
+      const prompt = element(documentRef, "div", "codex-provider-login-prompt");
+      prompt.setAttribute("role", "status");
+      prompt.setAttribute("aria-live", "polite");
+      prompt.hidden = true;
+      const copy = element(
+        documentRef,
+        "span",
+        "codex-provider-login-prompt-copy",
+        "Enter this code in the OpenAI sign-in window:",
+      );
+      const code = element(documentRef, "code", "codex-provider-login-prompt-code");
+      prompt.append(copy, code);
+      return Object.freeze({ prompt, code });
+    };
+    const connectionsLoginPrompt = makeLoginPrompt();
     const connectionsActions = element(documentRef, "div", "codex-ai-connections-actions");
     const connectionsList = element(documentRef, "div", "codex-ai-connections-list");
     connectionsActions.append(connectionsList);
@@ -3127,6 +3182,7 @@
       connectionsCopy,
       connectionsStatus,
       connectionsRetry,
+      connectionsLoginPrompt.prompt,
       connectionsActions,
     );
     const firstConnectionSetup = element(documentRef, "dialog", "codex-first-connection-setup");
@@ -3157,6 +3213,7 @@
     firstConnectionStatus.setAttribute("role", "status");
     firstConnectionStatus.setAttribute("aria-live", "polite");
     firstConnectionStatus.hidden = true;
+    const firstConnectionLoginPrompt = makeLoginPrompt();
     const firstConnectionRetry = element(documentRef, "button", "codex-first-connection-retry", "Retry");
     firstConnectionRetry.type = "button";
     firstConnectionRetry.setAttribute("aria-label", "Retry AI connections");
@@ -3167,6 +3224,7 @@
       firstConnectionChoices,
       firstConnectionError,
       firstConnectionStatus,
+      firstConnectionLoginPrompt.prompt,
       firstConnectionRetry,
     );
     if (nativeProtocolMode) {
@@ -3205,7 +3263,9 @@
     });
     let providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
     let providerOnboarding = null;
+    let providerLoginPrompt = null;
     let providerConnectionsUnsubscribe = null;
+    let providerLoginPromptUnsubscribe = null;
     let providerCatalogUnsubscribe = null;
     let providerAuthorityLoaded = false;
     let providerCatalogLoaded = false;
@@ -3518,9 +3578,49 @@
       return providerConnections.find((entry) => entry.providerId === providerId) ?? disconnectedProvider(providerId);
     }
 
+    function renderProviderLoginPrompt() {
+      const operation = providerLoginPrompt?.operation;
+      const visible = Boolean(
+        providerLoginPrompt
+        && operation
+        && providerOperations.get("openai-codex") === operation
+        && !mountDisposed,
+      );
+      for (const target of [connectionsLoginPrompt, firstConnectionLoginPrompt]) {
+        target.code.textContent = visible ? providerLoginPrompt.prompt.userCode : "";
+        target.prompt.hidden = !visible;
+      }
+    }
+
+    function clearProviderLoginPrompt(operation = null) {
+      if (operation !== null && providerLoginPrompt?.operation !== operation) return;
+      providerLoginPrompt = null;
+      renderProviderLoginPrompt();
+    }
+
+    function receiveProviderLoginPrompt(value) {
+      let prompt;
+      try { prompt = normalizeProviderLoginPrompt(value); } catch { return; }
+      const operation = providerOperations.get("openai-codex");
+      if (!operation || mountDisposed) return;
+      if (providerLoginPrompt && providerLoginPrompt.operation === operation
+        && prompt.generation <= providerLoginPrompt.prompt.generation) return;
+      const baseline = providerConnection("openai-codex");
+      providerLoginPrompt = Object.freeze({
+        prompt,
+        operation,
+        baselineState: baseline.state,
+        baselineGeneration: baseline.generation,
+      });
+      renderProviderLoginPrompt();
+    }
+
     function providerErrorCopy(providerId, error) {
       const connection = providerConnection(providerId);
       const code = typeof error?.code === "string" ? error.code : connection.errorCode;
+      if (code === "OPENBOT_PROVIDER_DISCONNECT_PENDING") {
+        return `${connection.label} disconnect is pending. Retry disconnect.`;
+      }
       if (code && /CANCEL|CANCELLED/i.test(code)) return `${connection.label} connection cancelled. Try again.`;
       if (code && /INVALID/i.test(code)) return `${connection.label} details were not accepted. Check them and try again.`;
       return `${connection.label} could not be connected. Try again.`;
@@ -3538,24 +3638,32 @@
     function updateProviderRow(entry, connection) {
       if (!entry || !connection) return;
       const pending = providerPending.has(connection.providerId);
+      const operation = providerOperations.get(connection.providerId);
+      const disconnecting = pending && operation?.kind === "disconnect";
       const connected = connection.state === "connected";
       const externallyConnecting = connection.state === "connecting";
+      const disconnectPending = connection.providerId === "openai-codex"
+        && connection.state === "unavailable"
+        && connection.errorCode === "OPENBOT_PROVIDER_DISCONNECT_PENDING";
       const receiptRetry = entry.first && providerReceiptRetry.has(connection.providerId);
       const legacyConfirmation = entry.first && connected && !receiptRetry
         && providerOnboarding === null
         && providerCatalog.models.some((model) => model.provider === connection.providerId);
-      const stateText = pending ? "Connecting…"
+      const stateText = disconnecting ? "Disconnecting…" : pending ? "Connecting…"
         : connected ? "Connected"
-          : connection.state === "connecting" ? "Connecting…"
-          : connection.state === "unavailable" ? "Unavailable" : "Not connected";
+        : connection.state === "connecting" ? "Connecting…"
+        : connection.state === "unavailable" ? "Unavailable" : "Not connected";
       entry.state.textContent = stateText;
       entry.state.dataset.state = connection.state;
       entry.title.textContent = connection.label;
       entry.row.dataset.loginKind = connection.loginKind;
       entry.action.disabled = providerFacadeInvalid || pending
+        || disconnectPending
+        || (entry.first && providerAuthorityRetryable)
         || (connected && !receiptRetry && !legacyConfirmation) || externallyConnecting;
-      entry.disconnect.disabled = pending || !connected;
-      entry.disconnect.hidden = entry.first || !connected;
+      entry.disconnect.disabled = pending;
+      entry.disconnect.hidden = entry.first || (!connected && !disconnectPending);
+      entry.disconnect.textContent = disconnectPending ? "Retry disconnect" : "Disconnect";
       if (!pending && connection.state === "unavailable" && connection.errorCode) {
         entry.error.textContent = providerErrorCopy(connection.providerId, { code: connection.errorCode });
         entry.error.hidden = false;
@@ -3594,6 +3702,7 @@
       firstConnectionRetry.hidden = !(retryable && shouldOpen);
       firstConnectionRetry.disabled = refreshPending;
       setDialogOpen(firstConnectionSetup, shouldOpen);
+      renderProviderLoginPrompt();
       panel.inert = shouldOpen;
       modelDock.inert = shouldOpen;
       if (providerFacadeInvalid) {
@@ -3690,6 +3799,20 @@
 
     function commitProviderSnapshot(snapshot) {
       const previousConnections = providerConnections;
+      const previousDirect = previousConnections.find((entry) => entry.providerId === "openai-codex");
+      const nextDirect = snapshot.connections.find((entry) => entry.providerId === "openai-codex");
+      if (providerLoginPrompt && nextDirect) {
+        const stateChanged = previousDirect?.state !== nextDirect.state;
+        const generationChanged = previousDirect?.generation !== nextDirect.generation;
+        const isBaseline = nextDirect.state === providerLoginPrompt.baselineState
+          && nextDirect.generation === providerLoginPrompt.baselineGeneration;
+        if ((stateChanged || generationChanged)
+          && !isBaseline
+          && (nextDirect.state !== "connecting"
+            || (previousDirect?.state === "connecting" && generationChanged))) {
+          clearProviderLoginPrompt();
+        }
+      }
       providerConnections = snapshot.connections;
       providerCatalogSource = snapshot.catalog;
       providerCatalog = filterProviderCatalog(snapshot.catalog, snapshot.connections);
@@ -3803,9 +3926,10 @@
       return promise;
     }
 
-    function beginProviderOperation(providerId, first, entry) {
+    function beginProviderOperation(providerId, first, entry, kind = "connect") {
       if (mountDisposed || !providerFacade || providerFacadeInvalid || providerOperations.has(providerId)) return null;
-      const operation = Object.freeze({ providerId, first, entry, sequence: ++providerActionSequence });
+      if (providerId === "openai-codex") clearProviderLoginPrompt();
+      const operation = Object.freeze({ providerId, first, entry, kind, sequence: ++providerActionSequence });
       providerOperations.set(providerId, operation);
       providerPending.add(providerId);
       return operation;
@@ -3842,6 +3966,7 @@
       updateConnectionPresentation(lastSnapshot);
       let failed = false;
       let receiptAttempted = false;
+      let receiptAcknowledged = false;
       let expectedReceipt = null;
       try {
         if (shouldConnect) {
@@ -3856,8 +3981,16 @@
           if (typeof providerFacade.completeOnboarding !== "function") throw new Error("Provider onboarding is unavailable.");
           receiptAttempted = true;
           const returnedReceipt = await providerFacade.completeOnboarding(providerId);
+          receiptAcknowledged = true;
           if (!currentProviderOperation(operation)) return;
-          if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
+          if (!await refreshProviderAuthority()) {
+            // completeOnboarding() is the durable commit acknowledgement. A
+            // following snapshot failure is stale publication, not a receipt
+            // write failure and must not create a Finish setup retry.
+            firstConnectionError.hidden = true;
+            entry.error.hidden = true;
+            return;
+          }
           if (!currentProviderOperation(operation)) return;
           expectedReceipt = normalizeProviderOnboarding(
             returnedReceipt,
@@ -3871,26 +4004,34 @@
           firstConnectionError.hidden = true;
         }
       } catch (error) {
-        failed = true;
-        if (currentProviderOperation(operation)) {
-          const connectedAfterReceiptFailure = first && receiptAttempted
-            && providerConnection(providerId).state === "connected";
-          if (connectedAfterReceiptFailure) {
-            providerReceiptRetry.add(providerId);
-            entry.error.textContent = `${providerConnection(providerId).label} is connected, but first-connection setup could not be saved. Try again.`;
-          } else entry.error.textContent = providerErrorCopy(providerId, error);
-          entry.error.hidden = false;
-          if (first) {
-            firstConnectionError.textContent = entry.error.textContent;
-            firstConnectionError.hidden = false;
+        if (receiptAcknowledged) {
+          if (!providerAuthorityRetryable) markProviderRefreshFailure();
+          firstConnectionError.hidden = true;
+          entry.error.hidden = true;
+          failed = false;
+        } else {
+          failed = true;
+          if (currentProviderOperation(operation)) {
+            const connectedAfterReceiptFailure = first && receiptAttempted
+              && providerConnection(providerId).state === "connected";
+            if (connectedAfterReceiptFailure) {
+              providerReceiptRetry.add(providerId);
+              entry.error.textContent = `${providerConnection(providerId).label} is connected, but first-connection setup could not be saved. Try again.`;
+            } else entry.error.textContent = providerErrorCopy(providerId, error);
+            entry.error.hidden = false;
+            if (first) {
+              firstConnectionError.textContent = entry.error.textContent;
+              firstConnectionError.hidden = false;
+            }
+            entry.action.focus?.();
           }
-          entry.action.focus?.();
         }
       } finally {
         const ownsOperation = providerOperations.get(providerId) === operation;
         if (ownsOperation) {
           providerOperations.delete(providerId);
           providerPending.delete(providerId);
+          clearProviderLoginPrompt(operation);
         }
         if (ownsOperation && !mountDisposed) {
           updateConnectionPresentation(lastSnapshot);
@@ -3903,7 +4044,7 @@
       if (mountDisposed || !providerFacade || typeof providerFacade.disconnect !== "function"
         || providerFacadeInvalid || providerPending.has(providerId)) return;
       const entry = providerRows.get(providerId);
-      const operation = beginProviderOperation(providerId, false, entry);
+      const operation = beginProviderOperation(providerId, false, entry, "disconnect");
       if (!operation) return;
       if (entry) entry.error.hidden = true;
       updateConnectionPresentation(lastSnapshot);
@@ -3926,6 +4067,7 @@
         if (ownsOperation) {
           providerOperations.delete(providerId);
           providerPending.delete(providerId);
+          clearProviderLoginPrompt(operation);
         }
         if (ownsOperation && !mountDisposed) updateConnectionPresentation(lastSnapshot);
       }
@@ -4762,6 +4904,15 @@
           providerCatalogUnsubscribe = typeof candidate === "function" ? candidate : null;
         } catch {}
       }
+      if (typeof providerFacade.onLoginPrompt === "function") {
+        try {
+          const candidate = providerFacade.onLoginPrompt((value) => {
+            if (mountDisposed) return;
+            receiveProviderLoginPrompt(value);
+          });
+          providerLoginPromptUnsubscribe = typeof candidate === "function" ? candidate : null;
+        } catch {}
+      }
       void refreshProviderAuthority();
     }
     void controller.initialize().catch(() => {
@@ -4800,13 +4951,16 @@
         warningScope = null;
         providerOperations.clear();
         providerPending.clear();
+        clearProviderLoginPrompt();
         providerReceiptRetry.clear();
         closeAdvancedFlyout();
         selectionIntents.clear();
         try { providerConnectionsUnsubscribe?.(); } catch {}
         try { providerCatalogUnsubscribe?.(); } catch {}
+        try { providerLoginPromptUnsubscribe?.(); } catch {}
         providerConnectionsUnsubscribe = null;
         providerCatalogUnsubscribe = null;
+        providerLoginPromptUnsubscribe = null;
         localDesktopView?.dispose?.();
         localDesktopView = null;
         reasoningView.dispose();

@@ -251,6 +251,26 @@ body.light {
 
 .codex-provider-connection-error[hidden] { display: none; }
 
+.codex-provider-login-prompt {
+  display: grid;
+  gap: 4px;
+  margin: 2px 0;
+  padding: 8px 10px;
+  color: var(--codex-muted);
+  border: 1px solid color-mix(in srgb, var(--codex-blue-strong) 58%, var(--codex-border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--codex-blue-strong) 10%, var(--codex-input));
+  font-size: 10px;
+}
+
+.codex-provider-login-prompt[hidden] { display: none; }
+
+.codex-provider-login-prompt-code {
+  color: var(--codex-text);
+  font: 700 15px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: .08em;
+}
+
 .codex-provider-connection-form,
 .codex-provider-connection-actions {
   display: flex;
