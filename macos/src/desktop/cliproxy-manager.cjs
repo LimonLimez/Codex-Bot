@@ -40,6 +40,20 @@ function sameDirectory(left, right) {
     && left.mode === right.mode && left.birthtimeMs === right.birthtimeMs;
 }
 
+function authFileIdentity(stat) {
+  if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
+    || (stat.mode & 0o7777) !== 0o600 || stat.uid !== CURRENT_UID) throw new Error("unsafe auth file");
+  return {
+    dev: stat.dev, ino: stat.ino, mode: stat.mode, uid: stat.uid, nlink: stat.nlink,
+    size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs,
+  };
+}
+
+function sameAuthFile(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+    && left.uid === right.uid && left.nlink === right.nlink && left.size === right.size;
+}
+
 function canonicalDirectoryPath(requested) {
   const canonical = fs.realpathSync.native(requested);
   if (canonical === requested) return canonical;
@@ -285,9 +299,12 @@ class CLIProxyManager {
     const credential = this.#randomBytes(32).toString("hex");
     const port = this.#randomInt(49152, 65536);
     const endpoint = `http://127.0.0.1:${port}/v1`;
-    const configPath = path.join(configDirectory, "config.yaml");
-    const temporary = path.join(configDirectory, `.config.${process.pid}.${this.#randomBytes(8).toString("hex")}.tmp`);
+    const runPath = this.#runStableDirectory || configDirectory;
+    const configPath = path.join(runPath, "config.yaml");
+    const temporary = path.join(runPath, `.config.${process.pid}.${this.#randomBytes(8).toString("hex")}.tmp`);
+    this.#assertPrivateDirectory(configDirectory, this.#runDirectoryFd);
     fs.writeFileSync(temporary, configText({ authDirectory, credential, port }), { mode: 0o600, flag: "wx" });
+    this.#assertPrivateDirectory(configDirectory, this.#runDirectoryFd);
     fs.renameSync(temporary, configPath);
     fs.chmodSync(configPath, 0o600);
     let child;
@@ -453,7 +470,7 @@ class CLIProxyManager {
       await this.start();
       const epoch = this.#lifecycleEpoch;
       const configPath = this.#configPath;
-      const runDirectory = this.#runDirectory;
+      const runDirectory = this.#runStableDirectory || this.#runDirectory;
       if (!configPath || !runDirectory || !this.#authDirectory) throw new CLIProxyError();
       let sourceBytes;
       try { sourceBytes = this.#readHeldVertexSource(source); }
@@ -564,13 +581,35 @@ class CLIProxyManager {
       for (const entry of entries) {
         if (!descriptor.authFilePattern.test(entry.name)) continue;
         const target = path.join(directory, entry.name);
-        const stat = fs.lstatSync(target);
-        if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o7777) !== 0o600
-          || stat.uid !== CURRENT_UID || stat.nlink !== 1) throw new CLIProxyError(
-          "CLIProxyAPI provider credential is unsafe.", "CLIPROXY_PROVIDER_FAILED",
-        );
+        const expectedFd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
+        let expected;
+        try {
+          expected = authFileIdentity(fs.fstatSync(expectedFd));
+          const named = authFileIdentity(fs.lstatSync(target));
+          if (!sameAuthFile(expected, named)) throw new Error("auth file changed");
+        } finally { try { fs.closeSync(expectedFd); } catch {} }
         this.#assertPrivateDirectory(directory, directoryFd);
-        try { fs.rmSync(target, { force: true }); } catch { throw new CLIProxyError(); }
+        const quarantine = path.join(directory,
+          `.${entry.name}.quarantine.${process.pid}.${this.#randomBytes(8).toString("hex")}`);
+        let moved = false;
+        try {
+          fs.renameSync(target, quarantine);
+          moved = true;
+          const quarantinedFd = fs.openSync(quarantine, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
+          try {
+            const movedIdentity = authFileIdentity(fs.fstatSync(quarantinedFd));
+            if (!sameAuthFile(expected, movedIdentity)) throw new Error("replacement auth file");
+          } finally { try { fs.closeSync(quarantinedFd); } catch {} }
+          fs.unlinkSync(quarantine);
+        } catch (error) {
+          if (moved) {
+            try {
+              if (!fs.existsSync(target)) fs.renameSync(quarantine, target);
+            } catch { /* leave an unverified quarantine inode for manual recovery */ }
+          }
+          if (error instanceof CLIProxyError) throw error;
+          throw new CLIProxyError("CLIProxyAPI provider credential is unsafe.", "CLIPROXY_PROVIDER_FAILED");
+        }
       }
     } catch (error) {
       if (error?.code === "ENOENT" && closeDirectory) return;

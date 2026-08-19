@@ -406,3 +406,80 @@ test("Vertex import copies from a held no-follow source despite a pathname repla
   assert.equal(copied, original);
   manager.stop();
 });
+
+test("CLIProxy disconnect quarantines the expected inode and never removes a replacement at the same pathname", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  const stateRoot = path.join(root, "state");
+  const target = path.join(stateRoot, "auth", "xai-race.json");
+  const held = path.join(root, "xai-original.json");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(target, "original", { mode: 0o600 });
+  let targetChecks = 0;
+  const realLstat = fs.lstatSync;
+  const realRename = fs.renameSync;
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot,
+    spawnImpl() { return fakeChild(); },
+    probeImpl: async () => true,
+  });
+  await manager.start();
+  const originalLstat = fs.lstatSync;
+  fs.lstatSync = (value, ...args) => {
+    const stat = originalLstat(value, ...args);
+    if (value === target) {
+      targetChecks += 1;
+      if (targetChecks === 2) {
+        realRename(target, held);
+        fs.writeFileSync(target, "replacement", { mode: 0o600 });
+      }
+    }
+    return stat;
+  };
+  try {
+    await assert.rejects(manager.disconnectProvider("xai"), /unsafe|failed|provider/i);
+  } finally {
+    fs.lstatSync = realLstat;
+    fs.renameSync = realRename;
+  }
+  assert.equal(fs.readFileSync(target, "utf8"), "replacement");
+});
+
+test("CLIProxy config writes reject a run-directory swap instead of writing outside the held run identity", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  const stateRoot = path.join(root, "state");
+  const run = path.join(stateRoot, "run");
+  const held = path.join(root, "run-held");
+  const outside = path.join(root, "outside");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  fs.mkdirSync(outside, { mode: 0o700 });
+  let swapped = false;
+  const realRename = fs.renameSync;
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot,
+    randomBytes: () => Buffer.alloc(32, 0x88),
+    randomInt: () => 54330,
+    spawnImpl() { throw new Error("must not spawn after run swap"); },
+    probeImpl: async () => true,
+  });
+  fs.renameSync = (from, to) => {
+    if (!swapped && from.includes(".config.") && from.endsWith(".tmp")) {
+      swapped = true;
+      realRename(run, held);
+      fs.symlinkSync(outside, run, "dir");
+    }
+    return realRename(from, to);
+  };
+  try {
+    await assert.rejects(manager.start(), /private|unsafe|unavailable|ENOENT/i);
+  } finally { fs.renameSync = realRename; }
+  assert.equal(fs.existsSync(path.join(outside, "config.yaml")), false);
+});

@@ -167,6 +167,7 @@ class ProviderController extends EventEmitter {
       || typeof options.stateStore.read !== "function"
       || typeof options.stateStore.commitConnection !== "function"
       || typeof options.stateStore.removeConnection !== "function"
+      || typeof options.stateStore.removeConnectionAndOnboarding !== "function"
       || typeof options.stateStore.writeOnboarding !== "function"
       || typeof options.stateStore.clearOnboardingFor !== "function") throw invalid();
     if (options.keychain !== undefined && (!options.keychain || typeof options.keychain !== "object"
@@ -284,6 +285,7 @@ class ProviderController extends EventEmitter {
     let previousSecret = null;
     let secretDeleted = false;
     let externalRollback = null;
+    let durableCommitted = false;
     try {
       if (descriptor.loginKind === "api-key" || descriptor.loginKind === "local") {
         if (this.#keychain && connection?.secretRef) {
@@ -297,21 +299,26 @@ class ProviderController extends EventEmitter {
         if (result && typeof result.rollback === "function") externalRollback = result.rollback;
       }
       this.#assertLive(epoch);
-      await this.#stateStore.removeConnection(providerId);
-      await this.#stateStore.clearOnboardingFor(providerId);
+      await this.#stateStore.removeConnectionAndOnboarding(providerId);
+      durableCommitted = true;
     } catch (error) {
-      if (secretDeleted && this.#keychain) {
+      if (!durableCommitted && secretDeleted && this.#keychain) {
         try {
           if (previousSecret === null || previousSecret === undefined) await this.#keychain.delete(providerId);
           else await this.#keychain.set(providerId, previousSecret);
         } catch { /* preserve the stable public failure */ }
       }
-      if (externalRollback) { try { await externalRollback(); } catch { /* best effort */ } }
+      if (!durableCommitted && externalRollback) { try { await externalRollback(); } catch { /* best effort */ } }
       throw this.#publicError(error, "OPENBOT_PROVIDER_DISCONNECT_FAILED");
     }
     this.#errors.delete(providerId);
-    this.#assertLive(epoch);
-    await this.#publish();
+    try {
+      this.#assertLive(epoch);
+      await this.#publish();
+    } catch {
+      // The durable mutation is authoritative; publication/readback failures
+      // cannot turn a committed disconnect into a retryable failure.
+    }
     return undefined;
   }
 

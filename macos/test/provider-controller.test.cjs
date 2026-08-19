@@ -26,6 +26,10 @@ class FakeStateStore {
     this.state.connections = this.state.connections.filter((entry) => entry.providerId !== providerId);
     if (this.state.onboarding?.providerId === providerId) this.state.onboarding = null;
   }
+  async removeConnectionAndOnboarding(providerId) {
+    this.state.connections = this.state.connections.filter((entry) => entry.providerId !== providerId);
+    if (this.state.onboarding?.providerId === providerId) this.state.onboarding = null;
+  }
   async writeOnboarding(receipt) { this.state.onboarding = structuredClone(receipt); return structuredClone(receipt); }
   async clearOnboardingFor(providerId) { if (this.state.onboarding?.providerId === providerId) this.state.onboarding = null; }
 }
@@ -189,6 +193,94 @@ test("failed hosted reconnect invokes the provider rollback and preserves the pr
   await assert.rejects(controller.connect({ providerId: "anthropic-claude" }), /unavailable|failed/i);
   assert.equal(rolledBack, 1);
   assert.equal(state.state.connections[0].generation, 1);
+});
+
+test("disconnect uses one atomic durable removal-and-receipt mutation", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState();
+  let atomicCalls = 0;
+  let legacyCalls = 0;
+  state.removeConnectionAndOnboarding = async (providerId) => {
+    atomicCalls += 1;
+    state.state.connections = state.state.connections.filter(({ providerId: current }) => current !== providerId);
+    state.state.onboarding = null;
+  };
+  state.removeConnection = async () => { legacyCalls += 1; throw new Error("legacy mutation must not run"); };
+  const controller = new ProviderController({
+    stateStore: state,
+    cliproxy: {
+      connectProvider: async () => {}, importVertex: async () => {},
+      connectionStatus: async () => ({ state: "connected" }), listModels: async () => [descriptorModel()],
+      disconnectProvider: async () => {},
+    },
+  });
+  await controller.disconnect("anthropic-claude");
+  assert.equal(atomicCalls, 1);
+  assert.equal(legacyCalls, 0);
+});
+
+test("durable disconnect failure rolls back external cleanup and preserves the prior connection", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState();
+  state.removeConnectionAndOnboarding = async () => { throw new Error("durable precommit failure"); };
+  let rolledBack = 0;
+  const controller = new ProviderController({
+    stateStore: state,
+    cliproxy: {
+      connectProvider: async () => {}, importVertex: async () => {},
+      connectionStatus: async () => ({ state: "connected" }), listModels: async () => [descriptorModel()],
+      disconnectProvider: async () => ({ rollback: async () => { rolledBack += 1; } }),
+    },
+  });
+  await assert.rejects(controller.disconnect("anthropic-claude"), /failed|unavailable/i);
+  assert.equal(rolledBack, 1);
+  assert.equal(state.state.connections.length, 1);
+});
+
+test("postcommit publication failure does not report a committed disconnect as failed", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState();
+  let removed = false;
+  state.removeConnectionAndOnboarding = async () => {
+    removed = true;
+    state.state.connections = [];
+    state.state.onboarding = null;
+  };
+  const read = state.read.bind(state);
+  state.read = async () => {
+    if (removed) throw new Error("publication read failed");
+    return read();
+  };
+  const controller = new ProviderController({
+    stateStore: state,
+    cliproxy: {
+      connectProvider: async () => {}, importVertex: async () => {},
+      connectionStatus: async () => ({ state: "connected" }), listModels: async () => [descriptorModel()],
+      disconnectProvider: async () => {},
+    },
+  });
+  await controller.disconnect("anthropic-claude");
+  assert.equal(removed, true);
+});
+
+test("catalog generation ignores disconnected and unavailable connections in the real state store", async (t) => {
+  const { ProviderController } = require(controllerPath);
+  const { ProviderStateStore } = require("../src/desktop/provider-state-store.cjs");
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-provider-r1-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const store = new ProviderStateStore({ filePath: path.join(root, "providers.v1.json") });
+  await store.commitConnection({ providerId: "openai-codex", generation: 1, state: "connected", models: [descriptorModel("openai-codex")] });
+  await store.commitConnection({ providerId: "xai", generation: 10, state: "disconnected", models: [descriptorModel("xai")] });
+  const controller = new ProviderController({ stateStore: store });
+  const receipt = await controller.completeOnboarding("openai-codex");
+  assert.equal(receipt.catalogGeneration, 1);
+  assert.equal((await store.read()).onboarding.catalogGeneration, 1);
 });
 
 test("onboarding rejects a catalog-generation interleaving and carries the exact generation in the receipt", async () => {

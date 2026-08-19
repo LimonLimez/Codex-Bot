@@ -225,7 +225,9 @@ function normalizeState(value) {
   const onboarding = raw.onboarding === null ? null : normalizeReceipt(raw.onboarding);
   if (onboarding) {
     const connection = connections.find(({ providerId }) => providerId === onboarding.providerId);
-    const catalogGeneration = connections.reduce((highest, connection) => Math.max(highest, connection.generation), 0);
+    const catalogGeneration = connections
+      .filter((connection) => connection.state === "connected")
+      .reduce((highest, connection) => Math.max(highest, connection.generation), 0);
     if (!connection || connection.state !== "connected"
       || connection.generation !== onboarding.connectionGeneration
       || onboarding.catalogGeneration !== catalogGeneration) throw invalid();
@@ -346,12 +348,23 @@ class ProviderStateStore {
     });
   }
 
+  removeConnectionAndOnboarding(rawProviderId) {
+    if (typeof rawProviderId !== "string" || !PROVIDERS.has(rawProviderId)) return Promise.reject(invalid());
+    return this.#mutate((state) => {
+      state.connections = state.connections.filter(({ providerId }) => providerId !== rawProviderId);
+      if (state.onboarding?.providerId === rawProviderId) state.onboarding = null;
+      return null;
+    });
+  }
+
   writeOnboarding(rawReceipt) {
     let receipt;
     try { receipt = normalizeReceipt(rawReceipt); } catch { return Promise.reject(invalid()); }
     return this.#mutate((state) => {
       const connection = state.connections.find(({ providerId }) => providerId === receipt.providerId);
-      const catalogGeneration = state.connections.reduce((highest, entry) => Math.max(highest, entry.generation), 0);
+      const catalogGeneration = state.connections
+        .filter((entry) => entry.state === "connected")
+        .reduce((highest, entry) => Math.max(highest, entry.generation), 0);
       if (!connection || connection.state !== "connected"
         || connection.generation !== receipt.connectionGeneration
         || receipt.catalogGeneration !== catalogGeneration) throw invalid();
