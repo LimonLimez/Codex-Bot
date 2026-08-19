@@ -66,6 +66,10 @@ function safeSecret(value, { optional = false } = {}) {
 
 function localEndpoint(value) {
   if (typeof value !== "string" || value.length > 512 || /[\0\r\n]/.test(value)) throw invalid("Local provider loopback URL is invalid.");
+  const literal = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/v1$/.exec(value);
+  if (!literal || Number(literal[1]) < 1 || Number(literal[1]) > 65535) {
+    throw invalid("Local provider loopback URL is invalid.");
+  }
   let url;
   try { url = new URL(value); } catch { throw invalid("Local provider loopback URL is invalid."); }
   if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port

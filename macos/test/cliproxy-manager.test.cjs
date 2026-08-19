@@ -19,8 +19,8 @@ function fakeChild({ exitImmediately = false } = {}) {
   const child = new EventEmitter();
   child.exitCode = null;
   child.killed = false;
-  child.kill = () => { child.killed = true; child.exitCode = 0; child.emit("exit", 0, null); return true; };
-  if (exitImmediately) process.nextTick(() => { child.exitCode = 0; child.emit("exit", 0, null); });
+  child.kill = () => { child.killed = true; child.exitCode = 0; child.emit("exit", 0, null); child.emit("close", 0, null); return true; };
+  if (exitImmediately) process.nextTick(() => { child.exitCode = 0; child.emit("exit", 0, null); child.emit("close", 0, null); });
   return child;
 }
 
@@ -159,6 +159,7 @@ test("CLIProxy provider login is one-flight and every login child is stopped wit
   loginChild.kill = () => {
     loginChild.killed = true;
     loginChild.emit("exit", null, "SIGTERM");
+    loginChild.emit("close", null, "SIGTERM");
     return true;
   };
   let spawnCount = 0;
@@ -185,7 +186,7 @@ test("CLIProxy provider login is one-flight and every login child is stopped wit
   assert.equal(spawnCount, 2);
   manager.stop();
   assert.equal(loginChild.killed, true);
-  await assert.rejects(first, { code: "CLIPROXY_PROVIDER_FAILED" });
+  await assert.rejects(first, (error) => /CLIPROXY_PROVIDER_(FAILED|SUPERSEDED)/.test(error.code));
 });
 
 test("CLIProxy canonical provider flows wait for an exact credential file and reject service accounts", async (t) => {
@@ -248,5 +249,160 @@ test("Vertex import removes the exact private temporary and disconnect removes o
   assert.doesNotMatch(JSON.stringify(spawns), /private/);
   await manager.disconnectProvider("google-vertex-ai");
   assert.equal(fs.existsSync(path.join(root, "state", "auth", "vertex-imported.json")), false);
+  manager.stop();
+});
+
+test("CLIProxy rejects symlinked auth directories and never disconnects outside the private root", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const stateRoot = path.join(root, "state");
+  const outside = path.join(root, "outside");
+  fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(outside, { mode: 0o700 });
+  fs.writeFileSync(path.join(outside, "xai-outside.json"), "outside", { mode: 0o600 });
+  fs.symlinkSync(outside, path.join(stateRoot, "auth"), "dir");
+  const binaryPath = path.join(root, "cli-proxy-api");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot,
+    spawnImpl() { throw new Error("must not spawn"); },
+    probeImpl: async () => true,
+  });
+  await assert.rejects(manager.start(), /unavailable|private|unsafe/i);
+  await assert.rejects(manager.disconnectProvider("xai"), /failed|unsafe|provider/i);
+  assert.equal(fs.existsSync(path.join(outside, "xai-outside.json")), true);
+});
+
+test("CLIProxy provider settlement waits for close after exit and drained auth readiness", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  const serverChild = fakeChild();
+  const loginChild = new EventEmitter();
+  loginChild.exitCode = null;
+  loginChild.kill = () => {};
+  let closeObserved = false;
+  let count = 0;
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot: path.join(root, "state"),
+    randomBytes: () => Buffer.alloc(32, 0x55),
+    randomInt: () => 54327,
+    spawnImpl(executable, args) {
+      count += 1;
+      if (count === 1) return serverChild;
+      process.nextTick(() => {
+        loginChild.exitCode = 0;
+        loginChild.emit("exit", 0, null);
+        setTimeout(() => {
+          fs.writeFileSync(path.join(root, "state", "auth", "xai-close.json"), "{}", { mode: 0o600 });
+        }, 5);
+        setTimeout(() => { closeObserved = true; loginChild.emit("close", 0, null); }, 100);
+      });
+      return loginChild;
+    },
+    probeImpl: async () => true,
+  });
+  await manager.start();
+  await manager.connectProvider("xai");
+  assert.equal(closeObserved, true);
+  manager.stop();
+});
+
+test("CLIProxy stop fences and settles a provider flight before a later generation", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  const serverChildren = [fakeChild(), fakeChild()];
+  const loginChild = new EventEmitter();
+  loginChild.exitCode = null;
+  loginChild.kill = () => { loginChild.killed = true; };
+  let count = 0;
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot: path.join(root, "state"),
+    randomBytes: () => Buffer.alloc(32, 0x66),
+    randomInt: () => 54328,
+    spawnImpl(executable, args) {
+      count += 1;
+      if (args.includes("-local-model")) return serverChildren[Math.min(count - 1, 1)];
+      return loginChild;
+    },
+    probeImpl: async () => true,
+  });
+  await manager.start();
+  const pending = manager.connectProvider("xai");
+  await new Promise((resolve) => setImmediate(resolve));
+  manager.stop();
+  const firstOutcome = await Promise.race([
+    pending.then(() => "resolved", (error) => error.code),
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 200)),
+  ]);
+  assert.notEqual(firstOutcome, "timeout");
+  assert.match(String(firstOutcome), /CLIPROXY/);
+  assert.equal(loginChild.killed, true);
+  const next = manager.connectProvider("xai");
+  manager.stop();
+  const nextOutcome = await Promise.race([
+    next.then(() => "resolved", (error) => error.code),
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 200)),
+  ]);
+  assert.notEqual(nextOutcome, "timeout");
+  assert.match(String(nextOutcome), /CLIPROXY/);
+});
+
+test("Vertex import copies from a held no-follow source despite a pathname replacement race", async (t) => {
+  const { CLIProxyManager } = require(managerPath);
+  const root = tempRoot(t);
+  const binaryPath = path.join(root, "cli-proxy-api");
+  const sourcePath = path.join(root, "service-account.json");
+  const heldPath = path.join(root, "service-account-held.json");
+  const outsidePath = path.join(root, "outside-provider.json");
+  const original = JSON.stringify({ type: "service_account", private_key: "original" });
+  const outside = JSON.stringify({ type: "service_account", private_key: "outside" });
+  fs.writeFileSync(binaryPath, "fixture");
+  fs.chmodSync(binaryPath, 0o755);
+  fs.writeFileSync(sourcePath, original, { mode: 0o600 });
+  fs.writeFileSync(outsidePath, outside, { mode: 0o600 });
+  const serverChild = fakeChild();
+  let copied;
+  let count = 0;
+  const realCopy = fs.copyFileSync;
+  const manager = new CLIProxyManager({
+    binaryPath,
+    stateRoot: path.join(root, "state"),
+    randomBytes: () => Buffer.alloc(32, 0x77),
+    randomInt: () => 54329,
+    spawnImpl(executable, args) {
+      count += 1;
+      if (args.includes("-vertex-import")) {
+        const temporary = args[args.indexOf("-vertex-import") + 1];
+        copied = fs.readFileSync(temporary, "utf8");
+        fs.writeFileSync(path.join(root, "state", "auth", "vertex-race.json"), "{}", { mode: 0o600 });
+        return fakeChild({ exitImmediately: true });
+      }
+      return serverChild;
+    },
+    probeImpl: async () => true,
+  });
+  fs.copyFileSync = (from, to, flags) => {
+    if (from === sourcePath) {
+      fs.renameSync(sourcePath, heldPath);
+      fs.symlinkSync(outsidePath, sourcePath, "file");
+    }
+    return realCopy(from, to, flags);
+  };
+  try {
+    await manager.importVertex(sourcePath);
+  } finally {
+    fs.copyFileSync = realCopy;
+  }
+  assert.equal(copied, original);
   manager.stop();
 });

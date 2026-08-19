@@ -152,7 +152,11 @@ class ProviderController extends EventEmitter {
   #account;
   #now;
   #flights = new Map();
+  #providerTails = new Map();
+  #flightRejectors = new Map();
   #errors = new Map();
+  #disposed = false;
+  #lifecycleEpoch = 0;
 
   constructor(rawOptions = {}) {
     super();
@@ -167,7 +171,7 @@ class ProviderController extends EventEmitter {
       || typeof options.stateStore.clearOnboardingFor !== "function") throw invalid();
     if (options.keychain !== undefined && (!options.keychain || typeof options.keychain !== "object"
       || types.isProxy(options.keychain) || typeof options.keychain.set !== "function"
-      || typeof options.keychain.delete !== "function")) throw invalid();
+      || typeof options.keychain.delete !== "function" || typeof options.keychain.read !== "function")) throw invalid();
     if (options.openai !== undefined && (!options.openai || typeof options.openai !== "object"
       || types.isProxy(options.openai) || typeof options.openai.discover !== "function"
       || typeof options.openai.streamConfiguration !== "function")) throw invalid();
@@ -237,6 +241,7 @@ class ProviderController extends EventEmitter {
   }
 
   connect(rawRequest) {
+    if (this.#disposed) return Promise.reject(unavailable("OPENBOT_PROVIDER_DISPOSED"));
     let request;
     try {
       request = ownData(rawRequest, REQUEST_FIELDS, ["providerId"]);
@@ -261,32 +266,51 @@ class ProviderController extends EventEmitter {
     }
     const providerId = request.providerId;
     if (request.signal?.aborted) return Promise.reject(unavailable("OPENBOT_PROVIDER_CANCELLED"));
-    const existing = this.#flights.get(providerId);
-    if (existing) return existing;
-    let promise;
-    promise = Promise.resolve().then(() => this.#connect(request)).finally(() => {
-      if (this.#flights.get(providerId) === promise) this.#flights.delete(providerId);
-    });
-    this.#flights.set(providerId, promise);
-    return promise;
+    return this.#schedule(providerId, "connect", (epoch) => this.#connect(request, epoch));
   }
 
-  async disconnect(rawProviderId) {
+  disconnect(rawProviderId) {
     const providerId = this.#canonical(rawProviderId);
+    if (this.#disposed) return Promise.reject(unavailable("OPENBOT_PROVIDER_DISPOSED"));
+    return this.#schedule(providerId, "disconnect", (epoch) => this.#disconnect(providerId, epoch));
+  }
+
+  async #disconnect(providerId, epoch) {
+    this.#assertLive(epoch);
     const state = await this.#readState();
+    this.#assertLive(epoch);
     const connection = state.connections.find(({ providerId: current }) => current === providerId);
     const descriptor = providerDescriptor(providerId);
+    let previousSecret = null;
+    let secretDeleted = false;
+    let externalRollback = null;
     try {
       if (descriptor.loginKind === "api-key" || descriptor.loginKind === "local") {
-        if (this.#keychain && connection?.secretRef) await this.#keychain.delete(providerId);
+        if (this.#keychain && connection?.secretRef) {
+          previousSecret = await this.#keychain.read(providerId);
+          this.#assertLive(epoch);
+          await this.#keychain.delete(providerId);
+          secretDeleted = true;
+        }
       } else if (this.#cliproxy) {
-        await this.#cliproxy.disconnectProvider(providerId);
+        const result = await this.#cliproxy.disconnectProvider(providerId);
+        if (result && typeof result.rollback === "function") externalRollback = result.rollback;
       }
+      this.#assertLive(epoch);
       await this.#stateStore.removeConnection(providerId);
       await this.#stateStore.clearOnboardingFor(providerId);
     } catch (error) {
+      if (secretDeleted && this.#keychain) {
+        try {
+          if (previousSecret === null || previousSecret === undefined) await this.#keychain.delete(providerId);
+          else await this.#keychain.set(providerId, previousSecret);
+        } catch { /* preserve the stable public failure */ }
+      }
+      if (externalRollback) { try { await externalRollback(); } catch { /* best effort */ } }
       throw this.#publicError(error, "OPENBOT_PROVIDER_DISCONNECT_FAILED");
     }
+    this.#errors.delete(providerId);
+    this.#assertLive(epoch);
     await this.#publish();
     return undefined;
   }
@@ -295,18 +319,29 @@ class ProviderController extends EventEmitter {
     return (await this.#readState()).onboarding;
   }
 
-  async completeOnboarding(rawProviderId) {
+  completeOnboarding(rawProviderId) {
     const providerId = this.#canonical(rawProviderId);
+    if (this.#disposed) return Promise.reject(unavailable("OPENBOT_PROVIDER_DISPOSED"));
+    return this.#schedule(providerId, "onboarding", (epoch) => this.#completeOnboarding(providerId, epoch));
+  }
+
+  async #completeOnboarding(providerId, epoch) {
     const stateBefore = await this.#readState();
+    this.#assertLive(epoch);
     const connectionBefore = stateBefore.connections.find(({ providerId: current }) => current === providerId);
     if (!connectionBefore || connectionBefore.state !== "connected") throw unavailable("OPENBOT_PROVIDER_NOT_READY");
     const catalogBefore = await this.catalog();
+    this.#assertLive(epoch);
     const state = await this.#readState();
+    this.#assertLive(epoch);
     const connection = state.connections.find(({ providerId: current }) => current === providerId);
     if (!connection || connection.state !== "connected" || connection.generation !== connectionBefore.generation) {
       throw unavailable("OPENBOT_PROVIDER_NOT_READY");
     }
-    const models = catalogBefore.models.filter((model) => model.provider === providerId);
+    const catalogAfter = await this.catalog();
+    this.#assertLive(epoch);
+    if (catalogAfter.generation !== catalogBefore.generation) throw unavailable("OPENBOT_PROVIDER_CATALOG_STALE");
+    const models = catalogAfter.models.filter((model) => model.provider === providerId);
     if (models.length === 0) throw unavailable("OPENBOT_PROVIDER_NOT_READY");
     const completedAt = this.#now();
     if (typeof completedAt !== "string") throw unavailable();
@@ -314,6 +349,7 @@ class ProviderController extends EventEmitter {
       schemaVersion: 1,
       providerId,
       connectionGeneration: connection.generation,
+      catalogGeneration: catalogAfter.generation,
       completedAt,
     };
     try {
@@ -326,13 +362,19 @@ class ProviderController extends EventEmitter {
     }
   }
 
-  async #connect(request) {
+  async #connect(request, epoch) {
     const providerId = request.providerId;
     const descriptor = providerDescriptor(providerId);
+    this.#assertLive(epoch);
     const previousState = await this.#readState();
+    this.#assertLive(epoch);
     const previous = previousState.connections.find(({ providerId: current }) => current === providerId);
     let models;
     let connectionDetails = {};
+    let previousSecret = null;
+    let secretMutated = false;
+    let externalRollback = null;
+    let committed = false;
     try {
       this.#assertSignal(request.signal);
       if (providerId === "openai-codex") {
@@ -363,17 +405,24 @@ class ProviderController extends EventEmitter {
         if (configuration.baseUrl) connectionDetails.baseUrl = configuration.baseUrl;
         const apiKey = configuration.apiKey;
         if (apiKey !== null && apiKey !== undefined) {
-          if (!this.#keychain) throw unavailable();
+        if (!this.#keychain) throw unavailable();
+          previousSecret = await this.#keychain.read(providerId);
+          this.#assertLive(epoch);
           await this.#keychain.set(providerId, apiKey);
+          secretMutated = true;
           this.#assertSignal(request.signal);
+          this.#assertLive(epoch);
           connectionDetails.secretRef = `keychain:${providerId}`;
         }
         connectionDetails.authType = descriptor.loginKind;
       } else {
         if (!this.#cliproxy) throw unavailable();
-        if (descriptor.loginKind === "service-account") await this.#cliproxy.importVertex(request.sourcePath);
-        else await this.#cliproxy.connectProvider(providerId);
+        const externalResult = descriptor.loginKind === "service-account"
+          ? await this.#cliproxy.importVertex(request.sourcePath)
+          : await this.#cliproxy.connectProvider(providerId);
+        if (externalResult && typeof externalResult.rollback === "function") externalRollback = externalResult.rollback;
         this.#assertSignal(request.signal);
+        this.#assertLive(epoch);
         const status = await this.#cliproxy.connectionStatus(providerId);
         if (!status || status.state !== "connected") throw unavailable("OPENBOT_PROVIDER_NOT_READY");
         const listed = await this.#cliproxy.listModels(providerId);
@@ -393,15 +442,31 @@ class ProviderController extends EventEmitter {
         connectedAt: this.#now(),
       };
       await this.#stateStore.commitConnection(connection);
+      committed = true;
+      this.#assertLive(epoch);
       this.#errors.delete(providerId);
       await this.#publish();
       return (await this.listConnections()).find(({ providerId: current }) => current === providerId);
     } catch (error) {
-      if (error instanceof ProviderControllerError) throw error;
       const publicError = this.#publicError(error,
         error?.code === "OPENBOT_PROVIDER_CANCELLED" || /CANCELLED$/i.test(String(error?.code || ""))
           ? "OPENBOT_PROVIDER_CANCELLED" : "OPENBOT_PROVIDER_FAILED");
       this.#errors.set(providerId, publicError.code);
+      if (secretMutated && this.#keychain) {
+        try {
+          if (previousSecret === null || previousSecret === undefined) await this.#keychain.delete(providerId);
+          else await this.#keychain.set(providerId, previousSecret);
+        } catch { /* preserve the durable prior state and report the stable failure */ }
+      }
+      if (externalRollback) {
+        try { await externalRollback(); } catch { /* provider cleanup is best effort */ }
+      }
+      if (committed) {
+        try {
+          if (previous) await this.#stateStore.commitConnection(previous);
+          else await this.#stateStore.removeConnection(providerId);
+        } catch { /* state store remains authoritative for the next explicit retry */ }
+      }
       try { await this.#publish(); } catch { /* publication cannot expose provider details */ }
       // A failed flight never replaces the prior good connection or creates a
       // receipt. State writes occur only after every external check succeeds.
@@ -411,6 +476,41 @@ class ProviderController extends EventEmitter {
       }
       throw publicError;
     }
+  }
+
+  #schedule(providerId, kind, operation) {
+    const key = `${kind}:${providerId}`;
+    const existing = this.#flights.get(key);
+    if (existing) return existing;
+    const epoch = this.#lifecycleEpoch;
+    const previous = this.#providerTails.get(providerId) || Promise.resolve();
+    let rejectFlight;
+    const cancellation = new Promise((_resolve, reject) => { rejectFlight = reject; });
+    const operationPromise = previous.catch(() => {}).then(() => operation(epoch));
+    let promise;
+    promise = Promise.race([operationPromise, cancellation]).finally(() => {
+      if (this.#flights.get(key) === promise) this.#flights.delete(key);
+      if (this.#flightRejectors.get(key) === rejectFlight) this.#flightRejectors.delete(key);
+      if (this.#providerTails.get(providerId) === promise) this.#providerTails.delete(providerId);
+    });
+    this.#flights.set(key, promise);
+    this.#flightRejectors.set(key, rejectFlight);
+    this.#providerTails.set(providerId, promise);
+    return promise;
+  }
+
+  dispose() {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    this.#lifecycleEpoch += 1;
+    const rejectors = [...this.#flightRejectors.values()];
+    this.#flightRejectors.clear();
+    this.#flights.clear();
+    this.#providerTails.clear();
+    for (const reject of rejectors) {
+      try { reject(unavailable("OPENBOT_PROVIDER_DISPOSED")); } catch {}
+    }
+    this.removeAllListeners();
   }
 
   async #publish() {
@@ -431,6 +531,11 @@ class ProviderController extends EventEmitter {
 
   #assertSignal(signal) {
     if (signal?.aborted) throw unavailable("OPENBOT_PROVIDER_CANCELLED");
+  }
+
+  #assertLive(epoch) {
+    if (this.#disposed) throw unavailable("OPENBOT_PROVIDER_DISPOSED");
+    if (epoch !== this.#lifecycleEpoch) throw unavailable("OPENBOT_PROVIDER_SUPERSEDED");
   }
 
   #publicError(error, fallback = "OPENBOT_PROVIDER_FAILED") {

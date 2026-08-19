@@ -84,3 +84,25 @@ test("discovery rejects redirects, duplicate or malformed ids, and oversized cat
   });
   await assert.rejects(many.discover({ providerId: "openai-api-key", apiKey: "sk-private" }), /invalid|models/i);
 });
+
+test("local discovery rejects alternate numeric, octal, hexadecimal, short, and trailing-dot authorities", async () => {
+  const { OpenAICompatibleProvider } = require(providerPath);
+  const provider = new OpenAICompatibleProvider({
+    request: async () => ({
+      statusCode: 200,
+      headers: {},
+      body: JSON.stringify({ data: [model()] }),
+    }),
+  });
+  for (const baseUrl of [
+    "http://2130706433:11434/v1",
+    "http://0177.0.0.1:11434/v1",
+    "http://0x7f000001:11434/v1",
+    "http://127.1:11434/v1",
+    "http://127.0.0.1.:11434/v1",
+  ]) {
+    await assert.rejects(provider.discover({
+      providerId: "local-openai-compatible", baseUrl, apiKey: null,
+    }), /invalid|loopback/i);
+  }
+});

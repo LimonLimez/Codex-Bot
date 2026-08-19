@@ -1,5 +1,6 @@
 "use strict";
 
+const nodeFs = require("node:fs");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
@@ -24,8 +25,15 @@ const MODEL_FIELDS = new Set([
   "efforts", "reasoningEfforts", "supportedReasoningEfforts", "serviceTiers", "defaultReasoningEffort",
   "defaultServiceTier", "catalogGeneration", "inputModalities", "supportsPersonality", "isDefault",
 ]);
-const RECEIPT_FIELDS = new Set(["schemaVersion", "providerId", "connectionGeneration", "completedAt"]);
+const RECEIPT_FIELDS = new Set(["schemaVersion", "providerId", "connectionGeneration", "catalogGeneration", "completedAt"]);
 const STATE_FIELDS = new Set(["schemaVersion", "connections", "onboarding"]);
+const PRIVATE_MODE = 0o700;
+const FILE_MODE = 0o600;
+const CURRENT_UID = typeof process.getuid === "function" ? process.getuid() : -1;
+const OPEN_DIRECTORY_FLAGS = nodeFs.constants.O_RDONLY
+  | nodeFs.constants.O_DIRECTORY | nodeFs.constants.O_NOFOLLOW | nodeFs.constants.O_CLOEXEC;
+const OPEN_FILE_FLAGS = nodeFs.constants.O_RDONLY
+  | nodeFs.constants.O_NOFOLLOW | nodeFs.constants.O_CLOEXEC;
 
 class ProviderStateStoreError extends Error {
   constructor(message = "OpenBot provider state is invalid.", code = "OPENBOT_PROVIDER_STATE_FAILED") {
@@ -165,6 +173,7 @@ function normalizeConnection(value) {
   if (!PROVIDERS.has(raw.providerId) || !Number.isSafeInteger(raw.generation) || raw.generation < 0
     || !CONNECTION_STATES.has(raw.state)) throw invalid();
   const models = denseArray(raw.models, MAX_MODELS).map(normalizeModel);
+  if (models.some(({ provider }) => provider !== raw.providerId)) throw invalid();
   const result = {
     providerId: raw.providerId,
     generation: raw.generation,
@@ -191,13 +200,15 @@ function normalizeConnection(value) {
 }
 
 function normalizeReceipt(value) {
-  const raw = ownData(value, RECEIPT_FIELDS, ["schemaVersion", "providerId", "connectionGeneration", "completedAt"]);
+  const raw = ownData(value, RECEIPT_FIELDS, ["schemaVersion", "providerId", "connectionGeneration", "catalogGeneration", "completedAt"]);
   if (raw.schemaVersion !== SCHEMA_VERSION || !PROVIDERS.has(raw.providerId)
-    || !Number.isSafeInteger(raw.connectionGeneration) || raw.connectionGeneration < 0) throw invalid();
+    || !Number.isSafeInteger(raw.connectionGeneration) || raw.connectionGeneration < 0
+    || !Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0) throw invalid();
   return Object.freeze({
     schemaVersion: SCHEMA_VERSION,
     providerId: raw.providerId,
     connectionGeneration: raw.connectionGeneration,
+    catalogGeneration: raw.catalogGeneration,
     completedAt: timestamp(raw.completedAt),
   });
 }
@@ -214,8 +225,10 @@ function normalizeState(value) {
   const onboarding = raw.onboarding === null ? null : normalizeReceipt(raw.onboarding);
   if (onboarding) {
     const connection = connections.find(({ providerId }) => providerId === onboarding.providerId);
+    const catalogGeneration = connections.reduce((highest, connection) => Math.max(highest, connection.generation), 0);
     if (!connection || connection.state !== "connected"
-      || connection.generation !== onboarding.connectionGeneration) throw invalid();
+      || connection.generation !== onboarding.connectionGeneration
+      || onboarding.catalogGeneration !== catalogGeneration) throw invalid();
   }
   connections.sort((left, right) => PROVIDER_IDS.indexOf(left.providerId) - PROVIDER_IDS.indexOf(right.providerId));
   return Object.freeze({ schemaVersion: SCHEMA_VERSION, connections: Object.freeze(connections), onboarding });
@@ -229,6 +242,62 @@ function cloneState(value) {
   if (Array.isArray(value)) return Object.freeze(value.map(cloneState));
   if (!value || typeof value !== "object") return value;
   return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, cloneState(nested)])));
+}
+
+function statTime(stat, field) {
+  const ns = stat[`${field}Ns`];
+  if (typeof ns === "bigint") return ns;
+  const ms = stat[`${field}Ms`];
+  if (typeof ms === "bigint") return ms * 1_000_000n;
+  if (Number.isFinite(ms)) return BigInt(Math.trunc(ms * 1_000_000));
+  throw new Error("stat time unavailable");
+}
+
+function privateDirectoryIdentity(stat) {
+  const bad = !stat || typeof stat.isDirectory !== "function" || !stat.isDirectory()
+    || typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink()
+    || (BigInt(stat.mode) & 0o7777n) !== BigInt(PRIVATE_MODE)
+    || CURRENT_UID < 0 || BigInt(stat.uid) !== BigInt(CURRENT_UID);
+  if (bad) {
+    throw invalid();
+  }
+  return Object.freeze({
+    dev: BigInt(stat.dev), ino: BigInt(stat.ino), uid: BigInt(stat.uid),
+    mode: BigInt(stat.mode), birthtime: statTime(stat, "birthtime"),
+  });
+}
+
+function sameDirectory(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
+    && left.mode === right.mode && left.birthtime === right.birthtime;
+}
+
+function regularFileIdentity(stat, directory, maximum = MAX_FILE_BYTES) {
+  if (!stat || typeof stat.isFile !== "function" || !stat.isFile()
+    || typeof stat.isSymbolicLink === "function" && stat.isSymbolicLink()
+    || BigInt(stat.dev) !== directory.dev || BigInt(stat.uid) !== directory.uid
+    || (BigInt(stat.mode) & 0o7777n) !== BigInt(FILE_MODE)
+    || BigInt(stat.nlink) !== 1n || BigInt(stat.size) < 0n
+    || BigInt(stat.size) > BigInt(maximum)) throw invalid();
+  return Object.freeze({
+    dev: BigInt(stat.dev), ino: BigInt(stat.ino), uid: BigInt(stat.uid), mode: BigInt(stat.mode),
+    nlink: BigInt(stat.nlink), size: BigInt(stat.size), birthtime: statTime(stat, "birthtime"),
+    mtime: statTime(stat, "mtime"), ctime: statTime(stat, "ctime"),
+  });
+}
+
+function sameFile(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
+    && left.mode === right.mode && left.nlink === right.nlink && left.size === right.size
+    && left.birthtime === right.birthtime && left.mtime === right.mtime && left.ctime === right.ctime;
+}
+
+function canonicalPathEquivalent(requested, canonical) {
+  if (requested === canonical) return true;
+  // macOS exposes /tmp and /var through the stable /private namespace. This
+  // kernel-owned alias is not a user-controlled parent substitution.
+  return (requested.startsWith("/var/") || requested.startsWith("/tmp/"))
+    && canonical === `/private${requested}`;
 }
 
 class ProviderStateStore {
@@ -282,8 +351,10 @@ class ProviderStateStore {
     try { receipt = normalizeReceipt(rawReceipt); } catch { return Promise.reject(invalid()); }
     return this.#mutate((state) => {
       const connection = state.connections.find(({ providerId }) => providerId === receipt.providerId);
+      const catalogGeneration = state.connections.reduce((highest, entry) => Math.max(highest, entry.generation), 0);
       if (!connection || connection.state !== "connected"
-        || connection.generation !== receipt.connectionGeneration) throw invalid();
+        || connection.generation !== receipt.connectionGeneration
+        || receipt.catalogGeneration !== catalogGeneration) throw invalid();
       state.onboarding = receipt;
       return receipt;
     });
@@ -319,52 +390,196 @@ class ProviderStateStore {
   }
 
   async #readState() {
-    let stat;
-    try { stat = await this.#fs.lstat(this.#filePath); }
+    let directory;
+    try { directory = await this.#openDirectory(); }
     catch (error) {
       if (error?.code === "ENOENT") return emptyState();
       throw new ProviderStateStoreError();
     }
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES
-      || (stat.mode & 0o777) !== 0o600) throw new ProviderStateStoreError();
-    let source;
-    try { source = await this.#fs.readFile(this.#filePath, "utf8"); }
-    catch { throw new ProviderStateStoreError(); }
-    if (Buffer.byteLength(source, "utf8") > MAX_FILE_BYTES) throw new ProviderStateStoreError();
-    try { return normalizeState(JSON.parse(source)); } catch { throw new ProviderStateStoreError(); }
+    try {
+      await this.#assertDirectory(directory);
+      const target = await this.#readTarget(directory);
+      await this.#assertDirectory(directory);
+      return target.missing ? emptyState() : normalizeState(JSON.parse(target.source));
+    } catch (error) {
+      if (error instanceof ProviderStateStoreError) throw error;
+      throw new ProviderStateStoreError();
+    } finally {
+      try { await directory.handle.close(); } catch {}
+    }
   }
 
   async #writeState(state) {
     const directory = path.dirname(this.#filePath);
-    try {
-      await this.#fs.mkdir(directory, { recursive: true, mode: 0o700 });
-      let directoryStat = await this.#fs.lstat(directory);
-      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error("unsafe directory");
-      await this.#fs.chmod(directory, 0o700);
-      directoryStat = await this.#fs.lstat(directory);
-      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
-        || (directoryStat.mode & 0o777) !== 0o700) throw new Error("unsafe directory");
-    } catch { throw new ProviderStateStoreError(); }
+    try { await this.#fs.mkdir(directory, { recursive: true, mode: PRIVATE_MODE }); }
+    catch { throw new ProviderStateStoreError(); }
+    let directoryContext;
+    try { directoryContext = await this.#openDirectory(); }
+    catch { throw new ProviderStateStoreError(); }
+    const source = `${JSON.stringify(state)}\n`;
+    const bytes = Buffer.from(source, "utf8");
+    if (bytes.length > MAX_FILE_BYTES) {
+      try { await directoryContext.handle.close(); } catch {}
+      throw new ProviderStateStoreError();
+    }
     let id;
     try { id = this.#randomUUID(); } catch { throw new ProviderStateStoreError(); }
     if (typeof id !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(id)) throw new ProviderStateStoreError();
-    const temporary = path.join(directory, `.${path.basename(this.#filePath)}.${id}.tmp`);
+    const temporary = path.join(directoryContext.stablePath, `.${path.basename(this.#filePath)}.${id}.tmp`);
     let handle = null;
+    let renamed = false;
     try {
-      handle = await this.#fs.open(temporary, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify(state)}\n`, "utf8");
+      await this.#assertDirectory(directoryContext);
+      const before = await this.#targetSnapshot(directoryContext);
+      handle = await this.#fs.open(temporary,
+        nodeFs.constants.O_WRONLY | nodeFs.constants.O_CREAT | nodeFs.constants.O_EXCL
+          | nodeFs.constants.O_NOFOLLOW | nodeFs.constants.O_CLOEXEC,
+        FILE_MODE);
+      const created = regularFileIdentity(await handle.stat({ bigint: true }), directoryContext.identity);
+      const namedCreated = regularFileIdentity(await this.#fs.lstat(temporary, { bigint: true }), directoryContext.identity);
+      if (!sameFile(created, namedCreated) || created.size !== 0n) throw new Error("temporary identity");
+      await this.#writeExact(handle, bytes);
       await handle.sync();
       await handle.close();
       handle = null;
-      await this.#fs.rename(temporary, this.#filePath);
-      await this.#fs.chmod(this.#filePath, 0o600);
-      const stat = await this.#fs.lstat(this.#filePath);
-      if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new Error("unsafe file");
+      const synced = regularFileIdentity(await this.#fs.lstat(temporary, { bigint: true }), directoryContext.identity);
+      if (synced.size !== BigInt(bytes.length)) throw new Error("temporary size");
+      await this.#assertTargetUnchanged(directoryContext, before);
+      await this.#assertDirectory(directoryContext);
+      try {
+        await this.#fs.rename(temporary, path.join(directoryContext.stablePath, path.basename(this.#filePath)));
+        renamed = true;
+      } catch {
+        const uncertain = await this.#readTarget(directoryContext);
+        if (uncertain.missing || uncertain.source !== source) throw new Error("rename uncertain");
+        renamed = true;
+      }
+      try { await directoryContext.handle.sync(); }
+      catch {
+        const uncertain = await this.#readTarget(directoryContext);
+        if (uncertain.missing || uncertain.source !== source) throw new Error("commit uncertain");
+      }
+      const committed = await this.#readTarget(directoryContext);
+      if (committed.missing || committed.source !== source) throw new Error("commit readback");
     } catch {
       try { await handle?.close(); } catch { /* best effort */ }
-      try { await this.#fs.rm(temporary, { force: true }); } catch { /* best effort */ }
+      if (renamed) {
+        try {
+          const committed = await this.#readTarget(directoryContext);
+          if (!committed.missing && committed.source === source) {
+            try { await directoryContext.handle.close(); } catch {}
+            return;
+          }
+        } catch { /* preserve failure below */ }
+      }
+      try { await this.#unlinkOwnedTemporary(directoryContext, temporary); } catch { /* best effort */ }
+      try { await directoryContext.handle.close(); } catch {}
       throw new ProviderStateStoreError();
     }
+    try { await directoryContext.handle.close(); } catch {}
+  }
+
+  async #openDirectory() {
+    const directoryPath = path.dirname(this.#filePath);
+    let canonical;
+    try { canonical = nodeFs.realpathSync.native(directoryPath); } catch (error) { throw error; }
+    if (!canonicalPathEquivalent(directoryPath, canonical) || path.normalize(canonical) !== canonical) throw invalid();
+    const named = privateDirectoryIdentity(await this.#fs.lstat(directoryPath, { bigint: true }));
+    const handle = await this.#fs.open(directoryPath, OPEN_DIRECTORY_FLAGS);
+    try {
+      const opened = privateDirectoryIdentity(await handle.stat({ bigint: true }));
+      if (!sameDirectory(named, opened)) throw new Error("directory identity");
+      return { path: directoryPath, stablePath: this.#stableDirectoryPath(directoryPath, opened), handle, identity: opened };
+    } catch (error) {
+      try { await handle.close(); } catch {}
+      throw error;
+    }
+  }
+
+  async #assertDirectory(context) {
+    const canonical = nodeFs.realpathSync.native(context.path);
+    if (!canonicalPathEquivalent(context.path, canonical)) throw new Error("directory replaced");
+    const opened = privateDirectoryIdentity(await context.handle.stat({ bigint: true }));
+    const named = privateDirectoryIdentity(await this.#fs.lstat(context.path, { bigint: true }));
+    const stable = privateDirectoryIdentity(await this.#fs.lstat(context.stablePath, { bigint: true }));
+    if (!sameDirectory(context.identity, opened) || !sameDirectory(opened, named)
+      || !sameDirectory(opened, stable)) throw new Error("directory identity");
+  }
+
+  #stableDirectoryPath(directoryPath, identity) {
+    try {
+      const candidate = `/.vol/${identity.dev}/${identity.ino}`;
+      const stat = nodeFs.lstatSync(candidate, { bigint: true });
+      nodeFs.realpathSync.native(candidate);
+      if (sameDirectory(identity, privateDirectoryIdentity(stat))) return candidate;
+    } catch { /* non-macOS hosts use the verified canonical path */ }
+    return directoryPath;
+  }
+
+  async #readTarget(context) {
+    let before;
+    const target = path.join(context.stablePath, path.basename(this.#filePath));
+    try { before = regularFileIdentity(await this.#fs.lstat(target, { bigint: true }), context.identity); }
+    catch (error) { if (error?.code === "ENOENT") return { missing: true }; throw error; }
+    let handle;
+    try {
+      handle = await this.#fs.open(target, OPEN_FILE_FLAGS);
+      const opened = regularFileIdentity(await handle.stat({ bigint: true }), context.identity);
+      if (!sameFile(before, opened)) throw new Error("file identity");
+      const bytes = await this.#readBounded(handle);
+      const finished = regularFileIdentity(await handle.stat({ bigint: true }), context.identity);
+      const named = regularFileIdentity(await this.#fs.lstat(target, { bigint: true }), context.identity);
+      if (!sameFile(before, finished) || !sameFile(before, named) || BigInt(bytes.length) !== before.size) throw new Error("file changed");
+      const source = bytes.toString("utf8");
+      if (!Buffer.from(source, "utf8").equals(bytes)) throw new Error("invalid utf8");
+      return { missing: false, source };
+    } finally { try { await handle?.close(); } catch {} }
+  }
+
+  async #readBounded(handle) {
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const room = MAX_FILE_BYTES + 1 - total;
+      if (room <= 0) throw new Error("state too large");
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, room));
+      const result = await handle.read(buffer, 0, buffer.length, null);
+      if (!result || !Number.isSafeInteger(result.bytesRead) || result.bytesRead < 0 || result.bytesRead > buffer.length) throw new Error("read");
+      if (result.bytesRead === 0) break;
+      total += result.bytesRead;
+      if (total > MAX_FILE_BYTES) throw new Error("state too large");
+      chunks.push(buffer.subarray(0, result.bytesRead));
+    }
+    return Buffer.concat(chunks, total);
+  }
+
+  async #writeExact(handle, bytes) {
+    let offset = 0;
+    while (offset < bytes.length) {
+      const result = await handle.write(bytes, offset, bytes.length - offset, null);
+      if (!result || !Number.isSafeInteger(result.bytesWritten) || result.bytesWritten <= 0
+        || result.bytesWritten > bytes.length - offset) throw new Error("write");
+      offset += result.bytesWritten;
+    }
+  }
+
+  async #targetSnapshot(context) {
+    const target = path.join(context.stablePath, path.basename(this.#filePath));
+    try { return regularFileIdentity(await this.#fs.lstat(target, { bigint: true }), context.identity); }
+    catch (error) { if (error?.code === "ENOENT") return null; throw error; }
+  }
+
+  async #assertTargetUnchanged(context, before) {
+    const after = await this.#targetSnapshot(context);
+    if (before === null ? after !== null : after === null || !sameFile(before, after)) throw new Error("target changed");
+  }
+
+  async #unlinkOwnedTemporary(context, temporary) {
+    try {
+      const stat = regularFileIdentity(await this.#fs.lstat(temporary, { bigint: true }), context.identity);
+      if (stat.nlink !== 1n) return;
+      await this.#fs.rm(temporary, { force: true });
+    } catch (error) { if (error?.code !== "ENOENT") throw error; }
   }
 }
 

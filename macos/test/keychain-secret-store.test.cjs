@@ -68,3 +68,24 @@ test("Keychain read returns only bounded secret output and delete uses explicit 
     ["delete-generic-password", "-s", "com.limonlimez.openbot.providers"],
   ]);
 });
+
+test("Keychain waits for close and drained stdout after exit", async () => {
+  const { KeychainSecretStore } = require(storePath);
+  const child = new EventEmitter();
+  child.stdin = { end() {} };
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.kill = () => {};
+  const secrets = new KeychainSecretStore({
+    service: "com.limonlimez.openbot.providers",
+    spawn: () => {
+      process.nextTick(() => {
+        child.emit("exit", 0, null);
+        setImmediate(() => child.stdout.emit("data", Buffer.from("late-secret\n")));
+        setTimeout(() => child.emit("close", 0, null), 10);
+      });
+      return child;
+    },
+  });
+  assert.equal(await secrets.read("openai-api-key"), "late-secret");
+});

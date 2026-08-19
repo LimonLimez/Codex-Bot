@@ -92,6 +92,9 @@ function settledSecurityChild(child, { input = null, captureStdout = false } = {
   }
   return new Promise((resolve, reject) => {
     let settled = false;
+    let exited = false;
+    let exitCode = null;
+    let exitSignal = null;
     let timer;
     const cleanup = () => {
       clearTimeout(timer);
@@ -107,13 +110,17 @@ function settledSecurityChild(child, { input = null, captureStdout = false } = {
     };
     const onError = () => finish(() => reject(failed()));
     const onClose = (code, signal) => finish(() => {
-      if (code !== 0 || signal) return reject(failed());
+      const finalCode = code === null || code === undefined ? exitCode : code;
+      const finalSignal = signal === null || signal === undefined ? exitSignal : signal;
+      if (!exited && finalCode === null && !finalSignal) return reject(failed());
+      if (finalCode !== 0 || finalSignal) return reject(failed());
       if (stderr.overflow) return reject(failed());
       resolve({ stdout: Buffer.concat(stdout.chunks).toString("utf8") });
     });
     const onExit = (code, signal) => {
-      // `exit` is enough for the security helper; a later `close` is ignored.
-      onClose(code, signal);
+      exited = true;
+      exitCode = code;
+      exitSignal = signal;
     };
     timer = setTimeout(() => finish(() => {
       try { child.kill?.(); } catch { /* process cleanup is best effort */ }

@@ -29,7 +29,7 @@ test("onboarding receipt is tied to an authoritative connection generation", asy
   const store = new ProviderStateStore({ filePath: path.join(root, "providers.v1.json") });
   const now = "2026-08-18T00:00:00.000Z";
   await store.commitConnection({ providerId: "openai-codex", generation: 7, state: "connected", models: [model()] });
-  await store.writeOnboarding({ schemaVersion: 1, providerId: "openai-codex", connectionGeneration: 7, completedAt: now });
+  await store.writeOnboarding({ schemaVersion: 1, providerId: "openai-codex", connectionGeneration: 7, catalogGeneration: 7, completedAt: now });
   assert.equal((await store.read()).onboarding.connectionGeneration, 7);
   await store.removeConnection("openai-codex");
   assert.equal((await store.read()).onboarding, null);
@@ -68,4 +68,117 @@ test("same-provider commits serialize and remove clears only matching onboarding
     store.commitConnection({ providerId: "openai-codex", generation: 2, state: "connected", models: [model()] }),
   ]);
   assert.equal((await store.read()).connections[0].generation, 2);
+});
+
+test("state rejects a model owned by a different provider", async (t) => {
+  const { ProviderStateStore } = require(storePath);
+  const root = tempRoot(t);
+  const store = new ProviderStateStore({ filePath: path.join(root, "providers.v1.json") });
+  await assert.rejects(store.commitConnection({
+    providerId: "anthropic-claude",
+    generation: 1,
+    state: "connected",
+    models: [{ provider: "openai-api-key", model: "gpt-live", label: "Wrong owner" }],
+  }), /invalid/i);
+});
+
+test("state commit treats post-rename durability uncertainty as committed when readback matches", async (t) => {
+  const { ProviderStateStore } = require(storePath);
+  const root = tempRoot(t);
+  const filePath = path.join(root, "providers.v1.json");
+  const first = new ProviderStateStore({ filePath });
+  await first.commitConnection({
+    providerId: "openai-codex", generation: 1, state: "connected", models: [model()],
+  });
+  let failOnce = true;
+  const uncertain = new ProviderStateStore({
+    filePath,
+    fs: {
+      ...require("node:fs/promises"),
+      async chmod(target, mode) {
+        if (target === filePath && failOnce) {
+          failOnce = false;
+          throw new Error("post-rename durability uncertain");
+        }
+        return require("node:fs/promises").chmod(target, mode);
+      },
+    },
+  });
+  const committed = await uncertain.commitConnection({
+    providerId: "openai-codex", generation: 2, state: "connected", models: [model()],
+  });
+  assert.equal(committed.generation, 2);
+  assert.equal((await uncertain.read()).connections[0].generation, 2);
+});
+
+test("state read rejects a file replaced by a symlink after its initial identity check", async (t) => {
+  const { ProviderStateStore } = require(storePath);
+  const fs = require("node:fs/promises");
+  const root = tempRoot(t);
+  const filePath = path.join(root, "providers.v1.json");
+  const outside = path.join(root, "outside.json");
+  const held = path.join(root, "held.json");
+  const initial = new ProviderStateStore({ filePath });
+  await initial.commitConnection({
+    providerId: "openai-codex", generation: 1, state: "connected", models: [model()],
+  });
+  await fs.writeFile(outside, JSON.stringify({ schemaVersion: 1, connections: [], onboarding: null }));
+  let raced = false;
+  const race = async () => {
+    if (!raced) {
+      raced = true;
+      await fs.rename(filePath, held);
+      await fs.symlink(outside, filePath);
+    }
+  };
+  const racing = new ProviderStateStore({
+    filePath,
+    fs: {
+      ...fs,
+      async readFile(target, encoding) {
+        if (target === filePath) await race();
+        return fs.readFile(target, encoding);
+      },
+      async open(target, ...args) {
+        if (target === filePath) await race();
+        return fs.open(target, ...args);
+      },
+    },
+  });
+  await assert.rejects(racing.read(), /failed|invalid/i);
+  assert.equal((await fs.lstat(outside)).isFile(), true);
+});
+
+test("state write rejects a checked parent replaced by a symlink before mode changes", async (t) => {
+  const { ProviderStateStore } = require(storePath);
+  const fs = require("node:fs/promises");
+  const root = tempRoot(t);
+  const directory = path.join(root, "private");
+  const outside = path.join(root, "outside");
+  const moved = path.join(root, "private-held");
+  const filePath = path.join(directory, "providers.v1.json");
+  await fs.mkdir(directory, { mode: 0o700 });
+  await fs.mkdir(outside, { mode: 0o755 });
+  let swapped = false;
+  const realLstat = fs.lstat;
+  const racing = new ProviderStateStore({
+    filePath,
+    fs: {
+      ...fs,
+      async lstat(target, ...args) {
+        const result = await realLstat(target, ...args);
+        if (!swapped && target === directory) {
+          swapped = true;
+          await fs.rename(directory, moved);
+          await fs.symlink(outside, directory, "dir");
+        }
+        return result;
+      },
+    },
+  });
+  await assert.rejects(racing.commitConnection({
+    providerId: "openai-codex", generation: 1, state: "connected", models: [model()],
+  }), /failed|invalid/i);
+  assert.deepEqual(await fs.readdir(outside), []);
+  assert.equal((await fs.lstat(outside)).mode & 0o777, 0o755);
 });

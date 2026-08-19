@@ -24,6 +24,29 @@ const MAX_PROVIDER_STDERR_BYTES = 16 * 1024;
 const MAX_MODEL_BYTES = 1_048_576;
 const MAX_MODELS = 200;
 const MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const PRIVATE_MODE = 0o700;
+const CURRENT_UID = typeof process.getuid === "function" ? process.getuid() : -1;
+const DIRECTORY_FLAGS = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY
+  | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC;
+
+function directoryIdentity(stat) {
+  if (!stat || !stat.isDirectory() || stat.isSymbolicLink()
+    || (stat.mode & 0o7777) !== PRIVATE_MODE || CURRENT_UID < 0 || stat.uid !== CURRENT_UID) throw new Error("unsafe directory");
+  return { dev: stat.dev, ino: stat.ino, uid: stat.uid, mode: stat.mode, birthtimeMs: stat.birthtimeMs };
+}
+
+function sameDirectory(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
+    && left.mode === right.mode && left.birthtimeMs === right.birthtimeMs;
+}
+
+function canonicalDirectoryPath(requested) {
+  const canonical = fs.realpathSync.native(requested);
+  if (canonical === requested) return canonical;
+  if ((requested.startsWith("/var/") || requested.startsWith("/tmp/"))
+    && canonical === `/private${requested}`) return canonical;
+  throw new Error("directory path is not stable");
+}
 
 function plainOwn(value, allowed, required = []) {
   if (!value || typeof value !== "object" || Array.isArray(value) || types.isProxy(value)) throw new Error();
@@ -162,9 +185,14 @@ class CLIProxyManager {
   #configPath = null;
   #authDirectory = null;
   #runDirectory = null;
+  #authStableDirectory = null;
+  #runStableDirectory = null;
+  #authDirectoryFd = null;
+  #runDirectoryFd = null;
   #lifecycleEpoch = 0;
   #providerChildren = new Set();
   #providerPromises = new Map();
+  #providerRejectors = new Map();
 
   constructor({
     binaryPath,
@@ -232,12 +260,28 @@ class CLIProxyManager {
     }
     const authDirectory = path.join(this.#stateRoot, "auth");
     const configDirectory = path.join(this.#stateRoot, "run");
-    fs.mkdirSync(authDirectory, { recursive: true, mode: 0o700 });
-    fs.mkdirSync(configDirectory, { recursive: true, mode: 0o700 });
-    fs.chmodSync(authDirectory, 0o700);
-    fs.chmodSync(configDirectory, 0o700);
+    let authFd;
+    let runFd;
+    try {
+      fs.mkdirSync(this.#stateRoot, { recursive: true, mode: PRIVATE_MODE });
+      fs.chmodSync(this.#stateRoot, PRIVATE_MODE);
+      canonicalDirectoryPath(this.#stateRoot);
+      directoryIdentity(fs.lstatSync(this.#stateRoot));
+      fs.mkdirSync(authDirectory, { recursive: true, mode: PRIVATE_MODE });
+      fs.mkdirSync(configDirectory, { recursive: true, mode: PRIVATE_MODE });
+      authFd = this.#openPrivateDirectory(authDirectory);
+      runFd = this.#openPrivateDirectory(configDirectory);
+    } catch {
+      try { if (authFd !== undefined) fs.closeSync(authFd); } catch {}
+      try { if (runFd !== undefined) fs.closeSync(runFd); } catch {}
+      throw new CLIProxyError("CLIProxyAPI private state directory is unsafe.", "CLIPROXY_PRIVATE_STATE_FAILED");
+    }
     this.#authDirectory = authDirectory;
     this.#runDirectory = configDirectory;
+    this.#authDirectoryFd = authFd;
+    this.#runDirectoryFd = runFd;
+    this.#authStableDirectory = this.#stableDirectory(authDirectory, authFd);
+    this.#runStableDirectory = this.#stableDirectory(configDirectory, runFd);
     const credential = this.#randomBytes(32).toString("hex");
     const port = this.#randomInt(49152, 65536);
     const endpoint = `http://127.0.0.1:${port}/v1`;
@@ -259,6 +303,13 @@ class CLIProxyManager {
       fs.rmSync(configPath, { force: true });
       this.#authDirectory = null;
       this.#runDirectory = null;
+      this.#authStableDirectory = null;
+      this.#runStableDirectory = null;
+      for (const descriptor of [this.#authDirectoryFd, this.#runDirectoryFd]) {
+        if (descriptor !== null && descriptor !== undefined) { try { fs.closeSync(descriptor); } catch {} }
+      }
+      this.#authDirectoryFd = null;
+      this.#runDirectoryFd = null;
       throw new CLIProxyError();
     }
     this.#child = child;
@@ -302,6 +353,13 @@ class CLIProxyManager {
       if (this.#configPath === configPath) this.#configPath = null;
       if (this.#authDirectory === authDirectory) this.#authDirectory = null;
       if (this.#runDirectory === configDirectory) this.#runDirectory = null;
+      this.#authStableDirectory = null;
+      this.#runStableDirectory = null;
+      for (const descriptor of [this.#authDirectoryFd, this.#runDirectoryFd]) {
+        if (descriptor !== null && descriptor !== undefined) { try { fs.closeSync(descriptor); } catch {} }
+      }
+      this.#authDirectoryFd = null;
+      this.#runDirectoryFd = null;
       try { fs.rmSync(configPath, { force: true }); } catch {}
     };
     child.once?.("error", onTermination);
@@ -326,16 +384,22 @@ class CLIProxyManager {
     const providerId = descriptor.providerId;
     const existing = this.#providerPromises.get(providerId);
     if (existing) return existing;
+    let rejectFlight;
+    const cancellation = new Promise((_resolve, reject) => { rejectFlight = reject; });
+    let operation;
     let promise;
     // Queue the body behind a microtask before invoking it. This makes the
     // map write happen before any dependency can synchronously re-enter the
     // manager and request the same provider.
-    promise = Promise.resolve().then(() => this.#connectProvider(descriptor)).finally(() => {
+    operation = Promise.resolve().then(() => this.#connectProvider(descriptor));
+    promise = Promise.race([operation, cancellation]).finally(() => {
       if (this.#providerPromises.get(providerId) === promise) {
         this.#providerPromises.delete(providerId);
+        this.#providerRejectors.delete(providerId);
       }
     });
     this.#providerPromises.set(providerId, promise);
+    this.#providerRejectors.set(providerId, rejectFlight);
     return promise;
   }
 
@@ -344,13 +408,27 @@ class CLIProxyManager {
     const epoch = this.#lifecycleEpoch;
     const configPath = this.#configPath;
     if (!configPath || !this.#authDirectory) throw new CLIProxyError();
-    const snapshot = this.#snapshotAuth(descriptor);
-    await this.#runProviderChild(
-      ["-config", configPath, descriptor.loginFlag],
-      epoch,
-    );
-    await this.#waitForAuth(descriptor, snapshot, epoch);
-    return this.connectionStatus(descriptor.providerId);
+    const before = this.#snapshotAuth(descriptor);
+    const snapshot = this.#captureAuth(descriptor);
+    try {
+      await this.#runProviderChild(
+        ["-config", configPath, descriptor.loginFlag],
+        epoch,
+      );
+      await this.#waitForAuth(descriptor, before, epoch);
+    } catch (error) {
+      try { await this.#restoreAuth(descriptor, snapshot); } catch { /* preserve the original stable error */ }
+      throw error;
+    }
+    const status = await this.connectionStatus(descriptor.providerId);
+    const result = { ...status };
+    Object.defineProperty(result, "rollback", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: () => this.#restoreAuth(descriptor, snapshot),
+    });
+    return Object.freeze(result);
   }
 
   importVertex(sourcePath) {
@@ -367,36 +445,91 @@ class CLIProxyManager {
     }
     const existing = this.#providerPromises.get(providerId);
     if (existing) return existing;
+    let rejectFlight;
+    const cancellation = new Promise((_resolve, reject) => { rejectFlight = reject; });
+    let operation;
     let promise;
-    promise = Promise.resolve().then(async () => {
+    operation = Promise.resolve().then(async () => {
       await this.start();
       const epoch = this.#lifecycleEpoch;
       const configPath = this.#configPath;
       const runDirectory = this.#runDirectory;
       if (!configPath || !runDirectory || !this.#authDirectory) throw new CLIProxyError();
-      let sourceStat;
-      try {
-        sourceStat = fs.lstatSync(source);
-        if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error();
-      } catch {
-        throw new CLIProxyError("CLIProxyAPI provider source is invalid.", "CLIPROXY_PROVIDER_INVALID");
-      }
-      const snapshot = this.#snapshotAuth(providerDescriptor(providerId));
+      let sourceBytes;
+      try { sourceBytes = this.#readHeldVertexSource(source); }
+      catch { throw new CLIProxyError("CLIProxyAPI provider source is invalid.", "CLIPROXY_PROVIDER_INVALID"); }
+      const descriptor = providerDescriptor(providerId);
+      const before = this.#snapshotAuth(descriptor);
+      const snapshot = this.#captureAuth(descriptor);
       const temporary = path.join(runDirectory, `.vertex-${process.pid}-${this.#randomBytes(12).toString("hex")}.json`);
       try {
-        fs.copyFileSync(source, temporary, fs.constants.COPYFILE_EXCL);
-        fs.chmodSync(temporary, 0o600);
-        await this.#runProviderChild(["-vertex-import", temporary, "-config", configPath], epoch);
-        await this.#waitForAuth(providerDescriptor(providerId), snapshot, epoch);
-        return this.connectionStatus(providerId);
+        const temporaryFd = fs.openSync(temporary,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+            | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC,
+          0o600);
+        try {
+          let offset = 0;
+          while (offset < sourceBytes.length) {
+            const written = fs.writeSync(temporaryFd, sourceBytes, offset, sourceBytes.length - offset);
+            if (!Number.isSafeInteger(written) || written <= 0) throw new Error();
+            offset += written;
+          }
+          fs.fsyncSync(temporaryFd);
+        } finally { try { fs.closeSync(temporaryFd); } catch {} }
+        try {
+          await this.#runProviderChild(["-vertex-import", temporary, "-config", configPath], epoch);
+          await this.#waitForAuth(descriptor, before, epoch);
+        } catch (error) {
+          try { await this.#restoreAuth(descriptor, snapshot); } catch { /* preserve the original stable error */ }
+          throw error;
+        }
+        const status = await this.connectionStatus(providerId);
+        const result = { ...status };
+        Object.defineProperty(result, "rollback", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: () => this.#restoreAuth(descriptor, snapshot),
+        });
+        return Object.freeze(result);
       } finally {
         try { fs.rmSync(temporary, { force: true }); } catch { /* exact temporary cleanup is best effort */ }
       }
-    }).finally(() => {
+    });
+    promise = Promise.race([operation, cancellation]).finally(() => {
       if (this.#providerPromises.get(providerId) === promise) this.#providerPromises.delete(providerId);
+      if (this.#providerRejectors.get(providerId) === rejectFlight) this.#providerRejectors.delete(providerId);
     });
     this.#providerPromises.set(providerId, promise);
+    this.#providerRejectors.set(providerId, rejectFlight);
     return promise;
+  }
+
+  #readHeldVertexSource(source) {
+    const descriptor = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
+    try {
+      const before = fs.fstatSync(descriptor);
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
+        || before.size < 2 || before.size > 4 * 1024 * 1024) throw new Error("source bounds");
+      const chunks = [];
+      let total = 0;
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      while (true) {
+        const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+        if (!Number.isSafeInteger(bytesRead) || bytesRead < 0 || bytesRead > buffer.length) throw new Error("source read");
+        if (bytesRead === 0) break;
+        total += bytesRead;
+        if (total > 4 * 1024 * 1024) throw new Error("source growth");
+        chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
+      }
+      const finished = fs.fstatSync(descriptor);
+      const named = fs.lstatSync(source);
+      if (!finished.isFile() || finished.dev !== before.dev || finished.ino !== before.ino
+        || finished.size !== before.size || finished.mtimeMs !== before.mtimeMs
+        || !named.isFile() || named.isSymbolicLink() || named.dev !== before.dev || named.ino !== before.ino
+        || named.size !== before.size || named.mtimeMs !== before.mtimeMs || total !== before.size) throw new Error("source changed");
+      return Buffer.concat(chunks, total);
+    } finally { try { fs.closeSync(descriptor); } catch {} }
   }
 
   async disconnectProvider(provider) {
@@ -407,20 +540,53 @@ class CLIProxyManager {
     if (!CLIPROXY_PROVIDER_SET.has(descriptor.providerId)) {
       throw new CLIProxyError("CLIProxyAPI provider is invalid.", "CLIPROXY_PROVIDER_INVALID");
     }
-    const directory = this.#authDirectory || path.join(this.#stateRoot, "auth");
-    let entries;
-    try { entries = fs.readdirSync(directory, { withFileTypes: true }); }
-    catch (error) { if (error?.code === "ENOENT") return; throw new CLIProxyError(); }
-    for (const entry of entries) {
-      if (!descriptor.authFilePattern.test(entry.name)) continue;
-      const target = path.join(directory, entry.name);
-      let stat;
-      try { stat = fs.lstatSync(target); } catch { throw new CLIProxyError(); }
-      if (!stat.isFile() || stat.isSymbolicLink()) throw new CLIProxyError(
-        "CLIProxyAPI provider credential is unsafe.", "CLIPROXY_PROVIDER_FAILED",
-      );
-      try { fs.rmSync(target, { force: true }); } catch { throw new CLIProxyError(); }
+    const snapshot = this.#captureAuth(descriptor);
+    let directory = this.#authStableDirectory || this.#authDirectory || path.join(this.#stateRoot, "auth");
+    if (!fs.existsSync(directory)) return;
+    let directoryFd = this.#authDirectoryFd;
+    let closeDirectory = false;
+    try {
+      if (directoryFd === null || directoryFd === undefined) {
+        const requested = path.join(this.#stateRoot, "auth");
+        directoryFd = this.#openPrivateDirectory(requested);
+        this.#authStableDirectory = this.#stableDirectory(requested, directoryFd);
+        // Operations below use the held identity path when the platform exposes VolFS.
+        directory = this.#authStableDirectory;
+        closeDirectory = true;
+      }
+      this.#assertPrivateDirectory(directory, directoryFd);
+    } catch {
+      throw new CLIProxyError("CLIProxyAPI private state directory is unsafe.", "CLIPROXY_PRIVATE_STATE_FAILED");
     }
+    let entries;
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!descriptor.authFilePattern.test(entry.name)) continue;
+        const target = path.join(directory, entry.name);
+        const stat = fs.lstatSync(target);
+        if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o7777) !== 0o600
+          || stat.uid !== CURRENT_UID || stat.nlink !== 1) throw new CLIProxyError(
+          "CLIProxyAPI provider credential is unsafe.", "CLIPROXY_PROVIDER_FAILED",
+        );
+        this.#assertPrivateDirectory(directory, directoryFd);
+        try { fs.rmSync(target, { force: true }); } catch { throw new CLIProxyError(); }
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT" && closeDirectory) return;
+      if (error instanceof CLIProxyError) throw error;
+      throw new CLIProxyError();
+    } finally {
+      if (closeDirectory) { try { fs.closeSync(directoryFd); } catch {} }
+    }
+    const result = { providerId: descriptor.providerId };
+    Object.defineProperty(result, "rollback", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: () => this.#restoreAuth(descriptor, snapshot),
+    });
+    return Object.freeze(result);
   }
 
   async listModels(provider) {
@@ -549,6 +715,9 @@ class CLIProxyManager {
     child.stderr?.on?.("data", (chunk) => { stderr.bytes = Math.min(MAX_PROVIDER_STDERR_BYTES + 1, stderr.bytes + Buffer.byteLength(chunk)); });
     return new Promise((resolve, reject) => {
       let settled = false;
+      let exited = false;
+      let exitCode = null;
+      let exitSignal = null;
       const timer = setTimeout(() => {
         try { child.kill?.(); } catch { /* best effort */ }
         finish(() => reject(new CLIProxyError(
@@ -566,8 +735,16 @@ class CLIProxyManager {
       child.once?.("error", () => finish(() => reject(new CLIProxyError(
         "CLIProxyAPI provider connection failed.", "CLIPROXY_PROVIDER_FAILED",
       ))));
-      child.once?.("exit", (code) => {
-        if (code === 0 && epoch === this.#lifecycleEpoch && stderr.bytes <= MAX_PROVIDER_STDERR_BYTES) finish(resolve);
+      child.once?.("exit", (code, signal) => {
+        exited = true;
+        exitCode = code;
+        exitSignal = signal;
+      });
+      child.once?.("close", (code, signal) => {
+        const finalCode = code === null || code === undefined ? exitCode : code;
+        const finalSignal = signal === null || signal === undefined ? exitSignal : signal;
+        if (exited && finalCode === 0 && !finalSignal && epoch === this.#lifecycleEpoch
+          && stderr.bytes <= MAX_PROVIDER_STDERR_BYTES) finish(resolve);
         else finish(() => reject(new CLIProxyError(
           "CLIProxyAPI provider connection failed.", "CLIPROXY_PROVIDER_FAILED",
         )));
@@ -576,9 +753,11 @@ class CLIProxyManager {
   }
 
   #snapshotAuth(descriptor) {
-    const directory = this.#authDirectory;
+    const directory = this.#authStableDirectory || this.#authDirectory;
     const snapshot = new Map();
     if (!directory) return snapshot;
+    try { this.#assertPrivateDirectory(directory, this.#authDirectoryFd); }
+    catch { throw new CLIProxyError("CLIProxyAPI private state directory is unsafe.", "CLIPROXY_PRIVATE_STATE_FAILED"); }
     let entries;
     try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return snapshot; }
     for (const entry of entries) {
@@ -586,12 +765,106 @@ class CLIProxyManager {
       const target = path.join(directory, entry.name);
       try {
         const stat = fs.lstatSync(target);
-        if (stat.isFile() && !stat.isSymbolicLink()) {
-          snapshot.set(entry.name, `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.mode & 0o777}`);
+        if (stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o7777) === 0o600
+          && stat.uid === CURRENT_UID && stat.nlink === 1) {
+          snapshot.set(entry.name, `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.mode & 0o7777}`);
         }
       } catch { /* unreadable candidates are not treated as credentials */ }
     }
     return snapshot;
+  }
+
+  #captureAuth(descriptor) {
+    const snapshot = new Map();
+    const directory = this.#authStableDirectory || this.#authDirectory;
+    if (!directory) return snapshot;
+    this.#assertPrivateDirectory(directory, this.#authDirectoryFd);
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return snapshot; }
+    for (const entry of entries) {
+      if (!descriptor.authFilePattern.test(entry.name)) continue;
+      const target = path.join(directory, entry.name);
+      const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
+      try {
+        const stat = fs.fstatSync(fd);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 4 * 1024 * 1024) throw new Error("unsafe auth");
+        const bytes = Buffer.allocUnsafe(stat.size);
+        let offset = 0;
+        while (offset < stat.size) {
+          const read = fs.readSync(fd, bytes, offset, stat.size - offset, null);
+          if (!Number.isSafeInteger(read) || read <= 0) throw new Error("auth read");
+          offset += read;
+        }
+        const named = fs.lstatSync(target);
+        if (!named.isFile() || named.isSymbolicLink() || named.dev !== stat.dev || named.ino !== stat.ino
+          || named.size !== stat.size || named.mtimeMs !== stat.mtimeMs) throw new Error("auth changed");
+        snapshot.set(entry.name, Buffer.from(bytes));
+      } finally { try { fs.closeSync(fd); } catch {} }
+    }
+    return snapshot;
+  }
+
+  async #restoreAuth(descriptor, snapshot) {
+    await this.disconnectProvider(descriptor.providerId);
+    const directory = this.#authStableDirectory || this.#authDirectory || path.join(this.#stateRoot, "auth");
+    let fd;
+    try { fd = this.#authDirectoryFd ?? this.#openPrivateDirectory(directory); }
+    catch { throw new CLIProxyError("CLIProxyAPI private state directory is unsafe.", "CLIPROXY_PRIVATE_STATE_FAILED"); }
+    const temporaryFd = this.#authDirectoryFd === null || this.#authDirectoryFd === undefined;
+    try {
+      this.#assertPrivateDirectory(directory, fd);
+      for (const [name, bytes] of snapshot) {
+        if (!/^[A-Za-z0-9._-]{1,255}$/.test(name) || !descriptor.authFilePattern.test(name)) throw new Error("auth name");
+        const target = path.join(directory, name);
+        const output = fs.openSync(target,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL
+            | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC,
+          0o600);
+        try {
+          let offset = 0;
+          while (offset < bytes.length) {
+            const written = fs.writeSync(output, bytes, offset, bytes.length - offset);
+            if (!Number.isSafeInteger(written) || written <= 0) throw new Error("auth write");
+            offset += written;
+          }
+          fs.fsyncSync(output);
+        } finally { try { fs.closeSync(output); } catch {} }
+      }
+    } catch { throw new CLIProxyError("CLIProxyAPI provider rollback failed.", "CLIPROXY_PROVIDER_FAILED"); }
+    finally { if (temporaryFd) { try { fs.closeSync(fd); } catch {} } }
+  }
+
+  #stableDirectory(directory, descriptor) {
+    try {
+      const stat = fs.fstatSync(descriptor);
+      const candidate = `/.vol/${stat.dev}/${stat.ino}`;
+      const named = fs.lstatSync(candidate);
+      fs.realpathSync.native(candidate);
+      if (sameDirectory(directoryIdentity(stat), directoryIdentity(named))) return candidate;
+    } catch { /* Linux test hosts do not expose macOS VolFS identities. */ }
+    return directory;
+  }
+
+  #openPrivateDirectory(directory) {
+    const canonical = canonicalDirectoryPath(directory);
+    const named = directoryIdentity(fs.lstatSync(directory));
+    const descriptor = fs.openSync(directory, DIRECTORY_FLAGS);
+    try {
+      const opened = directoryIdentity(fs.fstatSync(descriptor));
+      if (!sameDirectory(named, opened) || !canonicalDirectoryPath(directory)) throw new Error("directory identity");
+      return descriptor;
+    } catch (error) {
+      try { fs.closeSync(descriptor); } catch {}
+      throw error;
+    }
+  }
+
+  #assertPrivateDirectory(directory, descriptor) {
+    if (descriptor === null || descriptor === undefined) throw new Error("directory descriptor missing");
+    const opened = directoryIdentity(fs.fstatSync(descriptor));
+    const named = directoryIdentity(fs.lstatSync(directory));
+    if (!sameDirectory(opened, named)) throw new Error("directory identity changed");
+    canonicalDirectoryPath(directory);
   }
 
   #hasAuth(descriptor) {
@@ -627,6 +900,16 @@ class CLIProxyManager {
 
   stop() {
     this.#lifecycleEpoch += 1;
+    const providerRejectors = [...this.#providerRejectors.values()];
+    this.#providerRejectors.clear();
+    this.#providerPromises.clear();
+    for (const reject of providerRejectors) {
+      try {
+        reject(new CLIProxyError(
+          "CLIProxyAPI provider connection was superseded.", "CLIPROXY_PROVIDER_SUPERSEDED",
+        ));
+      } catch {}
+    }
     const child = this.#child;
     this.#child = null;
     this.#session = null;
@@ -643,6 +926,13 @@ class CLIProxyManager {
     this.#configPath = null;
     this.#authDirectory = null;
     this.#runDirectory = null;
+    this.#authStableDirectory = null;
+    this.#runStableDirectory = null;
+    for (const descriptor of [this.#authDirectoryFd, this.#runDirectoryFd]) {
+      if (descriptor !== null && descriptor !== undefined) { try { fs.closeSync(descriptor); } catch {} }
+    }
+    this.#authDirectoryFd = null;
+    this.#runDirectoryFd = null;
   }
 }
 
