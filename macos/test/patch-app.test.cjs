@@ -179,15 +179,20 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
         "dist/codex/desktop/codex-runtime-integrity.cjs",
         "dist/codex/desktop/inference-bridge-server.cjs",
         "dist/codex/desktop/inference-provider-router.cjs",
+        "dist/codex/desktop/keychain-secret-store.cjs",
         "dist/codex/desktop/local-automation-controller.cjs",
         "dist/codex/desktop/local-automation-native-io.cjs",
         "dist/codex/desktop/local-automation-store.cjs",
         "dist/codex/desktop/local-cron-schedule.cjs",
         "dist/codex/desktop/local-desktop-frame-ipc.cjs",
         "dist/codex/desktop/model-selection-store.cjs",
+        "dist/codex/desktop/openai-compatible-inference-transport.cjs",
+        "dist/codex/desktop/openai-compatible-provider.cjs",
         "dist/codex/desktop/openbot-native-coordinator-ipc.cjs",
         "dist/codex/desktop/openbot-native-coordinator.cjs",
         "dist/codex/desktop/openbot-user-data.cjs",
+        "dist/codex/desktop/provider-controller.cjs",
+        "dist/codex/desktop/provider-state-store.cjs",
         "dist/codex/desktop/runtime.cjs",
         "dist/codex/desktop/standalone-conversation-controller.cjs",
         "dist/codex/desktop/standalone-conversation-ipc.cjs",
@@ -220,6 +225,7 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
         "dist/codex/node_modules/ws/lib/websocket.js",
         "dist/codex/node_modules/ws/package.json",
         "dist/codex/node_modules/ws/wrapper.mjs",
+        "dist/codex/provider-descriptors.cjs",
         "dist/codex/renderer/chat-content.js",
         "dist/electron-main/main.cjs",
         "dist/electron-preload/preload.cjs",
@@ -294,6 +300,8 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
   assert.match(patchedPreload, /exposeInMainWorld\("desktop",Q\)/);
   assert.match(patchedPreload, /exposeInMainWorld\("codexBots"/);
   assert.match(patchedPreload, /exposeInMainWorld\("codexRuntime"/);
+  assert.match(patchedPreload, /retry:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:retry",value\)/);
+  assert.match(patchedPreload, /onStatus:callback/);
   const patchedMain = fs.readFileSync(
     path.join(extracted, "dist", "electron-main", "main.cjs"),
     "utf8",
@@ -301,7 +309,13 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
   assert.match(patchedMain, /stockFeature="kept"/);
   assert.match(patchedMain, /codex\/desktop\/runtime\.cjs/);
   for (const relative of [
+    "provider-descriptors.cjs",
     "desktop/runtime.cjs",
+    "desktop/provider-controller.cjs",
+    "desktop/provider-state-store.cjs",
+    "desktop/keychain-secret-store.cjs",
+    "desktop/openai-compatible-provider.cjs",
+    "desktop/openai-compatible-inference-transport.cjs",
     "desktop/model-selection-store.cjs",
     "desktop/openbot-user-data.cjs",
     "bots/bot-store.cjs",
@@ -313,6 +327,14 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
   ]) {
     assert.equal(fs.lstatSync(path.join(extracted, "dist", "codex", relative)).isFile(), true);
   }
+  assert.deepEqual(
+    fs.readFileSync(path.join(extracted, "dist", "codex", "provider-descriptors.cjs")),
+    fs.readFileSync(path.join(__dirname, "..", "..", "src", "provider-descriptors.cjs")),
+  );
+  assert.equal(
+    sha256File(path.join(extracted, "dist", "codex", "provider-descriptors.cjs")),
+    sha256File(path.join(__dirname, "..", "..", "src", "provider-descriptors.cjs")),
+  );
   const remoteClientPath = path.join(
     extracted,
     "dist",

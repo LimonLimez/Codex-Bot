@@ -52,6 +52,9 @@ const PATCHER_SOURCE_FILES = Object.freeze([...new Set([
   ...DESKTOP_FILES,
   ...RENDERER_ASSETS.map((file) => `renderer/${file}`),
 ])].sort());
+const PATCHER_SHARED_SOURCE_FILES = Object.freeze([
+  "provider-descriptors.cjs",
+]);
 
 function sha256File(file) {
   const hash = crypto.createHash("sha256");
@@ -140,6 +143,7 @@ function stagePatcherPayload({ macRoot, patcherRoot }) {
   }
   if (fs.existsSync(targetRoot)) throw new Error("Patcher payload target already exists");
   fs.mkdirSync(targetRoot, { recursive: true, mode: 0o755 });
+  const sharedTargets = [];
   try {
     for (const file of PATCHER_SCRIPT_FILES) {
       copyFile(path.join(sourceRoot, "scripts", file), path.join(targetRoot, "scripts", file));
@@ -150,10 +154,22 @@ function stagePatcherPayload({ macRoot, patcherRoot }) {
         path.join(targetRoot, "src", ...file.split("/")),
       );
     }
+    const sharedSourceRoot = path.resolve(sourceRoot, "..", "src");
+    const sharedTargetRoot = path.resolve(targetRoot, "..", "src");
+    for (const file of PATCHER_SHARED_SOURCE_FILES) {
+      copyFile(
+        path.join(sharedSourceRoot, file),
+        path.join(sharedTargetRoot, file),
+      );
+      sharedTargets.push(path.join(sharedTargetRoot, file));
+    }
     for (const file of PATCHER_ASSET_FILES) {
       copyFile(path.join(sourceRoot, "assets", file), path.join(targetRoot, "assets", file));
     }
   } catch (error) {
+    for (const target of sharedTargets) {
+      if (fs.existsSync(target)) fs.rmSync(target, { force: true });
+    }
     fs.rmSync(targetRoot, { recursive: true, force: true });
     throw error;
   }
@@ -504,6 +520,7 @@ module.exports = {
   NODE_PACKAGES,
   PATCHER_ASSET_FILES,
   PATCHER_SCRIPT_FILES,
+  PATCHER_SHARED_SOURCE_FILES,
   PATCHER_SOURCE_FILES,
   PROVENANCE_RELATIVE,
   SIDECAR_BYTES,

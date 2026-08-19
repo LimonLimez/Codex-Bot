@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { replaceUnique } = require("./anchors.cjs");
@@ -14,15 +15,20 @@ const DESKTOP_FILES = Object.freeze([
   "desktop/codex-runtime-integrity.cjs",
   "desktop/inference-bridge-server.cjs",
   "desktop/inference-provider-router.cjs",
+  "desktop/keychain-secret-store.cjs",
   "desktop/local-automation-controller.cjs",
   "desktop/local-automation-native-io.cjs",
   "desktop/local-automation-store.cjs",
   "desktop/local-cron-schedule.cjs",
   "desktop/local-desktop-frame-ipc.cjs",
   "desktop/model-selection-store.cjs",
+  "desktop/openai-compatible-inference-transport.cjs",
+  "desktop/openai-compatible-provider.cjs",
   "desktop/openbot-native-coordinator-ipc.cjs",
   "desktop/openbot-native-coordinator.cjs",
   "desktop/openbot-user-data.cjs",
+  "desktop/provider-controller.cjs",
+  "desktop/provider-state-store.cjs",
   "desktop/runtime.cjs",
   "desktop/standalone-conversation-controller.cjs",
   "desktop/standalone-conversation-ipc.cjs",
@@ -50,6 +56,9 @@ const DESKTOP_FILES = Object.freeze([
   "local/local-permission-broker.cjs",
   "local/local-permission-store.cjs",
   "renderer/chat-content.js",
+]);
+const SHARED_FILES = Object.freeze([
+  "provider-descriptors.cjs",
 ]);
 const WS_FILES = Object.freeze([
   "LICENSE",
@@ -99,7 +108,7 @@ const PRELOAD_SENTINEL = 'exposeInMainWorld("codexBots"';
 const PRELOAD_PATCH = `const __codexInvoke=(method,...args)=>s.ipcRenderer.invoke("codex-bot:"+method,...args);const __codexAccountInvoke=(method,...args)=>s.ipcRenderer.invoke("codex-account:"+method,...args);const __openbotComputerInvoke=(method,...args)=>s.ipcRenderer.invoke("openbot-computer:"+method,...args);const __codexBots=Object.freeze({list:()=>__codexInvoke("list"),create:()=>__codexInvoke("create"),adoptLegacy:value=>__codexInvoke("adopt-legacy",value),read:botId=>__codexInvoke("read",botId),rename:(botId,name)=>__codexInvoke("rename",botId,name),updateProfile:(botId,profile)=>__codexInvoke("update-profile",botId,profile),advanceSetup:value=>__codexInvoke("advance-setup",value),retryRuntime:botId=>__codexInvoke("retry-runtime",botId),onChanged:callback=>{if(typeof callback!=="function")throw new TypeError("Bot change listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("codex-bot:changed",listener);return()=>s.ipcRenderer.removeListener("codex-bot:changed",listener)}});const __codexRuntime=Object.freeze({connectProvider:provider=>__codexInvoke("connect-provider",provider),selectBot:botId=>__codexInvoke("select-bot",botId),readActiveBotId:()=>s.ipcRenderer.invoke("codex-bot:read-active-bot-id"),readModel:botId=>__codexInvoke("read-model",botId),selectModel:selection=>__codexInvoke("select-model",selection),onEvent:callback=>{if(typeof callback!=="function")throw new TypeError("Runtime event listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("codex-runtime:event",listener);return()=>s.ipcRenderer.removeListener("codex-runtime:event",listener)}});const __codexAccount=Object.freeze({read:()=>__codexAccountInvoke("read"),login:mode=>__codexAccountInvoke("login",mode),cancelLogin:()=>__codexAccountInvoke("login-cancel"),logout:()=>__codexAccountInvoke("logout"),retry:()=>__codexAccountInvoke("retry"),catalog:()=>s.ipcRenderer.invoke("codex-catalog:list"),onChanged:callback=>{if(typeof callback!=="function")throw new TypeError("Account change listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("codex-account:changed",listener);return()=>s.ipcRenderer.removeListener("codex-account:changed",listener)},onCatalogChanged:callback=>{if(typeof callback!=="function")throw new TypeError("Catalog change listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("codex-catalog:changed",listener);return()=>s.ipcRenderer.removeListener("codex-catalog:changed",listener)}});const __openbotComputer=Object.freeze({selectMode:value=>__openbotComputerInvoke("select-mode",value),read:botId=>__openbotComputerInvoke("read",botId),decidePermission:value=>__openbotComputerInvoke("permission-decide",value),listPermissionRequests:botId=>__openbotComputerInvoke("permission-requests-list",botId),listPermissions:botId=>__openbotComputerInvoke("permissions-list",botId),revokePermission:value=>__openbotComputerInvoke("permission-revoke",value),onChanged:callback=>{if(typeof callback!=="function")throw new TypeError("Computer change listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-computer:changed",listener);return()=>s.ipcRenderer.removeListener("openbot-computer:changed",listener)},onPermissionRequested:callback=>{if(typeof callback!=="function")throw new TypeError("Computer permission listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-computer:permission-requested",listener);return()=>s.ipcRenderer.removeListener("openbot-computer:permission-requested",listener)}});s.contextBridge.exposeInMainWorld("codexBots",__codexBots);s.contextBridge.exposeInMainWorld("codexRuntime",__codexRuntime);s.contextBridge.exposeInMainWorld("codexAccount",__codexAccount);s.contextBridge.exposeInMainWorld("openbotComputer",__openbotComputer);`;
 const PROVIDER_PRELOAD_PATCH = `const __openbotProviders=Object.freeze({readAuthoritySnapshot:()=>s.ipcRenderer.invoke("openbot-provider:authority-snapshot"),connect:value=>s.ipcRenderer.invoke("openbot-provider:connect",value),disconnect:value=>s.ipcRenderer.invoke("openbot-provider:disconnect",value),completeOnboarding:value=>s.ipcRenderer.invoke("openbot-provider:onboarding-complete",value),onConnectionsChanged:callback=>{if(typeof callback!=="function")throw new TypeError("Provider connection listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-provider:changed",listener);return()=>s.ipcRenderer.removeListener("openbot-provider:changed",listener)},onCatalogChanged:callback=>{if(typeof callback!=="function")throw new TypeError("Provider catalog listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-provider:catalog-changed",listener);return()=>s.ipcRenderer.removeListener("openbot-provider:catalog-changed",listener)}});s.contextBridge.exposeInMainWorld("openbotProviders",__openbotProviders);`;
 const STANDALONE_PRELOAD_PATCH = `const __openbotConversationInvoke=(method,...args)=>s.ipcRenderer.invoke("openbot-conversation:"+method,...args);const __openbotConversations=Object.freeze({list:botId=>__openbotConversationInvoke("list",botId),create:value=>__openbotConversationInvoke("create",value),read:value=>__openbotConversationInvoke("read",value),send:value=>__openbotConversationInvoke("send",value),cancel:value=>__openbotConversationInvoke("cancel",value),onChanged:callback=>{if(typeof callback!=="function")throw new TypeError("Conversation change listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-conversation:changed",listener);return()=>s.ipcRenderer.removeListener("openbot-conversation:changed",listener)},onEvent:callback=>{if(typeof callback!=="function")throw new TypeError("Conversation event listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-conversation:event",listener);return()=>s.ipcRenderer.removeListener("openbot-conversation:event",listener)}});s.contextBridge.exposeInMainWorld("openbotConversations",__openbotConversations);`;
-const LOCAL_FRAME_PRELOAD_PATCH = `const __openbotLocalDesktop=Object.freeze({select:value=>s.ipcRenderer.invoke("openbot-local-frame:select",value),clear:value=>s.ipcRenderer.invoke("openbot-local-frame:clear",value),onFrame:callback=>{if(typeof callback!=="function")throw new TypeError("Local Desktop frame listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-local-frame:frame",listener);return()=>s.ipcRenderer.removeListener("openbot-local-frame:frame",listener)}});s.contextBridge.exposeInMainWorld("openbotLocalDesktop",__openbotLocalDesktop);`;
+const LOCAL_FRAME_PRELOAD_PATCH = `const __openbotLocalDesktop=Object.freeze({select:value=>s.ipcRenderer.invoke("openbot-local-frame:select",value),retry:value=>s.ipcRenderer.invoke("openbot-local-frame:retry",value),clear:value=>s.ipcRenderer.invoke("openbot-local-frame:clear",value),onFrame:callback=>{if(typeof callback!=="function")throw new TypeError("Local Desktop frame listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-local-frame:frame",listener);return()=>s.ipcRenderer.removeListener("openbot-local-frame:frame",listener)},onStatus:callback=>{if(typeof callback!=="function")throw new TypeError("Local Desktop status listener must be a function.");const listener=(_event,value)=>callback(value);s.ipcRenderer.on("openbot-local-frame:status",listener);return()=>s.ipcRenderer.removeListener("openbot-local-frame:status",listener)}});s.contextBridge.exposeInMainWorld("openbotLocalDesktop",__openbotLocalDesktop);`;
 
 function patchMainSource(source) {
   if (typeof source !== "string" || source.includes("codex/desktop/runtime.cjs")) {
@@ -168,6 +177,10 @@ function realFile(file, label) {
   return stat;
 }
 
+function sha256File(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+
 function patchDesktop(extractedRoot) {
   const root = path.resolve(extractedRoot);
   const main = path.join(root, "dist", "electron-main", "main.cjs");
@@ -184,6 +197,18 @@ function patchDesktop(extractedRoot) {
     fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 });
     fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
     fs.chmodSync(target, 0o644);
+  }
+  const sharedSourceRoot = path.resolve(sourceRoot, "..", "..", "src");
+  for (const relative of SHARED_FILES) {
+    const source = path.join(sharedSourceRoot, ...relative.split("/"));
+    realFile(source, `Shared source ${relative}`);
+    const target = path.join(targetRoot, ...relative.split("/"));
+    fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o755 });
+    fs.copyFileSync(source, target, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(target, 0o644);
+    if (sha256File(source) !== sha256File(target)) {
+      throw new Error(`Shared source ${relative} changed while staging.`);
+    }
   }
   const wsRoot = path.resolve(sourceRoot, "..", "node_modules", "ws");
   for (const relative of WS_FILES) {
@@ -204,4 +229,11 @@ function patchDesktop(extractedRoot) {
   });
 }
 
-module.exports = { DESKTOP_FILES, WS_FILES, patchDesktop, patchMainSource, patchPreloadSource };
+module.exports = {
+  DESKTOP_FILES,
+  SHARED_FILES,
+  WS_FILES,
+  patchDesktop,
+  patchMainSource,
+  patchPreloadSource,
+};

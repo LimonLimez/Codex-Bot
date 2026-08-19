@@ -178,6 +178,7 @@ test("installer stages only the exact exported patcher source script and Advance
     PATCHER_ASSET_FILES,
     PATCHER_SCRIPT_FILES,
     PATCHER_SOURCE_FILES,
+    PATCHER_SHARED_SOURCE_FILES,
     stagePatcherPayload,
   } = require(scriptPath);
   assert.equal(typeof stagePatcherPayload, "function");
@@ -213,15 +214,20 @@ test("installer stages only the exact exported patcher source script and Advance
     "desktop/codex-runtime-integrity.cjs",
     "desktop/inference-bridge-server.cjs",
     "desktop/inference-provider-router.cjs",
+    "desktop/keychain-secret-store.cjs",
     "desktop/local-automation-controller.cjs",
     "desktop/local-automation-native-io.cjs",
     "desktop/local-automation-store.cjs",
     "desktop/local-cron-schedule.cjs",
     "desktop/local-desktop-frame-ipc.cjs",
     "desktop/model-selection-store.cjs",
+    "desktop/openai-compatible-inference-transport.cjs",
+    "desktop/openai-compatible-provider.cjs",
     "desktop/openbot-native-coordinator-ipc.cjs",
     "desktop/openbot-native-coordinator.cjs",
     "desktop/openbot-user-data.cjs",
+    "desktop/provider-controller.cjs",
+    "desktop/provider-state-store.cjs",
     "desktop/runtime.cjs",
     "desktop/standalone-conversation-controller.cjs",
     "desktop/standalone-conversation-ipc.cjs",
@@ -248,6 +254,7 @@ test("installer stages only the exact exported patcher source script and Advance
     "renderer/openbot-local-desktop-view.js",
     "renderer/reasoning-control.js",
   ]);
+  assert.deepEqual(PATCHER_SHARED_SOURCE_FILES, ["provider-descriptors.cjs"]);
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "openbot-patcher-payload-test-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -261,6 +268,16 @@ test("installer stages only the exact exported patcher source script and Advance
     ...PATCHER_SCRIPT_FILES.map((file) => `scripts/${file}`),
     ...PATCHER_SOURCE_FILES.map((file) => `src/${file}`),
   ].sort());
+  const sharedDescriptor = path.join(root, "src", "provider-descriptors.cjs");
+  assert.equal(fs.lstatSync(sharedDescriptor).isFile(), true);
+  assert.deepEqual(
+    fs.readFileSync(sharedDescriptor),
+    fs.readFileSync(path.join(__dirname, "..", "..", "src", "provider-descriptors.cjs")),
+  );
+  assert.equal(
+    crypto.createHash("sha256").update(fs.readFileSync(sharedDescriptor)).digest("hex"),
+    crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname, "..", "..", "src", "provider-descriptors.cjs"))).digest("hex"),
+  );
 
   const advancedPickerCss = fs.readFileSync(
     path.join(patcher, "src", "renderer", "codex-ui.css"),

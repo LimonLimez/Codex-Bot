@@ -157,8 +157,10 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /exposeInMainWorld\("openbotComputer"/);
   assert.match(preload, /exposeInMainWorld\("openbotLocalDesktop"/);
   assert.match(preload, /select:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:select",value\)/);
+  assert.match(preload, /retry:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:retry",value\)/);
   assert.match(preload, /clear:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:clear",value\)/);
   assert.match(preload, /openbot-local-frame:frame/);
+  assert.match(preload, /openbot-local-frame:status/);
   assert.match(preload, /codex-bot:changed/);
   assert.match(preload, /codex-runtime:event/);
   assert.match(preload, /onEvent:callback/);
@@ -181,6 +183,46 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   }
   assert.throws(() => patchMainSource(main), /already|anchor/i);
   assert.throws(() => patchPreloadSource(preload), /already|anchor/i);
+});
+
+test("local desktop preload facade exposes exact frame and status channels with removable listeners", async () => {
+  const { patchPreloadSource } = require(patchPath);
+  const harness = runSyntheticPreload(patchPreloadSource(STOCK_PRELOAD));
+  const localDesktop = harness.exposed.get("openbotLocalDesktop");
+
+  assert.ok(localDesktop, "the renderer must discover the local desktop facade");
+  assert.equal(Object.isFrozen(localDesktop), true);
+  assert.deepEqual(Object.keys(localDesktop).sort(), [
+    "clear", "onFrame", "onStatus", "retry", "select",
+  ]);
+
+  await localDesktop.select({ botId: "bot-a", viewGeneration: 1 });
+  await localDesktop.retry({ botId: "bot-a", viewGeneration: 1 });
+  await localDesktop.clear({ viewGeneration: 1 });
+  assert.deepEqual(harness.calls.map(({ channel, args }) => ({ channel, args })), [
+    { channel: "openbot-local-frame:select", args: [{ botId: "bot-a", viewGeneration: 1 }] },
+    { channel: "openbot-local-frame:retry", args: [{ botId: "bot-a", viewGeneration: 1 }] },
+    { channel: "openbot-local-frame:clear", args: [{ viewGeneration: 1 }] },
+  ]);
+
+  const frames = [];
+  const statuses = [];
+  assert.throws(() => localDesktop.onFrame(null), (error) => error?.name === "TypeError");
+  assert.throws(() => localDesktop.onStatus("not-a-function"), (error) => error?.name === "TypeError");
+  const removeFrame = localDesktop.onFrame((value) => frames.push(value));
+  const removeStatus = localDesktop.onStatus((value) => statuses.push(value));
+  const frameListener = harness.listeners.get("openbot-local-frame:frame")[0];
+  const statusListener = harness.listeners.get("openbot-local-frame:status")[0];
+  harness.ipcRenderer.emit("openbot-local-frame:frame", { frameId: "frame-1" });
+  harness.ipcRenderer.emit("openbot-local-frame:status", { state: "live" });
+  assert.deepEqual(frames, [{ frameId: "frame-1" }]);
+  assert.deepEqual(statuses, [{ state: "live" }]);
+  removeFrame();
+  removeStatus();
+  assert.deepEqual(harness.removals, [
+    { channel: "openbot-local-frame:frame", listener: frameListener },
+    { channel: "openbot-local-frame:status", listener: statusListener },
+  ]);
 });
 
 test("provider authority snapshot and active bot identity use exact narrow preload channels", async () => {
@@ -406,9 +448,14 @@ test("desktop packaging includes every direct inference runtime module in the au
     "desktop/codex-runtime-integrity.cjs",
     "desktop/inference-bridge-server.cjs",
     "desktop/inference-provider-router.cjs",
+    "desktop/keychain-secret-store.cjs",
     "desktop/local-desktop-frame-ipc.cjs",
+    "desktop/openai-compatible-inference-transport.cjs",
+    "desktop/openai-compatible-provider.cjs",
     "desktop/openbot-native-coordinator-ipc.cjs",
     "desktop/openbot-native-coordinator.cjs",
+    "desktop/provider-controller.cjs",
+    "desktop/provider-state-store.cjs",
     "computer/computer-target-router.cjs",
     "local/local-computer-boundary.cjs",
     "local/local-computer-runtime.cjs",
@@ -430,9 +477,10 @@ test("desktop packaging includes every direct inference runtime module in the au
 });
 
 test("desktop packaging closes every relative require reachable from its exact source list", () => {
-  const { DESKTOP_FILES } = require(patchPath);
+  const { DESKTOP_FILES, SHARED_FILES } = require(patchPath);
   const sourceRoot = path.join(__dirname, "..", "src");
-  const packaged = new Set(DESKTOP_FILES);
+  const sharedSourceRoot = path.resolve(sourceRoot, "..", "..", "src");
+  const packaged = new Set([...DESKTOP_FILES, ...SHARED_FILES]);
   const relativeRequire = /require\(\s*["'](?<request>\.\.?\/[^"']+)["']\s*\)/g;
 
   for (const relative of DESKTOP_FILES) {
@@ -445,6 +493,15 @@ test("desktop packaging closes every relative require reachable from its exact s
         true,
         `${relative} requires ${dependency}, which must be present in the packaged closure`,
       );
+    }
+  }
+  assert.deepEqual(SHARED_FILES, ["provider-descriptors.cjs"]);
+  for (const relative of SHARED_FILES) {
+    const source = fs.readFileSync(path.join(sharedSourceRoot, relative), "utf8");
+    for (const match of source.matchAll(relativeRequire)) {
+      let dependency = path.posix.normalize(path.posix.join(path.posix.dirname(relative), match.groups.request));
+      if (path.posix.extname(dependency) === "") dependency += ".cjs";
+      assert.equal(packaged.has(dependency), true, `${relative} requires ${dependency}`);
     }
   }
 });

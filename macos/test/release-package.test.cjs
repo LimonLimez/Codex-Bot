@@ -342,6 +342,10 @@ test("release audit distinguishes reviewed user-data source from an actual user 
         "Resources/Patcher/src/renderer/openbot-local-desktop-view.css",
         ".openbot-local-desktop { display: block; }\n",
       ],
+      [
+        "Resources/src/provider-descriptors.cjs",
+        '"use strict";\nmodule.exports = {};\n',
+      ],
     ]);
     assert.doesNotThrow(fixture.audit);
   });
