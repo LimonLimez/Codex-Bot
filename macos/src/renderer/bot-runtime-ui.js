@@ -508,8 +508,7 @@
         || typeof raw.defaultReasoningEffort !== "string"
         || !(raw.defaultServiceTier === null || (typeof raw.defaultServiceTier === "string"
           && /^[a-z][a-z0-9_-]{0,31}$/.test(raw.defaultServiceTier)))
-        || !Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0
-        || raw.catalogGeneration > catalog.generation) {
+        || !Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0) {
         throw new Error("Model catalog is unavailable.");
       }
       const tierIds = new Set();
@@ -712,14 +711,31 @@
   function normalizeProviderFacade(value) {
     if (value === null || value === undefined) return null;
     const methods = [
-      "list", "connect", "disconnect", "catalog", "readOnboarding", "completeOnboarding",
+      "readAuthoritySnapshot", "connect", "disconnect", "completeOnboarding",
       "onConnectionsChanged", "onCatalogChanged",
     ];
-    const raw = exactDataObject(value, new Set(methods), methods, "Provider facade is unavailable.");
+    const allowed = new Set([...methods, "list", "catalog", "readOnboarding"]);
+    const raw = exactDataObject(value, allowed, methods, "Provider facade is unavailable.");
     if (methods.some((method) => typeof raw[method] !== "function")) {
       throw new Error("Provider facade is unavailable.");
     }
     return Object.freeze(raw);
+  }
+
+  function normalizeProviderAuthoritySnapshot(value) {
+    const raw = exactDataObject(
+      value,
+      new Set(["schemaVersion", "connections", "catalog", "onboarding"]),
+      ["schemaVersion", "connections", "catalog", "onboarding"],
+      "Provider authority is unavailable.",
+    );
+    if (raw.schemaVersion !== 1) throw new Error("Provider authority is unavailable.");
+    return Object.freeze({
+      schemaVersion: 1,
+      connections: normalizeProviderConnections(raw.connections),
+      catalog: normalizeProviderCatalog(raw.catalog),
+      onboarding: raw.onboarding,
+    });
   }
 
   function normalizeNativeActiveBotId(value) {
@@ -3125,11 +3141,14 @@
     let providerOnboardingLoaded = false;
     let providerInitialFocusDone = false;
     let providerAuthorityInvalid = providerFacadeInvalid;
+    let providerAuthorityHasCommit = false;
+    let providerAuthorityRetryable = false;
     let providerActionSequence = 0;
     const providerOperations = new Map();
     const providerReceiptRetry = new Set();
     let providerRefreshFlight = null;
-    let providerRefreshDirty = false;
+    let providerRefreshDeferred = null;
+    let providerRefreshTicket = 0;
     let resolveProviderRefreshDisposed = null;
     const providerRefreshDisposed = new Promise((resolve) => {
       resolveProviderRefreshDisposed = resolve;
@@ -3436,12 +3455,24 @@
       return `${connection.label} could not be connected. Try again.`;
     }
 
+    function providerReceiptsEqual(left, right) {
+      return left !== null && right !== null
+        && left.schemaVersion === right.schemaVersion
+        && left.providerId === right.providerId
+        && left.connectionGeneration === right.connectionGeneration
+        && left.catalogGeneration === right.catalogGeneration
+        && left.completedAt === right.completedAt;
+    }
+
     function updateProviderRow(entry, connection) {
       if (!entry || !connection) return;
       const pending = providerPending.has(connection.providerId);
       const connected = connection.state === "connected";
       const externallyConnecting = connection.state === "connecting";
       const receiptRetry = entry.first && providerReceiptRetry.has(connection.providerId);
+      const legacyConfirmation = entry.first && connected && !receiptRetry
+        && providerOnboarding === null
+        && providerCatalog.models.some((model) => model.provider === connection.providerId);
       const stateText = pending ? "Connecting…"
         : connected ? "Connected"
           : connection.state === "connecting" ? "Connecting…"
@@ -3451,7 +3482,7 @@
       entry.title.textContent = connection.label;
       entry.row.dataset.loginKind = connection.loginKind;
       entry.action.disabled = providerFacadeInvalid || pending
-        || (connected && !receiptRetry) || externallyConnecting;
+        || (connected && !receiptRetry && !legacyConfirmation) || externallyConnecting;
       entry.disconnect.disabled = pending || !connected;
       entry.disconnect.hidden = entry.first || !connected;
       if (!pending && connection.state === "unavailable" && connection.errorCode) {
@@ -3459,6 +3490,7 @@
         entry.error.hidden = false;
       }
       entry.action.textContent = receiptRetry ? "Finish setup"
+        : legacyConfirmation ? `Continue with ${connection.label}`
         : connected ? "Connected"
         : entry.first && connection.providerId === "openai-codex" ? "Continue with Direct Codex"
           : entry.first && connection.loginKind === "service-account" ? "Choose JSON"
@@ -3530,21 +3562,6 @@
       });
     }
 
-    function providerConnectionsEqual(left, right) {
-      if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-      return left.every((entry, index) => {
-        const other = right[index];
-        return entry.providerId === other.providerId
-          && entry.label === other.label
-          && entry.loginKind === other.loginKind
-          && entry.state === other.state
-          && entry.generation === other.generation
-          && entry.errorCode === other.errorCode
-          && entry.capabilities.reasoning === other.capabilities.reasoning
-          && entry.capabilities.fast === other.capabilities.fast;
-      });
-    }
-
     function validateProviderSnapshot(connections, catalog, onboarding) {
       const connected = connections.filter((entry) => entry.state === "connected");
       const expectedCatalogGeneration = connected.reduce(
@@ -3596,6 +3613,8 @@
       providerCatalog = filterProviderCatalog(snapshot.catalog, snapshot.connections);
       providerOnboarding = snapshot.onboarding;
       providerAuthorityInvalid = false;
+      providerAuthorityHasCommit = true;
+      providerAuthorityRetryable = false;
       providerAuthorityLoaded = true;
       providerCatalogLoaded = true;
       providerOnboardingLoaded = true;
@@ -3612,46 +3631,34 @@
 
     async function readProviderSnapshot() {
       const results = await Promise.race([
-        Promise.allSettled([
-          providerFacade.list(),
-          providerFacade.catalog(),
-          providerFacade.readOnboarding(),
-          providerFacade.list(),
-        ]),
+        Promise.resolve().then(() => providerFacade.readAuthoritySnapshot()),
         providerRefreshDisposed,
       ]);
       if (results === null) throw new Error("Provider controls are unavailable.");
       if (mountDisposed) throw new Error("Provider controls are unavailable.");
       try {
-        if (results.some((result) => result.status !== "fulfilled")) {
-          throw new Error("Provider authority is unavailable.");
-        }
-        const connectionsBefore = normalizeProviderConnections(results[0].value);
-        const catalog = normalizeProviderCatalog(results[1].value);
-        const onboardingValue = results[2].value;
-        const connectionsAfter = normalizeProviderConnections(results[3].value);
-        if (!providerConnectionsEqual(connectionsBefore, connectionsAfter)) {
-          const error = new Error("Provider authority changed while reading.");
-          error.code = "OPENBOT_PROVIDER_SNAPSHOT_UNSTABLE";
-          throw error;
-        }
-        const onboarding = validateProviderSnapshot(connectionsBefore, catalog, onboardingValue);
+        const normalized = normalizeProviderAuthoritySnapshot(results);
+        const onboarding = validateProviderSnapshot(
+          normalized.connections,
+          normalized.catalog,
+          normalized.onboarding,
+        );
         return Object.freeze({
-          connections: connectionsBefore,
-          catalog,
+          connections: normalized.connections,
+          catalog: normalized.catalog,
           onboarding,
         });
       } catch (error) {
-        if (error?.code === "OPENBOT_PROVIDER_SNAPSHOT_UNSTABLE"
-          || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE") throw error;
+        if (error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE") throw error;
         if (error && typeof error === "object") error.code = "OPENBOT_PROVIDER_SNAPSHOT_INVALID";
         throw error;
       }
     }
 
-    function markProviderRefreshInvalid() {
+    function markProviderRefreshFailure() {
       if (mountDisposed) return false;
-      providerAuthorityInvalid = true;
+      if (!providerAuthorityHasCommit) providerAuthorityInvalid = true;
+      else providerAuthorityRetryable = true;
       providerAuthorityLoaded = true;
       providerCatalogLoaded = true;
       providerOnboardingLoaded = true;
@@ -3661,52 +3668,55 @@
 
     function refreshProviderAuthority() {
       if (mountDisposed || !providerFacade || providerFacadeInvalid) return Promise.resolve(false);
+      providerRefreshTicket += 1;
       if (providerRefreshFlight) {
-        providerRefreshDirty = true;
         return providerRefreshFlight;
       }
-      let retryBudget = 1;
-      const flight = (async () => {
-        while (!mountDisposed) {
-          providerRefreshDirty = false;
-          let snapshot;
-          try {
-            snapshot = await readProviderSnapshot();
-          } catch (error) {
-            const retryable = providerRefreshDirty
-              || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_UNSTABLE"
-              || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE"
-              || error?.code === "OPENBOT_PROVIDER_SNAPSHOT_INVALID";
-            if (retryable && retryBudget > 0) {
-              retryBudget -= 1;
-              continue;
-            }
-            if (error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE" && providerOnboarding !== null) {
-              // A same-generation receipt/null read is not authority. Keep
-              // the last valid receipt while the next subscription signal
-              // asks the main process for a fresh full snapshot.
-              updateConnectionPresentation(lastSnapshot);
-              return true;
-            }
-            return markProviderRefreshInvalid();
-          }
-          if (providerRefreshDirty && retryBudget > 0) {
-            retryBudget -= 1;
-            continue;
-          }
-          if (providerRefreshDirty) return markProviderRefreshInvalid();
-          commitProviderSnapshot(snapshot);
-          return true;
-        }
-        return false;
-      })();
-      providerRefreshFlight = flight;
-      void flight.then(() => {
-        if (providerRefreshFlight === flight) providerRefreshFlight = null;
-      }, () => {
-        if (providerRefreshFlight === flight) providerRefreshFlight = null;
+      let resolve;
+      let reject;
+      const promise = new Promise((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
       });
-      return flight;
+      const deferred = Object.freeze({ promise, resolve, reject });
+      // Install the sentinel before starting the pump. The facade may invoke
+      // a subscription synchronously while its snapshot method is called.
+      providerRefreshFlight = promise;
+      providerRefreshDeferred = deferred;
+      const pump = async () => {
+        try {
+          while (!mountDisposed) {
+            const requestTicket = providerRefreshTicket;
+            let snapshot;
+            try {
+              snapshot = await readProviderSnapshot();
+            } catch (error) {
+              if (mountDisposed) break;
+              if (providerRefreshTicket !== requestTicket) continue;
+              if (error?.code === "OPENBOT_PROVIDER_SNAPSHOT_STALE" && providerOnboarding !== null) {
+                updateConnectionPresentation(lastSnapshot);
+                deferred.resolve(true);
+              } else {
+                deferred.resolve(markProviderRefreshFailure());
+              }
+              return;
+            }
+            if (mountDisposed) break;
+            commitProviderSnapshot(snapshot);
+            if (providerRefreshTicket !== requestTicket) continue;
+            deferred.resolve(true);
+            return;
+          }
+          deferred.resolve(false);
+        } catch (error) {
+          deferred.reject(error);
+        } finally {
+          if (providerRefreshFlight === promise) providerRefreshFlight = null;
+          if (providerRefreshDeferred === deferred) providerRefreshDeferred = null;
+        }
+      };
+      void pump();
+      return promise;
     }
 
     function beginProviderOperation(providerId, first, entry) {
@@ -3724,10 +3734,15 @@
     async function providerAction(providerId, first = false) {
       if (mountDisposed || !providerFacade || providerFacadeInvalid || providerPending.has(providerId)) return;
       const entry = first ? firstProviderRows.get(providerId) : providerRows.get(providerId);
-      if (!entry || typeof providerFacade.connect !== "function") return;
+      if (!entry || entry.action.disabled || typeof providerFacade.connect !== "function") return;
       const receiptRetry = first && providerReceiptRetry.has(providerId);
+      const current = providerConnection(providerId);
+      const legacyConfirmation = first && current.state === "connected"
+        && !receiptRetry && providerOnboarding === null
+        && providerCatalog.models.some((model) => model.provider === providerId);
+      const shouldConnect = !receiptRetry && !legacyConfirmation;
       let request;
-      if (!receiptRetry) {
+      if (shouldConnect) {
         try {
           request = requestForProvider(providerId, entry);
         } catch (error) {
@@ -3743,26 +3758,31 @@
       updateConnectionPresentation(lastSnapshot);
       let failed = false;
       let receiptAttempted = false;
+      let expectedReceipt = null;
       try {
-        if (receiptRetry) {
-          if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
-          if (!currentProviderOperation(operation)) return;
-        } else {
+        if (shouldConnect) {
           await providerFacade.connect(request);
           if (!currentProviderOperation(operation)) return;
-          if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
-          if (!currentProviderOperation(operation)) return;
         }
+        if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
+        if (!currentProviderOperation(operation)) return;
         const connection = providerConnection(providerId);
         if (connection.state !== "connected") throw new Error("Provider connection is not ready.");
         if (first) {
           if (typeof providerFacade.completeOnboarding !== "function") throw new Error("Provider onboarding is unavailable.");
           receiptAttempted = true;
-          await providerFacade.completeOnboarding(providerId);
+          const returnedReceipt = await providerFacade.completeOnboarding(providerId);
           if (!currentProviderOperation(operation)) return;
-          await refreshProviderAuthority();
+          if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
           if (!currentProviderOperation(operation)) return;
-          if (providerOnboarding === null) throw new Error("Provider onboarding is unavailable.");
+          expectedReceipt = normalizeProviderOnboarding(
+            returnedReceipt,
+            providerConnections,
+            providerCatalog,
+          );
+          if (!providerReceiptsEqual(providerOnboarding, expectedReceipt)) {
+            throw new Error("Provider onboarding is unavailable.");
+          }
           providerReceiptRetry.delete(providerId);
           firstConnectionError.hidden = true;
         }
@@ -3808,6 +3828,9 @@
         if (!currentProviderOperation(operation)) return;
         if (!await refreshProviderAuthority()) throw new Error("Provider authority is unavailable.");
         if (!currentProviderOperation(operation)) return;
+        if (providerConnection(providerId).state === "connected") {
+          throw new Error("Provider disconnect is not confirmed.");
+        }
       } catch (error) {
         if (entry && currentProviderOperation(operation)) {
           entry.error.textContent = providerErrorCopy(providerId, error).replace("connected", "disconnected");
@@ -4631,7 +4654,6 @@
           const candidate = providerFacade.onConnectionsChanged((value) => {
             if (mountDisposed) return;
             try { normalizeProviderConnections(value); } catch {}
-            providerRefreshDirty = providerRefreshFlight !== null;
             updateConnectionPresentation(lastSnapshot);
             void refreshProviderAuthority();
           });
@@ -4643,7 +4665,6 @@
           const candidate = providerFacade.onCatalogChanged((value) => {
             if (mountDisposed) return;
             try { normalizeProviderCatalog(value); } catch {}
-            providerRefreshDirty = providerRefreshFlight !== null;
             updateConnectionPresentation(lastSnapshot);
             void refreshProviderAuthority();
           });
@@ -4670,6 +4691,8 @@
         mountDisposed = true;
         resolveProviderRefreshDisposed?.(null);
         resolveProviderRefreshDisposed = null;
+        providerRefreshDeferred?.resolve(false);
+        providerRefreshDeferred = null;
         mountObserver?.disconnect();
         pickerResizeObserver?.disconnect();
         surfaceResizeObserver?.disconnect();

@@ -87,6 +87,18 @@ function providerFacade({ connections = eightConnections(), catalog = null, onbo
         : catalog ?? Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
     },
     async readOnboarding() { return typeof onboarding === "function" ? onboarding() : onboarding; },
+    async readAuthoritySnapshot() {
+      const [connectionValue, catalogValue, onboardingValue] = await Promise.all([
+        this.list(),
+        this.catalog(),
+        this.readOnboarding(),
+      ]);
+      return authoritySnapshot({
+        connections: connectionValue,
+        catalog: catalogValue,
+        onboarding: onboardingValue,
+      });
+    },
     async completeOnboarding(providerId) {
       if (typeof complete === "function") return complete(providerId);
       return Object.freeze({
@@ -127,6 +139,15 @@ function providerCatalog(models, generation = 1, status = "ready") {
     generation,
     status,
     models: Object.freeze(models),
+  });
+}
+
+function authoritySnapshot({ connections, catalog, onboarding = null }) {
+  return Object.freeze({
+    schemaVersion: 1,
+    connections,
+    catalog,
+    onboarding,
   });
 }
 
@@ -4000,7 +4021,34 @@ function createMountedUiHarness({
   };
   if (fileReader) windowRef.FileReader = fileReader;
   if (computerFacade) windowRef.openbotComputer = computerFacade;
-  if (providerFacade) windowRef.openbotProviders = providerFacade;
+  if (providerFacade) {
+    let mountedProviderFacade = providerFacade;
+    let hasAtomicRead = false;
+    let hasLegacyReads = false;
+    try {
+      const readDescriptor = Object.getOwnPropertyDescriptor(providerFacade, "readAuthoritySnapshot");
+      hasAtomicRead = Boolean(readDescriptor && "value" in readDescriptor
+        && typeof readDescriptor.value === "function");
+      hasLegacyReads = ["list", "catalog", "readOnboarding"].every((method) => {
+        const descriptor = Object.getOwnPropertyDescriptor(providerFacade, method);
+        return Boolean(descriptor && "value" in descriptor && typeof descriptor.value === "function");
+      });
+    } catch {}
+    if (!hasAtomicRead && hasLegacyReads) {
+      mountedProviderFacade = Object.freeze({
+        ...providerFacade,
+        async readAuthoritySnapshot() {
+          const [connections, providerCatalog, onboarding] = await Promise.all([
+            providerFacade.list(),
+            providerFacade.catalog(),
+            providerFacade.readOnboarding(),
+          ]);
+          return authoritySnapshot({ connections, catalog: providerCatalog, onboarding });
+        },
+      });
+    }
+    windowRef.openbotProviders = mountedProviderFacade;
+  }
   if (localDesktopViewApi) windowRef.OpenBotLocalDesktopView = localDesktopViewApi;
   if (localStorage) windowRef.localStorage = localStorage;
   const mounted = mount({ windowRef, documentRef });
@@ -6003,6 +6051,8 @@ test("provider single-flight survives an unrelated Power repaint", async (contex
   });
   const connection = deferred();
   let connectCalls = 0;
+  let completeCalls = 0;
+  let onboarding = null;
   const facade = providerFacade({
     connections: eightConnections({
       "openai-codex": { state: "connected", generation: 12 },
@@ -6011,6 +6061,18 @@ test("provider single-flight survives an unrelated Power repaint", async (contex
     connect() {
       connectCalls += 1;
       return connection.promise;
+    },
+    onboarding: () => onboarding,
+    complete(providerId) {
+      completeCalls += 1;
+      onboarding = {
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 12,
+        catalogGeneration: 12,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      };
+      return onboarding;
     },
   });
   const harness = createMountedUiHarness({
@@ -6027,7 +6089,7 @@ test("provider single-flight survives an unrelated Power repaint", async (contex
   const action = route.children.at(-1).children[0];
   action.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(connectCalls, 1);
+  assert.equal(connectCalls, 0);
   assert.equal(action.disabled, true);
 
   const power = harness.find("codex-power-input");
@@ -6040,7 +6102,8 @@ test("provider single-flight survives an unrelated Power repaint", async (contex
   await new Promise((resolve) => setImmediate(resolve));
   action.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(connectCalls, 1);
+  assert.equal(connectCalls, 0);
+  assert.equal(completeCalls, 1);
   connection.resolve();
 });
 
@@ -6058,8 +6121,8 @@ test("late lower-generation provider events cannot reopen a completed onboarding
   const current = eightConnections({
     "openai-codex": { state: "connected", generation: 2 },
   });
-  let emitConnections;
-  let emitCatalog;
+  let emitConnections = () => {};
+  let emitCatalog = () => {};
   const facade = providerFacade({
     connections: current,
     catalog,
@@ -6399,7 +6462,7 @@ test("external browser launch cannot complete onboarding before an authoritative
     "openai-codex": { state: "connecting", generation: 1 },
   });
   let onboarding = null;
-  let emitConnections;
+  let emitConnections = () => {};
   let completeCalls = 0;
   const facade = providerFacade({
     connections: () => connections,
@@ -6986,8 +7049,8 @@ test("provider events before a held startup refresh trigger a receipt-aware repl
   const heldCatalog = deferred();
   const heldReceipt = deferred();
   let phase = "held";
-  let emitConnections;
-  let emitCatalog;
+  let emitConnections = () => {};
+  let emitCatalog = () => {};
   const facade = {
     async list() { return phase === "held" ? heldList.promise : connections; },
     async catalog() { return phase === "held" ? heldCatalog.promise : catalog; },
@@ -7286,9 +7349,9 @@ test("R3-N1 older failed refresh cannot reopen a newer healthy gate", async (con
   let listCalls = 0;
   let catalogCalls = 0;
   let onboardingCalls = 0;
-  let emitConnections;
+  let emitConnections = () => {};
   const facade = {
-    async list() { return ++listCalls <= 2 ? oldReads.list.promise : connections; },
+    async list() { return ++listCalls === 1 ? oldReads.list.promise : connections; },
     async catalog() { return ++catalogCalls === 1 ? oldReads.catalog.promise : catalog; },
     async readOnboarding() {
       return ++onboardingCalls === 1 ? oldReads.onboarding.promise : receipt;
@@ -7315,7 +7378,7 @@ test("R3-N1 older failed refresh cannot reopen a newer healthy gate", async (con
     providerFacade: facade,
   });
   context.after(() => harness.mounted.dispose());
-  while (listCalls < 2 || catalogCalls < 1 || onboardingCalls < 1) {
+  while (listCalls < 1 || catalogCalls < 1 || onboardingCalls < 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   emitConnections(connections);
@@ -7681,7 +7744,7 @@ test("R4-N3 an external disconnect clears receipt retry only after the disconnec
 });
 
 test("R4-N4 an older higher-generation refresh cannot commit a mixed connection/catalog/receipt snapshot", async (context) => {
-  const oldReads = { listBefore: deferred(), listAfter: deferred(), catalog: deferred(), onboarding: deferred() };
+  const firstRead = deferred();
   const generationOneConnections = eightConnections({
     "openai-codex": { state: "connected", generation: 1 },
   });
@@ -7706,22 +7769,18 @@ test("R4-N4 an older higher-generation refresh cannot commit a mixed connection/
     connectionGeneration: 2,
     catalogGeneration: 2,
   };
-  let listCalls = 0;
-  let catalogCalls = 0;
-  let onboardingCalls = 0;
-  let emitConnections;
+  let authorityReads = 0;
+  let emitConnections = () => {};
   const facade = {
-    async list() {
-      listCalls += 1;
-      if (listCalls === 1) return oldReads.listBefore.promise;
-      if (listCalls === 2) return oldReads.listAfter.promise;
-      return generationOneConnections;
-    },
-    async catalog() {
-      return catalogCalls++ === 0 ? oldReads.catalog.promise : generationOneCatalog;
-    },
-    async readOnboarding() {
-      return onboardingCalls++ === 0 ? oldReads.onboarding.promise : generationOneReceipt;
+    async readAuthoritySnapshot() {
+      authorityReads += 1;
+      return authorityReads === 1
+        ? firstRead.promise
+        : authoritySnapshot({
+          connections: generationOneConnections,
+          catalog: generationOneCatalog,
+          onboarding: generationOneReceipt,
+        });
     },
     async connect() {},
     async disconnect() {},
@@ -7745,15 +7804,16 @@ test("R4-N4 an older higher-generation refresh cannot commit a mixed connection/
     providerFacade: facade,
   });
   context.after(() => harness.mounted.dispose());
-  while (listCalls < 2 || catalogCalls < 1 || onboardingCalls < 1) {
+  while (authorityReads < 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   emitConnections(generationOneConnections);
-  oldReads.listBefore.resolve(generationTwoConnections);
-  oldReads.listAfter.resolve(generationTwoConnections);
-  oldReads.catalog.resolve(generationTwoCatalog);
-  oldReads.onboarding.resolve(generationTwoReceipt);
-  while (listCalls < 3 || catalogCalls < 2 || onboardingCalls < 2) {
+  firstRead.resolve(authoritySnapshot({
+    connections: generationTwoConnections,
+    catalog: generationTwoCatalog,
+    onboarding: generationTwoReceipt,
+  }));
+  while (authorityReads < 2) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
@@ -7843,4 +7903,332 @@ test("provider event storms coalesce into one bounded stable retry", async (cont
     harness.mounted.controller.snapshot().modelCatalog.map(({ provider, model }) => ({ provider, model })),
     [{ provider: "openai-codex", model: "gpt-5.6-sol" }],
   );
+});
+
+test("R5-N1 atomic authority accepts model metadata newer than its envelope", async (context) => {
+  const connections = eightConnections({
+    "openai-codex": { state: "connected", generation: 1 },
+  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true }),
+  ], 1);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const facade = {
+    async readAuthoritySnapshot() { return authoritySnapshot({ connections, catalog, onboarding: receipt }); },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return receipt; },
+    onConnectionsChanged() { return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 3,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+  assert.deepEqual(harness.mounted.controller.snapshot().modelCatalog.map(({ model, catalogGeneration }) => ({
+    model,
+    catalogGeneration,
+  })), [{ model: "gpt-5.6-sol", catalogGeneration: 3 }]);
+});
+
+test("R5-N2 a connected legacy route confirms onboarding without reconnecting", async (context) => {
+  const connections = eightConnections({
+    "openai-codex": { state: "connected", generation: 1 },
+  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true }),
+  ], 1);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  let current = authoritySnapshot({ connections, catalog, onboarding: null });
+  let connectCalls = 0;
+  let completeCalls = 0;
+  const facade = {
+    async readAuthoritySnapshot() { return current; },
+    async connect() { connectCalls += 1; },
+    async disconnect() {},
+    async completeOnboarding(providerId) {
+      completeCalls += 1;
+      current = authoritySnapshot({ connections, catalog, onboarding: { ...receipt, providerId } });
+      return current.onboarding;
+    },
+    onConnectionsChanged() { return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 3,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const route = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  const action = route.children.at(-1).children[0];
+  assert.equal(action.disabled, false);
+  assert.equal(action.textContent, "Continue with OpenAI Codex");
+  action.listeners.get("click")();
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(connectCalls, 0);
+  assert.equal(completeCalls, 1);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+});
+
+test("R5-N3 finite authority signals converge after a quiet trailing read", async (context) => {
+  const disconnected = eightConnections();
+  const connected = eightConnections({
+    "openai-codex": { state: "connected", generation: 1 },
+  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true }),
+  ], 1);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const initial = authoritySnapshot({
+    connections: disconnected,
+    catalog: providerCatalog([], 0, "unavailable"),
+    onboarding: null,
+  });
+  const valid = authoritySnapshot({ connections: connected, catalog, onboarding: receipt });
+  const firstRead = deferred();
+  const secondRead = deferred();
+  let reads = 0;
+  let emitConnections = () => {};
+  let emitCatalog = () => {};
+  const facade = {
+    async readAuthoritySnapshot() {
+      reads += 1;
+      if (reads === 1) return firstRead.promise;
+      if (reads === 2) return secondRead.promise;
+      return valid;
+    },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return receipt; },
+    onConnectionsChanged(listener) { emitConnections = listener; return () => {}; },
+    onCatalogChanged(listener) { emitCatalog = listener; return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 3,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  emitConnections(disconnected);
+  firstRead.resolve(valid);
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  emitCatalog(catalog);
+  secondRead.resolve(valid);
+  for (let index = 0; index < 10; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(reads >= 3);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+  assert.equal(harness.mounted.controller.snapshot().modelCatalog.length, 1);
+});
+
+test("R5-N4 full-snapshot concurrent connects converge for either completion order", async (context) => {
+  const orders = [
+    ["openai-codex", "anthropic-claude"],
+    ["anthropic-claude", "openai-codex"],
+  ];
+  for (const order of orders) {
+    const disconnected = eightConnections();
+    const initial = authoritySnapshot({
+      connections: disconnected,
+      catalog: providerCatalog([], 0, "unavailable"),
+      onboarding: null,
+    });
+    const connectionFor = (providerId) => ({ state: "connected", generation: 1 });
+    const snapshotFor = (providerIds) => {
+      const overrides = Object.fromEntries(providerIds.map((providerId) => [providerId, connectionFor(providerId)]));
+      const connections = eightConnections(overrides);
+      const models = providerIds.map((providerId) => providerModel(
+        providerId,
+        providerId === "openai-codex" ? "gpt-5.6-sol" : "claude-fable-5",
+        providerId === "openai-codex" ? "GPT-5.6 Sol" : "Claude Fable 5",
+        ["medium"],
+        3,
+        { isDefault: providerId === order[0] },
+      ));
+      return authoritySnapshot({ connections, catalog: providerCatalog(models, 1), onboarding: null });
+    };
+    let current = initial;
+    let emitConnections;
+    let reads = 0;
+    let maxConcurrentReads = 0;
+    let activeReads = 0;
+    let heldFirstRead = null;
+    const connectFlights = new Map(order.map((providerId) => [providerId, deferred()]));
+    let connectCalls = 0;
+    const facade = {
+      async readAuthoritySnapshot() {
+        reads += 1;
+        activeReads += 1;
+        maxConcurrentReads = Math.max(maxConcurrentReads, activeReads);
+        if (reads === 1) {
+          activeReads -= 1;
+          return current;
+        }
+        if (!heldFirstRead) heldFirstRead = deferred();
+        const value = reads === 2 ? heldFirstRead.promise : Promise.resolve(current);
+        return value.then((snapshot) => {
+          activeReads -= 1;
+          return snapshot;
+        });
+      },
+      async connect({ providerId }) {
+        connectCalls += 1;
+        await connectFlights.get(providerId).promise;
+        const connectedProviders = order.filter((candidate) => candidate === providerId
+          || current.connections.some((entry) => entry.providerId === candidate && entry.state === "connected"));
+        current = snapshotFor(connectedProviders);
+        emitConnections(current.connections);
+        return current.connections.find((entry) => entry.providerId === providerId);
+      },
+      async disconnect() {},
+      async completeOnboarding() { return null; },
+      onConnectionsChanged(listener) { emitConnections = listener; return () => {}; },
+      onCatalogChanged() { return () => {}; },
+    };
+    const harness = createMountedUiHarness({
+      catalog: providerCatalog([], 0, "unavailable"),
+      initialSelection: Object.freeze({
+        botId: BOT_A,
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "medium",
+        serviceTier: null,
+        catalogGeneration: 3,
+        generation: 1,
+      }),
+      nativeProtocol: true,
+      nativeHost: true,
+      providerFacade: facade,
+    });
+    context.after(() => harness.mounted.dispose());
+    for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    const settings = (providerId) => harness.findAllPanel("codex-provider-connection")
+      .find((node) => node.dataset.providerId === providerId);
+    settings(order[0]).children.at(-1).children[0].listeners.get("click")();
+    settings(order[1]).children.at(-1).children[0].listeners.get("click")();
+    for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    connectFlights.get(order[0]).resolve();
+    for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    connectFlights.get(order[1]).resolve();
+    for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    heldFirstRead?.resolve(snapshotFor(order));
+    for (let index = 0; index < 10; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(connectCalls, 2);
+    assert.equal(maxConcurrentReads, 1);
+    assert.equal(settings(order[0]).children[0].children[2].hidden, true);
+    assert.equal(settings(order[1]).children[0].children[2].hidden, true);
+    assert.deepEqual(
+      new Set(harness.mounted.controller.snapshot().modelCatalog.map(({ provider }) => provider)),
+      new Set(order),
+    );
+    harness.mounted.dispose();
+  }
+});
+
+test("R5-N5 synchronous authority signal reentry cannot start a second reader", async (context) => {
+  const connections = eightConnections({ "openai-codex": { state: "connected", generation: 1 } });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 3, { isDefault: true }),
+  ], 1);
+  const snapshot = authoritySnapshot({ connections, catalog, onboarding: null });
+  const firstRead = deferred();
+  let emitConnections = () => {};
+  let reads = 0;
+  let activeReads = 0;
+  let maxConcurrentReads = 0;
+  const facade = {
+    async readAuthoritySnapshot() {
+      reads += 1;
+      activeReads += 1;
+      maxConcurrentReads = Math.max(maxConcurrentReads, activeReads);
+      if (reads === 1) {
+        emitConnections(connections);
+        return firstRead.promise.then((value) => {
+          activeReads -= 1;
+          return value;
+        });
+      }
+      activeReads -= 1;
+      return snapshot;
+    },
+    async connect() {},
+    async disconnect() {},
+    async completeOnboarding() { return null; },
+    onConnectionsChanged(listener) { emitConnections = listener; return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 3,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  firstRead.resolve(snapshot);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(maxConcurrentReads, 1);
+  assert.ok(reads >= 2);
 });
