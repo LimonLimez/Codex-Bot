@@ -120,6 +120,11 @@ try {
     }
 
     $headers = @{ 'User-Agent' = 'Codex-Bot-Release-Builder' }
+    # Public release inputs need no credential.  When a CI job or developer
+    # already supplies a GitHub token, use it for the GitHub API request so
+    # authenticated release queries are not needlessly rate-limited.
+    $githubToken = [Environment]::GetEnvironmentVariable('GITHUB_TOKEN', 'Process')
+    if ($githubToken) { $headers.Authorization = "Bearer $githubToken" }
     $release = Invoke-GitHubReleaseRequest -Uri "https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/tags/v$cliProxyVersion" -Headers $headers
     if ([string]$release.tag_name -ne "v$cliProxyVersion") { throw 'CLIProxyAPI release tag did not match the pinned version.' }
     $assetName = "CLIProxyAPI_${cliProxyVersion}_windows_amd64.zip"
