@@ -948,6 +948,7 @@ Required checks: exact start-document identity; CSP/no network resources; HTTPS 
 **Files:**
 - Review and integrate: the actual complete diff from `91ecf2215380348622a6e04a65940193bdef4a9b`
 - Modify only the original owning worker's files for verified integration defects; preserve the ownership table in the review record
+- Modify after the reviewed shared-source commit is fixed: `macos/test/platform-boundary.test.cjs` (`windowsBase` only)
 
 **Interfaces:**
 - Consumes passed Luna-max Gates 8 and 9.
@@ -1001,6 +1002,28 @@ git commit -m "feat(mac): complete provider desktop onboarding"
 ```
 
 Do not include generated apps, ASARs, DMGs, screenshots, recordings, profiles, logs, credentials, or artifacts in the commit.
+
+---
+
+- [ ] **Step 5: Pin the macOS shared-path boundary to the reviewed integration commit**
+
+After every reviewed provider/Desktop source change and integration fix is committed, record that exact commit:
+
+```bash
+OPENBOT_SHARED_BASE="$(git rev-parse HEAD)"
+git show --no-patch --format='%H %s' "$OPENBOT_SHARED_BASE"
+```
+
+Use `apply_patch` to replace only the literal `windowsBase` value in `macos/test/platform-boundary.test.cjs` with `OPENBOT_SHARED_BASE`. Do not add a filename allowlist for the shared provider files or docs. Then run and commit the boundary update:
+
+```bash
+node --test macos/test/platform-boundary.test.cjs
+git add macos/test/platform-boundary.test.cjs
+git commit -m "test(macOS): pin shared provider baseline"
+npm --prefix macos test
+```
+
+Expected: platform-boundary is `3/3` and the full macOS suite has zero failures. Future Windows/shared drift after the reviewed integration commit remains visible.
 
 ---
 
