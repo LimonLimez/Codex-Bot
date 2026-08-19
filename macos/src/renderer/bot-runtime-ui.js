@@ -470,20 +470,21 @@
       "Model catalog is unavailable.",
     );
     if (catalog.status !== "ready" || !Number.isSafeInteger(catalog.generation)
-      || catalog.generation < 0 || !Array.isArray(catalog.models) || catalog.models.length > 512) {
+      || catalog.generation < 0) {
       throw new Error("Model catalog is unavailable.");
     }
+    const catalogModels = exactDataArray(catalog.models, 512, "Model catalog is unavailable.");
     const models = [];
     const tuples = new Set();
-    for (const valueEntry of catalog.models) {
+    for (const valueEntry of catalogModels) {
       const raw = exactDataObject(
         valueEntry,
         new Set([
           "provider", "providerLabel", "model", "label", "efforts", "serviceTiers",
           "defaultReasoningEffort", "defaultServiceTier", "catalogGeneration", "isDefault",
         ]),
-        ["provider", "model", "label", "efforts", "serviceTiers", "defaultReasoningEffort",
-          "defaultServiceTier", "catalogGeneration"],
+        ["provider", "providerLabel", "model", "label", "efforts", "serviceTiers",
+          "defaultReasoningEffort", "defaultServiceTier", "catalogGeneration", "isDefault"],
         "Model catalog is unavailable.",
       );
       if (!PROVIDER_IDS.includes(raw.provider)
@@ -493,22 +494,26 @@
         || typeof raw.label !== "string" || raw.label.trim().length < 1 || raw.label.length > 160
         || tuples.has(`${raw.provider}\u0000${raw.model}`)
         || !Array.isArray(raw.efforts) || raw.efforts.length < 1 || raw.efforts.length > 32
-        || raw.efforts.some((effort) => typeof effort !== "string"
-          || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))) {
+        || !Array.isArray(raw.serviceTiers) || typeof raw.isDefault !== "boolean") {
         throw new Error("Model catalog is unavailable.");
       }
-      const efforts = Object.freeze([...new Set(raw.efforts)]);
+      const effortValues = exactDataArray(raw.efforts, 32, "Model catalog is unavailable.");
+      const serviceTierValues = exactDataArray(raw.serviceTiers, 16, "Model catalog is unavailable.");
+      if (effortValues.length < 1 || effortValues.some((effort) => typeof effort !== "string"
+        || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))) {
+        throw new Error("Model catalog is unavailable.");
+      }
+      const efforts = Object.freeze([...new Set(effortValues)]);
       if (!efforts.includes(raw.defaultReasoningEffort)
         || typeof raw.defaultReasoningEffort !== "string"
         || !(raw.defaultServiceTier === null || (typeof raw.defaultServiceTier === "string"
           && /^[a-z][a-z0-9_-]{0,31}$/.test(raw.defaultServiceTier)))
         || !Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0
-        || raw.catalogGeneration > catalog.generation
-        || !Array.isArray(raw.serviceTiers) || raw.serviceTiers.length > 16) {
+        || raw.catalogGeneration > catalog.generation) {
         throw new Error("Model catalog is unavailable.");
       }
       const tierIds = new Set();
-      const serviceTiers = Object.freeze(raw.serviceTiers.map((tierValue) => {
+      const serviceTiers = Object.freeze(serviceTierValues.map((tierValue) => {
         const tier = exactDataObject(
           tierValue,
           new Set(["id", "name", "description"]),
@@ -539,10 +544,40 @@
         serviceTiers,
         catalogGeneration: raw.catalogGeneration,
         defaultReasoningEffort: raw.defaultReasoningEffort,
-        isDefault: raw.isDefault === true,
+        isDefault: raw.isDefault,
       }));
     }
     return Object.freeze(models);
+  }
+
+  function normalizeProviderCatalog(value) {
+    const envelope = exactDataObject(
+      value,
+      new Set(["status", "generation", "models"]),
+      ["status", "generation", "models"],
+      "Model catalog is unavailable.",
+    );
+    if (!(envelope.status === "ready" || envelope.status === "unavailable")
+      || !Number.isSafeInteger(envelope.generation) || envelope.generation < 0) {
+      throw new Error("Model catalog is unavailable.");
+    }
+    const models = exactDataArray(envelope.models, 512, "Model catalog is unavailable.");
+    if (envelope.status === "ready") {
+      return Object.freeze({
+        generation: envelope.generation,
+        status: "ready",
+        models: normalizeModelCatalog(Object.freeze({
+          status: "ready",
+          generation: envelope.generation,
+          models,
+        })),
+      });
+    }
+    return Object.freeze({
+      generation: envelope.generation,
+      status: "unavailable",
+      models: Object.freeze([]),
+    });
   }
 
   function normalizeLegacyAccountCatalog(value) {
@@ -607,15 +642,14 @@
   }
 
   function normalizeProviderConnections(value) {
-    if (!Array.isArray(value) || value.length > PROVIDER_IDS.length) {
-      throw new Error("Provider connections are unavailable.");
-    }
+    const values = exactDataArray(value, PROVIDER_IDS.length, "Provider connections are unavailable.");
+    if (values.length !== PROVIDER_IDS.length) throw new Error("Provider connections are unavailable.");
     const byId = new Map();
-    for (const candidate of value) {
+    for (const candidate of values) {
       const raw = exactDataObject(
         candidate,
         new Set(["providerId", "label", "loginKind", "state", "generation", "capabilities", "errorCode"]),
-        ["providerId", "label", "loginKind", "state", "generation"],
+        ["providerId", "label", "loginKind", "state", "generation", "capabilities", "errorCode"],
         "Provider connections are unavailable.",
       );
       if (!PROVIDER_IDS.includes(raw.providerId) || byId.has(raw.providerId)
@@ -626,14 +660,12 @@
         || (raw.errorCode !== null && (typeof raw.errorCode !== "string" || raw.errorCode.length > 96))) {
         throw new Error("Provider connections are unavailable.");
       }
-      const capabilities = raw.capabilities === undefined
-        ? Object.freeze({ reasoning: false, fast: false })
-        : exactDataObject(
-          raw.capabilities,
-          new Set(["reasoning", "fast"]),
-          ["reasoning", "fast"],
-          "Provider connections are unavailable.",
-        );
+      const capabilities = exactDataObject(
+        raw.capabilities,
+        new Set(["reasoning", "fast"]),
+        ["reasoning", "fast"],
+        "Provider connections are unavailable.",
+      );
       if (typeof capabilities.reasoning !== "boolean" || typeof capabilities.fast !== "boolean") {
         throw new Error("Provider connections are unavailable.");
       }
@@ -644,14 +676,14 @@
         state: raw.state,
         generation: raw.generation,
         capabilities: Object.freeze({ reasoning: capabilities.reasoning, fast: capabilities.fast }),
-        errorCode: raw.errorCode ?? null,
+        errorCode: raw.errorCode,
       }));
     }
     return Object.freeze(PROVIDER_IDS.map((providerId) => byId.get(providerId) ?? disconnectedProvider(providerId)));
   }
 
   function normalizeProviderOnboarding(value, connections, catalog) {
-    if (value === null || value === undefined) return null;
+    if (value === null) return null;
     const raw = exactDataObject(
       value,
       new Set(["schemaVersion", "providerId", "connectionGeneration", "catalogGeneration", "completedAt"]),
@@ -665,7 +697,7 @@
       || !Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0
       || catalog.status !== "ready" || catalog.generation !== raw.catalogGeneration
       || !catalog.models.some((entry) => entry.provider === raw.providerId)
-      || typeof raw.completedAt !== "string" || raw.completedAt.length < 1 || raw.completedAt.length > 64) {
+      || !validTimestamp(raw.completedAt)) {
       throw new Error("Provider onboarding is unavailable.");
     }
     return Object.freeze({
@@ -749,6 +781,7 @@
     accountFacade = null,
     providerFacade = null,
     computerFacade = null,
+    nativeMode = false,
     onSelectionChanged = () => {},
     onRuntimeEvent = () => {},
     onStateChanged = () => {},
@@ -765,6 +798,7 @@
     }
     const bots = new Map();
     let activeBotId = null;
+    let preferredActiveBotId = null;
     let unsubscribe = null;
     let runtimeUnsubscribe = null;
     let catalogUnsubscribe = null;
@@ -1098,6 +1132,34 @@
       });
     }
 
+    function handleRuntimeEvent(event) {
+      if (disposed) return;
+      if (event?.type === "active-bot-changed") {
+        if (typeof event.botId !== "string" || !BOT_ID.test(event.botId)) return;
+        preferredActiveBotId = event.botId;
+        if (bots.has(event.botId) && activeBotId !== event.botId) requestBotSelection(event.botId);
+        return;
+      }
+      if (
+        !event
+        || typeof event !== "object"
+        || event.botId !== activeBotId
+        || !Number.isSafeInteger(event.generation)
+        || event.generation < 0
+      ) return;
+      try { onRuntimeEvent(event); } catch {}
+    }
+
+    function subscribeRuntimeEvents() {
+      if (runtimeUnsubscribe || !runtimeFacade || typeof runtimeFacade.onEvent !== "function") return;
+      const candidate = runtimeFacade.onEvent(handleRuntimeEvent);
+      if (disposed) {
+        if (typeof candidate === "function") candidate();
+        throw new Error("Bot controls are unavailable.");
+      }
+      runtimeUnsubscribe = typeof candidate === "function" ? candidate : null;
+    }
+
     function publish() {
       try {
         onStateChanged(snapshot());
@@ -1384,6 +1446,7 @@
 
     async function initialize() {
       if (disposed) throw new Error("Bot controls are unavailable.");
+      if (nativeMode) subscribeRuntimeEvents();
       if (computerFacade && typeof computerFacade.onChanged === "function" && !computerSubscribed) {
         computerSubscribed = true;
         const candidateComputer = computerFacade.onChanged((value) => {
@@ -1447,7 +1510,13 @@
         const pending = computerFacade
           ? [...bots.values()].find((record) => record.setupStage !== "complete")
           : null;
-        try { await selectBot(pending?.botId ?? bots.keys().next().value); }
+        const observedActive = preferredActiveBotId && bots.has(preferredActiveBotId)
+          ? preferredActiveBotId : null;
+        const fallback = nativeMode && typeof runtimeFacade?.onEvent === "function"
+          ? null : bots.keys().next().value;
+        const initialBotId = pending?.botId ?? observedActive ?? fallback;
+        if (!initialBotId) publish();
+        else try { await selectBot(initialBotId); }
         catch (error) {
           if (disposed) throw error;
           publish();
@@ -1465,29 +1534,7 @@
         throw new Error("Bot controls are unavailable.");
       }
       unsubscribe = typeof candidate === "function" ? candidate : null;
-      if (runtimeFacade && typeof runtimeFacade.onEvent === "function") {
-        const runtimeCandidate = runtimeFacade.onEvent((event) => {
-          if (!disposed && event?.type === "active-bot-changed"
-            && typeof event.botId === "string" && bots.has(event.botId)) {
-            requestBotSelection(event.botId);
-            return;
-          }
-          if (
-            disposed ||
-            !event ||
-            typeof event !== "object" ||
-            event.botId !== activeBotId ||
-            !Number.isSafeInteger(event.generation) ||
-            event.generation < 0
-          ) return;
-          try { onRuntimeEvent(event); } catch {}
-        });
-        if (disposed) {
-          if (typeof runtimeCandidate === "function") runtimeCandidate();
-          throw new Error("Bot controls are unavailable.");
-        }
-        runtimeUnsubscribe = typeof runtimeCandidate === "function" ? runtimeCandidate : null;
-      }
+      if (!nativeMode) subscribeRuntimeEvents();
       return snapshot();
     }
 
@@ -3002,7 +3049,16 @@
 
     let mountDisposed = false;
     let providerFacade = null;
-    try { providerFacade = normalizeProviderFacade(windowRef.openbotProviders); } catch {}
+    let providerFacadeInvalid = nativeProtocolMode;
+    try {
+      const candidate = normalizeProviderFacade(windowRef.openbotProviders);
+      if (candidate) {
+        providerFacade = candidate;
+        providerFacadeInvalid = false;
+      }
+    } catch {
+      providerFacadeInvalid = nativeProtocolMode;
+    }
     const providerRows = new Map();
     const firstProviderRows = new Map();
     const providerPending = new Set();
@@ -3015,6 +3071,10 @@
     let providerCatalogLoaded = false;
     let providerOnboardingLoaded = false;
     let providerInitialFocusDone = false;
+    let providerAuthorityInvalid = providerFacadeInvalid;
+    let providerAuthorityEpoch = 0;
+    let providerActionSequence = 0;
+    const providerOperations = new Map();
     let localDesktopView = null;
     let localDesktopSelection = undefined;
     let lastSnapshot = null;
@@ -3283,7 +3343,7 @@
       const actions = element(documentRef, "div", "codex-provider-connection-actions");
       actions.append(action, disconnect);
       row.append(copy, form, actions);
-      const entry = Object.freeze({ row, state, error, action, disconnect, inputs, providerId, first });
+      const entry = Object.freeze({ row, title, state, error, action, disconnect, inputs, providerId, first });
       (first ? firstProviderRows : providerRows).set(providerId, entry);
       action.addEventListener("click", () => { void providerAction(providerId, first); });
       disconnect.addEventListener("click", () => { void disconnectProvider(providerId); });
@@ -3321,13 +3381,16 @@
       if (!entry || !connection) return;
       const pending = providerPending.has(connection.providerId);
       const connected = connection.state === "connected";
+      const externallyConnecting = connection.state === "connecting";
       const stateText = pending ? "Connecting…"
         : connected ? "Connected"
           : connection.state === "connecting" ? "Connecting…"
           : connection.state === "unavailable" ? "Unavailable" : "Not connected";
       entry.state.textContent = stateText;
       entry.state.dataset.state = connection.state;
-      entry.action.disabled = pending || connected;
+      entry.title.textContent = connection.label;
+      entry.row.dataset.loginKind = connection.loginKind;
+      entry.action.disabled = providerFacadeInvalid || pending || connected || externallyConnecting;
       entry.disconnect.disabled = pending || !connected;
       entry.disconnect.hidden = entry.first || !connected;
       if (!pending && connection.state === "unavailable" && connection.errorCode) {
@@ -3341,7 +3404,8 @@
     }
 
     function renderProviderRows() {
-      for (const connection of providerConnections) {
+      for (const providerId of PROVIDER_IDS) {
+        const connection = providerConnection(providerId);
         updateProviderRow(providerRows.get(connection.providerId), connection);
         updateProviderRow(firstProviderRows.get(connection.providerId), connection);
       }
@@ -3350,11 +3414,16 @@
     function updateConnectionPresentation(snapshot = lastSnapshot) {
       if (!nativeProtocolMode) return;
       renderProviderRows();
-      const gateActive = providerFacade !== null;
-      const shouldOpen = gateActive && providerOnboarding === null;
+      const gateActive = providerFacade !== null || providerFacadeInvalid || providerAuthorityInvalid;
+      const shouldOpen = gateActive
+        && (providerFacadeInvalid || providerAuthorityInvalid || providerOnboarding === null);
       setDialogOpen(firstConnectionSetup, shouldOpen);
       panel.inert = shouldOpen;
       modelDock.inert = shouldOpen;
+      if (providerFacadeInvalid) {
+        firstConnectionError.textContent = "AI connections are unavailable. Update OpenBot and try again.";
+        firstConnectionError.hidden = false;
+      }
       if (shouldOpen && providerPending.size === 0 && !providerInitialFocusDone) {
         const firstPending = [...firstProviderRows.values()].find((entry) => !entry.action.disabled);
         firstPending?.action.focus?.();
@@ -3385,50 +3454,84 @@
       return Object.freeze(request);
     }
 
+    function acceptProviderConnections(value) {
+      const incoming = normalizeProviderConnections(value);
+      const current = new Map(providerConnections.map((entry) => [entry.providerId, entry]));
+      providerConnections = Object.freeze(incoming.map((entry) => {
+        const prior = current.get(entry.providerId);
+        return prior && prior.generation > entry.generation ? prior : entry;
+      }));
+      return true;
+    }
+
+    function acceptProviderCatalog(value) {
+      const incoming = normalizeProviderCatalog(value);
+      if (providerCatalog.generation > incoming.generation) return false;
+      providerCatalog = incoming;
+      return true;
+    }
+
+    function acceptProviderOnboarding(value) {
+      if (value === null && providerOnboarding !== null) {
+        try {
+          normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
+          return false;
+        } catch {}
+      }
+      if (value !== null && providerOnboarding !== null) {
+        let raw;
+        try {
+          raw = exactDataObject(
+            value,
+            new Set(["schemaVersion", "providerId", "connectionGeneration", "catalogGeneration", "completedAt"]),
+            ["schemaVersion", "providerId", "connectionGeneration", "catalogGeneration", "completedAt"],
+            "Provider onboarding is unavailable.",
+          );
+        } catch {
+          throw new Error("Provider onboarding is unavailable.");
+        }
+        if (Number.isSafeInteger(raw.connectionGeneration)
+          && Number.isSafeInteger(raw.catalogGeneration)
+          && (raw.connectionGeneration < providerOnboarding.connectionGeneration
+            || raw.catalogGeneration < providerOnboarding.catalogGeneration)) return false;
+      }
+      providerOnboarding = normalizeProviderOnboarding(value, providerConnections, providerCatalog);
+      return true;
+    }
+
     async function refreshProviderAuthority() {
-      if (mountDisposed || !providerFacade) return;
+      if (mountDisposed || !providerFacade || providerFacadeInvalid) return false;
+      const epoch = ++providerAuthorityEpoch;
       const results = await Promise.allSettled([
         providerFacade.list(),
         providerFacade.catalog(),
         providerFacade.readOnboarding(),
       ]);
-      if (mountDisposed) return;
+      if (mountDisposed || epoch !== providerAuthorityEpoch) return false;
       const [connectionsResult, catalogResult, onboardingResult] = results;
+      let valid = true;
       try {
-        providerConnections = connectionsResult.status === "fulfilled"
-          ? normalizeProviderConnections(connectionsResult.value) : Object.freeze(PROVIDER_IDS.map(disconnectedProvider));
+        if (connectionsResult.status !== "fulfilled") throw new Error("Provider connections are unavailable.");
+        acceptProviderConnections(connectionsResult.value);
       } catch {
+        valid = false;
         providerConnections = Object.freeze(PROVIDER_IDS.map(disconnectedProvider));
       }
       try {
-        const rawCatalog = catalogResult.status === "fulfilled" ? catalogResult.value : null;
-        const envelope = exactDataObject(
-          rawCatalog,
-          new Set(["status", "generation", "models"]),
-          ["status", "generation", "models"],
-          "Model catalog is unavailable.",
-        );
-        if (envelope.status === "ready") {
-          const models = normalizeModelCatalog(envelope);
-          providerCatalog = Object.freeze({ generation: envelope.generation, status: "ready", models });
-        } else if (typeof envelope.status === "string"
-          && Number.isSafeInteger(envelope.generation) && envelope.generation >= 0
-          && Array.isArray(envelope.models)) {
-          providerCatalog = Object.freeze({
-            generation: envelope.generation,
-            status: envelope.status,
-            models: Object.freeze([]),
-          });
-        } else throw new Error("Model catalog is unavailable.");
+        if (catalogResult.status !== "fulfilled") throw new Error("Model catalog is unavailable.");
+        acceptProviderCatalog(catalogResult.value);
       } catch {
+        valid = false;
         providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
       }
       try {
-        providerOnboarding = onboardingResult.status === "fulfilled"
-          ? normalizeProviderOnboarding(onboardingResult.value, providerConnections, providerCatalog) : null;
+        if (onboardingResult.status !== "fulfilled") throw new Error("Provider onboarding is unavailable.");
+        acceptProviderOnboarding(onboardingResult.value);
       } catch {
+        valid = false;
         providerOnboarding = null;
       }
+      providerAuthorityInvalid = !valid;
       providerAuthorityLoaded = true;
       providerCatalogLoaded = true;
       providerOnboardingLoaded = true;
@@ -3436,10 +3539,23 @@
       if (providerCatalogLoaded && providerCatalog.status === "ready") {
         controller?.applyCatalog?.(providerCatalog);
       }
+      return valid;
+    }
+
+    function beginProviderOperation(providerId, first, entry) {
+      if (mountDisposed || !providerFacade || providerFacadeInvalid || providerOperations.has(providerId)) return null;
+      const operation = Object.freeze({ providerId, first, entry, sequence: ++providerActionSequence });
+      providerOperations.set(providerId, operation);
+      providerPending.add(providerId);
+      return operation;
+    }
+
+    function currentProviderOperation(operation) {
+      return !mountDisposed && providerOperations.get(operation.providerId) === operation;
     }
 
     async function providerAction(providerId, first = false) {
-      if (mountDisposed || !providerFacade || providerPending.has(providerId)) return;
+      if (mountDisposed || !providerFacade || providerFacadeInvalid || providerPending.has(providerId)) return;
       const entry = first ? firstProviderRows.get(providerId) : providerRows.get(providerId);
       if (!entry || typeof providerFacade.connect !== "function") return;
       let request;
@@ -3451,25 +3567,30 @@
         entry.action.focus?.();
         return;
       }
-      providerPending.add(providerId);
+      const operation = beginProviderOperation(providerId, first, entry);
+      if (!operation) return;
       entry.error.hidden = true;
       updateConnectionPresentation(lastSnapshot);
       let failed = false;
       try {
         await providerFacade.connect(request);
+        if (!currentProviderOperation(operation)) return;
         await refreshProviderAuthority();
+        if (!currentProviderOperation(operation)) return;
         const connection = providerConnection(providerId);
         if (connection.state !== "connected") throw new Error("Provider connection is not ready.");
         if (first) {
           if (typeof providerFacade.completeOnboarding !== "function") throw new Error("Provider onboarding is unavailable.");
           await providerFacade.completeOnboarding(providerId);
+          if (!currentProviderOperation(operation)) return;
           await refreshProviderAuthority();
+          if (!currentProviderOperation(operation)) return;
           if (providerOnboarding === null) throw new Error("Provider onboarding is unavailable.");
           firstConnectionError.hidden = true;
         }
       } catch (error) {
         failed = true;
-        if (!mountDisposed) {
+        if (currentProviderOperation(operation)) {
           entry.error.textContent = providerErrorCopy(providerId, error);
           entry.error.hidden = false;
           if (first) {
@@ -3479,8 +3600,12 @@
           entry.action.focus?.();
         }
       } finally {
-        providerPending.delete(providerId);
-        if (!mountDisposed) {
+        const ownsOperation = providerOperations.get(providerId) === operation;
+        if (ownsOperation) {
+          providerOperations.delete(providerId);
+          providerPending.delete(providerId);
+        }
+        if (ownsOperation && !mountDisposed) {
           updateConnectionPresentation(lastSnapshot);
           if (failed) entry.action.focus?.();
         }
@@ -3489,23 +3614,30 @@
 
     async function disconnectProvider(providerId) {
       if (mountDisposed || !providerFacade || typeof providerFacade.disconnect !== "function"
-        || providerPending.has(providerId)) return;
+        || providerFacadeInvalid || providerPending.has(providerId)) return;
       const entry = providerRows.get(providerId);
-      providerPending.add(providerId);
+      const operation = beginProviderOperation(providerId, false, entry);
+      if (!operation) return;
       if (entry) entry.error.hidden = true;
       updateConnectionPresentation(lastSnapshot);
       try {
         await providerFacade.disconnect(providerId);
+        if (!currentProviderOperation(operation)) return;
         await refreshProviderAuthority();
+        if (!currentProviderOperation(operation)) return;
       } catch (error) {
-        if (entry) {
+        if (entry && currentProviderOperation(operation)) {
           entry.error.textContent = providerErrorCopy(providerId, error).replace("connected", "disconnected");
           entry.error.hidden = false;
           entry.action.focus?.();
         }
       } finally {
-        providerPending.delete(providerId);
-        if (!mountDisposed) updateConnectionPresentation(lastSnapshot);
+        const ownsOperation = providerOperations.get(providerId) === operation;
+        if (ownsOperation) {
+          providerOperations.delete(providerId);
+          providerPending.delete(providerId);
+        }
+        if (ownsOperation && !mountDisposed) updateConnectionPresentation(lastSnapshot);
       }
     }
 
@@ -3545,7 +3677,6 @@
         (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
         warningScope = null;
-        providerPending.clear();
       }
       if (enteredUltra) {
         warningScope = currentPowerScope;
@@ -4065,6 +4196,7 @@
       accountFacade: windowRef.codexAccount,
       providerFacade,
       computerFacade: windowRef.openbotComputer,
+      nativeMode: nativeProtocolMode,
       onStateChanged: render,
       onSelectionChanged(botId) {
         panel.dataset.activeBotId = botId ?? "";
@@ -4314,11 +4446,15 @@
         try {
           const candidate = providerFacade.onConnectionsChanged((value) => {
             if (mountDisposed) return;
-            try { providerConnections = normalizeProviderConnections(value); }
-            catch { providerConnections = Object.freeze(PROVIDER_IDS.map(disconnectedProvider)); }
+            providerAuthorityEpoch += 1;
             try {
-              providerOnboarding = normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
-            } catch { providerOnboarding = null; }
+              acceptProviderConnections(value);
+              providerAuthorityInvalid = false;
+              acceptProviderOnboarding(providerOnboarding);
+            } catch {
+              providerAuthorityInvalid = true;
+              providerOnboarding = null;
+            }
             updateConnectionPresentation(lastSnapshot);
           });
           providerConnectionsUnsubscribe = typeof candidate === "function" ? candidate : null;
@@ -4328,17 +4464,16 @@
         try {
           const candidate = providerFacade.onCatalogChanged((value) => {
             if (mountDisposed) return;
+            providerAuthorityEpoch += 1;
             try {
-              const envelope = exactDataObject(value, new Set(["status", "generation", "models"]),
-                ["status", "generation", "models"], "Model catalog is unavailable.");
-              providerCatalog = envelope.status === "ready"
-                ? Object.freeze({ generation: envelope.generation, status: "ready", models: normalizeModelCatalog(envelope) })
-                : Object.freeze({ generation: envelope.generation, status: envelope.status, models: Object.freeze([]) });
-              if (providerCatalog.status === "ready") controller?.applyCatalog?.(providerCatalog);
-            } catch { providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) }); }
-            try {
-              providerOnboarding = normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
-            } catch { providerOnboarding = null; }
+              const changed = acceptProviderCatalog(value);
+              providerAuthorityInvalid = false;
+              if (changed && providerCatalog.status === "ready") controller?.applyCatalog?.(providerCatalog);
+              acceptProviderOnboarding(providerOnboarding);
+            } catch {
+              providerAuthorityInvalid = true;
+              providerOnboarding = null;
+            }
             updateConnectionPresentation(lastSnapshot);
           });
           providerCatalogUnsubscribe = typeof candidate === "function" ? candidate : null;
@@ -4376,6 +4511,9 @@
         if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
         warningScope = null;
+        providerAuthorityEpoch += 1;
+        providerOperations.clear();
+        providerPending.clear();
         closeAdvancedFlyout();
         selectionIntents.clear();
         try { providerConnectionsUnsubscribe?.(); } catch {}

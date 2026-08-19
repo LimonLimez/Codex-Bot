@@ -5953,6 +5953,471 @@ test("mounted Power keeps an authoritative noncompact tuple visible until a proj
   harness.mounted.dispose();
 });
 
+test("provider single-flight survives an unrelated Power repaint", async (context) => {
+  const catalog = providerCatalog([
+    providerModel(
+      "openai-codex",
+      "gpt-5.6-sol",
+      "GPT-5.6 Sol",
+      ["low", "medium", "high", "xhigh", "max", "ultra"],
+      12,
+      { isDefault: true },
+    ),
+  ], 12);
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const connection = deferred();
+  let connectCalls = 0;
+  const facade = providerFacade({
+    catalog,
+    connect() {
+      connectCalls += 1;
+      return connection.promise;
+    },
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const route = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  const action = route.children.at(-1).children[0];
+  action.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(connectCalls, 1);
+  assert.equal(action.disabled, true);
+
+  const power = harness.find("codex-power-input");
+  power.listeners.get("pointerdown")();
+  power.value = "5";
+  power.listeners.get("input")();
+  power.listeners.get("pointerup")();
+  assert.equal(harness.find("codex-power-warning").hidden, false);
+  harness.mounted.controller.applyBot(bot(BOT_A, "A", "ready"));
+  await new Promise((resolve) => setImmediate(resolve));
+  action.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(connectCalls, 1);
+  connection.resolve();
+});
+
+test("late lower-generation provider events cannot reopen a completed onboarding gate", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 2, { isDefault: true }),
+  ], 2);
+  const receipt = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 2,
+    catalogGeneration: 2,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const current = eightConnections({
+    "openai-codex": { state: "connected", generation: 2 },
+  });
+  let emitConnections;
+  let emitCatalog;
+  const facade = providerFacade({
+    connections: current,
+    catalog,
+    onboarding: receipt,
+    connectionsSubscription(listener) {
+      emitConnections = listener;
+      return () => {};
+    },
+    catalogSubscription(listener) {
+      emitCatalog = listener;
+      return () => {};
+    },
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 2,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+  emitConnections(eightConnections({
+    "openai-codex": { state: "connected", generation: 1 },
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+  emitCatalog(providerCatalog([], 1, "unavailable"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+});
+
+test("an older all-settled provider refresh cannot overwrite a newer connection and receipt", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  const oldList = deferred();
+  const oldCatalog = deferred();
+  const oldOnboarding = deferred();
+  let listCalls = 0;
+  let catalogCalls = 0;
+  let onboardingCalls = 0;
+  let connections = eightConnections();
+  let onboarding = null;
+  const facade = {
+    async list() {
+      listCalls += 1;
+      return listCalls === 1 ? oldList.promise : connections;
+    },
+    async catalog() {
+      catalogCalls += 1;
+      return catalogCalls === 1 ? oldCatalog.promise : catalog;
+    },
+    async readOnboarding() {
+      onboardingCalls += 1;
+      return onboardingCalls === 1 ? oldOnboarding.promise : onboarding;
+    },
+    async connect(request) {
+      connections = eightConnections({
+        [request.providerId]: { state: "connected", generation: 1 },
+      });
+    },
+    async completeOnboarding(providerId) {
+      onboarding = {
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      };
+      return onboarding;
+    },
+    async disconnect() {},
+    onConnectionsChanged() { return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const route = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  route.children.at(-1).children[0].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(onboarding !== null, true);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+
+  oldList.resolve(eightConnections());
+  oldCatalog.resolve(providerCatalog([], 0, "unavailable"));
+  oldOnboarding.resolve(null);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+});
+
+test("native initialization consumes the authoritative active-bot event before selecting a roster item", async () => {
+  const { createBotUiController } = require(uiPath);
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  const selection = (botId) => Object.freeze({
+    botId,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation: 1,
+  });
+  const selected = [];
+  const controller = createBotUiController({
+    nativeMode: true,
+    facade: {
+      async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      onEvent(listener) {
+        listener({ type: "active-bot-changed", botId: BOT_B });
+        return () => {};
+      },
+      async selectBot(botId) { selected.push(botId); return selection(botId); },
+      async readModel(botId) { return selection(botId); },
+    },
+    providerFacade: {
+      async catalog() { return catalog; },
+      onCatalogChanged() { return () => {}; },
+    },
+  });
+  await controller.initialize();
+  assert.deepEqual(selected, [BOT_B]);
+  assert.equal(controller.snapshot().activeBotId, BOT_B);
+  controller.dispose();
+});
+
+test("invalid or missing native provider facades keep the chooser blocked and product surfaces inert", async (context) => {
+  let accessorReads = 0;
+  const invalidFacade = {};
+  Object.defineProperty(invalidFacade, "list", {
+    get() {
+      accessorReads += 1;
+      throw new Error("hostile accessor");
+    },
+  });
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: invalidFacade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(accessorReads, 0);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
+  assert.equal(harness.mounted.panel.inert, true);
+  assert.equal(harness.mounted.modelDock.inert, true);
+  assert.equal(harness.findAllPanel("codex-first-connection-choice")[0].children.at(-1).children[0].disabled, true);
+
+  const missing = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+  });
+  context.after(() => missing.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(missing.findPanel("codex-first-connection-setup").open, true);
+  assert.equal(missing.mounted.panel.inert, true);
+  assert.equal(missing.mounted.modelDock.inert, true);
+});
+
+test("an externally connecting provider route is not actionable until it becomes retryable", async (context) => {
+  const catalog = providerCatalog([], 0, "unavailable");
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 0,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: providerFacade({
+      catalog,
+      connections: eightConnections({
+        "anthropic-claude": { state: "connecting", generation: 4 },
+      }),
+    }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const route = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "anthropic-claude");
+  assert.equal(route.children.at(-1).children[0].disabled, true);
+});
+
+test("provider chooser and Settings render the validated connection DTO label", async (context) => {
+  const catalog = providerCatalog([], 0, "unavailable");
+  const connections = eightConnections({ xai: { label: "DTO xAI label" } });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 0,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: providerFacade({ connections, catalog }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const chooser = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "xai");
+  const settings = harness.findAllPanel("codex-provider-connection")
+    .find((node) => node.dataset.providerId === "xai");
+  assert.equal(chooser.children[0].children[0].textContent, "DTO xAI label");
+  assert.equal(settings.children[0].children[0].textContent, "DTO xAI label");
+  assert.equal(chooser.dataset.loginKind, providerDescriptor("xai").loginKind);
+  assert.equal(settings.dataset.loginKind, providerDescriptor("xai").loginKind);
+});
+
+test("hostile provider DTOs reject missing fields, custom arrays, and non-canonical receipts", async (context) => {
+  const catalogModels = [
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 1, { isDefault: true }),
+  ];
+  catalogModels.extra = "reject me";
+  const malformedCatalog = Object.freeze({
+    generation: 1,
+    status: "ready",
+    models: catalogModels,
+  });
+  const malformedConnections = eightConnections({
+    "openai-codex": { state: "connected", generation: 1 },
+  }).map((entry) => {
+    if (entry.providerId !== "openai-codex") return entry;
+    const copy = { ...entry };
+    delete copy.capabilities;
+    return copy;
+  });
+  const harness = createMountedUiHarness({
+    catalog: malformedCatalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: providerFacade({
+      connections: malformedConnections,
+      catalog: malformedCatalog,
+      onboarding: {
+        schemaVersion: 1,
+        providerId: "openai-codex",
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19",
+      },
+    }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
+  assert.equal(harness.mounted.panel.inert, true);
+  assert.equal(harness.mounted.modelDock.inert, true);
+});
+
+test("external browser launch cannot complete onboarding before an authoritative connected catalog event", async (context) => {
+  const catalog = providerCatalog([
+    providerModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  let connections = eightConnections({
+    "openai-codex": { state: "connecting", generation: 1 },
+  });
+  let onboarding = null;
+  let emitConnections;
+  let completeCalls = 0;
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog,
+    onboarding: () => onboarding,
+    connect() { return undefined; },
+    complete(providerId) {
+      completeCalls += 1;
+      onboarding = {
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      };
+      return onboarding;
+    },
+    connectionsSubscription(listener) {
+      emitConnections = listener;
+      return () => {};
+    },
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const route = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "openai-codex");
+  route.children.at(-1).children[0].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(completeCalls, 0);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
+
+  connections = eightConnections({
+    "openai-codex": { state: "connected", generation: 1 },
+  });
+  emitConnections(connections);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(completeCalls, 0);
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
+});
+
 test("closed Power trigger uses compact labels while Advanced summary keeps raw effort labels", async () => {
   const catalog = Object.freeze({
     generation: 12,
