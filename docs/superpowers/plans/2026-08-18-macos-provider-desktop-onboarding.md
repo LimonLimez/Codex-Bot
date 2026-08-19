@@ -288,9 +288,12 @@ test("local discovery accepts only literal loopback and one bounded non-redirect
     providerId: "local-openai-compatible", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null,
   });
   assert.deepEqual(catalog.models.map(({ model }) => model), ["local-model"]);
+  const credentialedUrl = new URL("http://127.0.0.1:11434/v1");
+  credentialedUrl.username = "fixture-user";
+  credentialedUrl.password = "fixture-password";
   for (const baseUrl of [
     "http://localhost:11434/v1", "http://192.168.1.2/v1", "https://127.0.0.1/v1",
-    "http://user:pass@127.0.0.1:11434/v1", "http://[::1]:11434/v1",
+    credentialedUrl.href, "http://[::1]:11434/v1",
   ]) await assert.rejects(provider.discover({ providerId: "local-openai-compatible", baseUrl, apiKey: null }), /invalid|loopback/i);
   await assert.rejects(redirecting.discover({
     providerId: "local-openai-compatible", baseUrl: "http://127.0.0.1:11434/v1", apiKey: null,
