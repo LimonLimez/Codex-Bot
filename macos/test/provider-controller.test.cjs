@@ -511,3 +511,29 @@ test("readAuthoritySnapshot is disposal-fenced before and during its one state r
   rejectRead(new Error("late state failure"));
   await assert.rejects(failedPending, { code: "OPENBOT_PROVIDER_DISPOSED" });
 });
+
+test("internal error connection state is publicly unavailable with its stable error code", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = {
+    schemaVersion: 1,
+    connections: [{
+      providerId: "anthropic-claude",
+      generation: 4,
+      state: "error",
+      errorCode: "OPENBOT_PROVIDER_FAILED",
+      models: [],
+    }],
+    onboarding: null,
+  };
+  const controller = new ProviderController({ stateStore: state });
+
+  const listed = (await controller.listConnections()).find(({ providerId }) => providerId === "anthropic-claude");
+  assert.equal(listed.state, "unavailable");
+  assert.equal(listed.errorCode, "OPENBOT_PROVIDER_FAILED");
+
+  const snapshot = await controller.readAuthoritySnapshot();
+  const projected = snapshot.connections.find(({ providerId }) => providerId === "anthropic-claude");
+  assert.equal(projected.state, "unavailable");
+  assert.equal(projected.errorCode, "OPENBOT_PROVIDER_FAILED");
+});

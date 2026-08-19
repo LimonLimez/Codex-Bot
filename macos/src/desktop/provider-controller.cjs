@@ -154,7 +154,9 @@ function projectConnections(state, errors = null) {
       providerId,
       label: descriptor.label,
       loginKind: descriptor.loginKind,
-      state: current?.state || (errorCode ? "unavailable" : "disconnected"),
+      state: current?.state === "error"
+        ? "unavailable"
+        : current?.state || (errorCode ? "unavailable" : "disconnected"),
       generation: current?.generation || 0,
       capabilities: {
         reasoning: descriptor.reasoningEfforts.length > 1,
