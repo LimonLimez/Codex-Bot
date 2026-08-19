@@ -677,6 +677,7 @@ test("native roster requests preserve correlation and route create, rename, prof
     description: "Build with Direct Codex.",
     origin: "user",
     isKickstartRequested: true,
+    templateId: "coding",
     avatarShape: "gem",
     avatarColor: "purple",
   });
@@ -3160,9 +3161,6 @@ test("malformed, duplicate, and oversized frames close only their port while uns
 
   for (const [requestId, method, args] of [
     ["r-delete-unavailable", "deleteAgents", { ids: [BOT_A] }],
-    ["r-template-unavailable", "createAgent", {
-      name: "Template Bot", description: "", templateId: "vendor-template",
-    }],
     ["r-attachment-unavailable", "sendPrompt", {
       agentId: BOT_A,
       prompt: "Use this attachment.",

@@ -67,6 +67,7 @@ const ALLOWED_MUTATIONS = Object.freeze([
   "dist/electron-preload/preload.cjs",
   "dist/host/host-main.cjs",
   "dist/renderer/assets/index-CphCyQnY.js",
+  "dist/renderer/assets/index-d9mfdYoh.js",
   "dist/renderer/codex/bot-runtime-ui.js",
   "dist/renderer/codex/codex-ui.css",
   "dist/renderer/codex/model-controls.js",

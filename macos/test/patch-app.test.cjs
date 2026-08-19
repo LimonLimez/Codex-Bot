@@ -14,6 +14,10 @@ const anchorsPath = path.join(macRoot, "src", "patch", "anchors.cjs");
 const rendererPatchPath = path.join(macRoot, "src", "patch", "renderer.cjs");
 const STOCK_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardingRunId:t,completeOnboarding:s}=RFn();return n?p.jsxs(p.Fragment,{children:[p.jsx(Upe,{}),p.jsx(ggt,{})]}):e==="checking"?null:p.jsx(TDn,{chrome:JHn,children:e==="onboarding"?p.jsx(qFn,{onComplete:s,presentation:KUn},t):p.jsx(BHn,{})})}';
 const STOCK_PROMPT_TRAILING = 'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:Q})';
+const STOCK_NEW_BOT_RECIPIENT = 'function q2e(n){return n.kind==="agent"?{kind:"agent",id:n.agent.id,name:n.agent.name,avatarDataUrl:n.agent.avatarDataUrl}:{kind:"new",name:n.kind==="create"?n.name:Jut}}';
+const STOCK_NEW_BOT_COMMIT = 'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,Ne,Te,xe,ve,t]';
+const STOCK_BOT_SETTINGS_ROOT = 'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
+const STOCK_SETTINGS_ROOT = 'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const STOCK_LOCAL_IDENTITY_ANCHORS = [
   'const Bgt={slice:"send-journal",schemaVersion:2,scope:"client-persisted",accountSensitive:!0}',
   'bt=()=>{if(!(Ge||t.get().status!=="ready"||s==null)){',
@@ -24,10 +28,14 @@ const STOCK_LOCAL_IDENTITY_ANCHORS = [
   'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())',
   'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null})',
 ].join(";");
-const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}const after="kept";`;
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}const after="kept";`;
 const SYNTHETIC_VENDOR_RENDERER_SHA256 = crypto
   .createHash("sha256")
   .update(SYNTHETIC_VENDOR_RENDERER, "utf8")
+  .digest("hex");
+const SYNTHETIC_VENDOR_SETTINGS_SHA256 = crypto
+  .createHash("sha256")
+  .update(STOCK_SETTINGS_ROOT, "utf8")
   .digest("hex");
 const rendererPatch = require(rendererPatchPath);
 
@@ -94,6 +102,10 @@ async function syntheticAsar(t, overrides = {}) {
     path.join(tree, "dist", "renderer", "assets", "index-CphCyQnY.js"),
     SYNTHETIC_VENDOR_RENDERER,
   );
+  fs.writeFileSync(
+    path.join(tree, "dist", "renderer", "assets", "index-d9mfdYoh.js"),
+    STOCK_SETTINGS_ROOT,
+  );
   const nativeBytes = Buffer.from("synthetic native helper\n");
   const nativePath = path.join(tree, "dist", "native", "sand-helper");
   fs.writeFileSync(nativePath, nativeBytes, { mode: 0o755 });
@@ -110,6 +122,7 @@ function loadPatcher() {
     patchRenderer(extractedRoot) {
       return rendererPatch.patchRenderer(extractedRoot, {
         expectedVendorRendererSha256: SYNTHETIC_VENDOR_RENDERER_SHA256,
+        expectedVendorSettingsSha256: SYNTHETIC_VENDOR_SETTINGS_SHA256,
       });
     },
   };
@@ -212,6 +225,7 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
         "dist/electron-preload/preload.cjs",
         "dist/host/host-main.cjs",
         "dist/renderer/assets/index-CphCyQnY.js",
+        "dist/renderer/assets/index-d9mfdYoh.js",
         "dist/renderer/codex/bot-runtime-ui.js",
         "dist/renderer/codex/codex-ui.css",
         "dist/renderer/codex/model-controls.js",

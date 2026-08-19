@@ -26,6 +26,9 @@ const CODEX_HEAD = `    <link rel="stylesheet" href="./codex/codex-ui.css">
 const VENDOR_RENDERER_ASSET = "index-CphCyQnY.js";
 const VENDOR_RENDERER_ASSET_SHA256 =
   "097b53e7c7e481022b393228b65104b3cd548881281b6adf0cb255a4b3e5b038";
+const VENDOR_SETTINGS_ASSET = "index-d9mfdYoh.js";
+const VENDOR_SETTINGS_ASSET_SHA256 =
+  "e30ee380b429519be8748ec7294c618d37db6c84ddf72e79d4f3d218245dfbae";
 const VENDOR_RENDERER_SCRIPT = `./assets/${VENDOR_RENDERER_ASSET}`;
 const VENDOR_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardingRunId:t,completeOnboarding:s}=RFn();return n?p.jsxs(p.Fragment,{children:[p.jsx(Upe,{}),p.jsx(ggt,{})]}):e==="checking"?null:p.jsx(TDn,{chrome:JHn,children:e==="onboarding"?p.jsx(qFn,{onComplete:s,presentation:KUn},t):p.jsx(BHn,{})})}';
 const OPENBOT_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardingRunId:t,completeOnboarding:s}=RFn();return n?p.jsxs(p.Fragment,{children:[p.jsx(Upe,{}),p.jsx(ggt,{})]}):e==="checking"?null:p.jsx(TDn,{chrome:JHn,children:e==="onboarding"&&!(window.openbotProtocol?.schemaVersion===1&&window.openbotProtocol?.mode==="local-protocol")?p.jsx(qFn,{onComplete:s,presentation:KUn},t):p.jsx(BHn,{})})}';
@@ -49,6 +52,22 @@ const VENDOR_PROMPT_TRAILING =
   'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:Q})';
 const OPENBOT_PROMPT_TRAILING =
   'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:[p.jsx("div",{"data-openbot-model-picker-host":!0}),Q]})';
+const VENDOR_NEW_BOT_RECIPIENT =
+  'function q2e(n){return n.kind==="agent"?{kind:"agent",id:n.agent.id,name:n.agent.name,avatarDataUrl:n.agent.avatarDataUrl}:{kind:"new",name:n.kind==="create"?n.name:Jut}}';
+const OPENBOT_NEW_BOT_RECIPIENT =
+  'function q2e(n){return n.kind==="agent"?{kind:"agent",id:n.agent.id,name:n.agent.name,avatarDataUrl:n.agent.avatarDataUrl}:n.kind==="create-new"?{kind:"picker"}:{kind:"new",name:n.name}}';
+const VENDOR_NEW_BOT_COMMIT =
+  'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,Ne,Te,xe,ve,t]';
+const OPENBOT_NEW_BOT_COMMIT =
+  'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;if(Ee.type==="single"&&Ee.recipient.kind==="picker"){S(),r(),W.openPicker();return}const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,W,Ne,Te,xe,ve,t]';
+const VENDOR_BOT_SETTINGS_ROOT =
+  'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
+const OPENBOT_BOT_SETTINGS_ROOT =
+  'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B,p.jsx("div",{"data-openbot-bot-settings-host":!0})]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
+const VENDOR_SETTINGS_ROOT =
+  'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
+const OPENBOT_SETTINGS_ROOT =
+  'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,t.jsx("div",{"data-openbot-connections-host":!0}),f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const VENDOR_CLIENT_RESTORE = 'if(await j.write({accountSlot:null,value:Ve}),!Ye()||(await B.restore(Ve),!Ye())||(await q.restore(Ve),!Ye())||(await K.restore(Ve),!Ye())||(await F.restore(Ve),!Ye())||(await ne.restore(Ve),!Ye())||(await Z.restore(Ve),!Ye())||(await ke.restore(Ve),!Ye()))return;';
 const OPENBOT_CLIENT_RESTORE = 'const openbotPersistenceSlot=Ve??(hasLocalCoordinator()?"openbot-local-v1":null);if(await j.write({accountSlot:null,value:Ve}),!Ye()||(await B.restore(openbotPersistenceSlot),!Ye())||(await q.restore(openbotPersistenceSlot),!Ye())||(await K.restore(openbotPersistenceSlot),!Ye())||(await F.restore(openbotPersistenceSlot),!Ye())||(await ne.restore(openbotPersistenceSlot),!Ye())||(await Z.restore(openbotPersistenceSlot),!Ye())||(await ke.restore(openbotPersistenceSlot),!Ye()))return;';
 const VENDOR_ROSTER_CONNECT_GATE = 'Ve!=null&&F.connect()';
@@ -127,11 +146,48 @@ function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSE
     OPENBOT_IDENTITY_PORT_GATE,
     "Grok coordinator identity port account gate",
   );
-  return replaceUnique(
+  patched = replaceUnique(
     patched,
     VENDOR_PROMPT_TRAILING,
     OPENBOT_PROMPT_TRAILING,
     "Grok composer model picker host",
+  );
+  patched = replaceUnique(
+    patched,
+    VENDOR_NEW_BOT_RECIPIENT,
+    OPENBOT_NEW_BOT_RECIPIENT,
+    "Grok native New Bot picker route",
+  );
+  patched = replaceUnique(
+    patched,
+    VENDOR_NEW_BOT_COMMIT,
+    OPENBOT_NEW_BOT_COMMIT,
+    "Grok native New Bot picker commit",
+  );
+  return replaceUnique(
+    patched,
+    VENDOR_BOT_SETTINGS_ROOT,
+    OPENBOT_BOT_SETTINGS_ROOT,
+    "Grok View Bot settings host",
+  );
+}
+
+function patchVendorSettingsSource(source, expectedSha256 = VENDOR_SETTINGS_ASSET_SHA256) {
+  if (typeof source !== "string" || source.length < 1) {
+    throw new Error("Grok settings asset is invalid");
+  }
+  if (typeof expectedSha256 !== "string" || !/^[a-f0-9]{64}$/.test(expectedSha256)) {
+    throw new Error("Expected Grok settings asset hash is invalid");
+  }
+  const actualSha256 = crypto.createHash("sha256").update(source, "utf8").digest("hex");
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(`Unsupported Grok settings asset hash: ${actualSha256}`);
+  }
+  return replaceUnique(
+    source,
+    VENDOR_SETTINGS_ROOT,
+    OPENBOT_SETTINGS_ROOT,
+    "Grok General Settings AI Connections host",
   );
 }
 
@@ -159,11 +215,15 @@ function patchRenderer(extractedRoot, options = {}) {
     throw new TypeError("Grok renderer patch options are invalid");
   }
   const optionKeys = Object.keys(options);
-  if (optionKeys.some((key) => key !== "expectedVendorRendererSha256")) {
+  if (optionKeys.some((key) => ![
+    "expectedVendorRendererSha256", "expectedVendorSettingsSha256",
+  ].includes(key))) {
     throw new Error("Unsupported Grok renderer patch option");
   }
   const expectedVendorRendererSha256 =
     options.expectedVendorRendererSha256 ?? VENDOR_RENDERER_ASSET_SHA256;
+  const expectedVendorSettingsSha256 =
+    options.expectedVendorSettingsSha256 ?? VENDOR_SETTINGS_ASSET_SHA256;
   const root = path.resolve(extractedRoot);
   const renderer = path.join(root, "dist", "renderer");
   realDirectory(root, "Extracted app");
@@ -192,6 +252,15 @@ function patchRenderer(extractedRoot, options = {}) {
     fs.readFileSync(vendorRenderer, "utf8"),
     expectedVendorRendererSha256,
   );
+  const vendorSettings = path.join(vendorAssets, VENDOR_SETTINGS_ASSET);
+  const vendorSettingsStat = fs.lstatSync(vendorSettings);
+  if (!vendorSettingsStat.isFile() || vendorSettingsStat.isSymbolicLink()) {
+    throw new Error("Grok settings asset must be a real file");
+  }
+  const patchedVendorSettings = patchVendorSettingsSource(
+    fs.readFileSync(vendorSettings, "utf8"),
+    expectedVendorSettingsSha256,
+  );
   const target = path.join(renderer, "codex");
   if (fs.existsSync(target)) throw new Error("Codex renderer asset target already exists");
   const sourceRoot = path.resolve(__dirname, "..", "renderer");
@@ -210,6 +279,10 @@ function patchRenderer(extractedRoot, options = {}) {
     encoding: "utf8",
     mode: vendorRendererStat.mode & 0o777,
   });
+  fs.writeFileSync(vendorSettings, patchedVendorSettings, {
+    encoding: "utf8",
+    mode: vendorSettingsStat.mode & 0o777,
+  });
   fs.writeFileSync(index, patchedIndex, { encoding: "utf8", mode: indexStat.mode & 0o777 });
 }
 
@@ -217,7 +290,10 @@ module.exports = {
   ASSETS,
   VENDOR_RENDERER_ASSET,
   VENDOR_RENDERER_ASSET_SHA256,
+  VENDOR_SETTINGS_ASSET,
+  VENDOR_SETTINGS_ASSET_SHA256,
   patchRenderer,
   patchRendererIndexSource,
   patchVendorRendererSource,
+  patchVendorSettingsSource,
 };

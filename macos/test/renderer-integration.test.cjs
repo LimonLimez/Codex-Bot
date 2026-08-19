@@ -38,6 +38,10 @@ const STOCK_RECONNECT_GATE = 'bt=()=>{if(!(Ge||t.get().status!=="ready"||s==null
 const STOCK_FOCUS_GATE = 'mt=()=>{if(Ge||t.get().status!=="ready"||s==null)return;';
 const STOCK_COMPOSER_ACCOUNT_GATE = ':s?f!=null?W._(mbn(f)):i.length>0?U({id:"I/1BxG"}):C??W._(dht):U({id:"622+sP"})';
 const STOCK_PROMPT_TRAILING = 'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:Q})';
+const STOCK_NEW_BOT_RECIPIENT = 'function q2e(n){return n.kind==="agent"?{kind:"agent",id:n.agent.id,name:n.agent.name,avatarDataUrl:n.agent.avatarDataUrl}:{kind:"new",name:n.kind==="create"?n.name:Jut}}';
+const STOCK_NEW_BOT_COMMIT = 'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,Ne,Te,xe,ve,t]';
+const STOCK_BOT_SETTINGS_ROOT = 'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
+const STOCK_SETTINGS_ROOT = 'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const STOCK_ROSTER_CONNECT_GATE = 'Ve!=null&&F.connect()';
 const STOCK_ACCOUNT_SCOPED_CONNECT_GATE = 'for(const it of Ee)(Ve!=null||!Me.has(it))&&it.connect?.()';
 const STOCK_POST_RESTORE_GATE = 'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())';
@@ -62,6 +66,9 @@ const SYNTHETIC_VENDOR_RENDERER = [
   'F.noteWindowFocus()};',
   STOCK_COMPOSER_ACCOUNT_GATE,
   STOCK_PROMPT_TRAILING,
+  STOCK_NEW_BOT_RECIPIENT,
+  STOCK_NEW_BOT_COMMIT,
+  STOCK_BOT_SETTINGS_ROOT,
   STOCK_CLIENT_RESTORE,
   STOCK_ROSTER_CONNECT_GATE,
   STOCK_ACCOUNT_SCOPED_CONNECT_GATE,
@@ -82,13 +89,23 @@ function tempRoot(t) {
   return root;
 }
 
-function writeSyntheticRendererTree(root, { index = STOCK_INDEX, asset = SYNTHETIC_VENDOR_RENDERER } = {}) {
+function writeSyntheticRendererTree(root, {
+  index = STOCK_INDEX,
+  asset = SYNTHETIC_VENDOR_RENDERER,
+  settingsAsset = STOCK_SETTINGS_ROOT,
+} = {}) {
   fs.mkdirSync(path.join(root, "dist", "renderer", "assets"), { recursive: true });
   fs.writeFileSync(path.join(root, "dist", "renderer", "index.html"), index);
   if (asset !== null) {
     fs.writeFileSync(
       path.join(root, "dist", "renderer", "assets", "index-CphCyQnY.js"),
       asset,
+    );
+  }
+  if (settingsAsset !== null) {
+    fs.writeFileSync(
+      path.join(root, "dist", "renderer", "assets", "index-d9mfdYoh.js"),
+      settingsAsset,
     );
   }
 }
@@ -197,6 +214,45 @@ test("the pinned renderer adds one composer model picker host immediately before
   );
 });
 
+test("the pinned renderer restores Grok New Bot and adds the bot-scoped Computer host", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  assert.match(
+    patched,
+    /function q2e\(n\)\{return n\.kind==="agent"\?\{kind:"agent",id:n\.agent\.id,name:n\.agent\.name,avatarDataUrl:n\.agent\.avatarDataUrl\}:n\.kind==="create-new"\?\{kind:"picker"\}:\{kind:"new",name:n\.name\}\}/,
+  );
+  assert.match(
+    patched,
+    /if\(Ee\.type==="single"&&Ee\.recipient\.kind==="picker"\)\{S\(\),r\(\),W\.openPicker\(\);return\}/,
+  );
+  assert.match(patched, /\[Ie,S,r,W,Ne,Te,xe,ve,t\]/);
+  assert.equal((patched.match(/data-openbot-bot-settings-host/g) ?? []).length, 1);
+  assert.match(
+    patched,
+    /children:\[j,B,p\.jsx\("div",\{"data-openbot-bot-settings-host":!0\}\)\]/,
+  );
+  assert.doesNotMatch(patched, new RegExp(STOCK_NEW_BOT_RECIPIENT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(patched, new RegExp(STOCK_NEW_BOT_COMMIT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("the pinned lazy General Settings asset adds one AI Connections host after Account", () => {
+  const { patchVendorSettingsSource } = require(patchPath);
+  const patched = patchVendorSettingsSource(STOCK_SETTINGS_ROOT, sha256Text(STOCK_SETTINGS_ROOT));
+  assert.equal((patched.match(/data-openbot-connections-host/g) ?? []).length, 1);
+  assert.match(
+    patched,
+    /children:\[o,t\.jsx\("div",\{"data-openbot-connections-host":!0\}\),f,m,r,u,c\]/,
+  );
+  assert.throws(
+    () => patchVendorSettingsSource(patched, sha256Text(patched)),
+    /already|anchor|not found/i,
+  );
+});
+
 test("the pinned native renderer patch fails closed on hash drift and every ambiguous anchor", async (t) => {
   const { patchVendorRendererSource } = require(patchPath);
   assert.throws(
@@ -215,6 +271,9 @@ test("the pinned native renderer patch fails closed on hash drift and every ambi
     ["focus", STOCK_FOCUS_GATE],
     ["composer", STOCK_COMPOSER_ACCOUNT_GATE],
     ["composer model picker host", STOCK_PROMPT_TRAILING],
+    ["new bot recipient", STOCK_NEW_BOT_RECIPIENT],
+    ["new bot commit", STOCK_NEW_BOT_COMMIT],
+    ["bot settings host", STOCK_BOT_SETTINGS_ROOT],
     ["client restore", STOCK_CLIENT_RESTORE],
     ["roster connect", STOCK_ROSTER_CONNECT_GATE],
     ["post restore", STOCK_POST_RESTORE_GATE],
@@ -262,7 +321,10 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
   const { patchRenderer } = require(patchPath);
   const root = tempRoot(t);
   writeSyntheticRendererTree(root);
-  patchRenderer(root, { expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER) });
+  patchRenderer(root, {
+    expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER),
+    expectedVendorSettingsSha256: sha256Text(STOCK_SETTINGS_ROOT),
+  });
   const target = path.join(root, "dist", "renderer", "codex");
   assert.deepEqual(fs.readdirSync(target).sort(), [
     "bot-runtime-ui.js",
@@ -284,6 +346,10 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
   );
   assert.match(vendorRenderer, /window\.openbotProtocol\?\.schemaVersion===1/);
   assert.doesNotMatch(vendorRenderer, new RegExp(STOCK_NATIVE_SHELL_GATE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(
+    fs.readFileSync(path.join(root, "dist", "renderer", "assets", "index-d9mfdYoh.js"), "utf8"),
+    /data-openbot-connections-host/,
+  );
 });
 
 test("renderer patch pins the reviewed asset path, hash, and unique script reference", async (t) => {
@@ -416,8 +482,13 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(botUi, /modelDock\.append\(modelTrigger,\s*popover,\s*advancedFlyout\)/s);
   assert.doesNotMatch(botUi, /advancedPanel\.append\([^;]*advancedFlyout/s);
   assert.doesNotMatch(botUi, /codex-power-(?:model|effort|speed)-select/);
-  assert.match(botUi, /nativeControls\.append\(statusRow,\s*computerRow,\s*computerGrants\)/s);
-  assert.doesNotMatch(botUi, /nativeControls\.append\(providerRow/s);
+  assert.match(
+    botUi,
+    /nativeBotSettings\.append\([\s\S]*statusRow,[\s\S]*computerRow,[\s\S]*computerGrants,[\s\S]*desktopHost/s,
+  );
+  assert.doesNotMatch(botUi, /popover\.append\([^;]*(?:statusRow|computerRow|computerGrants)/s);
+  assert.match(botUi, /nativeBotSettingsHost\.append\?\.\(nativeBotSettings\)/);
+  assert.match(botUi, /nativeConnectionsHost\.append\?\.\(connectionsSettings\)/);
   assert.doesNotMatch(botUi, /popover\.append\([^;]*reasoningView\.warning/s);
 });
 

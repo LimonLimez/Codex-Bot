@@ -1601,9 +1601,7 @@ class OpenBotNativeCoordinator {
       || args.isKickstartRequested !== undefined && typeof args.isKickstartRequested !== "boolean") {
       throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
     }
-    if (args.templateId !== undefined) {
-      throw capabilityUnavailable("createAgent");
-    }
+    if (args.templateId !== undefined) boundedString(args.templateId, 160);
     const appearance = {
       shape: appearanceId(args.avatarShape, "blob"),
       color: appearanceId(args.avatarColor, "blue"),

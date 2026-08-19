@@ -2233,7 +2233,13 @@
 
   function findUiMounts(documentRef) {
     if (!documentRef || typeof documentRef.querySelector !== "function") {
-      return Object.freeze({ sidebarHost: null, composerHost: null, nativeComposerHost: null });
+      return Object.freeze({
+        sidebarHost: null,
+        composerHost: null,
+        nativeComposerHost: null,
+        nativeBotSettingsHost: null,
+        nativeConnectionsHost: null,
+      });
     }
     const sidebarSelectors = [
       "[data-codex-bot-sidebar-host]",
@@ -2270,7 +2276,15 @@
       }
     }
     const nativeComposerHost = documentRef.querySelector("[data-openbot-model-picker-host]");
-    return Object.freeze({ sidebarHost, composerHost, nativeComposerHost });
+    const nativeBotSettingsHost = documentRef.querySelector("[data-openbot-bot-settings-host]");
+    const nativeConnectionsHost = documentRef.querySelector("[data-openbot-connections-host]");
+    return Object.freeze({
+      sidebarHost,
+      composerHost,
+      nativeComposerHost,
+      nativeBotSettingsHost,
+      nativeConnectionsHost,
+    });
   }
 
   function createReasoningView(documentRef, {
@@ -2744,18 +2758,100 @@
       creationAlert,
       renameRow,
       ...(nativeProtocolMode ? [] : [providerRow]),
-      statusRow,
-      computerRow,
-      computerGrants,
-      ...(nativeProtocolMode ? [] : [newBotSetup]),
+      ...(nativeProtocolMode ? [] : [statusRow, computerRow, computerGrants, newBotSetup]),
       computerSetup,
       permissionSheet,
     );
-    const nativeControls = element(documentRef, "section", "codex-native-controls");
+    const nativeBotSettings = element(documentRef, "section", "codex-native-bot-settings");
+    nativeBotSettings.setAttribute("aria-label", "OpenBot Computer");
+    const nativeBotSettingsTitle = element(
+      documentRef,
+      "h3",
+      "codex-native-section-title",
+      "Computer",
+    );
+    const desktopHost = element(
+      documentRef,
+      "div",
+      "codex-bot-desktop-host openbot-local-desktop-host",
+    );
     if (nativeProtocolMode) {
-      nativeControls.append(statusRow, computerRow, computerGrants);
+      nativeBotSettings.append(
+        nativeBotSettingsTitle,
+        statusRow,
+        computerRow,
+        computerGrants,
+        desktopHost,
+      );
+    }
+    const connectionsSettings = element(documentRef, "section", "codex-ai-connections");
+    connectionsSettings.setAttribute("aria-label", "AI Connections");
+    const connectionsTitle = element(documentRef, "h3", "codex-native-section-title", "AI Connections");
+    const connectionsCopy = element(
+      documentRef,
+      "p",
+      "codex-ai-connections-copy",
+      "Connect the AI services you want OpenBot to use. Models remain bot-specific.",
+    );
+    const connectionsActions = element(documentRef, "div", "codex-ai-connections-actions");
+    const connectionDirect = element(documentRef, "button", "codex-connection-direct", "Connect Direct Codex");
+    const connectionClaude = element(documentRef, "button", "codex-connection-claude", "Connect Claude");
+    for (const button of [connectionDirect, connectionClaude]) button.type = "button";
+    connectionsActions.append(connectionDirect, connectionClaude);
+    connectionsSettings.append(connectionsTitle, connectionsCopy, connectionsActions);
+    const firstConnectionSetup = element(documentRef, "dialog", "codex-first-connection-setup");
+    firstConnectionSetup.setAttribute("role", "dialog");
+    firstConnectionSetup.setAttribute("aria-modal", "true");
+    firstConnectionSetup.setAttribute("aria-labelledby", "codex-first-connection-title");
+    firstConnectionSetup.setAttribute("aria-describedby", "codex-first-connection-copy");
+    firstConnectionSetup.hidden = true;
+    const firstConnectionTitle = element(
+      documentRef,
+      "h2",
+      "codex-first-connection-title",
+      "Choose your first AI connection",
+    );
+    firstConnectionTitle.id = "codex-first-connection-title";
+    const firstConnectionCopy = element(
+      documentRef,
+      "p",
+      "codex-first-connection-copy",
+      "Connect one service before creating your first bot. You can connect more later in Settings.",
+    );
+    firstConnectionCopy.id = "codex-first-connection-copy";
+    const firstConnectionChoices = element(documentRef, "div", "codex-first-connection-choices");
+    const firstConnectionDirect = element(
+      documentRef,
+      "button",
+      "codex-first-connection-choice codex-first-connection-direct",
+      "Continue with Direct Codex",
+    );
+    const firstConnectionClaude = element(
+      documentRef,
+      "button",
+      "codex-first-connection-choice codex-first-connection-claude",
+      "Connect Claude",
+    );
+    for (const button of [firstConnectionDirect, firstConnectionClaude]) button.type = "button";
+    const firstConnectionRecommended = element(
+      documentRef,
+      "span",
+      "codex-first-connection-recommended",
+      "Recommended",
+    );
+    firstConnectionDirect.append(firstConnectionRecommended);
+    firstConnectionChoices.append(firstConnectionDirect, firstConnectionClaude);
+    const firstConnectionError = element(documentRef, "p", "codex-first-connection-error");
+    firstConnectionError.setAttribute("role", "alert");
+    firstConnectionError.hidden = true;
+    firstConnectionSetup.append(
+      firstConnectionTitle,
+      firstConnectionCopy,
+      firstConnectionChoices,
+      firstConnectionError,
+    );
+    if (nativeProtocolMode) {
       popover.append(
-        nativeControls,
         pickerMenu,
         reasoningView.label,
         reasoningView.instructions,
@@ -2763,11 +2859,24 @@
     } else popover.append(pickerMenu, reasoningView.label, reasoningView.instructions);
     modelDock.append(modelTrigger, popover, advancedFlyout);
     if (nativeProtocolMode) {
-      documentRef.body.append(computerSetup, permissionSheet);
+      documentRef.body.append(computerSetup, permissionSheet, firstConnectionSetup);
       panel.dataset.codexMountState = "native-shell";
     } else documentRef.body.append(panel, modelDock);
 
     let mountDisposed = false;
+    const FIRST_CONNECTION_KEY = "openbot.first-connection.v1";
+    let firstConnection = null;
+    try {
+      const storedConnection = windowRef.localStorage?.getItem?.(FIRST_CONNECTION_KEY);
+      if (["codex", "claude"].includes(storedConnection)) firstConnection = storedConnection;
+    } catch {}
+    let accountState = null;
+    let accountUnsubscribe = null;
+    let connectionPending = false;
+    let requestedFirstConnection = null;
+    let localDesktopView = null;
+    let localDesktopSelection = undefined;
+    let lastSnapshot = null;
     let advancedViewExpanded = false;
     let pickerTransitionFrame = 0;
     const POWER_SURFACE_MARGIN = 8;
@@ -2878,7 +2987,13 @@
     }
     function attachToProductHosts() {
       if (mountDisposed) return;
-      const { sidebarHost, composerHost, nativeComposerHost } = findUiMounts(documentRef);
+      const {
+        sidebarHost,
+        composerHost,
+        nativeComposerHost,
+        nativeBotSettingsHost,
+        nativeConnectionsHost,
+      } = findUiMounts(documentRef);
       if (nativeProtocolMode) {
         panel.dataset.codexMountState = "native-shell";
       } else if (sidebarHost) {
@@ -2898,6 +3013,33 @@
         if (nativeProtocolMode && modelDock.parentElement) modelDock.remove?.();
         modelDock.dataset.codexMountState = "pending";
       }
+      if (nativeProtocolMode && nativeBotSettingsHost) {
+        if (nativeBotSettings.parentElement !== nativeBotSettingsHost) {
+          nativeBotSettingsHost.append?.(nativeBotSettings);
+        }
+        if (!localDesktopView
+          && typeof windowRef.OpenBotLocalDesktopView?.createLocalDesktopView === "function") {
+          try {
+            localDesktopView = windowRef.OpenBotLocalDesktopView.createLocalDesktopView({
+              documentRef,
+              windowRef,
+              container: desktopHost,
+            });
+            localDesktopSelection = null;
+          } catch {}
+        }
+        synchronizeLocalDesktop(lastSnapshot);
+      } else if (nativeProtocolMode) {
+        nativeBotSettings.remove?.();
+        localDesktopView?.dispose?.();
+        localDesktopView = null;
+        localDesktopSelection = undefined;
+      }
+      if (nativeProtocolMode && nativeConnectionsHost) {
+        if (connectionsSettings.parentElement !== nativeConnectionsHost) {
+          nativeConnectionsHost.append?.(connectionsSettings);
+        }
+      } else if (nativeProtocolMode) connectionsSettings.remove?.();
     }
     attachToProductHosts();
     const MountObserver = windowRef.MutationObserver;
@@ -2906,7 +3048,6 @@
       : null;
     mountObserver?.observe(documentRef.body, { childList: true, subtree: true });
 
-    let lastSnapshot = null;
     let warningTimer = null;
     let warningScope = null;
     let currentPowerScope = "unselected";
@@ -2927,6 +3068,100 @@
     let permissionReturnFocus = null;
     const powerState = new POWER_CONTROL.PowerControlState([], null, { ownerKey: "unselected" });
     let controller;
+
+    function accountReady(value) {
+      return value?.status === "ready" && typeof value.authMode === "string"
+        && value.authMode.length > 0;
+    }
+
+    function synchronizeLocalDesktop(snapshot) {
+      if (!localDesktopView || !snapshot) return;
+      const nextBotId = snapshot.activeBotId && snapshot.computer.mode === "local"
+        ? snapshot.activeBotId
+        : null;
+      if (localDesktopSelection === nextBotId) return;
+      localDesktopSelection = nextBotId;
+      try { localDesktopView.selectBot(nextBotId); } catch {}
+    }
+
+    function persistFirstConnection(provider) {
+      if (!["codex", "claude"].includes(provider)) return;
+      firstConnection = provider;
+      requestedFirstConnection = null;
+      try { windowRef.localStorage?.setItem?.(FIRST_CONNECTION_KEY, provider); } catch {}
+      setDialogOpen(firstConnectionSetup, false);
+      updateConnectionPresentation(lastSnapshot);
+    }
+
+    function updateConnectionPresentation(snapshot = lastSnapshot) {
+      if (!nativeProtocolMode) return;
+      const directReady = accountReady(accountState);
+      connectionDirect.textContent = directReady ? "Direct Codex connected" : "Connect Direct Codex";
+      connectionDirect.disabled = connectionPending || directReady;
+      connectionClaude.disabled = connectionPending;
+      firstConnectionDirect.disabled = connectionPending;
+      firstConnectionClaude.disabled = connectionPending;
+      const shouldOpen = Boolean(snapshot && snapshot.bots.length === 0 && firstConnection === null);
+      setDialogOpen(firstConnectionSetup, shouldOpen);
+      if (shouldOpen && !connectionPending) firstConnectionDirect.focus?.();
+    }
+
+    async function refreshAccountState() {
+      if (typeof windowRef.codexAccount?.read !== "function") return accountState;
+      const value = await windowRef.codexAccount.read();
+      if (mountDisposed) return accountState;
+      accountState = value;
+      if (requestedFirstConnection === "codex" && accountReady(accountState)) {
+        persistFirstConnection("codex");
+      } else updateConnectionPresentation();
+      return accountState;
+    }
+
+    async function connectDirect({ first = false } = {}) {
+      if (mountDisposed || connectionPending) return;
+      connectionPending = true;
+      if (first) requestedFirstConnection = "codex";
+      firstConnectionError.hidden = true;
+      updateConnectionPresentation();
+      try {
+        if (!accountReady(accountState)) await refreshAccountState();
+        if (!accountReady(accountState)) await controller.connectProvider("codex");
+        if (!accountReady(accountState)) await refreshAccountState();
+        if (first && accountReady(accountState)) persistFirstConnection("codex");
+      } catch {
+        if (!mountDisposed) {
+          requestedFirstConnection = null;
+          firstConnectionError.textContent = "Direct Codex could not be connected. Try again.";
+          firstConnectionError.hidden = false;
+        }
+      } finally {
+        if (!mountDisposed) {
+          connectionPending = false;
+          updateConnectionPresentation();
+        }
+      }
+    }
+
+    async function connectClaude({ first = false } = {}) {
+      if (mountDisposed || connectionPending) return;
+      connectionPending = true;
+      firstConnectionError.hidden = true;
+      updateConnectionPresentation();
+      try {
+        await controller.connectProvider("claude");
+        if (first && !mountDisposed) persistFirstConnection("claude");
+      } catch {
+        if (!mountDisposed) {
+          firstConnectionError.textContent = "Claude could not be connected. Try again.";
+          firstConnectionError.hidden = false;
+        }
+      } finally {
+        if (!mountDisposed) {
+          connectionPending = false;
+          updateConnectionPresentation();
+        }
+      }
+    }
 
     function setDialogOpen(dialog, open) {
       if (open) {
@@ -3260,6 +3495,8 @@
       if (mountDisposed) return;
       const previousSnapshot = lastSnapshot;
       lastSnapshot = next;
+      synchronizeLocalDesktop(next);
+      updateConnectionPresentation(next);
       const liveBotIds = new Set(next.bots.map((record) => record.botId));
       for (const botId of selectionIntents.keys()) {
         if (!liveBotIds.has(botId)) selectionIntents.delete(botId);
@@ -3589,6 +3826,14 @@
         if (!mountDisposed) connectProvider.disabled = false;
       });
     });
+    connectionDirect.addEventListener("click", () => { void connectDirect(); });
+    connectionClaude.addEventListener("click", () => { void connectClaude(); });
+    firstConnectionDirect.addEventListener("click", () => { void connectDirect({ first: true }); });
+    firstConnectionClaude.addEventListener("click", () => { void connectClaude({ first: true }); });
+    firstConnectionSetup.addEventListener("cancel", (event) => event.preventDefault?.());
+    firstConnectionSetup.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") event.preventDefault?.();
+    });
 
     const setPopoverOpen = (open) => {
       const next = Boolean(open) && !modelTrigger.disabled;
@@ -3730,6 +3975,19 @@
       paintFast(desiredServiceTier === activeFastTier);
       void submitSelectionIntent(nextSelection, { fastTier: activeFastTier });
     });
+    if (nativeProtocolMode && typeof windowRef.codexAccount?.onChanged === "function") {
+      try {
+        const candidate = windowRef.codexAccount.onChanged((value) => {
+          if (mountDisposed) return;
+          accountState = value;
+          if (requestedFirstConnection === "codex" && accountReady(accountState)) {
+            persistFirstConnection("codex");
+          } else updateConnectionPresentation();
+        });
+        accountUnsubscribe = typeof candidate === "function" ? candidate : null;
+      } catch {}
+    }
+    if (nativeProtocolMode) void refreshAccountState().catch(() => updateConnectionPresentation());
     void controller.initialize().catch(() => {
       if (mountDisposed) return;
       status.textContent = "Remote computer unavailable";
@@ -3762,11 +4020,18 @@
         warningScope = null;
         closeAdvancedFlyout();
         selectionIntents.clear();
+        try { accountUnsubscribe?.(); } catch {}
+        accountUnsubscribe = null;
+        localDesktopView?.dispose?.();
+        localDesktopView = null;
         reasoningView.dispose();
         controller.dispose();
         newBotSetup.remove?.();
         computerSetup.remove?.();
         permissionSheet.remove?.();
+        firstConnectionSetup.remove?.();
+        nativeBotSettings.remove?.();
+        connectionsSettings.remove?.();
         panel.remove?.();
         modelDock.remove?.();
       },

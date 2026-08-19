@@ -3565,11 +3565,15 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
   const explicitSidebar = { id: "sidebar" };
   const explicitComposer = { id: "composer" };
   const explicitNativeComposer = { id: "native-composer" };
+  const explicitBotSettings = { id: "bot-settings" };
+  const explicitConnections = { id: "connections" };
   const explicitDocument = {
     querySelector(selector) {
       if (selector === "[data-codex-bot-sidebar-host]") return explicitSidebar;
       if (selector === "[data-codex-bot-composer-host]") return explicitComposer;
       if (selector === "[data-openbot-model-picker-host]") return explicitNativeComposer;
+      if (selector === "[data-openbot-bot-settings-host]") return explicitBotSettings;
+      if (selector === "[data-openbot-connections-host]") return explicitConnections;
       return null;
     },
     querySelectorAll() { return []; },
@@ -3578,6 +3582,8 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
     sidebarHost: explicitSidebar,
     composerHost: explicitComposer,
     nativeComposerHost: explicitNativeComposer,
+    nativeBotSettingsHost: explicitBotSettings,
+    nativeConnectionsHost: explicitConnections,
   });
 
   const semanticSidebar = { id: "semantic-sidebar" };
@@ -3601,6 +3607,8 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
     sidebarHost: semanticSidebar,
     composerHost: composerForm,
     nativeComposerHost: null,
+    nativeBotSettingsHost: null,
+    nativeConnectionsHost: null,
   });
 });
 
@@ -3764,6 +3772,9 @@ function createMountedUiHarness({
   botsFacade = null,
   computerFacade = null,
   runtimeFacade = null,
+  accountFacade = null,
+  localDesktopViewApi = null,
+  localStorage = null,
   nativeProtocol = false,
   nativeHost = nativeProtocol,
   reducedMotion = false,
@@ -3834,6 +3845,8 @@ function createMountedUiHarness({
     sidebar: null,
     composer: null,
     nativeModelHost: null,
+    nativeBotSettingsHost: null,
+    nativeConnectionsHost: null,
     listeners: new Map(),
     createElement(tagName) { return new MountElement(tagName, this); },
     getElementById() { return null; },
@@ -3841,6 +3854,8 @@ function createMountedUiHarness({
       if (selector === "[data-codex-bot-sidebar-host]") return this.sidebar;
       if (selector === "[data-codex-bot-composer-host]") return this.composer;
       if (selector === "[data-openbot-model-picker-host]") return this.nativeModelHost;
+      if (selector === "[data-openbot-bot-settings-host]") return this.nativeBotSettingsHost;
+      if (selector === "[data-openbot-connections-host]") return this.nativeConnectionsHost;
       return null;
     },
     querySelectorAll() { return []; },
@@ -3852,7 +3867,10 @@ function createMountedUiHarness({
   documentRef.composer = documentRef.createElement("form");
   if (nativeHost) {
     documentRef.nativeModelHost = documentRef.createElement("div");
+    documentRef.nativeBotSettingsHost = documentRef.createElement("div");
+    documentRef.nativeConnectionsHost = documentRef.createElement("div");
     documentRef.composer.append(documentRef.nativeModelHost);
+    documentRef.body.append(documentRef.nativeBotSettingsHost, documentRef.nativeConnectionsHost);
   }
   let mountObserver = null;
   class MountObserver {
@@ -3905,7 +3923,7 @@ function createMountedUiHarness({
         return current;
       },
     },
-    codexAccount: {
+    codexAccount: accountFacade ?? {
       async catalog() { return catalog; },
       onCatalogChanged() { return () => {}; },
     },
@@ -3934,6 +3952,8 @@ function createMountedUiHarness({
   };
   if (fileReader) windowRef.FileReader = fileReader;
   if (computerFacade) windowRef.openbotComputer = computerFacade;
+  if (localDesktopViewApi) windowRef.OpenBotLocalDesktopView = localDesktopViewApi;
+  if (localStorage) windowRef.localStorage = localStorage;
   const mounted = mount({ windowRef, documentRef });
   const find = (node, className, seen = new Set()) => {
     if (seen.has(node)) return null;
@@ -3971,6 +3991,186 @@ function createMountedUiHarness({
     windowListeners,
   };
 }
+
+test("native View Bot owns Computer controls and selects the active Free Local Desktop", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "high", "ultra"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const local = Object.freeze({
+    mode: "local",
+    generation: 3,
+    localProfileId: "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    nativeAgentId: null,
+    state: "ready",
+    lastConfirmedAt: "2026-08-15T12:34:56.000Z",
+    lastErrorCode: null,
+  });
+  const notNow = Object.freeze({
+    mode: "not-now",
+    generation: 4,
+    localProfileId: null,
+    nativeAgentId: null,
+    state: "unconfigured",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+  });
+  let computerListener;
+  const desktopSelections = [];
+  let desktopDisposed = 0;
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    nativeHost: true,
+    botsFacade: {
+      async list() { return [botWithComputer(BOT_A, "A", "ready", local)]; },
+      onChanged() { return () => {}; },
+    },
+    computerFacade: {
+      async read() { return { botId: BOT_A, computer: local }; },
+      async listPermissions() { return { botId: BOT_A, permissions: [] }; },
+      async listPermissionRequests() { return { botId: BOT_A, requests: [] }; },
+      onChanged(listener) { computerListener = listener; return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+    localDesktopViewApi: {
+      createLocalDesktopView({ container }) {
+        assert.equal(container.className.split(/\s+/).includes("codex-bot-desktop-host"), true);
+        return Object.freeze({
+          selectBot(value) { desktopSelections.push(value); },
+          dispose() { desktopDisposed += 1; },
+        });
+      },
+    },
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const settings = harness.findPanel("codex-native-bot-settings");
+  assert.equal(settings.parentElement, harness.documentRef.nativeBotSettingsHost);
+  assert.equal(harness.find("codex-runtime-row"), null);
+  assert.equal(harness.find("codex-computer-row"), null);
+  assert.equal(harness.find("codex-computer-grants"), null);
+  assert.equal(harness.findPanel("codex-computer-row").parentElement, settings);
+  assert.deepEqual(desktopSelections, [BOT_A]);
+
+  computerListener({ botId: BOT_A, computer: notNow });
+  assert.equal(harness.findPanel("codex-computer-status").textContent, "Computer not configured");
+  assert.deepEqual(desktopSelections, [BOT_A, null]);
+  harness.mounted.dispose();
+  assert.equal(desktopDisposed, 1);
+});
+
+test("first native launch requires an AI connection and exposes later connections in Settings", async (context) => {
+  const catalog = Object.freeze({
+    generation: 12,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium", "high"]),
+    })]),
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 12,
+    generation: 1,
+  });
+  const loginCalls = [];
+  const providerCalls = [];
+  let accountListener;
+  const stored = new Map();
+  const accountFacade = {
+    async read() {
+      return Object.freeze({
+        generation: 1,
+        status: "signed-out",
+        authMode: null,
+        planType: null,
+        requiresOpenaiAuth: true,
+        login: null,
+        rateLimits: null,
+      });
+    },
+    async login(mode) { loginCalls.push(mode); },
+    async catalog() { return catalog; },
+    onChanged(listener) { accountListener = listener; return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    nativeHost: true,
+    botsFacade: {
+      async list() { return []; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async connectProvider(provider) { providerCalls.push(provider); },
+    },
+    accountFacade,
+    localStorage: {
+      getItem(key) { return stored.get(key) ?? null; },
+      setItem(key, value) { stored.set(key, value); },
+    },
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const setup = harness.findPanel("codex-first-connection-setup");
+  assert.equal(setup.open, true);
+  assert.equal(setup.attributes["aria-modal"], "true");
+  assert.equal(harness.findPanel("codex-first-connection-skip"), null);
+  assert.equal(harness.findPanel("codex-first-connection-direct").textContent, "Continue with Direct Codex");
+  assert.equal(harness.findPanel("codex-first-connection-claude").textContent, "Connect Claude");
+
+  harness.findPanel("codex-first-connection-direct").listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(loginCalls, ["browser"]);
+  assert.equal(setup.open, true, "login launch alone must not complete onboarding");
+  accountListener(Object.freeze({
+    generation: 2,
+    status: "ready",
+    authMode: "chatgpt",
+    planType: "plus",
+    requiresOpenaiAuth: true,
+    login: null,
+    rateLimits: null,
+  }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(setup.open, false);
+  assert.equal(stored.get("openbot.first-connection.v1"), "codex");
+
+  const connections = harness.findPanel("codex-ai-connections");
+  assert.equal(connections.parentElement, harness.documentRef.nativeConnectionsHost);
+  assert.equal(harness.findPanel("codex-connection-direct").textContent, "Direct Codex connected");
+  harness.findPanel("codex-connection-claude").listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(providerCalls, ["claude"]);
+});
 
 test("mounted Advanced summary keeps a same-id CLIProxy selection provider-scoped", async (context) => {
   const catalog = Object.freeze({

@@ -157,11 +157,71 @@ body.light {
 
 .codex-computer-grants[hidden] { display: none; }
 
-.codex-native-controls {
+.codex-native-bot-settings,
+.codex-ai-connections {
   display: grid;
-  gap: 4px;
-  padding: 0 0 8px;
-  border-bottom: 1px solid var(--codex-border);
+  gap: 8px;
+  min-width: 0;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid color-mix(in srgb, var(--codex-border) 76%, transparent);
+  color: var(--codex-text);
+  font: 500 12px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.codex-native-section-title {
+  margin: 0;
+  color: var(--codex-text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.codex-native-bot-settings .codex-runtime-row,
+.codex-native-bot-settings .codex-computer-row {
+  margin: 0;
+  padding: 0;
+}
+
+.codex-native-bot-settings .openbot-local-desktop-host {
+  --openbot-shell-line: var(--codex-border);
+  --openbot-shell-panel: var(--codex-input);
+  --openbot-shell-muted: var(--codex-muted);
+  min-height: 220px;
+  padding: 0;
+}
+
+.codex-native-bot-settings .openbot-local-desktop-view {
+  height: 220px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.codex-ai-connections-copy {
+  margin: 0;
+  color: var(--codex-muted);
+  font-size: 12px;
+}
+
+.codex-ai-connections-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.codex-ai-connections button,
+.codex-native-bot-settings button {
+  min-height: 30px;
+  padding: 0 10px;
+  color: var(--codex-text);
+  border: 1px solid var(--codex-border);
+  border-radius: 8px;
+  background: var(--codex-input);
+  font: inherit;
+}
+
+.codex-ai-connections button:hover:not(:disabled),
+.codex-native-bot-settings button:hover:not(:disabled) {
+  background: var(--codex-input-hover);
 }
 
 .codex-computer-grants-title {
@@ -171,7 +231,7 @@ body.light {
   font-weight: 600;
 }
 
-:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grants-list {
+:is(.codex-bot-controls, .codex-model-dock, .codex-native-bot-settings) .codex-computer-grants-list {
   display: grid;
   gap: 4px;
   margin: 0;
@@ -181,7 +241,7 @@ body.light {
   color: inherit;
 }
 
-:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant {
+:is(.codex-bot-controls, .codex-model-dock, .codex-native-bot-settings) .codex-computer-grant {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 7px;
@@ -193,9 +253,9 @@ body.light {
   color: inherit;
 }
 
-:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-copy,
-:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-label,
-:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-capability {
+:is(.codex-bot-controls, .codex-model-dock, .codex-native-bot-settings) .codex-computer-grant-copy,
+:is(.codex-bot-controls, .codex-model-dock, .codex-native-bot-settings) .codex-computer-grant-label,
+:is(.codex-bot-controls, .codex-model-dock, .codex-native-bot-settings) .codex-computer-grant-capability {
   display: block;
   min-width: 0;
   margin: 0;
@@ -204,7 +264,7 @@ body.light {
   background: transparent;
 }
 
-:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-label {
+:is(.codex-bot-controls, .codex-model-dock, .codex-native-bot-settings) .codex-computer-grant-label {
   overflow: hidden;
   color: var(--codex-text);
   font-size: 10px;
@@ -212,7 +272,7 @@ body.light {
   white-space: nowrap;
 }
 
-:is(.codex-bot-controls, .codex-model-dock) .codex-computer-grant-capability {
+:is(.codex-bot-controls, .codex-model-dock, .codex-native-bot-settings) .codex-computer-grant-capability {
   margin-top: 1px;
   color: var(--codex-muted);
   font-size: 9px;
@@ -312,7 +372,8 @@ body.light {
 
 .codex-new-bot-setup,
 .codex-computer-setup,
-.codex-permission-sheet {
+.codex-permission-sheet,
+.codex-first-connection-setup {
   position: fixed;
   top: 50%;
   left: 50%;
@@ -334,21 +395,25 @@ body.light {
 
 .codex-new-bot-setup { width: min(420px, calc(100vw - 32px)); }
 .codex-permission-sheet { width: min(440px, calc(100vw - 32px)); }
+.codex-first-connection-setup { width: min(440px, calc(100vw - 32px)); }
 
 .codex-new-bot-setup::backdrop,
 .codex-computer-setup::backdrop,
-.codex-permission-sheet::backdrop {
+.codex-permission-sheet::backdrop,
+.codex-first-connection-setup::backdrop {
   background: rgb(0 0 0 / 58%);
   backdrop-filter: blur(2px);
 }
 
 .codex-new-bot-setup[hidden],
 .codex-computer-setup[hidden],
-.codex-permission-sheet[hidden] { display: none; }
+.codex-permission-sheet[hidden],
+.codex-first-connection-setup[hidden] { display: none; }
 
 .codex-new-bot-setup-title,
 .codex-computer-setup-title,
-.codex-permission-title {
+.codex-permission-title,
+.codex-first-connection-title {
   margin: 0;
   color: var(--codex-text);
   font-size: 12px;
@@ -359,12 +424,47 @@ body.light {
 .codex-new-bot-setup-copy,
 .codex-computer-setup-copy,
 .codex-permission-reason,
-.codex-permission-capability {
+.codex-permission-capability,
+.codex-first-connection-copy {
   margin: 0;
   color: var(--codex-muted);
   font-size: 10px;
   line-height: 1.4;
 }
+
+.codex-first-connection-choices {
+  display: grid;
+  gap: 8px;
+}
+
+.codex-first-connection-choice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 0 12px;
+  color: var(--codex-text);
+  border: 1px solid var(--codex-border);
+  border-radius: 9px;
+  background: var(--codex-input);
+  font: 600 12px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.codex-first-connection-choice:hover:not(:disabled) { background: var(--codex-input-hover); }
+
+.codex-first-connection-recommended {
+  color: var(--codex-blue-strong);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.codex-first-connection-error {
+  margin: 0;
+  color: var(--codex-danger);
+  font-size: 11px;
+}
+
+.codex-first-connection-error[hidden] { display: none; }
 
 .codex-new-bot-fields {
   display: grid;
