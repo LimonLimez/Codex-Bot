@@ -323,3 +323,191 @@ test("dispose fences pending provider operations and rejects new work", async ()
   await assert.rejects(controller.connect({ providerId: "anthropic-claude" }), { code: "OPENBOT_PROVIDER_DISPOSED" });
   release?.();
 });
+
+test("atomic authority snapshot projects one coherent frozen DTO from one state read", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = {
+    schemaVersion: 1,
+    connections: [
+      {
+        providerId: "openai-codex",
+        generation: 1,
+        state: "connected",
+        models: [{
+          provider: "openai-codex",
+          providerLabel: "OpenAI Codex",
+          model: "gpt-5.6-terra",
+          label: "Terra",
+          efforts: ["low", "high"],
+          serviceTiers: [],
+          defaultReasoningEffort: "low",
+          defaultServiceTier: null,
+          catalogGeneration: 3,
+          isDefault: true,
+        }],
+      },
+      {
+        providerId: "xai",
+        generation: 9,
+        state: "disconnected",
+        models: [descriptorModel("xai")],
+      },
+    ],
+    onboarding: {
+      schemaVersion: 1,
+      providerId: "openai-codex",
+      connectionGeneration: 1,
+      catalogGeneration: 1,
+      completedAt: "2026-08-18T00:00:00.000Z",
+    },
+  };
+  let reads = 0;
+  state.read = async () => {
+    reads += 1;
+    return structuredClone(state.state);
+  };
+  const externalCalls = [];
+  const controller = new ProviderController({
+    stateStore: state,
+    keychain: {
+      read: async () => { externalCalls.push("keychain.read"); throw new Error("must not run"); },
+      set: async () => { externalCalls.push("keychain.set"); throw new Error("must not run"); },
+      delete: async () => { externalCalls.push("keychain.delete"); throw new Error("must not run"); },
+    },
+    account: {
+      start: async () => { externalCalls.push("account.start"); throw new Error("must not run"); },
+      accountState: () => { externalCalls.push("account.state"); throw new Error("must not run"); },
+      catalogState: () => { externalCalls.push("account.catalog"); throw new Error("must not run"); },
+    },
+    cliproxy: {
+      connectProvider: async () => { externalCalls.push("cliproxy.connect"); throw new Error("must not run"); },
+      importVertex: async () => { externalCalls.push("cliproxy.import"); throw new Error("must not run"); },
+      disconnectProvider: async () => { externalCalls.push("cliproxy.disconnect"); throw new Error("must not run"); },
+      listModels: async () => { externalCalls.push("cliproxy.models"); throw new Error("must not run"); },
+      connectionStatus: async () => { externalCalls.push("cliproxy.status"); throw new Error("must not run"); },
+    },
+  });
+
+  const snapshot = await controller.readAuthoritySnapshot();
+  assert.equal(reads, 1);
+  assert.deepEqual(Object.keys(snapshot), ["schemaVersion", "connections", "catalog", "onboarding"]);
+  assert.equal(snapshot.schemaVersion, 1);
+  assert.deepEqual(snapshot.connections.map(({ providerId }) => providerId), PROVIDER_IDS);
+  assert.deepEqual(Object.keys(snapshot.connections[0]), [
+    "providerId", "label", "loginKind", "state", "generation", "capabilities", "errorCode",
+  ]);
+  assert.deepEqual(snapshot.catalog, {
+    generation: 1,
+    status: "ready",
+    models: [{
+      provider: "openai-codex",
+      providerLabel: "OpenAI Codex",
+      model: "gpt-5.6-terra",
+      label: "Terra",
+      efforts: ["low", "high"],
+      serviceTiers: [],
+      defaultReasoningEffort: "low",
+      defaultServiceTier: null,
+      catalogGeneration: 3,
+      isDefault: true,
+    }],
+  });
+  assert.deepEqual(snapshot.onboarding, state.state.onboarding);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.connections), true);
+  assert.equal(Object.isFrozen(snapshot.connections[0]), true);
+  assert.equal(Object.isFrozen(snapshot.connections[0].capabilities), true);
+  assert.equal(Object.isFrozen(snapshot.catalog), true);
+  assert.equal(Object.isFrozen(snapshot.catalog.models), true);
+  assert.equal(Object.isFrozen(snapshot.catalog.models[0]), true);
+  assert.equal(Object.isFrozen(snapshot.catalog.models[0].efforts), true);
+  assert.equal(Object.isFrozen(snapshot.onboarding), true);
+  assert.deepEqual(externalCalls, []);
+});
+
+test("catalog metadata keeps the real Direct Codex generation independent of connection generation", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  let starts = 0;
+  const controller = new ProviderController({
+    stateStore: state,
+    account: {
+      start: async () => { starts += 1; },
+      accountState: () => ({ status: "ready", authMode: "chatgpt" }),
+      catalogState: () => ({
+        status: "ready",
+        generation: 3,
+        models: [{
+          id: "gpt-5.6-terra",
+          displayName: "Terra",
+          supportedReasoningEfforts: ["low"],
+          serviceTiers: [],
+          defaultReasoningEffort: "low",
+          defaultServiceTier: null,
+          isDefault: true,
+        }],
+      }),
+    },
+  });
+
+  await controller.connect({ providerId: "openai-codex" });
+  const snapshot = await controller.readAuthoritySnapshot();
+  const connection = snapshot.connections.find(({ providerId }) => providerId === "openai-codex");
+  assert.equal(starts, 1);
+  assert.equal(connection.generation, 1);
+  assert.equal(snapshot.catalog.generation, 1);
+  assert.equal(snapshot.catalog.models[0].catalogGeneration, 3);
+});
+
+test("readAuthoritySnapshot rejects descriptor-hostile state without invoking accessors", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  let accessed = false;
+  const hostile = {};
+  Object.defineProperty(hostile, "schemaVersion", {
+    enumerable: true,
+    get() {
+      accessed = true;
+      throw new Error("hostile accessor");
+    },
+  });
+  state.read = async () => hostile;
+  const controller = new ProviderController({ stateStore: state });
+  await assert.rejects(controller.readAuthoritySnapshot(), { code: "OPENBOT_PROVIDER_UNAVAILABLE" });
+  assert.equal(accessed, false);
+});
+
+test("readAuthoritySnapshot is disposal-fenced before and during its one state read", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  let reads = 0;
+  state.read = async () => {
+    reads += 1;
+    return structuredClone(state.state);
+  };
+  const controller = new ProviderController({ stateStore: state });
+  controller.dispose();
+  await assert.rejects(controller.readAuthoritySnapshot(), { code: "OPENBOT_PROVIDER_DISPOSED" });
+  assert.equal(reads, 0);
+
+  let resolveRead;
+  const pendingState = new FakeStateStore();
+  pendingState.read = () => new Promise((resolve) => { resolveRead = resolve; });
+  const pendingController = new ProviderController({ stateStore: pendingState });
+  const pending = pendingController.readAuthoritySnapshot();
+  await new Promise((resolve) => setImmediate(resolve));
+  pendingController.dispose();
+  resolveRead(structuredClone(pendingState.state));
+  await assert.rejects(pending, { code: "OPENBOT_PROVIDER_DISPOSED" });
+
+  let rejectRead;
+  const failedState = new FakeStateStore();
+  failedState.read = () => new Promise((_resolve, reject) => { rejectRead = reject; });
+  const failedController = new ProviderController({ stateStore: failedState });
+  const failedPending = failedController.readAuthoritySnapshot();
+  await new Promise((resolve) => setImmediate(resolve));
+  failedController.dispose();
+  rejectRead(new Error("late state failure"));
+  await assert.rejects(failedPending, { code: "OPENBOT_PROVIDER_DISPOSED" });
+});

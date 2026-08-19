@@ -144,6 +144,46 @@ function freeze(value) {
   return Object.freeze(Object.fromEntries(Object.entries(value).map(([key, nested]) => [key, freeze(nested)])));
 }
 
+function projectConnections(state, errors = null) {
+  const byProvider = new Map(state.connections.map((connection) => [connection.providerId, connection]));
+  return PROVIDER_IDS.map((providerId) => {
+    const descriptor = providerDescriptor(providerId);
+    const current = byProvider.get(providerId);
+    const errorCode = errors?.get(providerId) || current?.errorCode || null;
+    return {
+      providerId,
+      label: descriptor.label,
+      loginKind: descriptor.loginKind,
+      state: current?.state || (errorCode ? "unavailable" : "disconnected"),
+      generation: current?.generation || 0,
+      capabilities: {
+        reasoning: descriptor.reasoningEfforts.length > 1,
+        fast: descriptor.fastModeSupported === true,
+      },
+      errorCode,
+    };
+  });
+}
+
+function projectCatalog(state) {
+  const models = [];
+  let generation = 0;
+  for (const connection of state.connections) {
+    if (connection.state !== "connected") continue;
+    generation = Math.max(generation, connection.generation);
+    for (const model of connection.models) models.push(model);
+  }
+  return {
+    generation,
+    status: models.length > 0 ? "ready" : "unavailable",
+    models,
+  };
+}
+
+function projectOnboarding(state) {
+  return state.onboarding;
+}
+
 class ProviderController extends EventEmitter {
   #stateStore;
   #keychain;
@@ -205,39 +245,32 @@ class ProviderController extends EventEmitter {
 
   async listConnections() {
     const state = await this.#readState();
-    const byProvider = new Map(state.connections.map((connection) => [connection.providerId, connection]));
-    return freeze(PROVIDER_IDS.map((providerId) => {
-      const descriptor = providerDescriptor(providerId);
-      const current = byProvider.get(providerId);
-      const errorCode = this.#errors.get(providerId) || current?.errorCode || null;
-      return {
-        providerId,
-        label: descriptor.label,
-        loginKind: descriptor.loginKind,
-        state: current?.state || (errorCode ? "unavailable" : "disconnected"),
-        generation: current?.generation || 0,
-        capabilities: {
-          reasoning: descriptor.reasoningEfforts.length > 1,
-          fast: descriptor.fastModeSupported === true,
-        },
-        errorCode,
-      };
-    }));
+    return freeze(projectConnections(state, this.#errors));
   }
 
   async catalog() {
     const state = await this.#readState();
-    const models = [];
-    let generation = 0;
-    for (const connection of state.connections) {
-      if (connection.state !== "connected") continue;
-      generation = Math.max(generation, connection.generation);
-      for (const model of connection.models) models.push(model);
+    return freeze(projectCatalog(state));
+  }
+
+  async readAuthoritySnapshot() {
+    const epoch = this.#lifecycleEpoch;
+    this.#assertLive(epoch);
+    let state;
+    try {
+      state = await this.#readState();
+    } catch (error) {
+      if (this.#disposed || epoch !== this.#lifecycleEpoch) {
+        throw unavailable("OPENBOT_PROVIDER_DISPOSED");
+      }
+      throw error;
     }
+    this.#assertLive(epoch);
     return freeze({
-      generation,
-      status: models.length > 0 ? "ready" : "unavailable",
-      models,
+      schemaVersion: 1,
+      connections: projectConnections(state, this.#errors),
+      catalog: projectCatalog(state),
+      onboarding: projectOnboarding(state),
     });
   }
 
@@ -323,7 +356,7 @@ class ProviderController extends EventEmitter {
   }
 
   async readOnboarding() {
-    return (await this.#readState()).onboarding;
+    return projectOnboarding(await this.#readState());
   }
 
   completeOnboarding(rawProviderId) {
