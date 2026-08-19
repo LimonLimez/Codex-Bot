@@ -1,6 +1,6 @@
 {
   "name": "open-bot",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "A local multi-model coworker app powered by the AI provider the user chooses.",
   "private": true,
   "license": "MIT",

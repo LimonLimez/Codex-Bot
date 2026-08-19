@@ -319,13 +319,13 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   assert.match(builder, /Release builds require a clean Git worktree/);
   assert.match(builder, /DEVELOPMENT TEST BUILD/);
   assert.match(builder, /Remove-Item -LiteralPath \$staleOutput -Force/);
-  assert.match(manifest, /#define AppCanonicalVersion "0\.1\.9"/);
+  assert.match(manifest, /#define AppCanonicalVersion "0\.1\.10"/);
   assert.match(
     manifest,
     /#define DevelopmentBuild GetEnv\("CODEX_BOT_INSTALLER_DEVELOPMENT"\)/,
   );
   assert.match(manifest, /#define AppName "Open Bot DEVELOPMENT TEST BUILD"/);
-  assert.match(manifest, /#define AppVersion "0\.1\.9 DEVELOPMENT TEST BUILD"/);
+  assert.match(manifest, /#define AppVersion "0\.1\.10 DEVELOPMENT TEST BUILD"/);
   assert.match(
     manifest,
     /#define AppVersionInfoDescription "Open Bot DEVELOPMENT TEST installer - DO NOT PUBLISH"/,
@@ -336,7 +336,7 @@ test("release inputs are explicit, third-party bits are pinned, and uninstall of
   );
   assert.match(
     manifest,
-    /#define AppOutputBaseFilename "OpenBot-Setup-0\.1\.9"/,
+    /#define AppOutputBaseFilename "OpenBot-Setup-0\.1\.10"/,
   );
   assert.match(manifest, /OutputBaseFilename=\{#AppOutputBaseFilename\}/);
   assert.match(

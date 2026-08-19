@@ -15,7 +15,7 @@ The separately downloaded vendor installer is pinned by URL, size, SHA-256, vers
 Silent dependency download remains explicit:
 
 ```powershell
-OpenBot-Setup-0.1.9.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /BOOTSTRAPGROKBOT=1
+OpenBot-Setup-0.1.10.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /BOOTSTRAPGROKBOT=1
 ```
 
 Without `/BOOTSTRAPGROKBOT=1`, silent setup requires an already verified compatible tree and fails closed if none exists.

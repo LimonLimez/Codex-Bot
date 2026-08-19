@@ -1476,7 +1476,7 @@ function connectionPanelHtml(status, { firstRun = false } = {}) {
       <form class="codex-key-form" data-codex-key-form hidden>
         <label for="codex-api-key">OpenAI API key</label>
         <div><input id="codex-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-..." required /><button type="submit">Verify & use</button></div>
-        <small>The key is verified with OpenAI and stored with Windows user-level encryption. It is never written to logs.</small>
+        <small>Use a direct key from platform.openai.com. Composio project keys belong in Connected apps; OpenRouter keys use a different service. The key is verified with OpenAI, stored with Windows user-level encryption, and never written to logs.</small>
       </form>
       ${firstRunAssurance}
       <p class="codex-notice" data-codex-notice data-tone="${escapeHtml(providerConnectionNotice.tone)}" aria-live="polite">${escapeHtml(providerConnectionNotice.message)}</p>

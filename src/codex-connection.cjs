@@ -1344,8 +1344,7 @@ async function configureLocalProvider({ baseUrl, apiKey = "" } = {}) {
 
 function setApiKey(apiKey) {
   const normalized = String(apiKey || "").trim();
-  if (normalized.length < 20)
-    throw new Error("Enter a complete OpenAI API key.");
+  validateOpenAiApiKey(normalized);
   const previous = safeJson(CONFIG_PATH, {});
   const config = plainObject(previous) ? previous : {};
   const defaults = storedDefaults(config, DEFAULT_PROVIDER_ID);
@@ -1361,14 +1360,29 @@ function setApiKey(apiKey) {
   );
 }
 
+function validateOpenAiApiKey(apiKey) {
+  if (apiKey.length < 20) throw new Error("Enter a complete OpenAI API key.");
+  if (/^ak_/i.test(apiKey))
+    throw new Error(
+      "This looks like a Composio project key. Paste it in Connected apps, not OpenAI API key.",
+    );
+  if (/^sk-or-v1-/i.test(apiKey))
+    throw new Error(
+      "This is an OpenRouter key. Open Bot's OpenAI API connection accepts a direct OpenAI key from platform.openai.com, not an OpenRouter key.",
+    );
+  if (!/^sk-/i.test(apiKey))
+    throw new Error(
+      "This does not look like a direct OpenAI API key. Use a key from platform.openai.com or choose the matching provider connection.",
+    );
+}
+
 async function verifyApiKey(apiKey) {
-  if (String(apiKey || "").trim().length < 20) {
-    throw new Error("Enter a complete OpenAI API key.");
-  }
+  const normalized = String(apiKey || "").trim();
+  validateOpenAiApiKey(normalized);
   const response = await fetch(
     `https://api.openai.com/v1/models/${encodeURIComponent(DEFAULT_MODEL)}`,
     {
-      headers: { Authorization: `Bearer ${String(apiKey || "").trim()}` },
+      headers: { Authorization: `Bearer ${normalized}` },
     },
   );
   if (!response.ok) {
@@ -2119,6 +2133,7 @@ module.exports = {
   setProvider,
   useProvider,
   usage,
+  validateOpenAiApiKey,
   verifyApiKey,
   normalizeCodexDeviceUrl,
   normalizeLocalBaseUrl,

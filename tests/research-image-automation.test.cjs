@@ -48,6 +48,25 @@ test("Research mode persists globally and per employee with strict validation", 
   );
 });
 
+test("OpenAI API-key validation rejects keys for other local integrations before any request", (t) => {
+  const connection = isolatedConnection(t);
+  assert.throws(
+    () => connection.validateOpenAiApiKey(`ak_${"x".repeat(40)}`),
+    /Composio project key.*Connected apps/i,
+  );
+  assert.throws(
+    () => connection.validateOpenAiApiKey(`sk-or-v1-${"x".repeat(40)}`),
+    /OpenRouter key/i,
+  );
+  assert.throws(
+    () => connection.validateOpenAiApiKey(`pk_${"x".repeat(40)}`),
+    /direct OpenAI API key/i,
+  );
+  assert.doesNotThrow(() =>
+    connection.validateOpenAiApiKey(`sk-proj-${"x".repeat(40)}`),
+  );
+});
+
 test("GPT Image 2 is API-key gated and returns only a bounded PNG data URL", async (t) => {
   const connection = isolatedConnection(t);
   const unavailable = connection.imageCapability();

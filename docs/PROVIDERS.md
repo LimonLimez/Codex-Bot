@@ -26,6 +26,8 @@ The endpoint must use `http://127.0.0.1:<port>/v1` or an equivalent loopback add
 
 OAuth credentials are owned by the bundled local CLIProxyAPI sidecar. Direct OpenAI keys and vendor-computer state are protected for the current Windows user. Secrets are excluded from logs and public status responses. See [Privacy](../PRIVACY.md) and [Security](../SECURITY.md).
 
+The OpenAI API key field only accepts a direct `sk-...` key created at [platform.openai.com](https://platform.openai.com/api-keys). A Composio project key (such as `ak_...`) belongs in **Connected apps**, and an OpenRouter key (such as `sk-or-v1-...`) cannot be used with OpenAI's API endpoint.
+
 ## Changing models
 
 Settings controls the workspace default. A coworker can override model, reasoning, and Fast mode independently. Clearing an override returns that coworker to the current workspace default.
