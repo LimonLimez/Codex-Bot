@@ -12,8 +12,9 @@ const LOCAL_B = "local-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 async function tick() {
@@ -51,6 +52,10 @@ function frame(botId, targetId, generation, frameId, byte = 1) {
     mimeType: "image/png",
     bytes: Uint8Array.from([byte, byte + 1, byte + 2]),
   });
+}
+
+function frameEvents(value) {
+  return value.first.sent.filter((entry) => entry.channel === "openbot-local-frame:frame");
 }
 
 function fixture({ captureDisplayFrame } = {}) {
@@ -143,7 +148,7 @@ test("sender-scoped selection drops an old bot frame before awaiting and sends e
   } = require(frameIpcPath);
   const installed = installLocalDesktopFrameIpc(value);
 
-  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(
+  const firstSelection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(
     ipcEvent(value.first.sender),
     { botId: BOT_A, viewGeneration: 1 },
   );
@@ -155,11 +160,12 @@ test("sender-scoped selection drops an old bot frame before awaiting and sends e
   await tick();
   aFrame.resolve(frame(BOT_A, LOCAL_A, 1, "frame-a", 3));
   await tick();
+  await firstSelection;
 
   assert.equal(value.second.sent.length, 0);
-  assert.equal(value.first.sent.length, 1);
-  assert.equal(value.first.sent[0].channel, LOCAL_DESKTOP_FRAME_EVENT_CHANNEL);
-  const event = value.first.sent[0].value;
+  assert.equal(frameEvents(value).length, 1);
+  assert.equal(frameEvents(value)[0].channel, LOCAL_DESKTOP_FRAME_EVENT_CHANNEL);
+  const event = frameEvents(value)[0].value;
   assert.deepEqual(Object.keys(event).sort(), [
     "botId", "bytes", "height", "mimeType", "sequence", "targetGeneration", "targetId", "viewGeneration", "width",
   ]);
@@ -180,6 +186,67 @@ test("sender-scoped selection drops an old bot frame before awaiting and sends e
   installed.dispose();
 });
 
+test("selection awaits first capture and reports sanitized unavailable status", async () => {
+  const held = deferred();
+  const value = fixture({ captureDisplayFrame: () => held.promise });
+  const {
+    LOCAL_DESKTOP_FRAME_CHANNELS,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const pending = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(
+    ipcEvent(value.first.sender),
+    { botId: BOT_A, viewGeneration: 1 },
+  );
+  assert.equal(
+    await Promise.race([pending.then(() => "settled"), tick().then(() => "pending")]),
+    "pending",
+  );
+  const error = Object.assign(new Error("/Users/private token=secret"), {
+    code: "OPENBOT_LOCAL_CAPTURE_FAILED",
+  });
+  held.reject(error);
+  const result = await pending;
+  assert.deepEqual(result, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    viewGeneration: 1,
+    state: "unavailable",
+    code: "OPENBOT_LOCAL_CAPTURE_FAILED",
+  });
+  assert.equal(value.first.sent.at(-1).channel, LOCAL_DESKTOP_STATUS_EVENT_CHANNEL);
+  assert.deepEqual(value.first.sent.at(-1).value, result);
+  assert.doesNotMatch(JSON.stringify(value.first.sent), /Users|token|secret/);
+  installed.dispose();
+});
+
+test("retry invalidates the old timer and cannot publish its late frame", async () => {
+  const first = deferred();
+  const value = fixture({
+    captureDisplayFrame(identity, call) {
+      if (call === 1) return first.promise;
+      return frame(identity.botId, identity.targetId, identity.targetGeneration, "frame-fresh", 9);
+    },
+  });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const select = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select);
+  const retry = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry);
+  const selected = select(ipcEvent(value.first.sender), { botId: BOT_A, viewGeneration: 1 });
+  await tick();
+  const retried = retry(ipcEvent(value.first.sender), { botId: BOT_A, viewGeneration: 2 });
+  first.resolve(frame(BOT_A, LOCAL_A, 1, "stale", 1));
+  await Promise.allSettled([selected, retried]);
+  assert.equal(value.first.sent.some(({ channel, value: sent }) =>
+    channel === "openbot-local-frame:frame" && sent.viewGeneration === 1), false);
+  assert.equal(value.first.sent.some(({ channel, value: sent }) =>
+    channel === "openbot-local-frame:frame" && sent.viewGeneration === 2), true);
+  installed.dispose();
+});
+
 test("sender view-generation high-water rejects stale or conflicting selects without replacing the current bot", async () => {
   const value = fixture();
   const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
@@ -190,7 +257,7 @@ test("sender view-generation high-water rejects stale or conflicting selects wit
 
   await select(event, { botId: BOT_B, viewGeneration: 3 });
   await tick();
-  assert.deepEqual(value.first.sent.map((entry) => entry.value.botId), [BOT_B]);
+  assert.equal(value.first.sent.every((entry) => entry.value.botId === BOT_B), true);
   const bTimer = value.timers[0];
   const effectsBeforeStale = value.readCalls.length;
 
@@ -249,7 +316,7 @@ test("non-local or not-ready selection returns one fixed unavailable failure bef
   assert.equal(value.timers.length, 0);
   assert.equal(value.manager.openCalls.length, 0);
   assert.equal(value.manager.captureCalls.length, 0);
-  assert.equal(value.first.sent.length, 0);
+  assert.equal(frameEvents(value).length, 0);
 
   value.states.set(BOT_A, computer(BOT_A, LOCAL_A));
   await assert.rejects(select(event, { botId: BOT_A, viewGeneration: 4 }), {
@@ -354,11 +421,11 @@ test("manager-owned hidden Local Desktop windows cannot subscribe to frame bytes
   assert.equal(value.timers.length, 0);
   assert.equal(value.manager.openCalls.length, 0);
   assert.equal(value.manager.captureCalls.length, 0);
-  assert.equal(value.first.sent.length, 0);
+  assert.equal(frameEvents(value).length, 0);
 
   await select(ipcEvent(value.second.sender), { botId: BOT_B, viewGeneration: 1 });
   await tick();
-  assert.deepEqual(value.second.sent.map((entry) => entry.value.botId), [BOT_B]);
+  assert.equal(value.second.sent.every((entry) => entry.value.botId === BOT_B), true);
   installed.dispose();
 });
 
@@ -379,7 +446,7 @@ test("frame bridge captures immediately then throttles without overlap and suppr
   );
   await tick();
   assert.equal(value.manager.captureCalls.length, 1);
-  assert.equal(value.first.sent.length, 1);
+  assert.equal(frameEvents(value).length, 1);
   assert.equal(value.timers.length, 1);
   assert.equal(value.timers[0].milliseconds, 1000);
 
@@ -389,13 +456,13 @@ test("frame bridge captures immediately then throttles without overlap and suppr
   assert.equal(value.manager.captureCalls.length, 2);
   secondCapture.resolve(frame(BOT_A, LOCAL_A, 1, "frame-same", 1));
   await tick();
-  assert.equal(value.first.sent.length, 1);
+  assert.equal(frameEvents(value).length, 1);
 
   value.timers[0].callback();
   await tick();
   assert.equal(value.manager.captureCalls.length, 3);
-  assert.equal(value.first.sent.length, 2);
-  assert.deepEqual(value.first.sent.map((entry) => entry.value.sequence), [1, 2]);
+  assert.equal(frameEvents(value).length, 2);
+  assert.deepEqual(frameEvents(value).map((entry) => entry.value.sequence), [1, 2]);
 
   await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(
     ipcEvent(value.first.sender),
@@ -426,7 +493,7 @@ test("computer generation changes and renderer destruction invalidate in-flight 
   const value = fixture({ captureDisplayFrame() { return waiting.promise; } });
   const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
   const installed = installLocalDesktopFrameIpc(value);
-  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(
+  const selection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(
     ipcEvent(value.first.sender),
     { botId: BOT_A, viewGeneration: 1 },
   );
@@ -435,7 +502,8 @@ test("computer generation changes and renderer destruction invalidate in-flight 
   value.computerBoundary.emit("changed", value.states.get(BOT_A));
   waiting.resolve(frame(BOT_A, LOCAL_A, 1, "stale", 2));
   await tick();
-  assert.equal(value.first.sent.length, 0);
+  await selection;
+  assert.equal(frameEvents(value).length, 0);
   assert.equal(value.timers.every((timer) => timer.cleared), true);
 
   value.first.sender.destroyed = true;

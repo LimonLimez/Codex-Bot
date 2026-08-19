@@ -18,11 +18,19 @@ const COMPUTER_STATE_FIELDS = new Set([
 const FRAME_FIELDS = new Set([
   "botId", "targetId", "targetGeneration", "frameId", "width", "height", "mimeType", "bytes",
 ]);
+const STATUS_FIELDS = new Set([
+  "botId", "targetId", "targetGeneration", "viewGeneration", "state", "code",
+]);
+const STATUS_STATES = new Set(["connecting", "live", "unavailable", "retrying"]);
+const STATUS_CODES = new Set([null, "OPENBOT_LOCAL_CAPTURE_FAILED", "OPENBOT_LOCAL_DESKTOP_STALE"]);
 const LOCAL_DESKTOP_FRAME_CHANNELS = Object.freeze({
   select: "openbot-local-frame:select",
+  retry: "openbot-local-frame:retry",
   clear: "openbot-local-frame:clear",
 });
 const LOCAL_DESKTOP_FRAME_EVENT_CHANNEL = "openbot-local-frame:frame";
+const LOCAL_DESKTOP_STATUS_EVENT_CHANNEL = "openbot-local-frame:status";
+const LOCAL_DESKTOP_FRAME_STATUS_EVENT_CHANNEL = LOCAL_DESKTOP_STATUS_EVENT_CHANNEL;
 
 function failure() {
   const error = new Error("OpenBot Local Desktop frame operation failed.");
@@ -61,6 +69,8 @@ function selectRequest(value) {
   const request = exactObject(value, SELECT_FIELDS);
   return Object.freeze({ botId: botId(request.botId), viewGeneration: viewGeneration(request.viewGeneration) });
 }
+
+const retryRequest = selectRequest;
 
 function clearRequest(value) {
   const request = exactObject(value, CLEAR_FIELDS);
@@ -119,6 +129,28 @@ function displayFrame(value, identity) {
   });
 }
 
+function displayStatus(value, identity = null) {
+  const status = exactObject(value, STATUS_FIELDS);
+  if (identity && (status.botId !== identity.botId || status.targetId !== identity.targetId
+    || status.targetGeneration !== identity.targetGeneration)) throw failure();
+  if (typeof status.botId !== "string" || !BOT_ID.test(status.botId)
+    || typeof status.targetId !== "string" || !TARGET_ID.test(status.targetId)
+    || !Number.isSafeInteger(status.targetGeneration) || status.targetGeneration < 0
+    || !Number.isSafeInteger(status.viewGeneration) || status.viewGeneration < 1
+    || !STATUS_STATES.has(status.state) || !STATUS_CODES.has(status.code)) throw failure();
+  if ((status.state === "live" || status.state === "connecting" || status.state === "retrying")
+    && status.code !== null) throw failure();
+  if (status.state === "unavailable" && status.code === null) throw failure();
+  return Object.freeze({
+    botId: status.botId,
+    targetId: status.targetId,
+    targetGeneration: status.targetGeneration,
+    viewGeneration: status.viewGeneration,
+    state: status.state,
+    code: status.code,
+  });
+}
+
 function installLocalDesktopFrameIpc({
   electron,
   manager,
@@ -139,6 +171,7 @@ function installLocalDesktopFrameIpc({
   let disposed = false;
   const subscriptions = new Map();
   const senderViews = new Map();
+  const flights = new Map();
   const destroyListeners = new Map();
   const registered = [];
 
@@ -175,8 +208,13 @@ function installLocalDesktopFrameIpc({
   }
 
   function invalidate(subscription) {
+    if (!subscription) return;
+    subscription.invalidated = true;
     if (subscriptions.get(subscription.sender) === subscription) subscriptions.delete(subscription.sender);
-    try { clearIntervalFn(subscription.timer); } catch {}
+    if (subscription.timer !== null) {
+      try { clearIntervalFn(subscription.timer); } catch {}
+      subscription.timer = null;
+    }
   }
 
   function ensureDestroyListener(sender) {
@@ -189,31 +227,32 @@ function installLocalDesktopFrameIpc({
     destroyListeners.set(sender, listener);
   }
 
-  async function capture(subscription) {
-    if (!current(subscription) || subscription.inFlight) return;
-    subscription.inFlight = true;
+  function status(subscription, state, code = null) {
+    return displayStatus({
+      botId: subscription.botId,
+      targetId: subscription.targetId,
+      targetGeneration: subscription.targetGeneration,
+      viewGeneration: subscription.viewGeneration,
+      state,
+      code,
+    });
+  }
+
+  function publishStatus(subscription, value) {
+    if (!current(subscription)) return false;
     try {
-      const record = await computerBoundary.read(subscription.botId);
-      if (!current(subscription)) return;
-      const identity = computerIdentity(record, subscription.botId);
-      await manager.open(record);
-      if (!current(subscription)) return;
-      const openedRecord = await computerBoundary.read(subscription.botId);
-      if (!current(subscription)) return;
-      const openedIdentity = computerIdentity(openedRecord, subscription.botId);
-      if (!sameIdentity(identity, openedIdentity)) return;
-      const rawFrame = await manager.captureDisplayFrame(identity);
-      if (!current(subscription)) return;
-      const finalRecord = await computerBoundary.read(subscription.botId);
-      if (!current(subscription)) return;
-      const finalIdentity = computerIdentity(finalRecord, subscription.botId);
-      if (!sameIdentity(identity, finalIdentity)) return;
-      const frame = displayFrame(rawFrame, identity);
-      if (frame.frameId === subscription.lastFrameId) return;
-      const sequence = subscription.sequence + 1;
-      if (!Number.isSafeInteger(sequence)) return;
-      subscription.sequence = sequence;
-      subscription.lastFrameId = frame.frameId;
+      subscription.sender.send(LOCAL_DESKTOP_STATUS_EVENT_CHANNEL, displayStatus(value, subscription));
+      return true;
+    } catch { return false; }
+  }
+
+  function publishFrame(subscription, identity, frame) {
+    if (!current(subscription)) return false;
+    const sequence = subscription.sequence + 1;
+    if (!Number.isSafeInteger(sequence)) return false;
+    subscription.sequence = sequence;
+    subscription.lastFrameId = frame.frameId;
+    try {
       subscription.sender.send(LOCAL_DESKTOP_FRAME_EVENT_CHANNEL, Object.freeze({
         botId: identity.botId,
         targetId: identity.targetId,
@@ -225,32 +264,95 @@ function installLocalDesktopFrameIpc({
         mimeType: "image/png",
         bytes: frame.bytes,
       }));
-    } catch {}
-    finally {
-      if (current(subscription)) subscription.inFlight = false;
-    }
+      return true;
+    } catch { return false; }
   }
 
-  function handle(channel, operation) {
-    electron.ipcMain.handle(channel, async (event, value) => {
+  function staleError() {
+    const error = failure();
+    error.code = "OPENBOT_LOCAL_DESKTOP_STALE";
+    return error;
+  }
+
+  function captureCode(error) {
+    return error?.code === "OPENBOT_LOCAL_DESKTOP_STALE"
+      ? "OPENBOT_LOCAL_DESKTOP_STALE"
+      : "OPENBOT_LOCAL_CAPTURE_FAILED";
+  }
+
+  function isLifecycleFence(error) {
+    return typeof error?.code === "string"
+      && /(?:DELET|DISPOSE|BOT_DELETING)/i.test(error.code);
+  }
+
+  function armTimer(subscription) {
+    if (!current(subscription) || subscription.timer !== null) return;
+    subscription.timer = setIntervalFn(() => { void capture(subscription); }, FRAME_INTERVAL_MS);
+    subscription.timer?.unref?.();
+  }
+
+  function capture(subscription) {
+    if (!current(subscription)) return Promise.resolve(status(subscription, "unavailable", "OPENBOT_LOCAL_DESKTOP_STALE"));
+    if (subscription.inFlight) return subscription.inFlight;
+    const captureGeneration = subscription.captureGeneration + 1;
+    subscription.captureGeneration = captureGeneration;
+    const flight = (async () => {
       try {
-        if (disposed) throw failure();
-        const view = currentSender(event);
-        if (!view) throw failure();
-        await readiness;
-        if (disposed) throw failure();
-        const readyView = currentSender(event);
-        if (!readyView || readyView.sender !== view.sender
-          || !sameFrame(readyView.senderFrame, view.senderFrame)) throw failure();
-        return await operation(readyView, value);
-      } catch { throw failure(); }
+        const record = await computerBoundary.read(subscription.botId);
+        if (!current(subscription) || subscription.captureGeneration !== captureGeneration) throw staleError();
+        const identity = computerIdentity(record, subscription.botId);
+        if (!sameIdentity(identity, subscription)) throw staleError();
+        await manager.open(record);
+        if (!current(subscription) || subscription.captureGeneration !== captureGeneration) throw staleError();
+        const openedRecord = await computerBoundary.read(subscription.botId);
+        if (!current(subscription) || subscription.captureGeneration !== captureGeneration) throw staleError();
+        const openedIdentity = computerIdentity(openedRecord, subscription.botId);
+        if (!sameIdentity(identity, openedIdentity)) throw staleError();
+        const rawFrame = await manager.captureDisplayFrame(identity);
+        if (!current(subscription) || subscription.captureGeneration !== captureGeneration) throw staleError();
+        const finalRecord = await computerBoundary.read(subscription.botId);
+        if (!current(subscription) || subscription.captureGeneration !== captureGeneration) throw staleError();
+        const finalIdentity = computerIdentity(finalRecord, subscription.botId);
+        if (!sameIdentity(identity, finalIdentity)) throw staleError();
+        const frame = displayFrame(rawFrame, identity);
+        if (frame.frameId !== subscription.lastFrameId) publishFrame(subscription, identity, frame);
+        const live = status(subscription, "live", null);
+        if (current(subscription)) {
+          publishStatus(subscription, live);
+          armTimer(subscription);
+        }
+        return live;
+      } catch (error) {
+        if (isLifecycleFence(error)) {
+          invalidate(subscription);
+          return status(subscription, "unavailable", "OPENBOT_LOCAL_DESKTOP_STALE");
+        }
+        const unavailable = status(subscription, "unavailable", captureCode(error));
+        if (current(subscription)) {
+          if (subscription.timer !== null) {
+            try { clearIntervalFn(subscription.timer); } catch {}
+            subscription.timer = null;
+          }
+          publishStatus(subscription, unavailable);
+        }
+        return unavailable;
+      }
+    })();
+    subscription.inFlight = flight;
+    void flight.then(() => {
+      if (subscription.inFlight === flight && !current(subscription)) subscription.inFlight = null;
+      else if (subscription.inFlight === flight) subscription.inFlight = null;
+    }, () => {
+      if (subscription.inFlight === flight) subscription.inFlight = null;
     });
-    registered.push(channel);
+    return flight;
   }
 
-  handle(LOCAL_DESKTOP_FRAME_CHANNELS.select, async ({ sender, senderFrame }, value) => {
-    const request = selectRequest(value);
+  function prepareView({ sender, senderFrame }, request) {
     const previousView = senderViews.get(sender);
+    const existing = flights.get(sender);
+    if (existing && existing.botId === request.botId && existing.viewGeneration === request.viewGeneration
+      && sameFrame(existing.senderFrame, senderFrame)) return { view: existing.view, promise: existing.promise };
     if (previousView && request.viewGeneration <= previousView.viewGeneration) throw failure();
     const previous = subscriptions.get(sender);
     if (previous) invalidate(previous);
@@ -262,52 +364,106 @@ function installLocalDesktopFrameIpc({
     });
     senderViews.set(sender, view);
     ensureDestroyListener(sender);
+    return { view, promise: null };
+  }
+
+  async function startSelection(view, request, initialState) {
+    await readiness;
+    if (disposed || !currentView(view)) throw failure();
     const record = await computerBoundary.read(request.botId);
     if (!currentView(view)) throw failure();
     const identity = computerIdentity(record, request.botId);
     const currentRecord = await computerBoundary.read(request.botId);
     if (!currentView(view)) throw failure();
     const currentIdentity = computerIdentity(currentRecord, request.botId);
-    if (!sameIdentity(identity, currentIdentity)) throw failure();
+    if (!sameIdentity(identity, currentIdentity)) throw staleError();
     const subscription = {
       botId: request.botId,
-      inFlight: false,
+      targetId: identity.targetId,
+      targetGeneration: identity.targetGeneration,
+      inFlight: null,
+      captureGeneration: 0,
+      invalidated: false,
       lastFrameId: null,
-      sender,
+      sender: view.sender,
       sequence: 0,
-      senderFrame,
+      senderFrame: view.senderFrame,
       timer: null,
       view,
       viewGeneration: request.viewGeneration,
     };
-    subscriptions.set(sender, subscription);
-    subscription.timer = setIntervalFn(() => { void capture(subscription); }, FRAME_INTERVAL_MS);
-    subscription.timer?.unref?.();
-    void capture(subscription);
-    return request;
-  });
+    subscriptions.set(view.sender, subscription);
+    const initial = status(subscription, initialState, null);
+    publishStatus(subscription, initial);
+    return capture(subscription);
+  }
 
-  handle(LOCAL_DESKTOP_FRAME_CHANNELS.clear, async ({ sender, senderFrame }, value) => {
-    const request = clearRequest(value);
-    const previousView = senderViews.get(sender);
-    if (previousView && request.viewGeneration < previousView.viewGeneration) return request;
-    const view = Object.freeze({
-      botId: null,
-      sender,
-      senderFrame,
-      viewGeneration: request.viewGeneration,
-    });
-    senderViews.set(sender, view);
-    ensureDestroyListener(sender);
-    const subscription = subscriptions.get(sender);
-    if (subscription && subscription.viewGeneration <= request.viewGeneration) invalidate(subscription);
-    return request;
-  });
+  function selectOrRetry(event, value, initialState) {
+    let request;
+    let viewInfo;
+    let checked;
+    try {
+      if (disposed) throw failure();
+      checked = currentSender(event);
+      if (!checked) throw failure();
+      request = initialState === "retrying" ? retryRequest(value) : selectRequest(value);
+      viewInfo = prepareView(checked, request);
+      if (viewInfo.promise) return viewInfo.promise;
+      const promise = startSelection(viewInfo.view, request, initialState).catch(() => { throw failure(); });
+      const flight = {
+        botId: request.botId,
+        senderFrame: checked.senderFrame,
+        view: viewInfo.view,
+        viewGeneration: request.viewGeneration,
+        promise,
+      };
+      flights.set(checked.sender, flight);
+      void promise.then(() => {
+        if (flights.get(checked.sender) === flight) flights.delete(checked.sender);
+      }, () => {
+        if (flights.get(checked.sender) === flight) flights.delete(checked.sender);
+      });
+      return promise;
+    } catch { return Promise.reject(failure()); }
+  }
+
+  function clearSelection(event, value) {
+    let request;
+    let checked;
+    try {
+      if (disposed) throw failure();
+      checked = currentSender(event);
+      if (!checked) throw failure();
+      request = clearRequest(value);
+      const previousView = senderViews.get(checked.sender);
+      if (previousView && request.viewGeneration < previousView.viewGeneration) return Promise.resolve(request);
+      const previous = subscriptions.get(checked.sender);
+      if (previous) invalidate(previous);
+      const view = Object.freeze({ botId: null, sender: checked.sender, senderFrame: checked.senderFrame,
+        viewGeneration: request.viewGeneration });
+      senderViews.set(checked.sender, view);
+      ensureDestroyListener(checked.sender);
+      return readiness.then(() => {
+        if (disposed || !currentView(view)) throw failure();
+        return request;
+      }).catch(() => { throw failure(); });
+    } catch { return Promise.reject(failure()); }
+  }
+
+  electron.ipcMain.handle(LOCAL_DESKTOP_FRAME_CHANNELS.select,
+    (event, value) => selectOrRetry(event, value, "connecting"));
+  electron.ipcMain.handle(LOCAL_DESKTOP_FRAME_CHANNELS.retry,
+    (event, value) => selectOrRetry(event, value, "retrying"));
+  electron.ipcMain.handle(LOCAL_DESKTOP_FRAME_CHANNELS.clear, clearSelection);
+  registered.push(...Object.values(LOCAL_DESKTOP_FRAME_CHANNELS));
 
   const onChanged = (value) => {
-    if (disposed || !value || typeof value.botId !== "string") return;
+    if (disposed) return;
+    let botId;
+    try { botId = typeof value?.botId === "string" && BOT_ID.test(value.botId) ? value.botId : null; } catch { return; }
+    if (!botId) return;
     for (const subscription of [...subscriptions.values()]) {
-      if (subscription.botId === value.botId) invalidate(subscription);
+      if (subscription.botId === botId) invalidate(subscription);
     }
   };
   computerBoundary.on?.("changed", onChanged);
@@ -316,6 +472,7 @@ function installLocalDesktopFrameIpc({
     const subscription = subscriptions.get(sender);
     if (subscription) invalidate(subscription);
     senderViews.delete(sender);
+    flights.delete(sender);
   }
 
   return Object.freeze({
@@ -327,6 +484,7 @@ function installLocalDesktopFrameIpc({
       for (const [sender, listener] of destroyListeners) sender.off?.("destroyed", listener);
       destroyListeners.clear();
       senderViews.clear();
+      flights.clear();
       for (const channel of registered) electron.ipcMain.removeHandler(channel);
     },
   });
@@ -335,5 +493,7 @@ function installLocalDesktopFrameIpc({
 module.exports = {
   LOCAL_DESKTOP_FRAME_CHANNELS,
   LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+  LOCAL_DESKTOP_FRAME_STATUS_EVENT_CHANNEL,
+  LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
   installLocalDesktopFrameIpc,
 };

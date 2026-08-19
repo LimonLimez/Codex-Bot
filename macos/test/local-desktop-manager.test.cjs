@@ -10,6 +10,7 @@ const { mock } = require("node:test");
 
 const managerPath = path.join(__dirname, "..", "src", "local", "local-desktop-manager.cjs");
 const helperChildPath = path.join(__dirname, "..", "src", "local", "local-helper-child.cjs");
+const { LOCAL_DESKTOP_START_HTML, LOCAL_DESKTOP_START_URL, safeDisplayUrl } = require(managerPath);
 
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
@@ -261,6 +262,44 @@ async function fixture(t, overrides = {}) {
   return { ...electron, helpers, manager, permissionBroker, root };
 }
 
+test("open loads and captures the exact CSP start document before reporting ready", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+
+  assert.deepEqual(windows[0].webContents.urls, [LOCAL_DESKTOP_START_URL]);
+  assert.equal(LOCAL_DESKTOP_START_HTML.length > 0, true);
+  assert.match(
+    Buffer.from(LOCAL_DESKTOP_START_URL.split(",")[1], "base64").toString("utf8"),
+    /default-src 'none'; base-uri 'none'; form-action 'none'/,
+  );
+  const frame = await manager.captureDisplayFrame(identity(session));
+  assert.equal(frame.bytes.byteLength > 0, true);
+});
+
+test("an untouched about:blank window fails with the public capture code", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  windows[0].webContents.urls = [];
+  assert.equal(session.state, "ready");
+  await assert.rejects(
+    manager.captureDisplayFrame(identity(session)),
+    (error) => error?.code === "OPENBOT_LOCAL_CAPTURE_FAILED",
+  );
+});
+
+test("safeDisplayUrl accepts only the exact built-in document or public HTTPS", () => {
+  assert.equal(safeDisplayUrl(LOCAL_DESKTOP_START_URL), LOCAL_DESKTOP_START_URL);
+  assert.equal(safeDisplayUrl("https://example.com/path"), "https://example.com/path");
+  for (const value of [
+    "about:blank",
+    `${LOCAL_DESKTOP_START_URL}x`,
+    "data:text/html,<script>token=secret</script>",
+    "file:///Users/private/index.html",
+  ]) {
+    assert.throws(() => safeDisplayUrl(value), (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_INVALID");
+  }
+});
+
 test("two bots receive distinct partitions workspaces and current frames", async (t) => {
   const { manager, sessions, windows, root } = await fixture(t);
   const frames = [];
@@ -293,7 +332,7 @@ test("two bots receive distinct partitions workspaces and current frames", async
   }
 
   await manager.navigate({ ...identity(a), url: "https://www.youtube.com/" });
-  assert.deepEqual(windows[0].webContents.urls, ["https://www.youtube.com/"]);
+  assert.deepEqual(windows[0].webContents.urls, [LOCAL_DESKTOP_START_URL, "https://www.youtube.com/"]);
   const frame = await manager.capture(identity(a));
   assert.equal(frame.botId, BOT_A);
   assert.equal(frame.targetGeneration, 1);

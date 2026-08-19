@@ -19,6 +19,8 @@ const DISPLAY_FRAME_BOUNDS = Object.freeze([
   Object.freeze({ width: 320, height: 200 }),
 ]);
 const MAX_URL_BYTES = 4096;
+const LOCAL_DESKTOP_START_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\"><title>OpenBot Free Local Desktop</title></head><body><main><h1>Free Local Desktop</h1><p>Ready for this bot.</p></main></body></html>";
+const LOCAL_DESKTOP_START_URL = `data:text/html;base64,${Buffer.from(LOCAL_DESKTOP_START_HTML, "utf8").toString("base64")}`;
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TARGET_ID_PATTERN = /^local-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -351,6 +353,11 @@ function safeHttpsUrl(value) {
   return url.href;
 }
 
+function safeDisplayUrl(value) {
+  if (value === LOCAL_DESKTOP_START_URL) return LOCAL_DESKTOP_START_URL;
+  return safeHttpsUrl(value);
+}
+
 function privateIp(hostname) {
   const address = hostname.startsWith("[") && hostname.endsWith("]")
     ? hostname.slice(1, -1)
@@ -495,6 +502,11 @@ class LocalDesktopManager extends EventEmitter {
       let protocol;
       try {
         this.#secureWindow(window);
+        await window.webContents.loadURL(LOCAL_DESKTOP_START_URL);
+        this.#assertBotAvailable(computer.botId);
+        if (window.webContents.getURL() !== LOCAL_DESKTOP_START_URL) {
+          throw desktopError("Local Desktop start document is invalid.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
         helperTransport = await this.#helperFactory(Object.freeze({
           botId: computer.botId,
           targetId: computer.targetId,
@@ -502,6 +514,9 @@ class LocalDesktopManager extends EventEmitter {
           workspacePath: profilePath.workspacePath,
         }));
         this.#assertBotAvailable(computer.botId);
+        if (window.webContents.getURL() !== LOCAL_DESKTOP_START_URL) {
+          throw desktopError("Local Desktop start document is invalid.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
         const entry = {
           ...computer,
           partition,
@@ -1045,7 +1060,7 @@ class LocalDesktopManager extends EventEmitter {
   }
 
   #assertCaptureUrl(entry) {
-    try { safeHttpsUrl(entry.window.webContents.getURL()); } catch {
+    try { safeDisplayUrl(entry.window.webContents.getURL()); } catch {
       throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
     }
   }
@@ -1075,6 +1090,9 @@ class LocalDesktopManager extends EventEmitter {
 }
 
 module.exports = {
+  LOCAL_DESKTOP_START_HTML,
+  LOCAL_DESKTOP_START_URL,
   LocalDesktopError,
   LocalDesktopManager,
+  safeDisplayUrl,
 };

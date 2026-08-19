@@ -11,6 +11,11 @@
     "botId", "targetId", "targetGeneration", "viewGeneration", "sequence",
     "width", "height", "mimeType", "bytes",
   ]);
+  const STATUS_FIELDS = new Set([
+    "botId", "targetId", "targetGeneration", "viewGeneration", "state", "code",
+  ]);
+  const STATUS_STATES = new Set(["connecting", "live", "unavailable", "retrying"]);
+  const STATUS_CODES = new Set([null, "OPENBOT_LOCAL_CAPTURE_FAILED", "OPENBOT_LOCAL_DESKTOP_STALE"]);
   const MAX_FRAME_BYTES = 1_048_576;
 
   function element(documentRef, tag, className, text) {
@@ -44,6 +49,29 @@
     } catch { return null; }
   }
 
+  function exactStatus(value) {
+    try {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const prototype = Object.getPrototypeOf(value);
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const keys = Reflect.ownKeys(descriptors);
+      if ((prototype !== Object.prototype && prototype !== null) || keys.length !== STATUS_FIELDS.size
+        || keys.some((key) => typeof key !== "string" || !STATUS_FIELDS.has(key)
+          || !("value" in descriptors[key]))
+        || [...STATUS_FIELDS].some((key) => !descriptors[key])) return null;
+      const status = Object.fromEntries([...STATUS_FIELDS].map((key) => [key, descriptors[key].value]));
+      if (typeof status.botId !== "string" || !BOT_ID.test(status.botId)
+        || typeof status.targetId !== "string" || !TARGET_ID.test(status.targetId)
+        || !Number.isSafeInteger(status.targetGeneration) || status.targetGeneration < 0
+        || !Number.isSafeInteger(status.viewGeneration) || status.viewGeneration < 1
+        || !STATUS_STATES.has(status.state) || !STATUS_CODES.has(status.code)) return null;
+      if ((status.state === "live" || status.state === "connecting" || status.state === "retrying")
+        && status.code !== null) return null;
+      if (status.state === "unavailable" && status.code === null) return null;
+      return Object.freeze(status);
+    } catch { return null; }
+  }
+
   function sameTarget(left, right) {
     return Boolean(left && right && left.targetId === right.targetId
       && left.targetGeneration === right.targetGeneration);
@@ -57,8 +85,9 @@
     const facade = windowRef.openbotLocalDesktop;
     const BlobClass = windowRef.Blob;
     const decodeBitmap = windowRef.createImageBitmap;
-    if (!facade || typeof facade.select !== "function" || typeof facade.clear !== "function"
-      || typeof facade.onFrame !== "function" || typeof BlobClass !== "function"
+    if (!facade || typeof facade.select !== "function" || typeof facade.retry !== "function"
+      || typeof facade.clear !== "function" || typeof facade.onFrame !== "function"
+      || typeof facade.onStatus !== "function" || typeof BlobClass !== "function"
       || typeof decodeBitmap !== "function") {
       throw new Error("OpenBot Local Desktop view is unavailable.");
     }
@@ -67,9 +96,15 @@
     surface.setAttribute("aria-label", "Selected bot Free Local Desktop");
     const header = element(documentRef, "header", "openbot-local-desktop-view-header");
     const status = element(documentRef, "span", "openbot-local-desktop-view-status", "No local desktop selected");
+    const retry = element(documentRef, "button", "openbot-local-desktop-retry", "Retry");
+    retry.type = "button";
+    retry.hidden = true;
+    retry.disabled = true;
+    retry.setAttribute("aria-label", "Retry local desktop");
     header.append(
       element(documentRef, "strong", "", "Free Local Desktop"),
       status,
+      retry,
     );
     const viewport = element(documentRef, "div", "openbot-local-desktop-viewport");
     const canvas = element(documentRef, "canvas", "openbot-local-desktop-canvas");
@@ -91,6 +126,8 @@
     let target = null;
     let lastSequence = 0;
     let decodeGeneration = 0;
+    let state = "none";
+    let retryPending = false;
 
     function clearCanvas() {
       decodeGeneration += 1;
@@ -99,20 +136,79 @@
       context.clearRect(0, 0, canvas.width, canvas.height);
     }
 
+    function setStatus(nextState) {
+      state = nextState;
+      status.textContent = nextState === "connecting"
+        ? "Connecting to local desktop…"
+        : nextState === "retrying"
+          ? "Retrying local desktop…"
+          : nextState === "live"
+            ? "Live local desktop"
+            : nextState === "unavailable"
+              ? "Local desktop unavailable"
+              : "No local desktop selected";
+      retry.hidden = !selectedBotId || nextState !== "unavailable";
+      retry.disabled = !selectedBotId || retryPending || nextState !== "unavailable";
+    }
+
+    function applyStatus(value) {
+      const next = exactStatus(value);
+      if (!next || disposed || next.botId !== selectedBotId || next.viewGeneration !== viewGeneration) return null;
+      const nextTarget = Object.freeze({ targetId: next.targetId, targetGeneration: next.targetGeneration });
+      if (target && !sameTarget(target, nextTarget)) return null;
+      if (!target) target = nextTarget;
+      setStatus(next.state);
+      retryPending = next.state === "retrying";
+      retry.disabled = !selectedBotId || retryPending || next.state !== "unavailable";
+      return next;
+    }
+
+    function failedCurrentOperation() {
+      if (disposed || !selectedBotId) return;
+      retryPending = false;
+      setStatus("unavailable");
+    }
+
+    function invokeSelection(operation) {
+      void Promise.resolve(operation).then((value) => {
+        if (value) applyStatus(value);
+      }, () => failedCurrentOperation());
+    }
+
     function selectBot(value) {
       if (disposed) return;
       viewGeneration += 1;
       selectedBotId = typeof value === "string" && BOT_ID.test(value) ? value : null;
+      retryPending = false;
       clearCanvas();
-      status.textContent = selectedBotId ? "Connecting to local desktop…" : "No local desktop selected";
+      setStatus(selectedBotId ? "connecting" : "none");
       const request = Object.freeze({ viewGeneration });
-      const operation = selectedBotId
-        ? facade.select(Object.freeze({ botId: selectedBotId, viewGeneration }))
-        : facade.clear(request);
-      void Promise.resolve(operation).catch(() => {
-        if (!disposed && request.viewGeneration === viewGeneration) status.textContent = "Local desktop unavailable";
-      });
+      let operation;
+      try {
+        operation = selectedBotId
+          ? facade.select(Object.freeze({ botId: selectedBotId, viewGeneration }))
+          : facade.clear(request);
+      } catch {
+        failedCurrentOperation();
+        return;
+      }
+      invokeSelection(operation);
     }
+
+    function retrySelectedBot() {
+      if (disposed || !selectedBotId || state !== "unavailable" || retryPending) return;
+      viewGeneration += 1;
+      retryPending = true;
+      clearCanvas();
+      setStatus("retrying");
+      try {
+        invokeSelection(facade.retry(Object.freeze({ botId: selectedBotId, viewGeneration })));
+      } catch {
+        failedCurrentOperation();
+      }
+    }
+
+    retry.addEventListener?.("click", retrySelectedBot);
 
     async function onFrame(value) {
       if (disposed) return;
@@ -124,6 +220,8 @@
       });
       if (sameTarget(target, nextTarget)) {
         if (frame.sequence <= lastSequence) return;
+      } else if (target) {
+        return;
       } else {
         clearCanvas();
         target = nextTarget;
@@ -141,32 +239,43 @@
         canvas.width = frame.width;
         canvas.height = frame.height;
         context.drawImage(bitmap, 0, 0, frame.width, frame.height);
-        status.textContent = "Live local desktop";
+        setStatus("live");
       } catch {
-        if (!disposed && pendingGeneration === decodeGeneration) status.textContent = "Local desktop unavailable";
+        if (!disposed && pendingGeneration === decodeGeneration) {
+          retryPending = false;
+          setStatus("unavailable");
+        }
       } finally {
         try { bitmap?.close?.(); } catch {}
       }
     }
 
     const stopFrames = facade.onFrame(onFrame);
+    const stopStatus = facade.onStatus(applyStatus);
     const stopComputer = typeof windowRef.openbotComputer?.onChanged === "function"
       ? windowRef.openbotComputer.onChanged((value) => {
-        if (!disposed && value?.botId === selectedBotId) selectBot(selectedBotId);
+        if (disposed) return;
+        if (value?.botId === selectedBotId) selectBot(selectedBotId);
+        else if (!value && selectedBotId) selectBot(null);
       })
       : () => {};
 
     return Object.freeze({
       canvas,
       selectBot,
+      retry: retrySelectedBot,
       dispose() {
         if (disposed) return;
         disposed = true;
         viewGeneration += 1;
+        selectedBotId = null;
+        retryPending = false;
         clearCanvas();
+        setStatus("none");
         try { stopFrames?.(); } catch {}
+        try { stopStatus?.(); } catch {}
         try { stopComputer?.(); } catch {}
-        try { facade.clear(Object.freeze({ viewGeneration })); } catch {}
+        try { void Promise.resolve(facade.clear(Object.freeze({ viewGeneration }))).catch(() => {}); } catch {}
         surface.remove?.();
       },
     });

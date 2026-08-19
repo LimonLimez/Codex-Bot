@@ -21,8 +21,10 @@ async function tick() {
 }
 
 function fixture({ decode, htmlCollection = false } = {}) {
-  const calls = { clear: [], clearRect: [], drawImage: [], select: [] };
+  const calls = { clear: [], clearRect: [], drawImage: [], retry: [], select: [], status: [] };
   let frameListener = null;
+  let statusListener = null;
+  const nodes = [];
   const context = {
     clearRect(...args) { calls.clearRect.push(args); },
     drawImage(...args) { calls.drawImage.push(args); },
@@ -30,7 +32,7 @@ function fixture({ decode, htmlCollection = false } = {}) {
   function element(tagName) {
     const children = [];
     if (htmlCollection) Object.defineProperty(children, "at", { value: undefined });
-    return {
+    const value = {
       tagName: tagName.toUpperCase(),
       children,
       attributes: {},
@@ -42,16 +44,22 @@ function fixture({ decode, htmlCollection = false } = {}) {
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = [...children]; },
       setAttribute(name, value) { this.attributes[name] = String(value); },
+      addEventListener(name, listener) { this.listeners ??= new Map(); this.listeners.set(name, listener); },
+      click() { this.listeners?.get("click")?.({ currentTarget: this }); },
       getContext(kind) { return tagName === "canvas" && kind === "2d" ? context : null; },
       remove() { this.removed = true; },
     };
+    nodes.push(value);
+    return value;
   }
   const documentRef = { createElement: element };
   const container = element("div");
   const openbotLocalDesktop = {
     async select(value) { calls.select.push(value); },
+    async retry(value) { calls.retry.push(value); },
     async clear(value) { calls.clear.push(value); },
     onFrame(callback) { frameListener = callback; return () => { if (frameListener === callback) frameListener = null; }; },
+    onStatus(callback) { statusListener = callback; return () => { if (statusListener === callback) statusListener = null; }; },
   };
   const objectUrls = [];
   const windowRef = {
@@ -68,7 +76,9 @@ function fixture({ decode, htmlCollection = false } = {}) {
     container,
     documentRef,
     emitFrame(value) { return frameListener?.(value); },
+    emitStatus(value) { return statusListener?.(value); },
     frameListener: () => frameListener,
+    nodes,
     objectUrls,
     windowRef,
   };
@@ -129,14 +139,61 @@ test("canvas view selects exact bot generations, draws only increasing current f
   await tick();
   assert.equal(value.calls.drawImage.length, 1);
 
-  value.emitFrame(frame({ targetGeneration: 2, sequence: 1, byte: 9 }));
+  mounted.selectBot(BOT_A);
+  value.emitFrame(frame({ targetGeneration: 2, viewGeneration: 2, sequence: 1, byte: 9 }));
   await tick();
   assert.equal(value.calls.drawImage.length, 2);
   assert.equal(value.calls.clearRect.length >= 2, true);
   assert.equal(value.objectUrls.length, 0);
   mounted.dispose();
   assert.equal(value.frameListener(), null);
-  assert.equal(value.calls.clear.at(-1).viewGeneration, 2);
+  assert.equal(value.calls.clear.at(-1).viewGeneration, 3);
+});
+
+test("status states expose four labels and retry is offered only when unavailable", async () => {
+  const value = fixture();
+  const { createLocalDesktopView } = require(viewPath);
+  const mounted = createLocalDesktopView(value);
+  mounted.selectBot(BOT_A);
+  const status = value.nodes.find((node) => node.className === "openbot-local-desktop-view-status");
+  const retry = value.nodes.find((node) => node.className === "openbot-local-desktop-retry");
+  assert.equal(status.textContent, "Connecting to local desktop…");
+  assert.equal(retry.hidden, true);
+
+  value.emitStatus({
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    viewGeneration: 1,
+    state: "unavailable",
+    code: "OPENBOT_LOCAL_CAPTURE_FAILED",
+  });
+  assert.equal(status.textContent, "Local desktop unavailable");
+  assert.equal(retry.hidden, false);
+  retry.click();
+  assert.deepEqual(value.calls.retry, [{ botId: BOT_A, viewGeneration: 2 }]);
+  assert.equal(retry.disabled, true);
+
+  value.emitStatus({
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    viewGeneration: 2,
+    state: "retrying",
+    code: null,
+  });
+  assert.equal(status.textContent, "Retrying local desktop…");
+  value.emitStatus({
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    viewGeneration: 2,
+    state: "live",
+    code: null,
+  });
+  assert.equal(status.textContent, "Live local desktop");
+  assert.equal(retry.hidden, true);
+  mounted.dispose();
 });
 
 test("selection invalidates before decode so late bitmaps close without drawing and disposal clears immediately", async () => {

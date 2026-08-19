@@ -31,6 +31,25 @@
   font-size: 11px;
 }
 
+.openbot-local-desktop-retry {
+  min-height: 24px;
+  padding: 2px 9px;
+  border: 1px solid var(--openbot-shell-line);
+  border-radius: 7px;
+  color: var(--openbot-shell-text);
+  background: var(--openbot-shell-panel);
+  font: inherit;
+  font-size: 11px;
+}
+
+.openbot-local-desktop-retry[hidden] {
+  display: none;
+}
+
+.openbot-local-desktop-retry:disabled {
+  opacity: 0.55;
+}
+
 .openbot-local-desktop-viewport {
   display: grid;
   min-width: 0;
