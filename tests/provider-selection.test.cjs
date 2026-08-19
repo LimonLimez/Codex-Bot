@@ -136,6 +136,47 @@ test("every interactive CLIProxy provider is selectable with independent models 
   );
 });
 
+test("every Windows provider alias writes its canonical provider ID", (t) => {
+  const { stateRoot, connection } = environment(t);
+  const expected = {
+    codex: "openai-codex",
+    claude: "anthropic-claude",
+    antigravity: "google-antigravity",
+    kimi: "moonshot-kimi",
+    xai: "xai",
+    vertex: "google-vertex-ai",
+    "openai-api-key": "openai-api-key",
+    local: "local-openai-compatible",
+  };
+
+  for (const [windowsProviderId, canonicalProviderId] of Object.entries(
+    expected,
+  )) {
+    if (windowsProviderId === "local") {
+      const current = JSON.parse(
+        fs.readFileSync(path.join(stateRoot, "connection.json"), "utf8"),
+      );
+      fs.writeFileSync(
+        path.join(stateRoot, "connection.json"),
+        JSON.stringify({
+          ...current,
+          localServer: {
+            baseUrl: "http://127.0.0.1:11434/v1",
+            models: [{ id: "local-model", label: "Local model" }],
+          },
+        }),
+      );
+      globalThis[stateKey] = null;
+    }
+    connection.setProvider(windowsProviderId);
+    const persisted = JSON.parse(
+      fs.readFileSync(path.join(stateRoot, "connection.json"), "utf8"),
+    );
+    assert.equal(persisted.provider, canonicalProviderId);
+    assert.ok(persisted.providerPreferences[canonicalProviderId]);
+  }
+});
+
 test("provider account discovery stays inside the installation auth directory and exposes no token", (t) => {
   const { authRoot, connection } = environment(t);
   const accessTokenKey = ["access", "token"].join("_");

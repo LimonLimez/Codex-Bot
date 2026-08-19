@@ -222,7 +222,7 @@ const PROVIDER_DESCRIPTORS = Object.freeze([
     models: MODEL_CATALOG,
   }),
   Object.freeze({
-    providerId: "local",
+    providerId: "local-openai-compatible",
     windowsProviderId: "local",
     label: "Local models",
     description: "Connect Ollama, LM Studio, or vLLM running on this PC.",
@@ -255,6 +255,7 @@ const LEGACY_PROVIDER_IDS = Object.freeze({
   "cliproxy-kimi": "moonshot-kimi",
   "cliproxy-xai": "xai",
   "cliproxy-vertex": "google-vertex-ai",
+  local: "local-openai-compatible",
 });
 
 function tryProviderDescriptor(value) {

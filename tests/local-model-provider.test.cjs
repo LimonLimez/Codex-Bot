@@ -81,7 +81,8 @@ test("local model discovery is loopback-only and becomes a provider catalog", as
   const persisted = JSON.parse(
     fs.readFileSync(path.join(stateRoot, "connection.json"), "utf8"),
   );
-  assert.equal(persisted.provider, "local");
+  assert.equal(persisted.provider, "local-openai-compatible");
+  assert.ok(persisted.providerPreferences["local-openai-compatible"]);
   assert.deepEqual(
     status.preferences.catalog.models.map((model) => model.id),
     ["qwen3:8b", "llama3.2:latest"],

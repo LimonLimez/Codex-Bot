@@ -693,7 +693,11 @@ function cloneProviderRecord(value) {
   for (const [key, item] of Object.entries(value)) {
     const provider = providerFor(key);
     if (provider && plainObject(item)) {
-      output[providerDescriptor(provider.providerId).providerId] = { ...item };
+      const canonical = canonicalProviderId(key);
+      // If both a canonical key and a legacy alias are present, canonical
+      // state wins regardless of JSON/object insertion order.
+      if (!hasOwn(output, canonical) || key === canonical)
+        output[canonical] = { ...item };
     }
   }
   return output;

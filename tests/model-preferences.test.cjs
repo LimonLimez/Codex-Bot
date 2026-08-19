@@ -132,6 +132,66 @@ test("legacy preferences migrate, persisted defaults beat bootstrap environment,
   });
 });
 
+test("canonical provider preference entries win over stale Windows aliases", (t) => {
+  const stateRoot = isolatedEnvironment(t);
+  writeConnectionConfig(stateRoot, {
+    mode: "codex-oauth",
+    provider: "openai-codex",
+    providerPreferences: {
+      "openai-codex": {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        fastMode: false,
+      },
+      codex: {
+        model: "gpt-5.6-luna",
+        reasoningEffort: "none",
+        fastMode: true,
+      },
+    },
+    providerAgentPreferences: {
+      "openai-codex": {
+        "agent-1": { model: "gpt-5.6-sol" },
+      },
+      codex: {
+        "agent-1": { model: "gpt-5.6-luna" },
+      },
+    },
+  });
+  const connection = loadConnection();
+
+  assert.deepEqual(connection.getPreferences("agent-1"), {
+    agentId: "agent-1",
+    provider: "codex",
+    defaults: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      fastMode: false,
+    },
+    override: { model: "gpt-5.6-sol" },
+    effective: {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      fastMode: false,
+    },
+  });
+
+  connection.setDefaultPreferences({ reasoningEffort: "max" });
+  const persisted = JSON.parse(
+    fs.readFileSync(path.join(stateRoot, "connection.json"), "utf8"),
+  );
+  assert.deepEqual(persisted.providerPreferences["openai-codex"], {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "max",
+    fastMode: false,
+  });
+  assert.deepEqual(persisted.providerAgentPreferences["openai-codex"], {
+    "agent-1": { model: "gpt-5.6-sol" },
+  });
+  assert.equal(persisted.providerPreferences.codex, undefined);
+  assert.equal(persisted.providerAgentPreferences.codex, undefined);
+});
+
 test("agent overrides are partial, inherit updated defaults, and can be cleared", (t) => {
   const stateRoot = isolatedEnvironment(t);
   let connection = loadConnection();
