@@ -1205,12 +1205,17 @@ test("open fences a superseded Computer generation before helper and entry publi
 test("open rechecks the authoritative generation after the start document and helper awaits", async (t) => {
   await t.test("after start document", async (subtest) => {
     const afterLoad = deferred();
+    const afterLoadRead = deferred();
     let reads = 0;
     const helperCalled = [];
     const value = await fixture(subtest, {
       readCurrentComputer: async () => {
         reads += 1;
-        return reads === 2 ? afterLoad.promise : localComputer(BOT_A, LOCAL_A, 1);
+        if (reads === 2) {
+          afterLoadRead.resolve();
+          return afterLoad.promise;
+        }
+        return localComputer(BOT_A, LOCAL_A, 1);
       },
       helperFactory: async () => {
         helperCalled.push(true);
@@ -1218,7 +1223,7 @@ test("open rechecks the authoritative generation after the start document and he
       },
     });
     const opening = value.manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
-    for (let attempt = 0; attempt < 50 && reads < 2; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    await afterLoadRead.promise;
     assert.equal(reads, 2);
     afterLoad.resolve(localComputer(BOT_A, LOCAL_A, 2));
     const failure = await opening;
@@ -1229,6 +1234,7 @@ test("open rechecks the authoritative generation after the start document and he
 
   await t.test("after helper", async (subtest) => {
     const afterHelper = deferred();
+    const helperEntered = deferred();
     const releaseHelper = deferred();
     let reads = 0;
     const helpers = [];
@@ -1241,12 +1247,13 @@ test("open rechecks the authoritative generation after the start document and he
       helperFactory: async () => {
         const helper = new FakeHelperTransport();
         helpers.push(helper);
+        helperEntered.resolve();
         await releaseHelper.promise;
         return helper;
       },
     });
     const opening = value.manager.open(localComputer(BOT_A, LOCAL_A, 1)).catch((error) => error);
-    for (let attempt = 0; attempt < 50 && helpers.length < 1; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
+    await helperEntered.promise;
     assert.equal(helpers.length, 1);
     releaseHelper.resolve();
     for (let attempt = 0; attempt < 50 && reads < 3; attempt += 1) await new Promise((resolve) => setImmediate(resolve));
