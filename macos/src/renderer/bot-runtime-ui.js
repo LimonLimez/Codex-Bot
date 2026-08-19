@@ -16,45 +16,37 @@
     : typeof require === "function"
       ? require("./reasoning-control.js")
       : null;
-  const OPTIONAL_MODEL_CATALOG = Object.freeze([
-    Object.freeze({
-      model: "claude-fable-5",
-      label: "Claude Fable 5",
-      efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-      provider: "cliproxy-anthropic",
-      serviceTier: null,
-      defaultServiceTier: null,
-      serviceTiers: Object.freeze([]),
-      catalogGeneration: 1,
-      defaultReasoningEffort: "medium",
-      isDefault: false,
-    }),
-    Object.freeze({
-      model: "claude-opus-5",
-      label: "Claude Opus 5",
-      efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-      provider: "cliproxy-anthropic",
-      serviceTier: null,
-      defaultServiceTier: null,
-      serviceTiers: Object.freeze([]),
-      catalogGeneration: 1,
-      defaultReasoningEffort: "medium",
-      isDefault: false,
-    }),
-    Object.freeze({
-      model: "claude-sonnet-5",
-      label: "Claude Sonnet 5",
-      efforts: Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra-code"]),
-      provider: "cliproxy-anthropic",
-      serviceTier: null,
-      defaultServiceTier: null,
-      serviceTiers: Object.freeze([]),
-      catalogGeneration: 1,
-      defaultReasoningEffort: "medium",
-      isDefault: false,
-    }),
+  const PROVIDER_IDS = Object.freeze([
+    "openai-codex",
+    "anthropic-claude",
+    "google-antigravity",
+    "moonshot-kimi",
+    "xai",
+    "google-vertex-ai",
+    "openai-api-key",
+    "local-openai-compatible",
   ]);
-  const MODEL_CATALOG = OPTIONAL_MODEL_CATALOG;
+  const PROVIDER_LABELS = Object.freeze({
+    "openai-codex": "OpenAI Codex",
+    "anthropic-claude": "Anthropic Claude",
+    "google-antigravity": "Google Antigravity",
+    "moonshot-kimi": "Moonshot Kimi",
+    xai: "xAI",
+    "google-vertex-ai": "Google Vertex AI",
+    "openai-api-key": "OpenAI API key",
+    "local-openai-compatible": "Local models",
+  });
+  const PROVIDER_STATES = new Set(["connected", "connecting", "disconnected", "unavailable"]);
+  const PROVIDER_LOGIN_KINDS = Object.freeze({
+    "openai-codex": "account",
+    "anthropic-claude": "oauth",
+    "google-antigravity": "oauth",
+    "moonshot-kimi": "device",
+    xai: "device",
+    "google-vertex-ai": "service-account",
+    "openai-api-key": "api-key",
+    "local-openai-compatible": "local",
+  });
   const EFFORT_LABELS = Object.freeze({
     low: "Light",
     medium: "Medium",
@@ -233,7 +225,13 @@
     return Object.freeze({ label: "Computer not configured", tone: "neutral" });
   }
 
-  function exactDataObject(value, fields, message) {
+  function exactDataObject(value, fields, requiredOrMessage, messageValue) {
+    const allowed = fields instanceof Set ? fields : new Set(fields);
+    const legacyExact = messageValue === undefined && typeof requiredOrMessage === "string";
+    const required = legacyExact
+      ? [...allowed]
+      : Array.isArray(requiredOrMessage) ? requiredOrMessage : [];
+    const message = legacyExact ? requiredOrMessage : messageValue;
     let descriptors;
     let prototype;
     try {
@@ -245,13 +243,13 @@
     }
     const keys = Reflect.ownKeys(descriptors);
     if ((prototype !== Object.prototype && prototype !== null)
-      || keys.length !== fields.length
-      || keys.some((key) => typeof key !== "string" || !fields.includes(key)
+      || (legacyExact && keys.length !== allowed.size)
+      || keys.some((key) => typeof key !== "string" || !allowed.has(key)
         || !("value" in descriptors[key]))
-      || fields.some((field) => !descriptors[field])) {
+      || required.some((field) => !descriptors[field])) {
       throw new Error(message);
     }
-    return Object.fromEntries(fields.map((field) => [field, descriptors[field].value]));
+    return Object.fromEntries(keys.map((key) => [key, descriptors[key].value]));
   }
 
   function exactDataArray(value, maximum, message) {
@@ -465,78 +463,236 @@
   }
 
   function normalizeModelCatalog(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)
-      || value.status !== "ready" || !Number.isSafeInteger(value.generation)
-      || value.generation < 1 || !Array.isArray(value.models)) {
+    const catalog = exactDataObject(
+      value,
+      new Set(["status", "generation", "models"]),
+      ["status", "generation", "models"],
+      "Model catalog is unavailable.",
+    );
+    if (catalog.status !== "ready" || !Number.isSafeInteger(catalog.generation)
+      || catalog.generation < 0 || !Array.isArray(catalog.models) || catalog.models.length > 512) {
       throw new Error("Model catalog is unavailable.");
     }
-    const official = [];
-    const names = new Set();
-    for (const raw of value.models) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)
-        || typeof raw.id !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(raw.id)
-        || typeof raw.displayName !== "string" || raw.displayName.length < 1
-        || raw.displayName.length > 160 || !Array.isArray(raw.supportedReasoningEfforts)
-        || raw.supportedReasoningEfforts.length < 1 || names.has(raw.id)) {
+    const models = [];
+    const tuples = new Set();
+    for (const valueEntry of catalog.models) {
+      const raw = exactDataObject(
+        valueEntry,
+        new Set([
+          "provider", "providerLabel", "model", "label", "efforts", "serviceTiers",
+          "defaultReasoningEffort", "defaultServiceTier", "catalogGeneration", "isDefault",
+        ]),
+        ["provider", "model", "label", "efforts", "serviceTiers", "defaultReasoningEffort",
+          "defaultServiceTier", "catalogGeneration"],
+        "Model catalog is unavailable.",
+      );
+      if (!PROVIDER_IDS.includes(raw.provider)
+        || typeof raw.providerLabel !== "string" || raw.providerLabel.length < 1
+        || raw.providerLabel.length > 160
+        || typeof raw.model !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(raw.model)
+        || typeof raw.label !== "string" || raw.label.trim().length < 1 || raw.label.length > 160
+        || tuples.has(`${raw.provider}\u0000${raw.model}`)
+        || !Array.isArray(raw.efforts) || raw.efforts.length < 1 || raw.efforts.length > 32
+        || raw.efforts.some((effort) => typeof effort !== "string"
+          || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))) {
         throw new Error("Model catalog is unavailable.");
       }
-      const efforts = Object.freeze([...raw.supportedReasoningEfforts]);
-      if (efforts.some((effort) => typeof effort !== "string"
-        || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))) {
-        throw new Error("Model catalog is unavailable.");
-      }
-      const rawServiceTiers = raw.serviceTiers ?? [];
-      const defaultServiceTier = raw.defaultServiceTier ?? null;
-      if (!Array.isArray(rawServiceTiers) || rawServiceTiers.length > 16
-        || !(defaultServiceTier === null || (typeof defaultServiceTier === "string"
-          && /^[a-z][a-z0-9_-]{0,31}$/.test(defaultServiceTier)))) {
+      const efforts = Object.freeze([...new Set(raw.efforts)]);
+      if (!efforts.includes(raw.defaultReasoningEffort)
+        || typeof raw.defaultReasoningEffort !== "string"
+        || !(raw.defaultServiceTier === null || (typeof raw.defaultServiceTier === "string"
+          && /^[a-z][a-z0-9_-]{0,31}$/.test(raw.defaultServiceTier)))
+        || !Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0
+        || raw.catalogGeneration > catalog.generation
+        || !Array.isArray(raw.serviceTiers) || raw.serviceTiers.length > 16) {
         throw new Error("Model catalog is unavailable.");
       }
       const tierIds = new Set();
-      const serviceTiers = Object.freeze(rawServiceTiers.map((entry) => {
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)
-          || typeof entry.id !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(entry.id)
-          || tierIds.has(entry.id) || typeof entry.name !== "string"
-          || entry.name.trim().length < 1 || entry.name.length > 160
-          || typeof entry.description !== "string" || entry.description.length > 1024) {
+      const serviceTiers = Object.freeze(raw.serviceTiers.map((tierValue) => {
+        const tier = exactDataObject(
+          tierValue,
+          new Set(["id", "name", "description"]),
+          ["id", "name"],
+          "Model catalog is unavailable.",
+        );
+        if (typeof tier.id !== "string" || !/^[a-z][a-z0-9_-]{0,31}$/.test(tier.id)
+          || tierIds.has(tier.id) || typeof tier.name !== "string"
+          || tier.name.trim().length < 1 || tier.name.length > 160
+          || (tier.description !== undefined && (typeof tier.description !== "string"
+            || tier.description.length > 1024))) {
           throw new Error("Model catalog is unavailable.");
         }
-        tierIds.add(entry.id);
-        return Object.freeze({ id: entry.id, name: entry.name, description: entry.description });
+        tierIds.add(tier.id);
+        return Object.freeze({ id: tier.id, name: tier.name, description: tier.description ?? "" });
       }));
-      if (defaultServiceTier !== null && !tierIds.has(defaultServiceTier)) {
+      if (raw.defaultServiceTier !== null && !tierIds.has(raw.defaultServiceTier)) {
         throw new Error("Model catalog is unavailable.");
       }
-      names.add(raw.id);
-      official.push(Object.freeze({
-        model: raw.id,
-        label: raw.displayName,
+      tuples.add(`${raw.provider}\u0000${raw.model}`);
+      models.push(Object.freeze({
+        model: raw.model,
+        label: raw.label,
+        provider: raw.provider,
+        providerLabel: raw.providerLabel,
         efforts,
-        provider: "openai-codex",
-        serviceTier: defaultServiceTier,
-        defaultServiceTier,
+        serviceTier: raw.defaultServiceTier,
+        defaultServiceTier: raw.defaultServiceTier,
         serviceTiers,
-        catalogGeneration: value.generation,
+        catalogGeneration: raw.catalogGeneration,
         defaultReasoningEffort: raw.defaultReasoningEffort,
         isDefault: raw.isDefault === true,
       }));
     }
-    return Object.freeze([
-      ...official,
-      ...OPTIONAL_MODEL_CATALOG.map((entry) => Object.freeze({
-        ...entry,
-        provider: "cliproxy-anthropic",
-        serviceTier: null,
-        defaultServiceTier: null,
-        serviceTiers: Object.freeze([]),
-        catalogGeneration: 1,
-        defaultReasoningEffort: entry.defaultReasoningEffort,
-        isDefault: false,
-      })),
-    ]);
+    return Object.freeze(models);
   }
 
-  function normalizeModelSelection(value, botId, catalog = MODEL_CATALOG) {
+  function normalizeLegacyAccountCatalog(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)
+      || value.status !== "ready" || !Number.isSafeInteger(value.generation)
+      || value.generation < 0 || !Array.isArray(value.models)) {
+      throw new Error("Model catalog is unavailable.");
+    }
+    const models = [];
+    const seen = new Set();
+    for (const candidate of value.models) {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)
+        || typeof candidate.id !== "string" || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(candidate.id)
+        || seen.has(candidate.id) || typeof candidate.displayName !== "string"
+        || candidate.displayName.length < 1 || candidate.displayName.length > 160
+        || !Array.isArray(candidate.supportedReasoningEfforts)
+        || candidate.supportedReasoningEfforts.length < 1) throw new Error("Model catalog is unavailable.");
+      const efforts = Object.freeze([...candidate.supportedReasoningEfforts]);
+      if (efforts.some((effort) => typeof effort !== "string"
+        || !/^[a-z][a-z0-9_-]{0,31}$/.test(effort))) throw new Error("Model catalog is unavailable.");
+      const tiers = Array.isArray(candidate.serviceTiers) ? candidate.serviceTiers : [];
+      const serviceTiers = Object.freeze(tiers.map((tier) => {
+        if (!tier || typeof tier !== "object" || Array.isArray(tier)
+          || typeof tier.id !== "string" || typeof tier.name !== "string") {
+          throw new Error("Model catalog is unavailable.");
+        }
+        return Object.freeze({ id: tier.id, name: tier.name, description: tier.description ?? "" });
+      }));
+      const defaultServiceTier = candidate.defaultServiceTier ?? null;
+      const defaultReasoningEffort = candidate.defaultReasoningEffort ?? efforts[0];
+      if (!efforts.includes(defaultReasoningEffort)
+        || (defaultServiceTier !== null && !serviceTiers.some((tier) => tier.id === defaultServiceTier))) {
+        throw new Error("Model catalog is unavailable.");
+      }
+      seen.add(candidate.id);
+      models.push(Object.freeze({
+        model: candidate.id,
+        label: candidate.displayName,
+        provider: "openai-codex",
+        providerLabel: PROVIDER_LABELS["openai-codex"],
+        efforts,
+        serviceTier: defaultServiceTier,
+        defaultServiceTier,
+        serviceTiers,
+        catalogGeneration: value.generation,
+        defaultReasoningEffort,
+        isDefault: candidate.isDefault === true,
+      }));
+    }
+    return Object.freeze(models);
+  }
+
+  function disconnectedProvider(providerId) {
+    return Object.freeze({
+      providerId,
+      label: PROVIDER_LABELS[providerId],
+      loginKind: PROVIDER_LOGIN_KINDS[providerId],
+      state: "disconnected",
+      generation: 0,
+      capabilities: Object.freeze({ reasoning: false, fast: false }),
+      errorCode: null,
+    });
+  }
+
+  function normalizeProviderConnections(value) {
+    if (!Array.isArray(value) || value.length > PROVIDER_IDS.length) {
+      throw new Error("Provider connections are unavailable.");
+    }
+    const byId = new Map();
+    for (const candidate of value) {
+      const raw = exactDataObject(
+        candidate,
+        new Set(["providerId", "label", "loginKind", "state", "generation", "capabilities", "errorCode"]),
+        ["providerId", "label", "loginKind", "state", "generation"],
+        "Provider connections are unavailable.",
+      );
+      if (!PROVIDER_IDS.includes(raw.providerId) || byId.has(raw.providerId)
+        || typeof raw.label !== "string" || raw.label.trim().length < 1 || raw.label.length > 160
+        || raw.loginKind !== PROVIDER_LOGIN_KINDS[raw.providerId]
+        || !PROVIDER_STATES.has(raw.state)
+        || !Number.isSafeInteger(raw.generation) || raw.generation < 0
+        || (raw.errorCode !== null && (typeof raw.errorCode !== "string" || raw.errorCode.length > 96))) {
+        throw new Error("Provider connections are unavailable.");
+      }
+      const capabilities = raw.capabilities === undefined
+        ? Object.freeze({ reasoning: false, fast: false })
+        : exactDataObject(
+          raw.capabilities,
+          new Set(["reasoning", "fast"]),
+          ["reasoning", "fast"],
+          "Provider connections are unavailable.",
+        );
+      if (typeof capabilities.reasoning !== "boolean" || typeof capabilities.fast !== "boolean") {
+        throw new Error("Provider connections are unavailable.");
+      }
+      byId.set(raw.providerId, Object.freeze({
+        providerId: raw.providerId,
+        label: raw.label,
+        loginKind: raw.loginKind,
+        state: raw.state,
+        generation: raw.generation,
+        capabilities: Object.freeze({ reasoning: capabilities.reasoning, fast: capabilities.fast }),
+        errorCode: raw.errorCode ?? null,
+      }));
+    }
+    return Object.freeze(PROVIDER_IDS.map((providerId) => byId.get(providerId) ?? disconnectedProvider(providerId)));
+  }
+
+  function normalizeProviderOnboarding(value, connections, catalog) {
+    if (value === null || value === undefined) return null;
+    const raw = exactDataObject(
+      value,
+      new Set(["schemaVersion", "providerId", "connectionGeneration", "catalogGeneration", "completedAt"]),
+      ["schemaVersion", "providerId", "connectionGeneration", "catalogGeneration", "completedAt"],
+      "Provider onboarding is unavailable.",
+    );
+    const connection = connections.find((entry) => entry.providerId === raw.providerId);
+    if (raw.schemaVersion !== 1 || !connection || connection.state !== "connected"
+      || !Number.isSafeInteger(raw.connectionGeneration) || raw.connectionGeneration < 0
+      || connection.generation !== raw.connectionGeneration
+      || !Number.isSafeInteger(raw.catalogGeneration) || raw.catalogGeneration < 0
+      || catalog.status !== "ready" || catalog.generation !== raw.catalogGeneration
+      || !catalog.models.some((entry) => entry.provider === raw.providerId)
+      || typeof raw.completedAt !== "string" || raw.completedAt.length < 1 || raw.completedAt.length > 64) {
+      throw new Error("Provider onboarding is unavailable.");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      providerId: raw.providerId,
+      connectionGeneration: raw.connectionGeneration,
+      catalogGeneration: raw.catalogGeneration,
+      completedAt: raw.completedAt,
+    });
+  }
+
+  function normalizeProviderFacade(value) {
+    if (value === null || value === undefined) return null;
+    const methods = [
+      "list", "connect", "disconnect", "catalog", "readOnboarding", "completeOnboarding",
+      "onConnectionsChanged", "onCatalogChanged",
+    ];
+    const raw = exactDataObject(value, new Set(methods), methods, "Provider facade is unavailable.");
+    if (methods.some((method) => typeof raw[method] !== "function")) {
+      throw new Error("Provider facade is unavailable.");
+    }
+    return Object.freeze(raw);
+  }
+
+  function normalizeModelSelection(value, botId, catalog = Object.freeze([])) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error("Model selection is unavailable.");
     }
@@ -575,7 +731,7 @@
     return Object.freeze(Object.fromEntries(fields.map((field) => [field, read(field)])));
   }
 
-  function isPendingOfficialSelection(value, botId) {
+  function isPendingCatalogSelection(value, botId) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     try {
       const prototype = Object.getPrototypeOf(value);
@@ -584,7 +740,8 @@
         && descriptors.botId && "value" in descriptors.botId
         && descriptors.botId.value === botId
         && descriptors.provider && "value" in descriptors.provider
-        && descriptors.provider.value === "openai-codex";
+        && typeof descriptors.provider.value === "string"
+        && PROVIDER_IDS.includes(descriptors.provider.value);
     } catch { return false; }
   }
 
@@ -592,6 +749,7 @@
     facade,
     runtimeFacade = null,
     accountFacade = null,
+    providerFacade = null,
     computerFacade = null,
     onSelectionChanged = () => {},
     onRuntimeEvent = () => {},
@@ -625,7 +783,7 @@
     let creationBotId = null;
     let creationError = null;
     let modelSelection = null;
-    let modelCatalog = OPTIONAL_MODEL_CATALOG;
+    let modelCatalog = Object.freeze([]);
     let catalogGeneration = -1;
     let catalogStatus = "loading";
     let profileSetup = closedProfileSetup();
@@ -1035,7 +1193,7 @@
       return true;
     }
 
-    function applyCatalog(value, { refreshSelection = true } = {}) {
+    function applyCatalog(value, { refreshSelection = true, legacyAccount = false } = {}) {
       if (disposed) return false;
       const generation = value && typeof value === "object" && !Array.isArray(value)
         && Number.isSafeInteger(value.generation) && value.generation >= 0
@@ -1043,12 +1201,12 @@
         : null;
       if (generation !== null && generation < catalogGeneration) return false;
 
-      let nextCatalog = OPTIONAL_MODEL_CATALOG;
+      let nextCatalog = Object.freeze([]);
       let nextStatus = "unavailable";
       if (value && typeof value === "object" && !Array.isArray(value)
         && value.status === "ready") {
         try {
-          nextCatalog = normalizeModelCatalog(value);
+          nextCatalog = legacyAccount ? normalizeLegacyAccountCatalog(value) : normalizeModelCatalog(value);
           nextStatus = "ready";
         } catch {}
       } else if (value && typeof value === "object" && !Array.isArray(value)
@@ -1152,7 +1310,7 @@
             try {
               modelSelection = normalizeModelSelection(stored, botId, modelCatalog);
             } catch (error) {
-              if (catalogStatus === "ready" || !isPendingOfficialSelection(stored, botId)) throw error;
+              if (catalogStatus === "ready" || !isPendingCatalogSelection(stored, botId)) throw error;
               modelSelection = null;
             }
           }
@@ -1253,9 +1411,10 @@
         });
         permissionUnsubscribe = typeof candidatePermission === "function" ? candidatePermission : null;
       }
-      if (accountFacade && typeof accountFacade.onCatalogChanged === "function") {
-        const candidateCatalog = accountFacade.onCatalogChanged((value) => {
-          applyCatalog(value);
+      const catalogFacade = providerFacade ?? accountFacade;
+      if (catalogFacade && typeof catalogFacade.onCatalogChanged === "function") {
+        const candidateCatalog = catalogFacade.onCatalogChanged((value) => {
+          applyCatalog(value, { legacyAccount: providerFacade === null });
         });
         if (disposed) {
           if (typeof candidateCatalog === "function") candidateCatalog();
@@ -1263,11 +1422,11 @@
         }
         catalogUnsubscribe = typeof candidateCatalog === "function" ? candidateCatalog : null;
       }
-      if (accountFacade && typeof accountFacade.catalog === "function") {
+      if (catalogFacade && typeof catalogFacade.catalog === "function") {
         try {
-          const catalog = await accountFacade.catalog();
+          const catalog = await catalogFacade.catalog();
           if (disposed) throw new Error("Bot controls are unavailable.");
-          applyCatalog(catalog, { refreshSelection: false });
+          applyCatalog(catalog, { refreshSelection: false, legacyAccount: providerFacade === null });
         } catch (error) {
           if (disposed) throw error;
           applyCatalog(null, { refreshSelection: false });
@@ -1742,20 +1901,34 @@
       return snapshot();
     }
 
-    async function connectProvider(provider) {
-      if (disposed || !new Set(["codex", "claude", "kimi"]).has(provider)) {
+    async function connectProvider(request) {
+      const rawProvider = typeof request === "string" ? request : request?.providerId;
+      const provider = rawProvider === "codex" ? "openai-codex"
+        : rawProvider === "claude" ? "anthropic-claude"
+          : rawProvider === "kimi" ? "moonshot-kimi" : rawProvider;
+      if (disposed || typeof provider !== "string" || !PROVIDER_IDS.includes(provider)) {
         throw new Error("Provider connection is unavailable.");
       }
-      if (provider === "codex") {
+      if (!providerFacade && !new Set(["openai-codex", "anthropic-claude", "moonshot-kimi"]).has(provider)) {
+        throw new Error("Provider connection is unavailable.");
+      }
+      if (providerFacade && typeof providerFacade.connect === "function") {
+        return providerFacade.connect(request && typeof request === "object"
+          ? request
+          : { providerId: provider });
+      }
+      if (provider === "openai-codex") {
         if (!accountFacade || typeof accountFacade.login !== "function") {
           throw new Error("Provider connection is unavailable.");
         }
         return accountFacade.login("browser");
       }
+      const legacyProvider = provider === "anthropic-claude" ? "claude"
+        : provider === "moonshot-kimi" ? "kimi" : provider;
       if (runtimeFacade == null || typeof runtimeFacade.connectProvider !== "function") {
         throw new Error("Provider connection is unavailable.");
       }
-      return runtimeFacade.connectProvider(provider);
+      return runtimeFacade.connectProvider(legacyProvider);
     }
 
     async function renameActive(name) {
@@ -1866,6 +2039,7 @@
 
     return Object.freeze({
       applyBot,
+      applyCatalog,
       chooseComputerMode,
       confirmComputerMode,
       confirmNewBotSetup,
@@ -2676,17 +2850,6 @@
     popover.setAttribute("role", "dialog");
     popover.setAttribute("aria-label", "Power");
     popover.hidden = true;
-    const providerRow = element(documentRef, "div", "codex-provider-row");
-    const providerSelect = element(documentRef, "select", "codex-provider-select");
-    providerSelect.setAttribute("aria-label", "Inference provider");
-    for (const [value, label] of [["codex", "OpenAI Codex"], ["claude", "Claude"], ["kimi", "Kimi"]]) {
-      const option = element(documentRef, "option", "", label);
-      option.value = value;
-      providerSelect.append(option);
-    }
-    const connectProvider = element(documentRef, "button", "codex-provider-connect", "Connect account");
-    connectProvider.type = "button";
-    providerRow.append(providerSelect, connectProvider);
     const reasoningView = createReasoningView(documentRef, { windowRef });
     const reasoning = reasoningView.input;
     const powerShell = element(documentRef, "div", "codex-power-shell");
@@ -2757,7 +2920,6 @@
       header,
       creationAlert,
       renameRow,
-      ...(nativeProtocolMode ? [] : [providerRow]),
       ...(nativeProtocolMode ? [] : [statusRow, computerRow, computerGrants, newBotSetup]),
       computerSetup,
       permissionSheet,
@@ -2794,10 +2956,8 @@
       "Connect the AI services you want OpenBot to use. Models remain bot-specific.",
     );
     const connectionsActions = element(documentRef, "div", "codex-ai-connections-actions");
-    const connectionDirect = element(documentRef, "button", "codex-connection-direct", "Connect Direct Codex");
-    const connectionClaude = element(documentRef, "button", "codex-connection-claude", "Connect Claude");
-    for (const button of [connectionDirect, connectionClaude]) button.type = "button";
-    connectionsActions.append(connectionDirect, connectionClaude);
+    const connectionsList = element(documentRef, "div", "codex-ai-connections-list");
+    connectionsActions.append(connectionsList);
     connectionsSettings.append(connectionsTitle, connectionsCopy, connectionsActions);
     const firstConnectionSetup = element(documentRef, "dialog", "codex-first-connection-setup");
     firstConnectionSetup.setAttribute("role", "dialog");
@@ -2820,27 +2980,6 @@
     );
     firstConnectionCopy.id = "codex-first-connection-copy";
     const firstConnectionChoices = element(documentRef, "div", "codex-first-connection-choices");
-    const firstConnectionDirect = element(
-      documentRef,
-      "button",
-      "codex-first-connection-choice codex-first-connection-direct",
-      "Continue with Direct Codex",
-    );
-    const firstConnectionClaude = element(
-      documentRef,
-      "button",
-      "codex-first-connection-choice codex-first-connection-claude",
-      "Connect Claude",
-    );
-    for (const button of [firstConnectionDirect, firstConnectionClaude]) button.type = "button";
-    const firstConnectionRecommended = element(
-      documentRef,
-      "span",
-      "codex-first-connection-recommended",
-      "Recommended",
-    );
-    firstConnectionDirect.append(firstConnectionRecommended);
-    firstConnectionChoices.append(firstConnectionDirect, firstConnectionClaude);
     const firstConnectionError = element(documentRef, "p", "codex-first-connection-error");
     firstConnectionError.setAttribute("role", "alert");
     firstConnectionError.hidden = true;
@@ -2864,16 +3003,20 @@
     } else documentRef.body.append(panel, modelDock);
 
     let mountDisposed = false;
-    const FIRST_CONNECTION_KEY = "openbot.first-connection.v1";
-    let firstConnection = null;
-    try {
-      const storedConnection = windowRef.localStorage?.getItem?.(FIRST_CONNECTION_KEY);
-      if (["codex", "claude"].includes(storedConnection)) firstConnection = storedConnection;
-    } catch {}
-    let accountState = null;
-    let accountUnsubscribe = null;
-    let connectionPending = false;
-    let requestedFirstConnection = null;
+    let providerFacade = null;
+    try { providerFacade = normalizeProviderFacade(windowRef.openbotProviders); } catch {}
+    const providerRows = new Map();
+    const firstProviderRows = new Map();
+    const providerPending = new Set();
+    let providerConnections = Object.freeze([]);
+    let providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
+    let providerOnboarding = null;
+    let providerConnectionsUnsubscribe = null;
+    let providerCatalogUnsubscribe = null;
+    let providerAuthorityLoaded = false;
+    let providerCatalogLoaded = false;
+    let providerOnboardingLoaded = false;
+    let providerInitialFocusDone = false;
     let localDesktopView = null;
     let localDesktopSelection = undefined;
     let lastSnapshot = null;
@@ -3069,9 +3212,89 @@
     const powerState = new POWER_CONTROL.PowerControlState([], null, { ownerKey: "unselected" });
     let controller;
 
-    function accountReady(value) {
-      return value?.status === "ready" && typeof value.authMode === "string"
-        && value.authMode.length > 0;
+    function createProviderRow(providerId, first) {
+      const label = PROVIDER_LABELS[providerId];
+      const kind = PROVIDER_LOGIN_KINDS[providerId];
+      const row = element(
+        documentRef,
+        "div",
+        first ? "codex-first-connection-choice" : "codex-provider-connection",
+      );
+      row.dataset.providerId = providerId;
+      row.dataset.loginKind = kind;
+      const copy = element(documentRef, "div", "codex-provider-connection-copy");
+      const title = element(documentRef, "strong", "codex-provider-connection-label", label);
+      const state = element(documentRef, "span", "codex-provider-connection-state", "Not connected");
+      state.setAttribute("role", "status");
+      state.setAttribute("aria-live", "polite");
+      const error = element(documentRef, "span", "codex-provider-connection-error");
+      error.setAttribute("role", "alert");
+      error.hidden = true;
+      copy.append(title, state, error);
+      const form = element(documentRef, "div", "codex-provider-connection-form");
+      const inputs = Object.create(null);
+      if (kind === "account") {
+        const mode = element(documentRef, "select", "codex-provider-auth-mode");
+        mode.setAttribute("aria-label", `${label} sign-in method`);
+        for (const [value, text] of [["browser", "Browser"], ["device-code", "Device"]]) {
+          const option = element(documentRef, "option", "", text);
+          option.value = value;
+          mode.append(option);
+        }
+        inputs.authMode = mode;
+        form.append(mode);
+      } else if (kind === "api-key") {
+        const apiKey = element(documentRef, "input", "codex-provider-api-key");
+        apiKey.type = "password";
+        apiKey.autocomplete = "off";
+        apiKey.placeholder = "API key";
+        apiKey.setAttribute("aria-label", `${label} API key`);
+        inputs.apiKey = apiKey;
+        form.append(apiKey);
+      } else if (kind === "local") {
+        const baseUrl = element(documentRef, "input", "codex-provider-base-url");
+        baseUrl.type = "url";
+        baseUrl.placeholder = "http://127.0.0.1:11434/v1";
+        baseUrl.setAttribute("aria-label", `${label} base URL`);
+        const apiKey = element(documentRef, "input", "codex-provider-api-key");
+        apiKey.type = "password";
+        apiKey.autocomplete = "off";
+        apiKey.placeholder = "Optional API key";
+        apiKey.setAttribute("aria-label", `${label} API key`);
+        inputs.baseUrl = baseUrl;
+        inputs.apiKey = apiKey;
+        form.append(baseUrl, apiKey);
+      }
+      const action = element(
+        documentRef,
+        "button",
+        first ? "codex-provider-connect codex-first-connection-action" : "codex-provider-connect",
+        kind === "account" ? "Connect in Browser"
+          : kind === "service-account" ? "Choose JSON"
+            : kind === "device" ? "Use Device" : "Connect",
+      );
+      action.type = "button";
+      action.dataset.providerId = providerId;
+      const disconnect = element(documentRef, "button", "codex-provider-disconnect", "Disconnect");
+      disconnect.type = "button";
+      disconnect.dataset.providerId = providerId;
+      disconnect.hidden = first;
+      const recommended = providerId === "openai-codex"
+        ? element(documentRef, "span", "codex-first-connection-recommended", "Recommended") : null;
+      if (recommended) copy.append(recommended);
+      const actions = element(documentRef, "div", "codex-provider-connection-actions");
+      actions.append(action, disconnect);
+      row.append(copy, form, actions);
+      const entry = Object.freeze({ row, state, error, action, disconnect, inputs, providerId, first });
+      (first ? firstProviderRows : providerRows).set(providerId, entry);
+      action.addEventListener("click", () => { void providerAction(providerId, first); });
+      disconnect.addEventListener("click", () => { void disconnectProvider(providerId); });
+      return row;
+    }
+
+    for (const providerId of PROVIDER_IDS) {
+      connectionsList.append(createProviderRow(providerId, false));
+      firstConnectionChoices.append(createProviderRow(providerId, true));
     }
 
     function synchronizeLocalDesktop(snapshot) {
@@ -3084,82 +3307,201 @@
       try { localDesktopView.selectBot(nextBotId); } catch {}
     }
 
-    function persistFirstConnection(provider) {
-      if (!["codex", "claude"].includes(provider)) return;
-      firstConnection = provider;
-      requestedFirstConnection = null;
-      try { windowRef.localStorage?.setItem?.(FIRST_CONNECTION_KEY, provider); } catch {}
-      setDialogOpen(firstConnectionSetup, false);
-      updateConnectionPresentation(lastSnapshot);
+    function providerConnection(providerId) {
+      return providerConnections.find((entry) => entry.providerId === providerId) ?? disconnectedProvider(providerId);
+    }
+
+    function providerErrorCopy(providerId, error) {
+      const connection = providerConnection(providerId);
+      const code = typeof error?.code === "string" ? error.code : connection.errorCode;
+      if (code && /CANCEL|CANCELLED/i.test(code)) return `${connection.label} connection cancelled. Try again.`;
+      if (code && /INVALID/i.test(code)) return `${connection.label} details were not accepted. Check them and try again.`;
+      return `${connection.label} could not be connected. Try again.`;
+    }
+
+    function updateProviderRow(entry, connection) {
+      if (!entry || !connection) return;
+      const pending = providerPending.has(connection.providerId);
+      const connected = connection.state === "connected";
+      const stateText = pending ? "Connecting…"
+        : connected ? "Connected"
+          : connection.state === "unavailable" ? "Unavailable" : "Not connected";
+      entry.state.textContent = stateText;
+      entry.state.dataset.state = connection.state;
+      entry.action.disabled = pending || connected;
+      entry.disconnect.disabled = pending || !connected;
+      entry.disconnect.hidden = entry.first || !connected;
+      if (!pending && connection.state === "unavailable" && connection.errorCode) {
+        entry.error.textContent = providerErrorCopy(connection.providerId, { code: connection.errorCode });
+        entry.error.hidden = false;
+      }
+      entry.action.textContent = connected ? "Connected"
+        : entry.first && connection.providerId === "openai-codex" ? "Continue with Direct Codex"
+          : entry.first && connection.loginKind === "service-account" ? "Choose JSON"
+            : entry.first && connection.loginKind === "device" ? "Use Device" : "Connect";
+    }
+
+    function renderProviderRows() {
+      for (const connection of providerConnections) {
+        updateProviderRow(providerRows.get(connection.providerId), connection);
+        updateProviderRow(firstProviderRows.get(connection.providerId), connection);
+      }
     }
 
     function updateConnectionPresentation(snapshot = lastSnapshot) {
       if (!nativeProtocolMode) return;
-      const directReady = accountReady(accountState);
-      connectionDirect.textContent = directReady ? "Direct Codex connected" : "Connect Direct Codex";
-      connectionDirect.disabled = connectionPending || directReady;
-      connectionClaude.disabled = connectionPending;
-      firstConnectionDirect.disabled = connectionPending;
-      firstConnectionClaude.disabled = connectionPending;
-      const shouldOpen = Boolean(snapshot && snapshot.bots.length === 0 && firstConnection === null);
+      renderProviderRows();
+      const gateActive = providerFacade !== null;
+      const shouldOpen = gateActive && providerOnboarding === null;
       setDialogOpen(firstConnectionSetup, shouldOpen);
-      if (shouldOpen && !connectionPending) firstConnectionDirect.focus?.();
-    }
-
-    async function refreshAccountState() {
-      if (typeof windowRef.codexAccount?.read !== "function") return accountState;
-      const value = await windowRef.codexAccount.read();
-      if (mountDisposed) return accountState;
-      accountState = value;
-      if (requestedFirstConnection === "codex" && accountReady(accountState)) {
-        persistFirstConnection("codex");
-      } else updateConnectionPresentation();
-      return accountState;
-    }
-
-    async function connectDirect({ first = false } = {}) {
-      if (mountDisposed || connectionPending) return;
-      connectionPending = true;
-      if (first) requestedFirstConnection = "codex";
-      firstConnectionError.hidden = true;
-      updateConnectionPresentation();
-      try {
-        if (!accountReady(accountState)) await refreshAccountState();
-        if (!accountReady(accountState)) await controller.connectProvider("codex");
-        if (!accountReady(accountState)) await refreshAccountState();
-        if (first && accountReady(accountState)) persistFirstConnection("codex");
-      } catch {
-        if (!mountDisposed) {
-          requestedFirstConnection = null;
-          firstConnectionError.textContent = "Direct Codex could not be connected. Try again.";
-          firstConnectionError.hidden = false;
-        }
-      } finally {
-        if (!mountDisposed) {
-          connectionPending = false;
-          updateConnectionPresentation();
-        }
+      panel.inert = shouldOpen;
+      modelDock.inert = shouldOpen;
+      if (shouldOpen && providerPending.size === 0 && !providerInitialFocusDone) {
+        const firstPending = [...firstProviderRows.values()].find((entry) => !entry.action.disabled);
+        firstPending?.action.focus?.();
+        providerInitialFocusDone = true;
+      }
+      if (!shouldOpen) providerInitialFocusDone = false;
+      if (snapshot && gateActive && !shouldOpen) {
+        panel.removeAttribute?.("aria-busy");
       }
     }
 
-    async function connectClaude({ first = false } = {}) {
-      if (mountDisposed || connectionPending) return;
-      connectionPending = true;
-      firstConnectionError.hidden = true;
-      updateConnectionPresentation();
+    function requestForProvider(providerId, entry) {
+      const request = { providerId };
+      if (providerId === "openai-codex") {
+        request.authMode = entry?.inputs.authMode?.value === "device-code" ? "device-code" : "browser";
+      } else if (providerId === "openai-api-key") {
+        request.apiKey = typeof entry?.inputs.apiKey?.value === "string" ? entry.inputs.apiKey.value : "";
+        if (!request.apiKey) throw new Error("Provider connection is unavailable.");
+        if (entry?.inputs.apiKey) entry.inputs.apiKey.value = "";
+      } else if (providerId === "local-openai-compatible") {
+        request.baseUrl = typeof entry?.inputs.baseUrl?.value === "string" ? entry.inputs.baseUrl.value : "";
+        request.apiKey = typeof entry?.inputs.apiKey?.value === "string" && entry.inputs.apiKey.value.length > 0
+          ? entry.inputs.apiKey.value : null;
+        if (entry?.inputs.apiKey) entry.inputs.apiKey.value = "";
+      } else if (providerId === "google-vertex-ai") {
+        return Object.freeze({ providerId });
+      }
+      return Object.freeze(request);
+    }
+
+    async function refreshProviderAuthority() {
+      if (mountDisposed || !providerFacade) return;
+      const results = await Promise.allSettled([
+        providerFacade.list(),
+        providerFacade.catalog(),
+        providerFacade.readOnboarding(),
+      ]);
+      if (mountDisposed) return;
+      const [connectionsResult, catalogResult, onboardingResult] = results;
       try {
-        await controller.connectProvider("claude");
-        if (first && !mountDisposed) persistFirstConnection("claude");
+        providerConnections = connectionsResult.status === "fulfilled"
+          ? normalizeProviderConnections(connectionsResult.value) : Object.freeze(PROVIDER_IDS.map(disconnectedProvider));
       } catch {
+        providerConnections = Object.freeze(PROVIDER_IDS.map(disconnectedProvider));
+      }
+      try {
+        const rawCatalog = catalogResult.status === "fulfilled" ? catalogResult.value : null;
+        const envelope = exactDataObject(
+          rawCatalog,
+          new Set(["status", "generation", "models"]),
+          ["status", "generation", "models"],
+          "Model catalog is unavailable.",
+        );
+        if (envelope.status === "ready") {
+          const models = normalizeModelCatalog(envelope);
+          providerCatalog = Object.freeze({ generation: envelope.generation, status: "ready", models });
+        } else if (typeof envelope.status === "string"
+          && Number.isSafeInteger(envelope.generation) && envelope.generation >= 0
+          && Array.isArray(envelope.models)) {
+          providerCatalog = Object.freeze({
+            generation: envelope.generation,
+            status: envelope.status,
+            models: Object.freeze([]),
+          });
+        } else throw new Error("Model catalog is unavailable.");
+      } catch {
+        providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
+      }
+      try {
+        providerOnboarding = onboardingResult.status === "fulfilled"
+          ? normalizeProviderOnboarding(onboardingResult.value, providerConnections, providerCatalog) : null;
+      } catch {
+        providerOnboarding = null;
+      }
+      providerAuthorityLoaded = true;
+      providerCatalogLoaded = true;
+      providerOnboardingLoaded = true;
+      updateConnectionPresentation(lastSnapshot);
+      if (providerCatalogLoaded && providerCatalog.status === "ready") {
+        controller?.applyCatalog?.(providerCatalog);
+      }
+    }
+
+    async function providerAction(providerId, first = false) {
+      if (mountDisposed || !providerFacade || providerPending.has(providerId)) return;
+      const entry = first ? firstProviderRows.get(providerId) : providerRows.get(providerId);
+      if (!entry || typeof providerFacade.connect !== "function") return;
+      let request;
+      try {
+        request = requestForProvider(providerId, entry);
+      } catch (error) {
+        entry.error.textContent = providerErrorCopy(providerId, error);
+        entry.error.hidden = false;
+        entry.action.focus?.();
+        return;
+      }
+      providerPending.add(providerId);
+      entry.error.hidden = true;
+      updateConnectionPresentation(lastSnapshot);
+      try {
+        await providerFacade.connect(request);
+        await refreshProviderAuthority();
+        const connection = providerConnection(providerId);
+        if (connection.state !== "connected") throw new Error("Provider connection is not ready.");
+        if (first) {
+          if (typeof providerFacade.completeOnboarding !== "function") throw new Error("Provider onboarding is unavailable.");
+          await providerFacade.completeOnboarding(providerId);
+          await refreshProviderAuthority();
+          if (providerOnboarding === null) throw new Error("Provider onboarding is unavailable.");
+          firstConnectionError.hidden = true;
+        }
+      } catch (error) {
         if (!mountDisposed) {
-          firstConnectionError.textContent = "Claude could not be connected. Try again.";
-          firstConnectionError.hidden = false;
+          entry.error.textContent = providerErrorCopy(providerId, error);
+          entry.error.hidden = false;
+          if (first) {
+            firstConnectionError.textContent = entry.error.textContent;
+            firstConnectionError.hidden = false;
+          }
+          entry.action.focus?.();
         }
       } finally {
-        if (!mountDisposed) {
-          connectionPending = false;
-          updateConnectionPresentation();
+        providerPending.delete(providerId);
+        if (!mountDisposed) updateConnectionPresentation(lastSnapshot);
+      }
+    }
+
+    async function disconnectProvider(providerId) {
+      if (mountDisposed || !providerFacade || typeof providerFacade.disconnect !== "function"
+        || providerPending.has(providerId)) return;
+      const entry = providerRows.get(providerId);
+      providerPending.add(providerId);
+      if (entry) entry.error.hidden = true;
+      updateConnectionPresentation(lastSnapshot);
+      try {
+        await providerFacade.disconnect(providerId);
+        await refreshProviderAuthority();
+      } catch (error) {
+        if (entry) {
+          entry.error.textContent = providerErrorCopy(providerId, error).replace("connected", "disconnected");
+          entry.error.hidden = false;
+          entry.action.focus?.();
         }
+      } finally {
+        providerPending.delete(providerId);
+        if (!mountDisposed) updateConnectionPresentation(lastSnapshot);
       }
     }
 
@@ -3199,6 +3541,7 @@
         (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
         warningScope = null;
+        providerPending.clear();
       }
       if (enteredUltra) {
         warningScope = currentPowerScope;
@@ -3430,15 +3773,13 @@
     function populateNewBotSetup(next) {
       const draft = next.profileSetup;
       const providers = [];
+      const providerLabels = new Map();
       for (const entry of next.modelCatalog) {
         if (!providers.includes(entry.provider)) providers.push(entry.provider);
+        if (!providerLabels.has(entry.provider)) providerLabels.set(entry.provider, entry.providerLabel);
       }
       newBotProvider.replaceChildren(...providers.map((provider) => {
-        const label = provider === "openai-codex"
-          ? "OpenAI Codex"
-          : provider === "cliproxy-anthropic"
-            ? "CLIProxyAPI"
-            : provider;
+        const label = providerLabels.get(provider) || PROVIDER_LABELS[provider] || provider;
         const option = element(documentRef, "option", "", label);
         option.value = provider;
         return option;
@@ -3518,8 +3859,6 @@
       rename.value = selected?.name ?? "";
       rename.disabled = selected == null || next.selectionPending || next.profileSetup.open;
       renameButton.disabled = rename.disabled;
-      providerSelect.disabled = selected == null || next.selectionPending || next.profileSetup.open;
-      connectProvider.disabled = providerSelect.disabled;
       status.textContent = next.runtime.label;
       status.dataset.tone = next.runtime.tone;
       retry.hidden = !next.runtime.retryVisible;
@@ -3720,6 +4059,7 @@
       facade,
       runtimeFacade: windowRef.codexRuntime,
       accountFacade: windowRef.codexAccount,
+      providerFacade,
       computerFacade: windowRef.openbotComputer,
       onStateChanged: render,
       onSelectionChanged(botId) {
@@ -3820,16 +4160,6 @@
       if (lastSnapshot?.permissionDecisionPending) return;
       decidePermission("deny");
     });
-    connectProvider.addEventListener("click", () => {
-      connectProvider.disabled = true;
-      void controller.connectProvider(providerSelect.value).catch(() => {}).finally(() => {
-        if (!mountDisposed) connectProvider.disabled = false;
-      });
-    });
-    connectionDirect.addEventListener("click", () => { void connectDirect(); });
-    connectionClaude.addEventListener("click", () => { void connectClaude(); });
-    firstConnectionDirect.addEventListener("click", () => { void connectDirect({ first: true }); });
-    firstConnectionClaude.addEventListener("click", () => { void connectClaude({ first: true }); });
     firstConnectionSetup.addEventListener("cancel", (event) => event.preventDefault?.());
     firstConnectionSetup.addEventListener("keydown", (event) => {
       if (event.key === "Escape") event.preventDefault?.();
@@ -3975,19 +4305,43 @@
       paintFast(desiredServiceTier === activeFastTier);
       void submitSelectionIntent(nextSelection, { fastTier: activeFastTier });
     });
-    if (nativeProtocolMode && typeof windowRef.codexAccount?.onChanged === "function") {
-      try {
-        const candidate = windowRef.codexAccount.onChanged((value) => {
-          if (mountDisposed) return;
-          accountState = value;
-          if (requestedFirstConnection === "codex" && accountReady(accountState)) {
-            persistFirstConnection("codex");
-          } else updateConnectionPresentation();
-        });
-        accountUnsubscribe = typeof candidate === "function" ? candidate : null;
-      } catch {}
+    if (providerFacade) {
+      if (typeof providerFacade.onConnectionsChanged === "function") {
+        try {
+          const candidate = providerFacade.onConnectionsChanged((value) => {
+            if (mountDisposed) return;
+            try { providerConnections = normalizeProviderConnections(value); }
+            catch { providerConnections = Object.freeze(PROVIDER_IDS.map(disconnectedProvider)); }
+            try {
+              providerOnboarding = normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
+            } catch { providerOnboarding = null; }
+            updateConnectionPresentation(lastSnapshot);
+          });
+          providerConnectionsUnsubscribe = typeof candidate === "function" ? candidate : null;
+        } catch {}
+      }
+      if (typeof providerFacade.onCatalogChanged === "function") {
+        try {
+          const candidate = providerFacade.onCatalogChanged((value) => {
+            if (mountDisposed) return;
+            try {
+              const envelope = exactDataObject(value, new Set(["status", "generation", "models"]),
+                ["status", "generation", "models"], "Model catalog is unavailable.");
+              providerCatalog = envelope.status === "ready"
+                ? Object.freeze({ generation: envelope.generation, status: "ready", models: normalizeModelCatalog(envelope) })
+                : Object.freeze({ generation: envelope.generation, status: envelope.status, models: Object.freeze([]) });
+              if (providerCatalog.status === "ready") controller?.applyCatalog?.(providerCatalog);
+            } catch { providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) }); }
+            try {
+              providerOnboarding = normalizeProviderOnboarding(providerOnboarding, providerConnections, providerCatalog);
+            } catch { providerOnboarding = null; }
+            updateConnectionPresentation(lastSnapshot);
+          });
+          providerCatalogUnsubscribe = typeof candidate === "function" ? candidate : null;
+        } catch {}
+      }
+      void refreshProviderAuthority();
     }
-    if (nativeProtocolMode) void refreshAccountState().catch(() => updateConnectionPresentation());
     void controller.initialize().catch(() => {
       if (mountDisposed) return;
       status.textContent = "Remote computer unavailable";
@@ -4020,8 +4374,10 @@
         warningScope = null;
         closeAdvancedFlyout();
         selectionIntents.clear();
-        try { accountUnsubscribe?.(); } catch {}
-        accountUnsubscribe = null;
+        try { providerConnectionsUnsubscribe?.(); } catch {}
+        try { providerCatalogUnsubscribe?.(); } catch {}
+        providerConnectionsUnsubscribe = null;
+        providerCatalogUnsubscribe = null;
         localDesktopView?.dispose?.();
         localDesktopView = null;
         reasoningView.dispose();
@@ -4044,7 +4400,6 @@
 
   return Object.freeze({
     EFFORT_LABELS,
-    MODEL_CATALOG,
     createReasoningView,
     createBotUiController,
     findUiMounts,

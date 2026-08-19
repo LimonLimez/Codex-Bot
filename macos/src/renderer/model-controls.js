@@ -278,34 +278,14 @@
   function buildPowerStops(catalog, selected = {}) {
     const models = (Array.isArray(catalog) ? catalog : []).filter(validPowerModel);
     if (!models.length) return Object.freeze([]);
-    const selectedModel = findCatalogModel(models, selected);
-    if (selectedModel && selectedModel.provider !== "openai-codex") {
-      return Object.freeze(COMPACT_EFFORTS
-        .map((effort) => powerStop(selectedModel, effort, selected))
-        .filter(Boolean));
-    }
-    if (!models.some((entry) => entry.provider === "openai-codex")) {
-      return Object.freeze(COMPACT_EFFORTS
-        .map((effort) => powerStop(models[0], effort, selected))
-        .filter(Boolean));
-    }
-    const fallback = models.find((entry) => entry.provider === "openai-codex" && entry.isDefault === true)
-      ?? models.find((entry) => entry.provider === "openai-codex")
-      ?? selectedModel
+    const selectedModel = findCatalogModel(models, selected)
+      ?? models.find((entry) => entry.isDefault === true)
       ?? models[0];
-    const terra = models.find((entry) => entry.provider === "openai-codex"
-      && entry.model === "gpt-5.6-terra") ?? fallback;
-    const sol = models.find((entry) => entry.provider === "openai-codex"
-      && entry.model === "gpt-5.6-sol") ?? fallback;
-    const sequence = [
-      [terra, "low"],
-      [sol, "low"],
-      [sol, "medium"],
-      [sol, "high"],
-      [sol, "xhigh"],
-      [sol, "max"],
-      [sol, "ultra"],
-    ];
+    const sameProvider = models.filter((entry) => entry.provider === selectedModel.provider);
+    const firstModel = sameProvider[0] ?? selectedModel;
+    const sequence = selectedModel === firstModel
+      ? COMPACT_EFFORTS.map((effort) => [selectedModel, effort])
+      : [[firstModel, "low"], ...COMPACT_EFFORTS.map((effort) => [selectedModel, effort])];
     const seen = new Set();
     const stops = [];
     for (const [model, effort] of sequence) {
@@ -330,9 +310,9 @@
     const modelOptions = Object.freeze(models.map((entry, index) => {
       const label = labels[index];
       const providerLabel = labelCounts.get(label) > 1
-        ? entry.provider === "openai-codex"
-          ? "Direct Codex"
-          : entry.provider === "cliproxy-anthropic" ? "CLIProxy" : entry.provider
+        ? (typeof entry.providerLabel === "string" && entry.providerLabel.length > 0
+          ? entry.providerLabel
+          : entry.provider)
         : null;
       return Object.freeze({
         key: modelOptionKey(entry.provider, entry.model),

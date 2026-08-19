@@ -239,6 +239,25 @@ test("the pinned renderer restores Grok New Bot and adds the bot-scoped Computer
   assert.doesNotMatch(patched, new RegExp(STOCK_NEW_BOT_COMMIT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
+test("renderer onboarding has no local storage authority and the native Power subtree has no Computer controls", () => {
+  const source = fs.readFileSync(botUiPath, "utf8");
+  const patchSource = fs.readFileSync(patchPath, "utf8");
+  assert.doesNotMatch(source, /openbot\.first-connection\.v1|localStorage/);
+  for (const providerId of [
+    "openai-codex",
+    "anthropic-claude",
+    "google-antigravity",
+    "moonshot-kimi",
+    "xai",
+    "google-vertex-ai",
+    "openai-api-key",
+    "local-openai-compatible",
+  ]) assert.match(source, new RegExp(providerId.replaceAll("-", "\\-")));
+  assert.match(source, /if \(nativeProtocolMode\) \{\s*popover\.append\(\s*pickerMenu/);
+  assert.doesNotMatch(source, /nativeProtocolMode\) \{[\s\S]{0,160}codex-computer-row/);
+  assert.match(patchSource, /W\.openPicker\(\)/);
+});
+
 test("the pinned lazy General Settings asset adds one AI Connections host after Account", () => {
   const { patchVendorSettingsSource } = require(patchPath);
   const patched = patchVendorSettingsSource(STOCK_SETTINGS_ROOT, sha256Text(STOCK_SETTINGS_ROOT));

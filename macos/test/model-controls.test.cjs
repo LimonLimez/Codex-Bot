@@ -338,6 +338,7 @@ test("Power and Advanced preserve provider identity when providers share one vis
       model: "claude-fable-5",
       label: "Claude Fable 5",
       provider: "openai-codex",
+      providerLabel: "Direct Codex",
       efforts: ["medium", "high"],
       defaultReasoningEffort: "medium",
       defaultServiceTier: null,
@@ -349,6 +350,7 @@ test("Power and Advanced preserve provider identity when providers share one vis
       model: "claude-fable-5",
       label: "Claude Fable 5",
       provider: "cliproxy-anthropic",
+      providerLabel: "CLIProxy",
       efforts: ["medium", "ultra-code"],
       defaultReasoningEffort: "medium",
       defaultServiceTier: null,
@@ -404,4 +406,53 @@ test("Power and Advanced preserve provider identity when providers share one vis
     effort: "medium",
     serviceTier: null,
   }), null, "an ambiguous raw model id cannot silently choose a provider");
+});
+
+test("Advanced collision labels use provider DTO labels instead of provider-specific branches", () => {
+  const catalog = [
+    {
+      model: "same-model",
+      label: "Shared Model",
+      provider: "provider-alpha",
+      providerLabel: "Alpha Route",
+      efforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: [],
+      catalogGeneration: 2,
+    },
+    {
+      model: "same-model",
+      label: "Shared Model",
+      provider: "provider-beta",
+      providerLabel: "Beta Route",
+      efforts: ["medium"],
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      serviceTiers: [],
+      catalogGeneration: 4,
+    },
+  ];
+  assert.deepEqual(controls.buildAdvancedOptions(catalog).models.map((entry) => ({
+    key: entry.key,
+    provider: entry.provider,
+    model: entry.model,
+    label: entry.label,
+    providerLabel: entry.providerLabel,
+  })), [
+    {
+      key: JSON.stringify(["provider-alpha", "same-model"]),
+      provider: "provider-alpha",
+      model: "same-model",
+      label: "Shared Model",
+      providerLabel: "Alpha Route",
+    },
+    {
+      key: JSON.stringify(["provider-beta", "same-model"]),
+      provider: "provider-beta",
+      model: "same-model",
+      label: "Shared Model",
+      providerLabel: "Beta Route",
+    },
+  ]);
 });

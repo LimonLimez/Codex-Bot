@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const uiPath = path.join(__dirname, "..", "src", "renderer", "bot-runtime-ui.js");
+const { PROVIDER_IDS, providerDescriptor } = require("../src/provider-descriptors.cjs");
 
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
@@ -49,6 +50,51 @@ function botWithComputer(botId, name, runtimeState, overrides = {}, setupStage =
 
 function pendingBotWithComputer(botId, name = "New Bot", runtimeState = "provisioning", appearance = undefined) {
   return botWithComputer(botId, name, runtimeState, {}, "profile-model", appearance);
+}
+
+function eightConnections(overrides = {}) {
+  return Object.freeze(PROVIDER_IDS.map((providerId) => Object.freeze({
+    providerId,
+    label: providerDescriptor(providerId).label,
+    loginKind: providerDescriptor(providerId).loginKind,
+    state: "disconnected",
+    generation: 0,
+    capabilities: Object.freeze({
+      reasoning: providerDescriptor(providerId).reasoningEfforts.length > 1,
+      fast: providerDescriptor(providerId).fastModeSupported === true,
+    }),
+    errorCode: null,
+    ...(overrides[providerId] || {}),
+  })));
+}
+
+function providerFacade({ connections = eightConnections(), catalog = null, onboarding = null, connect = null, disconnect = null } = {}) {
+  return {
+    async list() { return connections; },
+    async connect(request) {
+      if (typeof connect === "function") return connect(request);
+      return connections.find((entry) => entry.providerId === request.providerId) ?? null;
+    },
+    async disconnect(providerId) {
+      if (typeof disconnect === "function") return disconnect(providerId);
+      return connections.find((entry) => entry.providerId === providerId) ?? null;
+    },
+    async catalog() {
+      return catalog ?? Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
+    },
+    async readOnboarding() { return onboarding; },
+    async completeOnboarding(providerId) {
+      return Object.freeze({
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      });
+    },
+    onConnectionsChanged() { return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
 }
 
 class FakeClassList {
@@ -284,18 +330,9 @@ test("runtime presentation is truthful and never offers a local fallback", () =>
   }
 });
 
-test("the reviewed optional-provider manifest preserves model-specific Ultra Code positions", () => {
-  const { MODEL_CATALOG } = require(uiPath);
-  assert.deepEqual(
-    MODEL_CATALOG.map(({ model, efforts }) => [model, efforts]),
-    [
-      ["claude-fable-5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]],
-      ["claude-opus-5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]],
-      ["claude-sonnet-5", ["low", "medium", "high", "xhigh", "max", "ultra-code"]],
-    ],
-  );
-  assert.equal(Object.isFrozen(MODEL_CATALOG), true);
-  assert.equal(Object.isFrozen(MODEL_CATALOG[0].efforts), true);
+test("renderer ships no optional model catalog authority", () => {
+  const controls = require(uiPath);
+  assert.equal(Object.hasOwn(controls, "MODEL_CATALOG"), false);
 });
 
 test("local Bot photos accept only bounded PNG data URLs", async () => {
@@ -3773,6 +3810,7 @@ function createMountedUiHarness({
   computerFacade = null,
   runtimeFacade = null,
   accountFacade = null,
+  providerFacade = null,
   localDesktopViewApi = null,
   localStorage = null,
   nativeProtocol = false,
@@ -3952,6 +3990,7 @@ function createMountedUiHarness({
   };
   if (fileReader) windowRef.FileReader = fileReader;
   if (computerFacade) windowRef.openbotComputer = computerFacade;
+  if (providerFacade) windowRef.openbotProviders = providerFacade;
   if (localDesktopViewApi) windowRef.OpenBotLocalDesktopView = localDesktopViewApi;
   if (localStorage) windowRef.localStorage = localStorage;
   const mounted = mount({ windowRef, documentRef });
@@ -3979,6 +4018,7 @@ function createMountedUiHarness({
     find: (className) => find(mounted.modelDock, className),
     findAll: (className) => findAll(mounted.modelDock, className),
     findPanel: (className) => find(mounted.panel, className) ?? find(documentRef.body, className),
+    findAllPanel: (className) => findAll(documentRef.body, className),
     flushAnimationFrames() {
       const pending = [...animationFrames.entries()];
       animationFrames.clear();
@@ -4078,7 +4118,7 @@ test("native View Bot owns Computer controls and selects the active Free Local D
   assert.equal(desktopDisposed, 1);
 });
 
-test("first native launch requires an AI connection and exposes later connections in Settings", async (context) => {
+test("existing bots without a durable receipt still open the eight-route gate", async (context) => {
   const catalog = Object.freeze({
     generation: 12,
     status: "ready",
@@ -4098,44 +4138,24 @@ test("first native launch requires an AI connection and exposes later connection
     catalogGeneration: 12,
     generation: 1,
   });
-  const loginCalls = [];
-  const providerCalls = [];
-  let accountListener;
-  const stored = new Map();
-  const accountFacade = {
-    async read() {
-      return Object.freeze({
-        generation: 1,
-        status: "signed-out",
-        authMode: null,
-        planType: null,
-        requiresOpenaiAuth: true,
-        login: null,
-        rateLimits: null,
-      });
-    },
-    async login(mode) { loginCalls.push(mode); },
-    async catalog() { return catalog; },
-    onChanged(listener) { accountListener = listener; return () => {}; },
-    onCatalogChanged() { return () => {}; },
-  };
   const harness = createMountedUiHarness({
     catalog,
     initialSelection: selection,
     nativeProtocol: true,
     nativeHost: true,
     botsFacade: {
-      async list() { return []; },
+      async list() { return [bot(BOT_A, "Legacy Bot", "ready")]; },
       onChanged() { return () => {}; },
     },
-    runtimeFacade: {
-      async connectProvider(provider) { providerCalls.push(provider); },
-    },
-    accountFacade,
-    localStorage: {
-      getItem(key) { return stored.get(key) ?? null; },
-      setItem(key, value) { stored.set(key, value); },
-    },
+    providerFacade: providerFacade({
+      catalog: Object.freeze({
+        generation: 1,
+        status: "unavailable",
+        models: Object.freeze([]),
+      }),
+      onboarding: null,
+      connections: eightConnections(),
+    }),
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
@@ -4144,32 +4164,166 @@ test("first native launch requires an AI connection and exposes later connection
   assert.equal(setup.open, true);
   assert.equal(setup.attributes["aria-modal"], "true");
   assert.equal(harness.findPanel("codex-first-connection-skip"), null);
-  assert.equal(harness.findPanel("codex-first-connection-direct").textContent, "Continue with Direct Codex");
-  assert.equal(harness.findPanel("codex-first-connection-claude").textContent, "Connect Claude");
+  assert.deepEqual(
+    harness.findAllPanel("codex-first-connection-choice").map((node) => node.dataset.providerId),
+    PROVIDER_IDS,
+  );
+});
 
-  harness.findPanel("codex-first-connection-direct").listeners.get("click")();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(loginCalls, ["browser"]);
-  assert.equal(setup.open, true, "login launch alone must not complete onboarding");
-  accountListener(Object.freeze({
-    generation: 2,
+test("native renderer reads provider list catalog and onboarding independently of bot count", async (context) => {
+  const calls = [];
+  const localStorage = {
+    getItem() { throw new Error("renderer onboarding storage is forbidden"); },
+    setItem() { throw new Error("renderer onboarding storage is forbidden"); },
+  };
+  const facade = {
+    async list() { calls.push("list"); return eightConnections(); },
+    async catalog() { calls.push("catalog"); return { generation: 1, status: "unavailable", models: [] }; },
+    async readOnboarding() { calls.push("onboarding"); return null; },
+    onConnectionsChanged() { calls.push("connections-subscribe"); return () => {}; },
+    onCatalogChanged() { calls.push("catalog-subscribe"); return () => {}; },
+    async connect() { calls.push("connect"); },
+    async completeOnboarding() { calls.push("complete"); },
+    async disconnect() { calls.push("disconnect"); },
+  };
+  const catalog = Object.freeze({
+    generation: 1,
     status: "ready",
-    authMode: "chatgpt",
-    planType: "plus",
-    requiresOpenaiAuth: true,
-    login: null,
-    rateLimits: null,
-  }));
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+    })]),
+  });
+  const initialSelection = Object.freeze({
+    botId: BOT_A,
+    provider: "openai-codex",
+    model: "gpt-5.6-sol",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection,
+    nativeProtocol: true,
+    nativeHost: true,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "Legacy Bot", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    providerFacade: facade,
+    localStorage,
+  });
+  context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(setup.open, false);
-  assert.equal(stored.get("openbot.first-connection.v1"), "codex");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.includes("list"), true);
+  assert.equal(calls.includes("catalog"), true);
+  assert.equal(calls.includes("onboarding"), true);
+  assert.equal(harness.mounted.panel.inert, true);
+  assert.equal(harness.mounted.modelDock.inert, true);
+});
 
-  const connections = harness.findPanel("codex-ai-connections");
-  assert.equal(connections.parentElement, harness.documentRef.nativeConnectionsHost);
-  assert.equal(harness.findPanel("codex-connection-direct").textContent, "Direct Codex connected");
-  harness.findPanel("codex-connection-claude").listeners.get("click")();
+test("provider chooser sends exact route requests, completes first onboarding, and clears API secrets", async (context) => {
+  let connections = eightConnections();
+  let onboarding = null;
+  const requests = [];
+  const catalog = Object.freeze({
+    generation: 1,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      provider: "google-vertex-ai",
+      providerLabel: "Google Vertex AI",
+      model: "gemini-3.1-pro",
+      label: "Gemini 3.1 Pro",
+      efforts: Object.freeze(["medium"]),
+      serviceTiers: Object.freeze([]),
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      catalogGeneration: 1,
+      isDefault: true,
+    })]),
+  });
+  const facade = {
+    async list() { return connections; },
+    async catalog() { return catalog; },
+    async readOnboarding() { return onboarding; },
+    async connect(request) {
+      requests.push(request);
+      connections = eightConnections({
+        [request.providerId]: { state: "connected", generation: 1 },
+      });
+    },
+    async completeOnboarding(providerId) {
+      onboarding = {
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      };
+      return onboarding;
+    },
+    async disconnect(providerId) {
+      connections = eightConnections({ [providerId]: { state: "disconnected", generation: 2 } });
+    },
+    onConnectionsChanged() { return () => {}; },
+    onCatalogChanged() { return () => {}; },
+  };
+  const codexCatalog = Object.freeze({
+    generation: 1,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+    })]),
+  });
+  const harness = createMountedUiHarness({
+    catalog: codexCatalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+  });
+  context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(providerCalls, ["claude"]);
+  const firstVertex = harness.findAllPanel("codex-first-connection-choice")
+    .find((node) => node.dataset.providerId === "google-vertex-ai");
+  firstVertex.children.at(-1).children[0].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests[0], { providerId: "google-vertex-ai" });
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+
+  const apiRow = harness.findAllPanel("codex-provider-connection")
+    .find((node) => node.dataset.providerId === "openai-api-key");
+  const apiInput = apiRow.children[1].children[0];
+  apiInput.value = "sk-test-secret";
+  apiRow.children[2].children[0].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests[1], { providerId: "openai-api-key", apiKey: "sk-test-secret" });
+  assert.equal(apiInput.value, "");
+  apiRow.children[2].children[1].listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2);
 });
 
 test("mounted Advanced summary keeps a same-id CLIProxy selection provider-scoped", async (context) => {

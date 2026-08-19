@@ -203,9 +203,74 @@ body.light {
 }
 
 .codex-ai-connections-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.codex-ai-connections-list,
+.codex-first-connection-choices {
+  display: grid;
+  gap: 8px;
+}
+
+.codex-provider-connection,
+.codex-first-connection-choice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 8px 10px;
+  color: var(--codex-text);
+  border: 1px solid var(--codex-border);
+  border-radius: 9px;
+  background: var(--codex-input);
+}
+
+.codex-provider-connection-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.codex-provider-connection-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-provider-connection-state,
+.codex-provider-connection-error {
+  color: var(--codex-muted);
+  font-size: 10px;
+}
+
+.codex-provider-connection-error {
+  color: var(--codex-danger);
+}
+
+.codex-provider-connection-error[hidden] { display: none; }
+
+.codex-provider-connection-form,
+.codex-provider-connection-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
+  align-items: center;
+}
+
+.codex-provider-connection-form {
+  grid-column: 1 / -1;
+}
+
+.codex-provider-connection-actions { justify-content: flex-end; }
+
+.codex-provider-connection-form input,
+.codex-provider-connection-form select {
+  min-width: 0;
+  width: min(220px, 100%);
+  height: 28px;
+  padding: 0 7px;
 }
 
 .codex-ai-connections button,
@@ -438,15 +503,7 @@ body.light {
 }
 
 .codex-first-connection-choice {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 42px;
-  padding: 0 12px;
-  color: var(--codex-text);
-  border: 1px solid var(--codex-border);
-  border-radius: 9px;
-  background: var(--codex-input);
+  cursor: default;
   font: 600 12px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
 }
 
