@@ -35,6 +35,33 @@ test("onboarding receipt is tied to an authoritative connection generation", asy
   assert.equal((await store.read()).onboarding, null);
 });
 
+test("Direct disconnect-pending marker is model-free and clears its onboarding receipt", async (t) => {
+  const { ProviderStateStore } = require(storePath);
+  const root = tempRoot(t);
+  const store = new ProviderStateStore({ filePath: path.join(root, "providers.v1.json") });
+  const now = "2026-08-19T00:00:00.000Z";
+  await store.commitConnection({ providerId: "openai-codex", generation: 7, state: "connected", models: [model()] });
+  await store.writeOnboarding({
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 7,
+    catalogGeneration: 7,
+    completedAt: now,
+  });
+  await store.commitConnection({
+    providerId: "openai-codex",
+    generation: 8,
+    state: "unavailable",
+    errorCode: "OPENBOT_PROVIDER_DISCONNECT_PENDING",
+    models: [],
+  });
+  const state = await store.read();
+  assert.equal(state.connections[0].state, "unavailable");
+  assert.deepEqual(state.connections[0].models, []);
+  assert.equal(state.connections[0].generation, 8);
+  assert.equal(state.onboarding, null);
+});
+
 test("provider state is atomic, private, frozen, and rejects descriptor-invalid values", async (t) => {
   const { ProviderStateStore } = require(storePath);
   const root = tempRoot(t);

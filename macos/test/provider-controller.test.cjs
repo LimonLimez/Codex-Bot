@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const path = require("node:path");
 const test = require("node:test");
 
@@ -20,6 +21,10 @@ class FakeStateStore {
   async commitConnection(value) {
     this.state.connections = this.state.connections.filter(({ providerId }) => providerId !== value.providerId);
     this.state.connections.push(structuredClone(value));
+    if (this.state.onboarding?.providerId === value.providerId
+      && (value.state !== "connected" || value.generation !== this.state.onboarding.connectionGeneration)) {
+      this.state.onboarding = null;
+    }
     return structuredClone(value);
   }
   async removeConnection(providerId) {
@@ -45,6 +50,95 @@ function connectedState(providerId = "anthropic-claude", generation = 1) {
     }],
     onboarding: null,
   };
+}
+
+function directAccountModel(id = "gpt-live-terra") {
+  return {
+    id,
+    displayName: "Live Terra",
+    supportedReasoningEfforts: [{ reasoningEffort: "low" }],
+    serviceTiers: [],
+    defaultReasoningEffort: "low",
+    defaultServiceTier: null,
+    isDefault: true,
+  };
+}
+
+class FakeDirectAccount extends EventEmitter {
+  constructor({ signedOut = false, catalogStatus = "ready", models = [directAccountModel()], logoutErrors = 0 } = {}) {
+    super();
+    this.starts = 0;
+    this.loginModes = [];
+    this.cancelLogins = 0;
+    this.logouts = 0;
+    this.logoutErrors = logoutErrors;
+    this.account = {
+      generation: 1,
+      status: signedOut ? "signed-out" : "ready",
+      authMode: signedOut ? null : "chatgpt",
+      planType: signedOut ? null : "pro",
+      requiresOpenaiAuth: true,
+      login: null,
+      rateLimits: null,
+    };
+    this.catalog = { generation: 1, status: catalogStatus, models: catalogStatus === "ready" ? models : [] };
+  }
+
+  async start() { this.starts += 1; }
+
+  accountState() { return structuredClone(this.account); }
+
+  catalogState() { return structuredClone(this.catalog); }
+
+  async login(mode) {
+    this.loginModes.push(mode);
+    this.account = {
+      ...this.account,
+      status: "signing-in",
+      authMode: null,
+      login: mode === "device-code"
+        ? { mode, verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-1234" }
+        : { mode },
+    };
+    this.emit("account-changed", this.account);
+    const result = { state: this.account };
+    if (mode === "browser") {
+      Object.defineProperty(result, "openUrl", {
+        value: "https://chatgpt.com/auth/codex?private=main-only",
+        enumerable: false,
+      });
+    }
+    return Object.freeze(result);
+  }
+
+  async cancelLogin() {
+    this.cancelLogins += 1;
+    this.account = { ...this.account, status: "signed-out", authMode: null, login: null };
+    this.emit("account-changed", this.account);
+  }
+
+  async logout() {
+    this.logouts += 1;
+    if (this.logoutErrors > 0) {
+      this.logoutErrors -= 1;
+      throw new Error("private logout failure");
+    }
+    this.account = { ...this.account, status: "signed-out", authMode: null, login: null };
+    this.catalog = { generation: this.catalog.generation + 1, status: "unavailable", models: [] };
+    this.emit("account-changed", this.account);
+    this.emit("catalog-changed", this.catalog);
+  }
+
+  becomeReady(models = [directAccountModel()], generation = this.catalog.generation + 1) {
+    this.account = { ...this.account, generation: this.account.generation + 1, status: "ready", authMode: "chatgpt", login: null };
+    this.catalog = { generation, status: "ready", models };
+    this.emit("account-changed", this.account);
+    this.emit("catalog-changed", this.catalog);
+  }
+}
+
+function directContext({ openExternal = async () => {}, onLoginPrompt = () => {}, isCurrent = () => true } = {}) {
+  return { openExternal, onLoginPrompt, isCurrent };
 }
 
 test("controller lists eight routes but catalogs only authoritative connected providers", async () => {
@@ -430,10 +524,12 @@ test("catalog metadata keeps the real Direct Codex generation independent of con
   const { ProviderController } = require(controllerPath);
   const state = new FakeStateStore();
   let starts = 0;
+  let logins = 0;
   const controller = new ProviderController({
     stateStore: state,
     account: {
       start: async () => { starts += 1; },
+      login: async () => { logins += 1; },
       accountState: () => ({ status: "ready", authMode: "chatgpt" }),
       catalogState: () => ({
         status: "ready",
@@ -455,6 +551,7 @@ test("catalog metadata keeps the real Direct Codex generation independent of con
   const snapshot = await controller.readAuthoritySnapshot();
   const connection = snapshot.connections.find(({ providerId }) => providerId === "openai-codex");
   assert.equal(starts, 1);
+  assert.equal(logins, 0);
   assert.equal(connection.generation, 1);
   assert.equal(snapshot.catalog.generation, 1);
   assert.equal(snapshot.catalog.models[0].catalogGeneration, 3);
@@ -536,4 +633,283 @@ test("internal error connection state is publicly unavailable with its stable er
   const projected = snapshot.connections.find(({ providerId }) => providerId === "anthropic-claude");
   assert.equal(projected.state, "unavailable");
   assert.equal(projected.errorCode, "OPENBOT_PROVIDER_FAILED");
+});
+
+test("signed-out Direct Codex browser connect invokes login once, opens only the private URL in main, publishes connecting, and commits only after readiness", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount({ signedOut: true });
+  const opened = [];
+  const presentations = [];
+  const controller = new ProviderController({ stateStore: state, account });
+  controller.on("connections-changed", (connections) => presentations.push(connections));
+  const pending = controller.connect(
+    { providerId: "openai-codex", authMode: "browser" },
+    directContext({ openExternal: async (url) => { opened.push(url); } }),
+  );
+  void pending.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(account.loginModes, ["browser"]);
+  assert.equal(opened.length, 1);
+  assert.match(opened[0], /^https:\/\/chatgpt\.com\/auth\/codex\?/);
+  assert.equal((await controller.readAuthoritySnapshot()).connections[0].state, "connecting");
+  assert.equal(state.state.connections.length, 0);
+  assert.equal(presentations.at(-1)?.[0].state, "connecting");
+
+  account.becomeReady();
+  const connected = await pending;
+  assert.equal(connected.providerId, "openai-codex");
+  assert.equal((await controller.catalog()).status, "ready");
+  assert.doesNotMatch(JSON.stringify(connected), /chatgpt\.com|private|loginId|verificationUrl/);
+});
+
+test("Direct Codex device connect publishes only the bounded ceremony DTO and waits for readiness before durable commit", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount({ signedOut: true });
+  const prompts = [];
+  const controller = new ProviderController({ stateStore: state, account });
+  const pending = controller.connect(
+    { providerId: "openai-codex", authMode: "device-code" },
+    directContext({ onLoginPrompt: (prompt) => prompts.push(prompt) }),
+  );
+  void pending.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(prompts, [{
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    generation: 1,
+    mode: "device-code",
+    verificationUrl: "https://auth.openai.com/codex/device",
+    userCode: "ABCD-1234",
+  }]);
+  assert.equal(state.state.connections.length, 0);
+  assert.equal((await controller.readAuthoritySnapshot()).connections[0].state, "connecting");
+  assert.doesNotMatch(JSON.stringify(prompts), /loginId|token|private|authUrl/);
+
+  account.becomeReady();
+  await pending;
+  assert.equal(state.state.connections[0].providerId, "openai-codex");
+  assert.equal(state.state.connections[0].state, "connected");
+});
+
+test("already-ready Direct Codex connect never invokes login and preserves an existing connection generation and receipt", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 7);
+  state.state.onboarding = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 7,
+    catalogGeneration: 7,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const account = new FakeDirectAccount();
+  account.catalog = { generation: 3, status: "ready", models: [directAccountModel("gpt-live-sol")] };
+  const controller = new ProviderController({ stateStore: state, account });
+  await controller.connect({ providerId: "openai-codex" });
+  assert.equal(account.starts, 1);
+  assert.deepEqual(account.loginModes, []);
+  assert.equal(state.state.connections[0].generation, 7);
+  assert.equal(state.state.onboarding.connectionGeneration, 7);
+  assert.equal(state.state.connections[0].models[0].model, "gpt-live-sol");
+});
+
+test("duplicate Direct Codex connects return one Promise and start one ceremony", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount({ signedOut: true });
+  const controller = new ProviderController({ stateStore: state, account });
+  const first = controller.connect(
+    { providerId: "openai-codex", authMode: "browser" },
+    directContext({ openExternal: async () => {} }),
+  );
+  const second = controller.connect(
+    { providerId: "openai-codex", authMode: "browser" },
+    directContext({ openExternal: async () => { throw new Error("second context must not run"); } }),
+  );
+  assert.equal(first, second);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(account.loginModes, ["browser"]);
+  account.becomeReady();
+  await first;
+});
+
+test("Direct Codex disconnect cancels a pending ceremony and no late completion can resurrect the route", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount({ signedOut: true });
+  const cliproxy = {
+    disconnects: 0,
+    connectProvider: async () => {},
+    importVertex: async () => {},
+    connectionStatus: async () => ({ state: "connected" }),
+    listModels: async () => [descriptorModel("anthropic-claude")],
+    disconnectProvider: async () => { cliproxy.disconnects += 1; },
+  };
+  const controller = new ProviderController({ stateStore: state, account, cliproxy });
+  const pending = controller.connect(
+    { providerId: "openai-codex", authMode: "device-code" },
+    directContext({ onLoginPrompt: () => {} }),
+  );
+  void pending.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  const disconnecting = controller.disconnect("openai-codex");
+  await assert.rejects(pending, /cancel|supersed|unavailable/i);
+  await disconnecting;
+  assert.equal(account.cancelLogins, 1);
+  assert.equal(cliproxy.disconnects, 0);
+  account.becomeReady();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.state.connections.length, 0);
+  assert.equal((await controller.catalog()).models.length, 0);
+});
+
+test("dispose cancels Direct login, detaches account listeners, and prevents a late connection write", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount({ signedOut: true });
+  const controller = new ProviderController({ stateStore: state, account });
+  const pending = controller.connect(
+    { providerId: "openai-codex", authMode: "browser" },
+    directContext({ openExternal: async () => {} }),
+  );
+  void pending.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.dispose();
+  await assert.rejects(pending, { code: "OPENBOT_PROVIDER_DISPOSED" });
+  assert.equal(account.cancelLogins, 1);
+  assert.equal(account.listenerCount("account-changed"), 0);
+  assert.equal(account.listenerCount("catalog-changed"), 0);
+  account.becomeReady();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state.state.connections.length, 0);
+});
+
+test("Direct Codex disconnect never invokes CLIProxy, stages model-free authority, logs out, and clears connection plus receipt", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 1);
+  state.state.onboarding = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 1,
+    catalogGeneration: 1,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const account = new FakeDirectAccount();
+  const cliproxy = {
+    disconnects: 0,
+    connectProvider: async () => {}, importVertex: async () => {},
+    connectionStatus: async () => ({ state: "connected" }),
+    listModels: async () => [descriptorModel("anthropic-claude")],
+    disconnectProvider: async () => { cliproxy.disconnects += 1; },
+  };
+  const controller = new ProviderController({ stateStore: state, account, cliproxy });
+  const rows = [];
+  controller.on("connections-changed", (connections) => rows.push(connections[0]));
+  await controller.disconnect("openai-codex");
+  assert.equal(cliproxy.disconnects, 0);
+  assert.equal(account.logouts, 1);
+  assert.equal(rows.some((row) => row.state === "unavailable" && row.errorCode === "OPENBOT_PROVIDER_DISCONNECT_PENDING"), true);
+  assert.equal(state.state.connections.length, 0);
+  assert.equal(state.state.onboarding, null);
+});
+
+test("failed Direct logout remains unavailable and model-free and can retry cleanup", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 4);
+  state.state.onboarding = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 4,
+    catalogGeneration: 4,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const account = new FakeDirectAccount({ logoutErrors: 1 });
+  const controller = new ProviderController({ stateStore: state, account });
+  await assert.rejects(controller.disconnect("openai-codex"), { code: "OPENBOT_PROVIDER_DISCONNECT_FAILED" });
+  assert.equal(state.state.connections[0].state, "unavailable");
+  assert.deepEqual(state.state.connections[0].models, []);
+  assert.equal(state.state.onboarding, null);
+  await controller.disconnect("openai-codex");
+  assert.equal(account.logouts, 2);
+  assert.equal(state.state.connections.length, 0);
+});
+
+test("external account signed-out/offline and catalog-unavailable signals cannot leave Direct Codex connected or catalogued", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 2);
+  state.state.onboarding = {
+    schemaVersion: 1,
+    providerId: "openai-codex",
+    connectionGeneration: 2,
+    catalogGeneration: 2,
+    completedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const account = new FakeDirectAccount();
+  const controller = new ProviderController({ stateStore: state, account });
+  account.account = { ...account.account, status: "signed-out", authMode: null, login: null };
+  account.emit("account-changed", account.account);
+  let snapshot = await controller.readAuthoritySnapshot();
+  assert.equal(snapshot.connections[0].state, "unavailable");
+  assert.equal(snapshot.catalog.models.length, 0);
+  for (let attempt = 0; attempt < 10 && state.state.connections[0]?.state === "connected"; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(state.state.connections[0].state, "unavailable");
+  assert.equal(state.state.onboarding, null);
+
+  state.state = connectedState("openai-codex", 5);
+  account.account = { ...account.account, status: "ready", authMode: "chatgpt" };
+  account.catalog = { generation: 8, status: "ready", models: [directAccountModel()] };
+  account.emit("account-changed", account.account);
+  account.catalog = { generation: 9, status: "unavailable", models: [] };
+  account.emit("catalog-changed", account.catalog);
+  snapshot = await controller.readAuthoritySnapshot();
+  assert.equal(snapshot.connections[0].state, "unavailable");
+  assert.equal(snapshot.catalog.models.length, 0);
+});
+
+test("ready account/catalog refresh updates only an existing Direct connection and never silently creates one", async () => {
+  const { ProviderController } = require(controllerPath);
+  const emptyState = new FakeStateStore();
+  const account = new FakeDirectAccount();
+  const controller = new ProviderController({ stateStore: emptyState, account });
+  account.emit("account-changed", account.account);
+  account.emit("catalog-changed", account.catalog);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(emptyState.state.connections.length, 0);
+
+  emptyState.state = connectedState("openai-codex", 6);
+  account.catalog = { generation: 10, status: "ready", models: [directAccountModel("gpt-live-sol")] };
+  account.emit("catalog-changed", account.catalog);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(emptyState.state.connections[0].generation, 6);
+  assert.equal(emptyState.state.connections[0].models[0].model, "gpt-live-sol");
+});
+
+test("postcommit onboarding publication/readback failure returns the committed receipt without rewriting it", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("anthropic-claude", 1);
+  const originalRead = state.read.bind(state);
+  let reads = 0;
+  state.read = async () => {
+    reads += 1;
+    if (reads >= 5) throw new Error("publication readback failed");
+    return originalRead();
+  };
+  let writes = 0;
+  const originalWrite = state.writeOnboarding.bind(state);
+  state.writeOnboarding = async (receipt) => {
+    writes += 1;
+    return originalWrite(receipt);
+  };
+  const controller = new ProviderController({ stateStore: state, now: () => "2026-08-19T00:00:00.000Z" });
+  const receipt = await controller.completeOnboarding("anthropic-claude");
+  assert.deepEqual(receipt, state.state.onboarding);
+  assert.equal(writes, 1);
 });
