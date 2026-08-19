@@ -722,6 +722,26 @@
     return Object.freeze(raw);
   }
 
+  function normalizeNativeActiveBotId(value) {
+    if (value === null) return null;
+    if (typeof value !== "string" || !BOT_ID.test(value)) {
+      throw new Error("Native active bot identity is unavailable.");
+    }
+    return value;
+  }
+
+  function readDataFunction(value, property, message) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    let descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(value, property); }
+    catch { throw new Error(message); }
+    if (!descriptor) return null;
+    if (!("value" in descriptor) || typeof descriptor.value !== "function") {
+      throw new Error(message);
+    }
+    return descriptor.value;
+  }
+
   function normalizeModelSelection(value, botId, catalog = Object.freeze([])) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new Error("Model selection is unavailable.");
@@ -799,6 +819,8 @@
     const bots = new Map();
     let activeBotId = null;
     let preferredActiveBotId = null;
+    let authoritativeActiveBotId = null;
+    let initializationComplete = false;
     let unsubscribe = null;
     let runtimeUnsubscribe = null;
     let catalogUnsubscribe = null;
@@ -1137,7 +1159,9 @@
       if (event?.type === "active-bot-changed") {
         if (typeof event.botId !== "string" || !BOT_ID.test(event.botId)) return;
         preferredActiveBotId = event.botId;
-        if (bots.has(event.botId) && activeBotId !== event.botId) requestBotSelection(event.botId);
+        if (initializationComplete && bots.has(event.botId) && activeBotId !== event.botId) {
+          requestBotSelection(event.botId);
+        }
         return;
       }
       if (
@@ -1151,8 +1175,10 @@
     }
 
     function subscribeRuntimeEvents() {
-      if (runtimeUnsubscribe || !runtimeFacade || typeof runtimeFacade.onEvent !== "function") return;
-      const candidate = runtimeFacade.onEvent(handleRuntimeEvent);
+      if (runtimeUnsubscribe || !runtimeFacade) return;
+      const onEvent = readDataFunction(runtimeFacade, "onEvent", "Runtime event facade is unavailable.");
+      if (!onEvent) return;
+      const candidate = onEvent.call(runtimeFacade, handleRuntimeEvent);
       if (disposed) {
         if (typeof candidate === "function") candidate();
         throw new Error("Bot controls are unavailable.");
@@ -1447,6 +1473,19 @@
     async function initialize() {
       if (disposed) throw new Error("Bot controls are unavailable.");
       if (nativeMode) subscribeRuntimeEvents();
+      if (nativeMode) {
+        const readActiveBotId = readDataFunction(
+          runtimeFacade,
+          "readActiveBotId",
+          "Native active bot identity is unavailable.",
+        );
+        if (readActiveBotId) {
+          authoritativeActiveBotId = normalizeNativeActiveBotId(
+            await readActiveBotId.call(runtimeFacade),
+          );
+          if (disposed) throw new Error("Bot controls are unavailable.");
+        }
+      }
       if (computerFacade && typeof computerFacade.onChanged === "function" && !computerSubscribed) {
         computerSubscribed = true;
         const candidateComputer = computerFacade.onChanged((value) => {
@@ -1510,10 +1549,9 @@
         const pending = computerFacade
           ? [...bots.values()].find((record) => record.setupStage !== "complete")
           : null;
-        const observedActive = preferredActiveBotId && bots.has(preferredActiveBotId)
-          ? preferredActiveBotId : null;
-        const fallback = nativeMode && typeof runtimeFacade?.onEvent === "function"
-          ? null : bots.keys().next().value;
+        const observedActive = authoritativeActiveBotId && bots.has(authoritativeActiveBotId)
+          ? authoritativeActiveBotId : null;
+        const fallback = nativeMode ? null : bots.keys().next().value;
         const initialBotId = pending?.botId ?? observedActive ?? fallback;
         if (!initialBotId) publish();
         else try { await selectBot(initialBotId); }
@@ -1534,6 +1572,7 @@
         throw new Error("Bot controls are unavailable.");
       }
       unsubscribe = typeof candidate === "function" ? candidate : null;
+      initializationComplete = true;
       if (!nativeMode) subscribeRuntimeEvents();
       return snapshot();
     }
@@ -3072,9 +3111,9 @@
     let providerOnboardingLoaded = false;
     let providerInitialFocusDone = false;
     let providerAuthorityInvalid = providerFacadeInvalid;
-    let providerAuthorityEpoch = 0;
     let providerActionSequence = 0;
     const providerOperations = new Map();
+    const providerReceiptRetry = new Set();
     let localDesktopView = null;
     let localDesktopSelection = undefined;
     let lastSnapshot = null;
@@ -3382,6 +3421,7 @@
       const pending = providerPending.has(connection.providerId);
       const connected = connection.state === "connected";
       const externallyConnecting = connection.state === "connecting";
+      const receiptRetry = entry.first && providerReceiptRetry.has(connection.providerId);
       const stateText = pending ? "Connecting…"
         : connected ? "Connected"
           : connection.state === "connecting" ? "Connecting…"
@@ -3390,14 +3430,16 @@
       entry.state.dataset.state = connection.state;
       entry.title.textContent = connection.label;
       entry.row.dataset.loginKind = connection.loginKind;
-      entry.action.disabled = providerFacadeInvalid || pending || connected || externallyConnecting;
+      entry.action.disabled = providerFacadeInvalid || pending
+        || (connected && !receiptRetry) || externallyConnecting;
       entry.disconnect.disabled = pending || !connected;
       entry.disconnect.hidden = entry.first || !connected;
       if (!pending && connection.state === "unavailable" && connection.errorCode) {
         entry.error.textContent = providerErrorCopy(connection.providerId, { code: connection.errorCode });
         entry.error.hidden = false;
       }
-      entry.action.textContent = connected ? "Connected"
+      entry.action.textContent = receiptRetry ? "Finish setup"
+        : connected ? "Connected"
         : entry.first && connection.providerId === "openai-codex" ? "Continue with Direct Codex"
           : entry.first && connection.loginKind === "service-account" ? "Choose JSON"
             : entry.first && connection.loginKind === "device" ? "Use Device" : "Connect";
@@ -3467,6 +3509,24 @@
     function acceptProviderCatalog(value) {
       const incoming = normalizeProviderCatalog(value);
       if (providerCatalog.generation > incoming.generation) return false;
+      if (providerCatalog.generation === incoming.generation
+        && providerCatalog.status === "ready" && incoming.status === "ready") {
+        const models = new Map(providerCatalog.models.map((entry) => [
+          `${entry.provider}\u0000${entry.model}`,
+          entry,
+        ]));
+        for (const entry of incoming.models) {
+          models.set(`${entry.provider}\u0000${entry.model}`, entry);
+        }
+        providerCatalog = Object.freeze({
+          generation: incoming.generation,
+          status: "ready",
+          models: Object.freeze([...models.values()]),
+        });
+        return true;
+      }
+      if (providerCatalog.generation === incoming.generation
+        && providerCatalog.status === "ready" && incoming.status === "unavailable") return false;
       providerCatalog = incoming;
       return true;
     }
@@ -3501,13 +3561,12 @@
 
     async function refreshProviderAuthority() {
       if (mountDisposed || !providerFacade || providerFacadeInvalid) return false;
-      const epoch = ++providerAuthorityEpoch;
       const results = await Promise.allSettled([
         providerFacade.list(),
         providerFacade.catalog(),
         providerFacade.readOnboarding(),
       ]);
-      if (mountDisposed || epoch !== providerAuthorityEpoch) return false;
+      if (mountDisposed) return false;
       const [connectionsResult, catalogResult, onboardingResult] = results;
       let valid = true;
       try {
@@ -3515,21 +3574,18 @@
         acceptProviderConnections(connectionsResult.value);
       } catch {
         valid = false;
-        providerConnections = Object.freeze(PROVIDER_IDS.map(disconnectedProvider));
       }
       try {
         if (catalogResult.status !== "fulfilled") throw new Error("Model catalog is unavailable.");
         acceptProviderCatalog(catalogResult.value);
       } catch {
         valid = false;
-        providerCatalog = Object.freeze({ generation: 0, status: "unavailable", models: Object.freeze([]) });
       }
       try {
         if (onboardingResult.status !== "fulfilled") throw new Error("Provider onboarding is unavailable.");
         acceptProviderOnboarding(onboardingResult.value);
       } catch {
         valid = false;
-        providerOnboarding = null;
       }
       providerAuthorityInvalid = !valid;
       providerAuthorityLoaded = true;
@@ -3558,40 +3614,56 @@
       if (mountDisposed || !providerFacade || providerFacadeInvalid || providerPending.has(providerId)) return;
       const entry = first ? firstProviderRows.get(providerId) : providerRows.get(providerId);
       if (!entry || typeof providerFacade.connect !== "function") return;
+      const receiptRetry = first && providerReceiptRetry.has(providerId);
       let request;
-      try {
-        request = requestForProvider(providerId, entry);
-      } catch (error) {
-        entry.error.textContent = providerErrorCopy(providerId, error);
-        entry.error.hidden = false;
-        entry.action.focus?.();
-        return;
+      if (!receiptRetry) {
+        try {
+          request = requestForProvider(providerId, entry);
+        } catch (error) {
+          entry.error.textContent = providerErrorCopy(providerId, error);
+          entry.error.hidden = false;
+          entry.action.focus?.();
+          return;
+        }
       }
       const operation = beginProviderOperation(providerId, first, entry);
       if (!operation) return;
       entry.error.hidden = true;
       updateConnectionPresentation(lastSnapshot);
       let failed = false;
+      let receiptAttempted = false;
       try {
-        await providerFacade.connect(request);
-        if (!currentProviderOperation(operation)) return;
-        await refreshProviderAuthority();
-        if (!currentProviderOperation(operation)) return;
+        if (receiptRetry) {
+          await refreshProviderAuthority();
+          if (!currentProviderOperation(operation)) return;
+        } else {
+          await providerFacade.connect(request);
+          if (!currentProviderOperation(operation)) return;
+          await refreshProviderAuthority();
+          if (!currentProviderOperation(operation)) return;
+        }
         const connection = providerConnection(providerId);
         if (connection.state !== "connected") throw new Error("Provider connection is not ready.");
         if (first) {
           if (typeof providerFacade.completeOnboarding !== "function") throw new Error("Provider onboarding is unavailable.");
+          receiptAttempted = true;
           await providerFacade.completeOnboarding(providerId);
           if (!currentProviderOperation(operation)) return;
           await refreshProviderAuthority();
           if (!currentProviderOperation(operation)) return;
           if (providerOnboarding === null) throw new Error("Provider onboarding is unavailable.");
+          providerReceiptRetry.delete(providerId);
           firstConnectionError.hidden = true;
         }
       } catch (error) {
         failed = true;
         if (currentProviderOperation(operation)) {
-          entry.error.textContent = providerErrorCopy(providerId, error);
+          const connectedAfterReceiptFailure = first && receiptAttempted
+            && providerConnection(providerId).state === "connected";
+          if (connectedAfterReceiptFailure) {
+            providerReceiptRetry.add(providerId);
+            entry.error.textContent = `${providerConnection(providerId).label} is connected, but first-connection setup could not be saved. Try again.`;
+          } else entry.error.textContent = providerErrorCopy(providerId, error);
           entry.error.hidden = false;
           if (first) {
             firstConnectionError.textContent = entry.error.textContent;
@@ -3616,6 +3688,7 @@
       if (mountDisposed || !providerFacade || typeof providerFacade.disconnect !== "function"
         || providerFacadeInvalid || providerPending.has(providerId)) return;
       const entry = providerRows.get(providerId);
+      providerReceiptRetry.delete(providerId);
       const operation = beginProviderOperation(providerId, false, entry);
       if (!operation) return;
       if (entry) entry.error.hidden = true;
@@ -4446,7 +4519,6 @@
         try {
           const candidate = providerFacade.onConnectionsChanged((value) => {
             if (mountDisposed) return;
-            providerAuthorityEpoch += 1;
             try {
               acceptProviderConnections(value);
               providerAuthorityInvalid = false;
@@ -4456,6 +4528,7 @@
               providerOnboarding = null;
             }
             updateConnectionPresentation(lastSnapshot);
+            void refreshProviderAuthority();
           });
           providerConnectionsUnsubscribe = typeof candidate === "function" ? candidate : null;
         } catch {}
@@ -4464,7 +4537,6 @@
         try {
           const candidate = providerFacade.onCatalogChanged((value) => {
             if (mountDisposed) return;
-            providerAuthorityEpoch += 1;
             try {
               const changed = acceptProviderCatalog(value);
               providerAuthorityInvalid = false;
@@ -4475,6 +4547,7 @@
               providerOnboarding = null;
             }
             updateConnectionPresentation(lastSnapshot);
+            void refreshProviderAuthority();
           });
           providerCatalogUnsubscribe = typeof candidate === "function" ? candidate : null;
         } catch {}
@@ -4511,9 +4584,9 @@
         if (warningTimer != null) (windowRef.clearTimeout || clearTimeout)(warningTimer);
         warningTimer = null;
         warningScope = null;
-        providerAuthorityEpoch += 1;
         providerOperations.clear();
         providerPending.clear();
+        providerReceiptRetry.clear();
         closeAdvancedFlyout();
         selectionIntents.clear();
         try { providerConnectionsUnsubscribe?.(); } catch {}
