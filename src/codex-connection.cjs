@@ -5,229 +5,61 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const {
+  PROVIDER_IDS,
+  PROVIDER_DESCRIPTORS,
+  canonicalProviderId,
+  providerDescriptor,
+  tryProviderDescriptor,
+  providerModelIdentity,
+} = require("./provider-descriptors.cjs");
 
 const STATE_ROOT =
   process.env.CODEX_BOT_STATE_ROOT ||
   path.join(process.env.LOCALAPPDATA || os.tmpdir(), "Open Bot");
 const CONFIG_PATH = path.join(STATE_ROOT, "connection.json");
 const BRIDGE_LOG_PATH = path.join(STATE_ROOT, "logs", "bridge.jsonl");
-const DEFAULT_MODEL = "gpt-5.6-terra";
+const CODEX_DESCRIPTOR = providerDescriptor("openai-codex");
+const API_KEY_DESCRIPTOR = providerDescriptor("openai-api-key");
+const LOCAL_DESCRIPTOR = providerDescriptor("local");
+const DEFAULT_MODEL = CODEX_DESCRIPTOR.defaultModel;
+// Compatibility invariant: DEFAULT_MODEL = "gpt-5.6-terra".
 const DEFAULT_REASONING = "high";
 const DEFAULT_FAST_MODE = false;
-const MODEL_CATALOG = Object.freeze([
-  Object.freeze({
-    id: "gpt-5.6-sol",
-    label: "5.6 Sol",
-    description: "Frontier capability for the hardest work.",
-  }),
-  Object.freeze({
-    id: "gpt-5.6-terra",
-    label: "5.6 Terra",
-    description: "Balanced capability and speed.",
-  }),
-  Object.freeze({
-    id: "gpt-5.6-luna",
-    label: "5.6 Luna",
-    description: "Efficient for quick, routine work.",
-  }),
-]);
-const REASONING_EFFORTS = Object.freeze([
-  "none",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
-const LOCAL_PROVIDER_ID = "local";
-const LOCAL_REASONING_EFFORTS = Object.freeze(["none"]);
+const MODEL_CATALOG = CODEX_DESCRIPTOR.models;
+const REASONING_EFFORTS = CODEX_DESCRIPTOR.reasoningEfforts;
+const LOCAL_PROVIDER_ID = LOCAL_DESCRIPTOR.windowsProviderId;
+const LOCAL_REASONING_EFFORTS = LOCAL_DESCRIPTOR.reasoningEfforts;
 const LOCAL_MODEL_LIMIT = 200;
 const LOCAL_MODELS_RESPONSE_LIMIT = 1024 * 1024;
-const CLIPROXY_PROVIDERS = Object.freeze([
-  Object.freeze({
-    id: "codex",
-    label: "OpenAI Codex",
-    description: "Use a ChatGPT account with Codex access.",
-    loginKind: "device",
-    loginFlag: "-codex-device-login",
-    authType: "codex",
-    authFilePattern: /^codex-.*\.json$/i,
-    defaultModel: DEFAULT_MODEL,
-    reasoningEfforts: REASONING_EFFORTS,
-    fastModeSupported: true,
-    models: MODEL_CATALOG,
-  }),
-  Object.freeze({
-    id: "claude",
-    label: "Anthropic Claude",
-    description: "Connect a Claude account through Anthropic OAuth.",
-    loginKind: "oauth",
-    loginFlag: "-claude-login",
-    authType: "claude",
-    authFilePattern: /^claude-.*\.json$/i,
-    defaultModel: "claude-sonnet-5",
-    reasoningEfforts: Object.freeze([
-      "none",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-    ]),
-    fastModeSupported: false,
-    models: Object.freeze([
-      Object.freeze({
-        id: "claude-opus-5",
-        label: "Claude Opus 5",
-        description: "Maximum capability for demanding long-horizon work.",
-      }),
-      Object.freeze({
-        id: "claude-sonnet-5",
-        label: "Claude Sonnet 5",
-        description: "Balanced agentic coding and everyday work.",
-      }),
-      Object.freeze({
-        id: "claude-fable-5",
-        label: "Claude Fable 5",
-        description: "Capable general reasoning for broad workflows.",
-      }),
-    ]),
-  }),
-  Object.freeze({
-    id: "antigravity",
-    label: "Google Antigravity",
-    description: "Connect Google models through Antigravity OAuth.",
-    loginKind: "oauth",
-    loginFlag: "-antigravity-login",
-    authType: "antigravity",
-    authFilePattern: /^antigravity(?:-.*)?\.json$/i,
-    defaultModel: "gemini-3.6-flash-high",
-    reasoningEfforts: Object.freeze(["low", "medium", "high"]),
-    fastModeSupported: false,
-    models: Object.freeze([
-      Object.freeze({
-        id: "gemini-3.6-flash-high",
-        label: "Gemini 3.6 Flash",
-        description: "Fast Google model with high reasoning.",
-      }),
-      Object.freeze({
-        id: "gemini-pro-agent",
-        label: "Gemini 3.1 Pro",
-        description: "Google's higher-capability agent model.",
-      }),
-      Object.freeze({
-        id: "claude-sonnet-4-6",
-        label: "Claude Sonnet 4.6",
-        description: "Claude routed through the Antigravity account.",
-      }),
-    ]),
-  }),
-  Object.freeze({
-    id: "kimi",
-    label: "Moonshot Kimi",
-    description: "Connect a Kimi account with device authorization.",
-    loginKind: "device",
-    loginFlag: "-kimi-login",
-    authType: "kimi",
-    authFilePattern: /^kimi-.*\.json$/i,
-    defaultModel: "kimi-k3",
-    reasoningEfforts: Object.freeze(["low", "high", "max"]),
-    fastModeSupported: false,
-    models: Object.freeze([
-      Object.freeze({
-        id: "kimi-k3",
-        label: "Kimi K3",
-        description: "Moonshot's next-generation flagship model.",
-      }),
-      Object.freeze({
-        id: "kimi-k3-256k",
-        label: "Kimi K3 256K",
-        description: "Kimi K3 with a lower-quota 256K context.",
-      }),
-      Object.freeze({
-        id: "kimi-k2.7-code-highspeed",
-        label: "Kimi K2.7 Code HighSpeed",
-        description: "Coding-focused Kimi with higher output speed.",
-      }),
-    ]),
-  }),
-  Object.freeze({
-    id: "xai",
-    label: "xAI",
-    description: "Connect an xAI account with device authorization.",
-    loginKind: "device",
-    loginFlag: "-xai-login",
-    authType: "xai",
-    authFilePattern: /^xai-.*\.json$/i,
-    defaultModel: "grok-4.5",
-    reasoningEfforts: Object.freeze(["none", "low", "medium", "high"]),
-    fastModeSupported: false,
-    models: Object.freeze([
-      Object.freeze({
-        id: "grok-4.5",
-        label: "Grok 4.5",
-        description: "xAI's flagship agentic model.",
-      }),
-      Object.freeze({
-        id: "grok-4.3",
-        label: "Grok 4.3",
-        description: "Long-context reasoning with optional thinking.",
-      }),
-      Object.freeze({
-        id: "grok-build-0.1",
-        label: "Grok Build 0.1",
-        description: "Fast coding model for software workflows.",
-      }),
-    ]),
-  }),
-  Object.freeze({
-    id: "vertex",
-    label: "Google Vertex AI",
-    description: "Import a Google Cloud service-account JSON key.",
-    loginKind: "service-account",
-    loginFlag: "-vertex-import",
-    authType: "vertex",
-    authFilePattern: /^vertex-.*\.json$/i,
-    defaultModel: "gemini-3.1-pro",
-    reasoningEfforts: Object.freeze(["none", "low", "medium", "high"]),
-    fastModeSupported: false,
-    models: Object.freeze([
-      Object.freeze({
-        id: "gemini-3.6-flash",
-        label: "Gemini 3.6 Flash",
-        description: "Fast Vertex model for high-volume work.",
-      }),
-      Object.freeze({
-        id: "gemini-3.1-pro",
-        label: "Gemini 3.1 Pro",
-        description: "High-capability Gemini through Google Cloud.",
-      }),
-      Object.freeze({
-        id: "gemini-2.5-flash",
-        label: "Gemini 2.5 Flash",
-        description: "Stable, efficient Vertex model.",
-      }),
-    ]),
-  }),
-]);
-const LOCAL_PROVIDER = Object.freeze({
-  id: LOCAL_PROVIDER_ID,
-  label: "Local models",
-  description: "Connect Ollama, LM Studio, or vLLM running on this PC.",
-  loginKind: "local",
-  loginFlag: null,
-  authType: null,
-  authFilePattern: /^$/,
-  defaultModel: "local-model",
-  reasoningEfforts: LOCAL_REASONING_EFFORTS,
-  fastModeSupported: false,
-  models: Object.freeze([]),
-});
-const PROVIDERS = Object.freeze([...CLIPROXY_PROVIDERS, LOCAL_PROVIDER]);
-const PROVIDERS_BY_ID = new Map(
-  PROVIDERS.map((provider) => [provider.id, provider]),
+const WINDOWS_DESCRIPTORS = Object.freeze(
+  PROVIDER_DESCRIPTORS.map((descriptor) =>
+    Object.freeze({
+      ...descriptor,
+      id: descriptor.windowsProviderId,
+      // The Windows CLIProxy route still uses the established Codex device
+      // flow; the canonical descriptor's account kind is for macOS routing.
+      // Compatibility invariant: loginFlag: "-codex-device-login".
+      ...(descriptor.providerId === "openai-codex"
+        ? { loginKind: "device" }
+        : {}),
+    }),
+  ),
 );
-const DEFAULT_PROVIDER_ID = "codex";
+const WINDOWS_DESCRIPTORS_BY_CANONICAL_ID = new Map(
+  WINDOWS_DESCRIPTORS.map((provider) => [provider.providerId, provider]),
+);
+const CLIPROXY_PROVIDERS = Object.freeze(
+  WINDOWS_DESCRIPTORS.filter(
+    (provider) => provider.providerId !== API_KEY_DESCRIPTOR.providerId &&
+      provider.providerId !== LOCAL_DESCRIPTOR.providerId,
+  ),
+);
+const LOCAL_PROVIDER = WINDOWS_DESCRIPTORS_BY_CANONICAL_ID.get(
+  LOCAL_DESCRIPTOR.providerId,
+);
+const PROVIDERS = Object.freeze([...CLIPROXY_PROVIDERS, LOCAL_PROVIDER]);
+const DEFAULT_PROVIDER_ID = CODEX_DESCRIPTOR.windowsProviderId;
 const DEFAULT_PROXY_URL = "http://127.0.0.1:8317/v1";
 const DEFAULT_PROXY_KEY = "codex-bot-local";
 const CODEX_DEVICE_URL = "https://auth.openai.com/codex/device";
@@ -344,21 +176,24 @@ function recordObject(value) {
 }
 
 function providerFor(value) {
-  return PROVIDERS_BY_ID.get(String(value || "")) || null;
+  const descriptor = tryProviderDescriptor(value);
+  return descriptor
+    ? WINDOWS_DESCRIPTORS_BY_CANONICAL_ID.get(descriptor.providerId) || null
+    : null;
 }
 
 function normalizeProviderId(value) {
   const provider = providerFor(value);
   if (!provider) {
     throw new SettingsValidationError(
-      `provider must be one of: ${PROVIDERS.map((item) => item.id).join(", ")}.`,
+      `provider must be one of: ${WINDOWS_DESCRIPTORS.map((item) => item.id).join(", ")}.`,
     );
   }
   return provider.id;
 }
 
 function activeProviderId(config = {}) {
-  if (config.mode === "api-key") return DEFAULT_PROVIDER_ID;
+  if (config.mode === "api-key") return API_KEY_DESCRIPTOR.windowsProviderId;
   return providerFor(config.provider)?.id || DEFAULT_PROVIDER_ID;
 }
 
@@ -507,8 +342,14 @@ function normalizeAgentId(value, { required = false } = {}) {
 
 function storedProviderPreferences(config, providerId) {
   if (!recordObject(config?.providerPreferences)) return null;
-  const candidate = config.providerPreferences[providerId];
-  return recordObject(candidate) ? candidate : null;
+  const provider = providerFor(providerId);
+  if (!provider) return null;
+  const canonical = providerDescriptor(provider.providerId).providerId;
+  for (const key of [canonical, provider.id]) {
+    const candidate = config.providerPreferences[key];
+    if (recordObject(candidate)) return candidate;
+  }
+  return null;
 }
 
 function storedDefaults(config = {}, providerId = activeProviderId(config)) {
@@ -545,8 +386,14 @@ function storedDefaults(config = {}, providerId = activeProviderId(config)) {
 }
 
 function storedAgentPreferenceMap(config, providerId) {
-  if (recordObject(config?.providerAgentPreferences?.[providerId]))
-    return config.providerAgentPreferences[providerId];
+  const provider = providerFor(providerId);
+  const canonical = provider
+    ? providerDescriptor(provider.providerId).providerId
+    : null;
+  for (const key of [canonical, provider?.id]) {
+    if (key && recordObject(config?.providerAgentPreferences?.[key]))
+      return config.providerAgentPreferences[key];
+  }
   if (
     providerId === activeProviderId(config) &&
     plainObject(config?.agentPreferences)
@@ -844,7 +691,10 @@ function cloneProviderRecord(value) {
   if (value == null || typeof value !== "object" || Array.isArray(value))
     return output;
   for (const [key, item] of Object.entries(value)) {
-    if (providerFor(key) && plainObject(item)) output[key] = { ...item };
+    const provider = providerFor(key);
+    if (provider && plainObject(item)) {
+      output[providerDescriptor(provider.providerId).providerId] = { ...item };
+    }
   }
   return output;
 }
@@ -854,10 +704,15 @@ function writePreferences(
   defaults,
   providerId = activeProviderId(config),
 ) {
+  const persistedProviderId = providerDescriptor(providerId).providerId;
   const providerPreferences = cloneProviderRecord(config.providerPreferences);
-  providerPreferences[providerId] = { ...defaults };
+  const providerAgentPreferences = cloneProviderRecord(
+    config.providerAgentPreferences,
+  );
+  providerPreferences[persistedProviderId] = { ...defaults };
   writeConfig({
     ...config,
+    provider: persistedProviderId,
     // Keep the established fields synchronized so older patched runtimes can
     // still read a newly written configuration without losing the selection.
     model: defaults.model,
@@ -865,6 +720,10 @@ function writePreferences(
     fastMode: defaults.fastMode,
     defaults: { ...defaults },
     providerPreferences,
+    ...(hasOwn(config, "providerAgentPreferences") ||
+    Object.keys(providerAgentPreferences).length
+      ? { providerAgentPreferences }
+      : {}),
   });
   globalThis[STATE_KEY] = null;
 }
@@ -905,7 +764,8 @@ function setAgentPreferences(agentId, update) {
   const providerAgentPreferences = cloneProviderRecord(
     config.providerAgentPreferences,
   );
-  providerAgentPreferences[providerId] = agentPreferences;
+  providerAgentPreferences[providerDescriptor(providerId).providerId] =
+    agentPreferences;
   const defaults = storedDefaults(config, providerId);
   writePreferences(
     { ...config, agentPreferences, providerAgentPreferences },
@@ -927,7 +787,8 @@ function clearAgentPreferences(agentId) {
   const providerAgentPreferences = cloneProviderRecord(
     config.providerAgentPreferences,
   );
-  providerAgentPreferences[providerId] = agentPreferences;
+  providerAgentPreferences[providerDescriptor(providerId).providerId] =
+    agentPreferences;
   const defaults = storedDefaults(config, providerId);
   writePreferences(
     { ...config, agentPreferences, providerAgentPreferences },
@@ -1065,7 +926,11 @@ function setMode(mode) {
   const previous = safeJson(CONFIG_PATH, {});
   const config = plainObject(previous) ? previous : {};
   const providerId =
-    mode === "codex-oauth" ? DEFAULT_PROVIDER_ID : activeProviderId(config);
+    mode === "api-key"
+      ? API_KEY_DESCRIPTOR.windowsProviderId
+      : mode === "codex-oauth"
+        ? DEFAULT_PROVIDER_ID
+        : activeProviderId(config);
   writePreferences(
     {
       ...config,
@@ -1082,15 +947,17 @@ function setProvider(value) {
   const previous = safeJson(CONFIG_PATH, {});
   const config = plainObject(previous) ? previous : {};
   const previousProviderId = activeProviderId(config);
+  const previousCanonicalProviderId = canonicalProviderId(previousProviderId);
+  const nextCanonicalProviderId = canonicalProviderId(providerId);
   const providerPreferences = cloneProviderRecord(config.providerPreferences);
-  providerPreferences[previousProviderId] = storedDefaults(
+  providerPreferences[previousCanonicalProviderId] = storedDefaults(
     config,
     previousProviderId,
   );
   const providerAgentPreferences = cloneProviderRecord(
     config.providerAgentPreferences,
   );
-  providerAgentPreferences[previousProviderId] = cloneAgentPreferences(
+  providerAgentPreferences[previousCanonicalProviderId] = cloneAgentPreferences(
     storedAgentPreferenceMap(config, previousProviderId),
   );
   const nextConfig = {
@@ -1100,7 +967,7 @@ function setProvider(value) {
     providerPreferences,
     providerAgentPreferences,
     agentPreferences: cloneAgentPreferences(
-      providerAgentPreferences[providerId],
+      providerAgentPreferences[nextCanonicalProviderId],
     ),
   };
   writePreferences(
@@ -1320,16 +1187,17 @@ function setApiKey(apiKey) {
     throw new Error("Enter a complete OpenAI API key.");
   const previous = safeJson(CONFIG_PATH, {});
   const config = plainObject(previous) ? previous : {};
-  const defaults = storedDefaults(config, DEFAULT_PROVIDER_ID);
+  const providerId = API_KEY_DESCRIPTOR.windowsProviderId;
+  const defaults = storedDefaults(config, providerId);
   writePreferences(
     {
       ...config,
       mode: "api-key",
       protectedApiKey: protectSecret(normalized),
-      provider: DEFAULT_PROVIDER_ID,
+      provider: providerId,
     },
     defaults,
-    DEFAULT_PROVIDER_ID,
+    providerId,
   );
 }
 
@@ -1376,7 +1244,8 @@ function normalizeCodexDeviceUrl(value) {
 }
 
 function normalizeProviderLoginUrl(providerId, value) {
-  if (providerId === "codex") return normalizeCodexDeviceUrl(value);
+  const windowsProviderId = providerFor(providerId)?.id || providerId;
+  if (windowsProviderId === "codex") return normalizeCodexDeviceUrl(value);
   try {
     const candidate = new URL(String(value || ""));
     if (
@@ -1393,7 +1262,7 @@ function normalizeProviderLoginUrl(providerId, value) {
       kimi: ["www.kimi.com", "/code/authorize_device"],
       xai: ["accounts.x.ai", "/oauth2/device"],
     };
-    const rule = rules[providerId];
+    const rule = rules[windowsProviderId];
     if (!rule || candidate.hostname !== rule[0]) return null;
     if (rule[1] && candidate.pathname.replace(/\/+$/, "") !== rule[1])
       return null;
@@ -1408,10 +1277,11 @@ function normalizeProviderLoginUrl(providerId, value) {
 function providerLoginOutput(providerId, output) {
   const provider = providerFor(providerId);
   if (!provider || provider.loginKind === "service-account") return null;
+  const windowsProviderId = provider.id;
   const rawUrl =
-    providerId === "codex"
+    windowsProviderId === "codex"
       ? output.match(/Codex device URL:\s*(https:\/\/\S+)/i)?.[1]
-      : providerId === "kimi" || providerId === "xai"
+      : windowsProviderId === "kimi" || windowsProviderId === "xai"
         ? output.match(/To authenticate, please visit:\s*(https:\/\/\S+)/i)?.[1]
         : output.match(
             /Visit the following URL to continue authentication:\s*(https:\/\/\S+)/i,
@@ -1423,14 +1293,14 @@ function providerLoginOutput(providerId, output) {
       `${provider.label} sign-in returned an unexpected page. Only the reviewed official provider page is allowed.`,
     );
   const code =
-    providerId === "codex"
+    windowsProviderId === "codex"
       ? output.match(
           /Codex device code:\s*([A-Z0-9]{4,12}(?:-[A-Z0-9]{4,12})?)/i,
         )?.[1]
       : output.match(
           /(?:User code:|Then enter this code:)\s*([A-Z0-9-]{4,32})/i,
         )?.[1];
-  if (providerId === "codex" && !code) return null;
+  if (windowsProviderId === "codex" && !code) return null;
   return {
     provider: provider.id,
     providerLabel: provider.label,
@@ -1926,6 +1796,8 @@ function publicStatus(agentId = null) {
 module.exports = {
   CLIPROXY_PROVIDERS,
   MODEL_CATALOG,
+  PROVIDER_IDS,
+  PROVIDER_DESCRIPTORS,
   REASONING_EFFORTS,
   SettingsValidationError,
   account,
@@ -1952,6 +1824,10 @@ module.exports = {
   normalizeProviderLoginUrl,
   providerLoginOutput,
   providerLoginStatus,
+  canonicalProviderId,
+  providerDescriptor,
+  tryProviderDescriptor,
+  providerModelIdentity,
   publicOriginForLog,
   redactError,
   redactLogDetails,

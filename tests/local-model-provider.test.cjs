@@ -48,7 +48,7 @@ function environment(t) {
 }
 
 test("local model discovery is loopback-only and becomes a provider catalog", async (t) => {
-  const { connection } = environment(t);
+  const { stateRoot, connection } = environment(t);
   const requests = [];
   global.fetch = async (url, options) => {
     requests.push({ url, options });
@@ -78,6 +78,10 @@ test("local model discovery is loopback-only and becomes a provider catalog", as
   assert.equal(status.connection.route, "local-openai-compatible");
   assert.equal(status.connection.provider, "local");
   assert.equal(status.connection.model, "qwen3:8b");
+  const persisted = JSON.parse(
+    fs.readFileSync(path.join(stateRoot, "connection.json"), "utf8"),
+  );
+  assert.equal(persisted.provider, "local");
   assert.deepEqual(
     status.preferences.catalog.models.map((model) => model.id),
     ["qwen3:8b", "llama3.2:latest"],

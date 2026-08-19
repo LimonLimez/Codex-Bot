@@ -65,7 +65,7 @@ function fakeChild() {
 }
 
 test("every interactive CLIProxy provider is selectable with independent models and defaults", (t) => {
-  const { connection } = environment(t);
+  const { stateRoot, connection } = environment(t);
   const expected = {
     codex: ["gpt-5.6-terra", "cliproxyapi-codex-oauth", true],
     claude: ["claude-sonnet-5", "cliproxyapi-claude-oauth", false],
@@ -82,6 +82,17 @@ test("every interactive CLIProxy provider is selectable with independent models 
   assert.deepEqual(
     connection.CLIPROXY_PROVIDERS.map((provider) => provider.id),
     Object.keys(expected),
+  );
+  assert.deepEqual(
+    connection.CLIPROXY_PROVIDERS.map((provider) => provider.providerId),
+    [
+      "openai-codex",
+      "anthropic-claude",
+      "google-antigravity",
+      "moonshot-kimi",
+      "xai",
+      "google-vertex-ai",
+    ],
   );
   for (const [provider, [model, route, fastSupported]] of Object.entries(
     expected,
@@ -114,6 +125,11 @@ test("every interactive CLIProxy provider is selectable with independent models 
   });
   connection.setProvider("kimi");
   assert.equal(connection.getPreferences().defaults.model, "kimi-k3-256k");
+  const persisted = JSON.parse(
+    fs.readFileSync(path.join(stateRoot, "connection.json"), "utf8"),
+  );
+  assert.equal(persisted.provider, "moonshot-kimi");
+  assert.ok(persisted.providerPreferences["moonshot-kimi"]);
   assert.throws(
     () => connection.setProvider("unknown"),
     /provider must be one/,
