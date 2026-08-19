@@ -492,11 +492,11 @@ class ProviderController extends EventEmitter {
       || typeof this.#account.accountState !== "function"
       || typeof this.#account.catalogState !== "function") throw unavailable();
     this.#directConnectActive = true;
-    this.#directDisconnectPending = false;
     const ceremonyEpoch = ++this.#directCeremonyEpoch;
     let loginStarted = false;
     let committed = false;
     try {
+      if (this.#directDisconnectPending) throw unavailable("OPENBOT_PROVIDER_SUPERSEDED");
       this.#assertDirectFences(epoch, ceremonyEpoch, request.signal);
       await this.#account.start();
       this.#assertDirectFences(epoch, ceremonyEpoch, request.signal);
@@ -930,7 +930,10 @@ class ProviderController extends EventEmitter {
           authType: readiness.account.authMode,
         });
       if (this.#directAuthorityEpoch !== authorityEpoch) {
-        await this.#forceDirectUnavailable(DIRECT_ACCOUNT_UNAVAILABLE, lifecycleEpoch);
+        const staleCode = this.#disposed
+          ? "OPENBOT_PROVIDER_DISPOSED"
+          : this.#directPresentation?.errorCode || DIRECT_ACCOUNT_UNAVAILABLE;
+        await this.#forceDirectUnavailable(staleCode, lifecycleEpoch);
         return;
       }
       this.#assertLive(lifecycleEpoch);

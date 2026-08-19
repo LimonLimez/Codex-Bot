@@ -1417,3 +1417,62 @@ test("M2 hosted/API/local publication disposal compensation is classified as DIS
     });
   }
 });
+
+test("C9 same-turn Direct connect then disconnect preserves the cancellation fence before queued execution", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const account = new FakeDirectAccount({ signedOut: true });
+  const controller = new ProviderController({ stateStore: state, account });
+  const events = [];
+  controller.on("connections-changed", (connections) => events.push(connections[0]));
+  const connecting = controller.connect(
+    { providerId: "openai-codex", authMode: "device-code" },
+    directContext({ onLoginPrompt: () => {} }),
+  );
+  const disconnecting = controller.disconnect("openai-codex");
+  void connecting.catch(() => {});
+  account.becomeReady();
+  await assert.rejects(connecting, /cancel|supersed|not ready|unavailable/i);
+  await disconnecting;
+  assert.deepEqual(account.loginModes, []);
+  assert.equal(events.some((row) => row?.state === "connected"), false);
+  assert.equal(state.state.connections.length, 0);
+  controller.dispose();
+});
+
+test("C9 same-turn disconnect then connect serializes without deadlock and allows a later explicit reconnect", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 3);
+  const account = new FakeDirectAccount();
+  account.logout = async () => { account.logouts += 1; };
+  const controller = new ProviderController({ stateStore: state, account });
+  const disconnecting = controller.disconnect("openai-codex");
+  const reconnecting = controller.connect({ providerId: "openai-codex" });
+  await disconnecting;
+  const connected = await reconnecting;
+  assert.equal(connected.providerId, "openai-codex");
+  assert.equal(account.logouts, 1);
+  assert.deepEqual(account.loginModes, []);
+  assert.equal(state.state.connections[0].state, "connected");
+  controller.dispose();
+});
+
+test("M3 Direct reconciliation disposal compensation records DISPOSED", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  state.state = connectedState("openai-codex", 5);
+  const account = new FakeDirectAccount();
+  const release = holdConnectedCommit(state, "openai-codex");
+  const controller = new ProviderController({ stateStore: state, account });
+  account.catalog = { generation: 11, status: "ready", models: [directAccountModel("gpt-live-sol")] };
+  account.emit("catalog-changed", account.catalog);
+  while (!release.isHeld()) await new Promise((resolve) => setImmediate(resolve));
+  const disposing = controller.dispose();
+  release();
+  await disposing;
+  const row = state.state.connections.find(({ providerId }) => providerId === "openai-codex");
+  assert.equal(row?.state, "unavailable");
+  assert.equal(row?.errorCode, "OPENBOT_PROVIDER_DISPOSED");
+  assert.deepEqual(row?.models || [], []);
+});
