@@ -10,7 +10,7 @@ const patchPath = path.join(__dirname, "..", "src", "patch", "desktop.cjs");
 
 const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;jEr=F=>o.emit(\"mcp-auth-completed\",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase(\"auth_service\");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase(\"window\"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on(\"activate\",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const mainFeature='kept';\n";
 const STOCK_MACHINE_DS = "async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}";
-const STOCK_MACHINE_STARTUP = 'F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
+const STOCK_MACHINE_STARTUP = 'Ic.markPhase("update_service"),Ic.armStuckWatchdog(),F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
 const STOCK_MACHINE_TELEMETRY = 'Ic.markPhase("telemetry");let x=await Ds(),C=hHn(';
 const STOCK_MACHINE_TOKEN_FUNCTIONS = [
   "function z9t(){globalThis.__machine.safeStorageCalls+=1;return globalThis.__machine.safeStorageAvailable}",
@@ -50,7 +50,7 @@ ${STOCK_MACHINE_DS}
 function uJt(){return {version:"0.20.0"}}
 function xe(){__machine.events.push("machine-id-fallback")}
 function hHn(value){__machine.events.push(["telemetry",value]);return value}
-globalThis.__machineProbe=async()=>{Ic.markPhase("update_service"),Ic.armStuckWatchdog();${STOCK_MACHINE_STARTUP};${STOCK_MACHINE_TELEMETRY}{machineId:x});return {startupId:r,telemetryId:x,telemetry:C}};
+globalThis.__machineProbe=async()=>{${STOCK_MACHINE_STARTUP};${STOCK_MACHINE_TELEMETRY}{machineId:x});return {startupId:r,telemetryId:x,telemetry:C}};
 `;
 const STOCK_MAIN_WITH_MACHINE_ANCHORS = `${STOCK_MAIN}
 ${STOCK_MACHINE_DS}

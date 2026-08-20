@@ -38,7 +38,7 @@ const SYNTHETIC_VENDOR_SETTINGS_SHA256 = crypto
   .update(STOCK_SETTINGS_ROOT, "utf8")
   .digest("hex");
 const STOCK_MACHINE_ID_MAIN = `async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}
-F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))
+Ic.markPhase("update_service"),Ic.armStuckWatchdog(),F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))
 Ic.markPhase("telemetry");let x=await Ds(),C=hHn(`;
 const rendererPatch = require(rendererPatchPath);
 
