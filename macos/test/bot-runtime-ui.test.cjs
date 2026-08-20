@@ -23,6 +23,15 @@ function cssRuleBody(css, selector) {
   return css.slice(open + 1, close);
 }
 
+function cssRuleBodyFromLast(css, selector) {
+  const start = css.lastIndexOf(selector);
+  assert.notEqual(start, -1, `missing CSS selector: ${selector}`);
+  const open = css.indexOf("{", start);
+  const close = css.indexOf("}", open);
+  assert.ok(open > start && close > open, `malformed CSS rule: ${selector}`);
+  return css.slice(open + 1, close);
+}
+
 test("provider picker Sand aliases use exact upstream fill tokens in every theme scope", () => {
   const css = fs.readFileSync(cssPath, "utf8");
   const aliases = [
@@ -62,6 +71,29 @@ test("provider picker card anatomy is isolated from Settings action-button casca
   assert.match(cssRuleBody(css, ".codex-provider-choice-button:hover"), /background:\s*var\(--codex-sand-fill-secondary-hover\)/);
   assert.match(cssRuleBody(css, ".codex-provider-choice-button[aria-pressed=\"true\"]"), /box-shadow:\s*inset 0 0 0 1px/);
   assert.match(cssRuleBody(css, ".codex-provider-choice-button:focus-visible"), /outline:\s*2px solid var\(--codex-sand-border-focus\)/);
+});
+
+test("provider details actions retain Sand anatomy and content-hugging states", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  const action = cssRuleBody(css, ".codex-provider-details .codex-provider-connection-actions button");
+  assert.match(action, /flex:\s*0 1 auto/);
+  assert.match(action, /padding:\s*0 10px/);
+  assert.match(action, /color:\s*var\(--codex-sand-text-primary\)/);
+  assert.match(action, /border:\s*1px solid var\(--codex-sand-border-subtle\)/);
+  assert.match(action, /border-radius:\s*8px/);
+  assert.match(action, /background:\s*var\(--codex-sand-fill-secondary\)/);
+  assert.match(action, /font:\s*inherit/);
+  assert.match(cssRuleBody(css, ".codex-provider-details .codex-provider-connection-actions button:hover:not(:disabled)"), /background:\s*var\(--codex-sand-fill-secondary-hover\)/);
+  assert.match(cssRuleBody(css, ".codex-provider-details .codex-provider-connection-actions button:focus-visible"), /outline:\s*2px solid var\(--codex-sand-border-focus\)/);
+  assert.match(cssRuleBody(css, ".codex-provider-details .codex-provider-connection-actions button:disabled"), /opacity:\s*0\.52/);
+});
+
+test("provider picker uses a stronger selected text role and scopes overflow away from Computer", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  assert.match(cssRuleBody(css, ".codex-provider-choice-selected"), /color:\s*var\(--codex-sand-text-primary\)/);
+  assert.doesNotMatch(cssRuleBody(css, ".codex-native-bot-settings,"), /overflow-x:\s*hidden/);
+  assert.match(cssRuleBodyFromLast(css, ".codex-ai-connections {\n"), /overflow-x:\s*hidden/);
+  assert.match(cssRuleBody(css, ".codex-provider-picker-scroll"), /overflow-x:\s*hidden/);
 });
 
 test("provider picker preserves 160-character labels errors and actions within both surfaces", async (context) => {
@@ -131,7 +163,7 @@ test("provider picker bounds both surfaces and suppresses all provider motion", 
   const css = fs.readFileSync(cssPath, "utf8");
   assert.match(cssRuleBody(css, ".codex-provider-picker-scroll"), /overflow:\s*auto/);
   assert.match(cssRuleBody(css, ".codex-provider-picker-scroll"), /overflow-x:\s*hidden/);
-  assert.match(cssRuleBody(css, ".codex-ai-connections"), /overflow-x:\s*hidden/);
+  assert.match(cssRuleBodyFromLast(css, ".codex-ai-connections {\n"), /overflow-x:\s*hidden/);
   assert.match(cssRuleBody(css, ".codex-provider-details"), /min-width:\s*0/);
   assert.match(cssRuleBody(css, ".codex-provider-details"), /max-width:\s*100%/);
   assert.match(css, /--codex-sand-text-tertiary\s*:\s*var\(--sand-text-tertiary,/);

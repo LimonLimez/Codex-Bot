@@ -181,10 +181,13 @@ body.light {
   max-width: 100%;
   margin-top: 16px;
   padding-top: 16px;
-  overflow-x: hidden;
   border-top: 1px solid color-mix(in srgb, var(--codex-border) 76%, transparent);
   color: var(--codex-text);
   font: 500 12px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+}
+
+.codex-ai-connections {
+  overflow-x: hidden;
 }
 
 .codex-native-section-title {
@@ -325,7 +328,7 @@ body.light {
   display: block;
   min-width: 0;
   max-width: 100%;
-  color: var(--codex-sand-text-tertiary);
+  color: var(--codex-sand-text-primary);
   font-size: 10px;
   font-weight: 650;
   line-height: 12px;
@@ -471,6 +474,37 @@ body.light {
   min-height: 30px;
   white-space: normal;
   overflow-wrap: anywhere;
+}
+
+.codex-provider-details .codex-provider-connection-actions button {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  min-height: 30px;
+  padding: 0 10px;
+  color: var(--codex-sand-text-primary);
+  border: 1px solid var(--codex-sand-border-subtle);
+  border-radius: 8px;
+  background: var(--codex-sand-fill-secondary);
+  box-sizing: border-box;
+  font: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.codex-provider-details .codex-provider-connection-actions button:hover:not(:disabled) {
+  background: var(--codex-sand-fill-secondary-hover);
+}
+
+.codex-provider-details .codex-provider-connection-actions button:focus-visible {
+  outline: 2px solid var(--codex-sand-border-focus);
+  outline-offset: 2px;
+}
+
+.codex-provider-details .codex-provider-connection-actions button:disabled {
+  opacity: 0.52;
+  filter: saturate(0.55);
 }
 
 .codex-provider-connection-form input,
