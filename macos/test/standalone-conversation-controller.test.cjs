@@ -1878,6 +1878,37 @@ test("not-now Computer availability exposes no tools and still permits direct Ch
   controller.dispose();
 });
 
+test("unavailable Cursor Computer exposes no tools and still permits direct Chat", async () => {
+  const { createStandaloneComputerToolBridge, StandaloneConversationController } = require(controllerPath);
+  const requests = [];
+  const toolBridge = createStandaloneComputerToolBridge({
+    computerTargetRouter: {
+      async resolve() {
+        const error = new Error("Cursor Remote Computer is unavailable.");
+        error.code = "OPENBOT_CURSOR_COMPUTER_UNAVAILABLE";
+        throw error;
+      },
+      async run() { throw new Error("must not run"); },
+      async disposeTask() { throw new Error("must not dispose unopened target"); },
+    },
+  });
+  const controller = new StandaloneConversationController({
+    router: { async stream(request) { requests.push(request); return directResult(request); } },
+    toolBridge,
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const created = controller.create({ botId: BOT_A });
+  const terminal = terminalEvent(controller, () => controller.send({
+    botId: BOT_A, conversationId: created.conversationId, text: "Answer directly.",
+  }));
+  assert.equal((await terminal).event.type, "completed");
+  assert.deepEqual(requests[0].tools, []);
+  assert.equal(requests[0].toolChoice, "none");
+  controller.dispose();
+});
+
 test("opened tool sessions dispose exactly once on initial stream failure and a cancelled hung dispatch", async () => {
   const { StandaloneConversationController } = require(controllerPath);
   let initialDisposals = 0;

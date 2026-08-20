@@ -9,7 +9,6 @@ const { mock } = require("node:test");
 const boundaryPath = path.join(__dirname, "..", "src", "local", "local-computer-boundary.cjs");
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const LOCAL_A = "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const CURSOR_A = "cursor-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const GRANT_A = "grant-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const UUIDS = [
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -153,7 +152,7 @@ test("failed local start remains fail closed and can switch to cursor then not-n
     mode: "cursor",
     generation: 2,
     localProfileId: LOCAL_A,
-    nativeAgentId: CURSOR_A,
+    nativeAgentId: null,
     state: "unavailable",
     lastErrorCode: "CURSOR_ACCOUNT_REQUIRED",
   }));
@@ -163,9 +162,22 @@ test("failed local start remains fail closed and can switch to cursor then not-n
   assert.deepEqual(skipped.computer, computer({
     generation: 3,
     localProfileId: LOCAL_A,
-    nativeAgentId: CURSOR_A,
+    nativeAgentId: null,
   }));
   assert.equal(manager.close.mock.callCount(), 2);
+});
+
+test("Cursor selection preserves an unavailable target without fabricating a native agent identity", async () => {
+  const { boundary, manager, writes } = fixture();
+
+  const selected = await boundary.selectMode({ botId: BOT_A, mode: "cursor" });
+
+  assert.equal(selected.computer.mode, "cursor");
+  assert.equal(selected.computer.nativeAgentId, null);
+  assert.equal(selected.computer.state, "unavailable");
+  assert.equal(selected.computer.lastErrorCode, "CURSOR_ACCOUNT_REQUIRED");
+  assert.equal(writes.at(-1).nativeAgentId, null);
+  assert.equal(manager.open.mock.callCount(), 0);
 });
 
 test("permission prompts and decisions expose metadata only and disposal is exact", async () => {
@@ -291,7 +303,7 @@ test("same-bot mode selections serialize and hostile input reaches no dependency
   assert.equal(store.read.mock.callCount(), callsBefore);
 });
 
-test("persistence failures close new helpers and restore an authoritative old local session", async () => {
+test("persistence failures close new helpers without reopening the prior local session", async () => {
   const first = fixture();
   const firstWrite = first.store.updateComputer;
   first.store.updateComputer = mock.fn(async (botId, next) => {
@@ -317,8 +329,7 @@ test("persistence failures close new helpers and restore an authoritative old lo
     code: "OPENBOT_COMPUTER_PERSIST_FAILED",
   });
   assert.equal(second.manager.close.mock.callCount(), 1);
-  assert.equal(second.manager.open.mock.callCount(), 1);
-  assert.deepEqual(second.manager.open.mock.calls[0].arguments[0], previous);
+  assert.equal(second.manager.open.mock.callCount(), 0);
 });
 
 test("deleteBot synchronously fences one bot, drains its older selection, and delegates exact cleanup once", async () => {

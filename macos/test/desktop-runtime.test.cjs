@@ -62,6 +62,7 @@ function runtimeFixture(t, {
   selectionStore = {},
   botDeletionCoordinator = null,
   accountController = null,
+  computerBoundary = null,
   shell = null,
   secondaryWindow = false,
   controllerOverride = null,
@@ -116,6 +117,7 @@ function runtimeFixture(t, {
   if (providerController !== null) injected.providerController = providerController;
   if (botDeletionCoordinator !== null) injected.botDeletionCoordinator = botDeletionCoordinator;
   if (accountController !== null) injected.accountController = accountController;
+  if (computerBoundary !== null) injected.computerBoundary = computerBoundary;
   if (canCreateAgent !== null) injected.canCreateAgent = canCreateAgent;
   const installed = installDesktopRuntime(electron, injected);
   t.after(() => installed.dispose());
@@ -124,6 +126,48 @@ function runtimeFixture(t, {
     secondaryFrame, secondarySender, secondarySent,
   });
 }
+
+test("desktop accepts Cursor-unavailable null identity for live selection and restart reads", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const unavailable = Object.freeze({
+    mode: "cursor",
+    generation: 2,
+    localProfileId: null,
+    nativeAgentId: null,
+    state: "unavailable",
+    lastConfirmedAt: null,
+    lastErrorCode: "CURSOR_ACCOUNT_REQUIRED",
+  });
+  let current = unavailable;
+  const boundary = {
+    async selectMode(value) { return { botId: value.botId, computer: current }; },
+    async read(botId) { return { botId, computer: current }; },
+    async decidePermission() { throw new Error("unused"); },
+    async listPermissionRequests() { return { botId: BOT_A, requests: [] }; },
+    async listPermissions() { return { botId: BOT_A, permissions: [] }; },
+    async revokePermission() { throw new Error("unused"); },
+    dispose() {},
+  };
+  const fixture = runtimeFixture(t, { computerBoundary: boundary });
+  const event = { sender: fixture.sender };
+  const selected = await fixture.handlers.get(IPC_CHANNELS.computerSelectMode)(
+    event,
+    { botId: BOT_A, mode: "cursor" },
+  );
+  assert.deepEqual(selected, { botId: BOT_A, computer: unavailable });
+  const restarted = await fixture.handlers.get(IPC_CHANNELS.computerRead)(event, BOT_A);
+  assert.deepEqual(restarted, { botId: BOT_A, computer: unavailable });
+
+  current = Object.freeze({ ...unavailable, state: "starting" });
+  await assert.rejects(
+    fixture.handlers.get(IPC_CHANNELS.computerSelectMode)(event, { botId: BOT_A, mode: "cursor" }),
+    { code: "OPENBOT_COMPUTER_OPERATION_FAILED" },
+  );
+  await assert.rejects(
+    fixture.handlers.get(IPC_CHANNELS.computerRead)(event, BOT_A),
+    { code: "OPENBOT_COMPUTER_OPERATION_FAILED" },
+  );
+});
 
 function tempRoot(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bot-desktop-runtime-test-"));

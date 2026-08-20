@@ -37,6 +37,11 @@ const LOCAL_TOOLS = Object.freeze([
   "screen.capture",
 ]);
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const NO_LOCAL_DISPOSAL_CODES = new Set([
+  "OPENBOT_COMPUTER_NOT_CONFIGURED",
+  "OPENBOT_CURSOR_COMPUTER_UNAVAILABLE",
+  "OPENBOT_LOCAL_DESKTOP_UNAVAILABLE",
+]);
 const MAX_MESSAGE_BYTES = 256 * 1024;
 const MAX_STRING_BYTES = 128 * 1024;
 const MAX_NODES = 4096;
@@ -465,9 +470,28 @@ class ComputerTargetRouter {
     const request = normalizeDispose(value);
     this.#assertBotAvailable(request.botId);
     const epochKey = botTaskKey(request);
+    const correlation = this.#tasks.get(taskKey(request));
     this.#taskEpochs.set(epochKey, (this.#taskEpochs.get(epochKey) ?? 0) + 1);
     this.#tasks.delete(taskKey(request));
-    if (typeof this.#localManager.disposeTask === "function") {
+
+    let current = null;
+    try {
+      const record = await this.#store.read(request.botId);
+      this.#assertBotAvailable(request.botId);
+      try {
+        current = currentIdentity(record, request.botId);
+      } catch (error) {
+        if (!NO_LOCAL_DISPOSAL_CODES.has(error?.code)) throw error;
+      }
+    } catch (error) {
+      this.#assertBotAvailable(request.botId);
+      throw error;
+    }
+
+    const exactLocalTask = correlation
+      && current?.mode === "local"
+      && correlation.identityKey === identityKey(current);
+    if (exactLocalTask && typeof this.#localManager.disposeTask === "function") {
       try {
         await this.#localManager.disposeTask(request);
       } catch (error) {

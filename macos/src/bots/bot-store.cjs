@@ -489,7 +489,12 @@ function normalizeComputer(value) {
   if (normalized.mode === "local" && normalized.localProfileId === null) {
     throw new Error("Local Computer mode requires a local profile ID.");
   }
-  if (normalized.mode === "cursor" && normalized.nativeAgentId === null) {
+  if (normalized.mode === "cursor" && normalized.state === "unconfigured") {
+    throw new Error("Cursor Computer mode cannot remain unconfigured.");
+  }
+  if (normalized.mode === "cursor"
+    && ["starting", "ready", "reconnecting"].includes(normalized.state)
+    && normalized.nativeAgentId === null) {
     throw new Error("Cursor Computer mode requires a native agent ID.");
   }
   if (normalized.mode === "not-now" && normalized.state !== "unconfigured") {

@@ -292,7 +292,10 @@ function computerRecordPublic(value) {
     || !(record.lastErrorCode === null || (typeof record.lastErrorCode === "string"
       && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.lastErrorCode)))) throw sanitizedComputerFailure();
   if (record.mode === "local" && record.localProfileId === null) throw sanitizedComputerFailure();
-  if (record.mode === "cursor" && record.nativeAgentId === null) throw sanitizedComputerFailure();
+  if (record.mode === "cursor" && record.state === "unconfigured") throw sanitizedComputerFailure();
+  if (record.mode === "cursor"
+    && ["starting", "ready", "reconnecting"].includes(record.state)
+    && record.nativeAgentId === null) throw sanitizedComputerFailure();
   if (record.mode === "not-now" && record.state !== "unconfigured") throw sanitizedComputerFailure();
   if (record.state === "ready" && record.lastConfirmedAt === null) throw sanitizedComputerFailure();
   return record;

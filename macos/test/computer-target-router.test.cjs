@@ -385,6 +385,23 @@ test("disposing a subagent task invalidates its pending result without closing t
   assert.equal(fixtureValue.openCalls.length, 1);
 });
 
+test("disposing a Cursor task clears only OpenBot correlation and never calls the local manager", async () => {
+  const cursor = bot(BOT_A, {
+    mode: "cursor",
+    generation: 2,
+    nativeAgentId: null,
+    state: "unavailable",
+    lastErrorCode: "CURSOR_ACCOUNT_REQUIRED",
+  });
+  const fixtureValue = fixture();
+  await fixtureValue.router.resolve(resolveInput("cursor-task"));
+  fixtureValue.records.set(BOT_A, cursor);
+
+  await fixtureValue.router.disposeTask({ botId: BOT_A, taskId: "cursor-task" });
+
+  assert.deepEqual(fixtureValue.disposed, []);
+});
+
 test("task disposal during the final current-target read suppresses the completed local effect", async () => {
   const fixtureValue = fixture();
   const target = await fixtureValue.router.resolve(resolveInput("child-2"));

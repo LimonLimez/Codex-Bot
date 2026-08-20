@@ -376,6 +376,26 @@ test("Computer selection is exact monotonic and rejects hostile patches", async 
   assert.deepEqual((await store.read(created.botId)).computer, selected.computer);
 });
 
+test("Cursor may persist explicit unavailable state without a native agent, but lifecycle states require one", async (t) => {
+  const { store } = await temporaryStore(t);
+  const created = await store.create();
+
+  const unavailable = await store.updateComputer(created.botId, {
+    mode: "cursor",
+    generation: 1,
+    state: "unavailable",
+    lastErrorCode: "CURSOR_ACCOUNT_REQUIRED",
+  });
+  assert.equal(unavailable.computer.nativeAgentId, null);
+  assert.equal(unavailable.computer.state, "unavailable");
+
+  await assert.rejects(store.updateComputer(created.botId, {
+    generation: 2,
+    state: "starting",
+    lastErrorCode: null,
+  }), /native agent ID/i);
+});
+
 test("Computer local profile ownership is unique across bot updates and failed mutation is atomic", async (t) => {
   const { filePath, store } = await temporaryStore(t);
   const first = await store.create();

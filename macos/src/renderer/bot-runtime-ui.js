@@ -398,7 +398,10 @@
       throw new Error("Computer state is unavailable.");
     }
     if (record.mode === "local" && record.localProfileId === null) throw new Error("Computer state is unavailable.");
-    if (record.mode === "cursor" && record.nativeAgentId === null) throw new Error("Computer state is unavailable.");
+    if (record.mode === "cursor" && record.state === "unconfigured") throw new Error("Computer state is unavailable.");
+    if (record.mode === "cursor"
+      && ["starting", "ready", "reconnecting"].includes(record.state)
+      && record.nativeAgentId === null) throw new Error("Computer state is unavailable.");
     if (record.mode === "not-now" && record.state !== "unconfigured") throw new Error("Computer state is unavailable.");
     if (record.state === "ready" && record.lastConfirmedAt === null) throw new Error("Computer state is unavailable.");
     return Object.freeze(record);

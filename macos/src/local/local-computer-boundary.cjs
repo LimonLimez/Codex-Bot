@@ -273,7 +273,7 @@ class LocalComputerBoundary extends EventEmitter {
           mode: "cursor",
           generation,
           localProfileId: record.computer.localProfileId,
-          nativeAgentId: record.computer.nativeAgentId || `cursor-${safeUUID(this.#randomUUID)}`,
+          nativeAgentId: record.computer.nativeAgentId,
           state: "unavailable",
           lastConfirmedAt: null,
           lastErrorCode: "CURSOR_ACCOUNT_REQUIRED",
@@ -287,14 +287,7 @@ class LocalComputerBoundary extends EventEmitter {
           lastConfirmedAt: null,
           lastErrorCode: null,
         };
-      try {
-        return await this.#persistAndPublish(request.botId, next);
-      } catch (error) {
-        if (record.computer.mode === "local" && record.computer.state === "ready") {
-          try { await this.#manager.open(record); } catch {}
-        }
-        throw error;
-      }
+      return this.#persistAndPublish(request.botId, next);
     });
   }
 

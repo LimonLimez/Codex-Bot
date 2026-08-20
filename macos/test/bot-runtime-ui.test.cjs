@@ -387,6 +387,38 @@ test("runtime presentation is truthful and never offers a local fallback", () =>
   }
 });
 
+test("renderer accepts an explicitly unavailable Cursor Computer without a native agent", async () => {
+  const { createBotUiController } = require(uiPath);
+  const unavailable = {
+    mode: "cursor",
+    generation: 2,
+    localProfileId: null,
+    nativeAgentId: null,
+    state: "unavailable",
+    lastConfirmedAt: null,
+    lastErrorCode: "CURSOR_ACCOUNT_REQUIRED",
+  };
+  const controller = createBotUiController({
+    facade: {
+      async list() { return [botWithComputer(BOT_A, "A", "ready", unavailable)]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: { async selectBot() { return null; } },
+    computerFacade: {
+      async read() { return { botId: BOT_A, computer: unavailable }; },
+      async listPermissions() { return { botId: BOT_A, permissions: [] }; },
+      async listPermissionRequests() { return { botId: BOT_A, requests: [] }; },
+      onChanged() { return () => {}; },
+      onPermissionRequested() { return () => {}; },
+    },
+  });
+  await controller.initialize();
+  assert.equal(controller.snapshot().computer.mode, "cursor");
+  assert.equal(controller.snapshot().computer.nativeAgentId, null);
+  assert.equal(controller.snapshot().computer.state, "unavailable");
+  controller.dispose();
+});
+
 test("renderer ships no optional model catalog authority", () => {
   const controls = require(uiPath);
   assert.equal(Object.hasOwn(controls, "MODEL_CATALOG"), false);
