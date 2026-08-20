@@ -3764,7 +3764,8 @@
     function updateProviderDetails(surface, entry, connection) {
       const pending = providerPending.has(connection.providerId);
       const operation = providerOperations.get(connection.providerId);
-      const disconnecting = pending && operation?.kind === "disconnect";
+      const surfacePending = pending && operation?.first === surface.first;
+      const disconnecting = surfacePending && operation?.kind === "disconnect";
       const connected = connection.state === "connected";
       const externallyConnecting = connection.state === "connecting";
       const disconnectPending = connection.providerId === "openai-codex"
@@ -3775,32 +3776,44 @@
         && providerOnboarding === null
         && providerCatalog.models.some((model) => model.provider === connection.providerId);
       const vertexUnavailable = connection.providerId === "google-vertex-ai";
-      const stateText = disconnecting ? "Disconnecting…" : pending ? "Connecting…"
+      const stateText = disconnecting ? "Disconnecting…" : surfacePending ? "Connecting…"
         : connected ? "Connected"
         : externallyConnecting ? "Connecting…"
           : vertexUnavailable ? "Unavailable"
             : connection.state === "unavailable" ? "Retry available" : "Not connected";
       entry.status.textContent = stateText;
       entry.status.dataset.state = connection.state;
-      entry.panel.setAttribute("aria-busy", String(pending));
-      entry.action.disabled = providerFacadeInvalid || pending || vertexUnavailable
+      entry.heading.textContent = connection.label;
+      entry.panel.dataset.loginKind = connection.loginKind;
+      entry.inputs.authMode?.setAttribute("aria-label", `${connection.label} sign-in method`);
+      entry.inputs.baseUrl?.setAttribute("aria-label", `${connection.label} base URL`);
+      entry.inputs.apiKey?.setAttribute("aria-label", `${connection.label} API key`);
+      entry.panel.setAttribute("aria-busy", String(surfacePending));
+      entry.action.disabled = providerFacadeInvalid || surfacePending || vertexUnavailable
         || disconnectPending || externallyConnecting
         || (surface.first && providerAuthorityRetryable)
         || (connected && !receiptRetry && !legacyConfirmation);
-      entry.disconnect.disabled = pending;
+      entry.disconnect.disabled = surfacePending;
       entry.disconnect.hidden = surface.first || (!connected && !disconnectPending);
       entry.disconnect.textContent = disconnectPending
         ? `Retry disconnect ${connection.label}` : `Disconnect ${connection.label}`;
-      if (!pending && connection.state === "unavailable" && connection.errorCode && !vertexUnavailable) {
+      const scopedError = providerErrors.get(`${surface.key}:${connection.providerId}`);
+      if (scopedError) {
+        entry.error.textContent = scopedError;
+        entry.error.hidden = false;
+      } else if (!surfacePending && connection.state === "unavailable"
+        && connection.errorCode && !vertexUnavailable) {
         entry.error.textContent = providerErrorCopy(connection.providerId, { code: connection.errorCode });
         entry.error.hidden = false;
+      } else if (!surfacePending) {
+        entry.error.hidden = true;
       }
       entry.action.textContent = receiptRetry ? "Finish setup"
         : legacyConfirmation ? `Continue with ${connection.label}`
           : connected ? "Connected"
             : connection.state === "unavailable" && !vertexUnavailable ? `Retry ${connection.label}`
               : `Connect ${connection.label}`;
-      const lockSelection = pending && surface.selectedProviderId === connection.providerId;
+      const lockSelection = surfacePending && surface.selectedProviderId === connection.providerId;
       for (const card of surface.cards.values()) card.button.disabled = lockSelection;
     }
 
@@ -3958,6 +3971,15 @@
       providerOnboardingLoaded = true;
       for (const connection of snapshot.connections) {
         const previous = previousConnections.find((entry) => entry.providerId === connection.providerId);
+        const recovered = (connection.state === "connected"
+          && !providerReceiptRetry.has(connection.providerId))
+          || (connection.state !== "unavailable"
+            && (previous?.state === "unavailable"
+              || (previous?.errorCode !== null && connection.errorCode === null)));
+        if (recovered) {
+          clearProviderError(true, connection.providerId);
+          clearProviderError(false, connection.providerId);
+        }
         if (connection.state === "disconnected"
           && (previous?.state !== "disconnected" || providerReceiptRetry.has(connection.providerId))) {
           providerReceiptRetry.delete(connection.providerId);

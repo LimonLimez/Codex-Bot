@@ -4441,6 +4441,151 @@ test("provider failure after a Settings detail rebuild appears and focuses the c
   assert.equal(harness.documentRef.activeElement, currentAction);
 });
 
+test("a detached provider failure projects its scoped error after later reselect", async (context) => {
+  const failure = deferred();
+  const facade = providerFacade({
+    catalog: providerCatalog([], 0, "unavailable"),
+    connect() { return failure.promise; },
+  });
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "moonshot-kimi", false);
+  const detachedAction = providerActionButton(harness, false);
+  detachedAction.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  clickProviderCard(harness, "xai", false);
+  assert.notEqual(providerActionButton(harness, false), detachedAction);
+
+  const error = new Error("private sk-secret /Users/person");
+  error.code = "OPENBOT_PROVIDER_INVALID";
+  failure.reject(error);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "moonshot-kimi", false);
+  const currentAction = providerActionButton(harness, false);
+  const currentError = providerControl(harness, "codex-provider-connection-error", false);
+  assert.equal(currentError.hidden, false);
+  assert.match(currentError.textContent, /details were not accepted|try again/i);
+  assert.doesNotMatch(providerText(harness, false), /sk-secret|Users\/person/);
+  assert.equal(harness.documentRef.activeElement, currentAction);
+});
+
+test("a same-provider pending operation locks only its owning surface", async (context) => {
+  const heldConnect = deferred();
+  const facade = providerFacade({
+    catalog: providerCatalog([], 0, "unavailable"),
+    connect() { return heldConnect.promise; },
+  });
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "moonshot-kimi");
+  clickProviderCard(harness, "moonshot-kimi", false);
+  const firstAction = providerActionButton(harness);
+  const settingsAction = providerActionButton(harness, false);
+  firstAction.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(providerDetail(harness).attributes["aria-busy"], "true");
+  assert.equal(firstAction.disabled, true);
+  assert.equal(providerCard(harness, "xai").disabled, true);
+  assert.equal(providerDetail(harness, false).attributes["aria-busy"], "false");
+  assert.equal(settingsAction.disabled, false);
+  assert.equal(providerCard(harness, "xai", false).disabled, false);
+
+  heldConnect.resolve();
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+});
+
+test("an authority recovery clears a stale selected provider error", async (context) => {
+  let connections = eightConnections();
+  let emitConnections = () => {};
+  const failure = new Error("private sk-secret /Users/person");
+  failure.code = "OPENBOT_PROVIDER_INVALID";
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog: providerCatalog([], 0, "unavailable"),
+    connect() { return Promise.reject(failure); },
+    connectionsSubscription(listener) {
+      emitConnections = listener;
+      return () => {};
+    },
+  });
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "moonshot-kimi", false);
+  providerActionButton(harness, false).listeners.get("click")();
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const error = providerControl(harness, "codex-provider-connection-error", false);
+  assert.equal(error.hidden, false);
+
+  connections = eightConnections({
+    "moonshot-kimi": { state: "unavailable", generation: 1, errorCode: "OPENBOT_PROVIDER_INVALID" },
+  });
+  emitConnections(connections);
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  connections = eightConnections({
+    "moonshot-kimi": { state: "disconnected", generation: 2, errorCode: null },
+  });
+  emitConnections(connections);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(error.hidden, true);
+
+  connections = eightConnections({
+    "moonshot-kimi": { state: "unavailable", generation: 3, errorCode: "OPENBOT_PROVIDER_INVALID" },
+  });
+  emitConnections(connections);
+  for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  connections = eightConnections({
+    "moonshot-kimi": { state: "connected", generation: 0, errorCode: null },
+  });
+  emitConnections(connections);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(error.hidden, true);
+});
+
+test("same-provider authority labels refresh selected detail metadata without losing inputs", async (context) => {
+  let connections = eightConnections({
+    "local-openai-compatible": { label: "Local models (initial)" },
+  });
+  let emitConnections = () => {};
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog: providerCatalog([], 0, "unavailable"),
+    connectionsSubscription(listener) {
+      emitConnections = listener;
+      return () => {};
+    },
+  });
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "local-openai-compatible", false);
+  const baseUrl = providerControl(harness, "codex-provider-base-url", false);
+  const apiKey = providerControl(harness, "codex-provider-api-key", false);
+  baseUrl.value = "http://127.0.0.1:9000/v1";
+  apiKey.value = "safe-local-secret";
+  assert.equal(providerControl(harness, "codex-provider-details-title", false).textContent, "Local models (initial)");
+
+  connections = eightConnections({
+    "local-openai-compatible": { label: "DTO Local route", generation: 1 },
+  });
+  emitConnections(connections);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(providerControl(harness, "codex-provider-details-title", false).textContent, "DTO Local route");
+  assert.equal(baseUrl.attributes["aria-label"], "DTO Local route base URL");
+  assert.equal(apiKey.attributes["aria-label"], "DTO Local route API key");
+  assert.equal(baseUrl.value, "http://127.0.0.1:9000/v1");
+  assert.equal(apiKey.value, "safe-local-secret");
+});
+
 test("native View Bot owns Computer controls and selects the active Free Local Desktop", async (context) => {
   const catalog = Object.freeze({
     generation: 12,
