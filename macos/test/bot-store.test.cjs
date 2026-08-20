@@ -230,6 +230,41 @@ test("schema v1 migrates to an explicit not-now Computer target", async (t) => {
   assert.equal(persisted.bots[0].setupStage, "complete");
 });
 
+test("legacy migration preserves fixed appearance defaults for partial records", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const legacy = {
+    schemaVersion: 1,
+    botId: `bot-${BOT_A_UUID}`,
+    name: "Legacy Partial Appearance",
+    appearance: { image: null, title: "", description: "" },
+    notifications: true,
+    createdAt: NOW,
+    updatedAt: NOW,
+    conversations: [],
+    runtime: {
+      provider: null,
+      remoteRuntimeId: null,
+      state: "unprovisioned",
+      lastConfirmedAt: null,
+      lastErrorCode: null,
+    },
+  };
+  await writeDocument(filePath, validV1StoreDocument([legacy]));
+
+  const loaded = await store.load();
+  assert.deepEqual(loaded[0].appearance, {
+    shape: "blob",
+    color: "red",
+    image: null,
+    title: "",
+    description: "",
+  });
+
+  await store.rename(legacy.botId, "Migrated Partial Appearance");
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.deepEqual(persisted.bots[0].appearance, loaded[0].appearance);
+});
+
 test("setup stage distinguishes fresh setup from migrated and adopted existing bots", async (t) => {
   const v1 = await temporaryStore(t);
   await writeDocument(v1.filePath, validV1StoreDocument([expectedV1Bot()]));
@@ -503,6 +538,49 @@ test("create derives only omitted appearance fields in the first durable write",
   const explicitColor = await store.create({ appearance: { color: "violet" } });
   assert.equal(explicitColor.appearance.shape, defaultAvatarIdentity(explicitColor.botId).shape);
   assert.equal(explicitColor.appearance.color, "violet");
+});
+
+test("create commits completed appearance bytes in one durable temp write", async (t) => {
+  const events = { writes: [], renames: [] };
+  const instrumentedFs = {
+    ...fs,
+    open: async (targetPath, ...args) => {
+      const handle = await fs.open(targetPath, ...args);
+      if (!targetPath.endsWith(".tmp")) return handle;
+      return new Proxy(handle, {
+        get(target, key) {
+          if (key === "writeFile") {
+            return async (contents, ...writeArgs) => {
+              events.writes.push({ targetPath, contents });
+              return target.writeFile(contents, ...writeArgs);
+            };
+          }
+          const value = Reflect.get(target, key, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+    rename: async (from, to) => {
+      events.renames.push({ from, to, contents: await fs.readFile(from, "utf8") });
+      return fs.rename(from, to);
+    },
+  };
+  const { filePath, store } = await temporaryStore(t, { fs: instrumentedFs });
+  const created = await store.create({ appearance: { description: "First durable" } });
+
+  assert.equal(events.writes.length, 1);
+  assert.equal(events.renames.length, 1);
+  assert.equal(events.writes[0].targetPath, events.renames[0].from);
+  assert.equal(events.renames[0].to, filePath);
+  assert.equal(events.writes[0].contents, events.renames[0].contents);
+  const committed = JSON.parse(events.writes[0].contents);
+  assert.deepEqual(committed.bots[0].appearance, {
+    ...defaultAvatarIdentity(created.botId),
+    image: null,
+    title: "",
+    description: "First durable",
+  });
+  assert.deepEqual(JSON.parse(await fs.readFile(filePath, "utf8")), committed);
 });
 
 test("existing appearance survives load restart edit and deletion without reassignment", async (t) => {
