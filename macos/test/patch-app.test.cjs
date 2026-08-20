@@ -353,6 +353,7 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
       vendorVersion: "0.20.0",
       releaseVersion: "0.2.0-macos.1",
       mutations: [
+        "dist/codex/bots/avatar-catalog.cjs",
         "dist/codex/bots/bot-store.cjs",
         "dist/codex/bots/chatgpt-relay-codec.cjs",
         "dist/codex/bots/conversation-router.cjs",
@@ -522,6 +523,7 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
     "desktop/openai-compatible-inference-transport.cjs",
     "desktop/model-selection-store.cjs",
     "desktop/openbot-user-data.cjs",
+    "bots/avatar-catalog.cjs",
     "bots/bot-store.cjs",
     "bots/runtime-controller.cjs",
     "bots/runtime-provider.cjs",
@@ -541,6 +543,10 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
     sha256File(path.join(extracted, "dist", "codex", "provider-descriptors.cjs")),
     sha256File(path.join(__dirname, "..", "..", "src", "provider-descriptors.cjs")),
   );
+  const avatarCatalog = path.join(extracted, "dist", "codex", "bots", "avatar-catalog.cjs");
+  const avatarCatalogSource = path.join(__dirname, "..", "src", "bots", "avatar-catalog.cjs");
+  assert.deepEqual(fs.readFileSync(avatarCatalog), fs.readFileSync(avatarCatalogSource));
+  assert.equal(sha256File(avatarCatalog), sha256File(avatarCatalogSource));
   const remoteClientPath = path.join(
     extracted,
     "dist",

@@ -192,6 +192,7 @@ test("installer stages only the exact exported patcher source script and Advance
     "grok-bot-0.20.0-darwin-arm64.manifest.json",
   ]);
   assert.deepEqual(PATCHER_SOURCE_FILES, [
+    "bots/avatar-catalog.cjs",
     "bots/bot-store.cjs",
     "bots/chatgpt-relay-codec.cjs",
     "bots/conversation-router.cjs",

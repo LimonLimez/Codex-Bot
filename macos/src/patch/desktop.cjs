@@ -42,6 +42,7 @@ const DESKTOP_FILES = Object.freeze([
   "bridge/runtime-config.cjs",
   "bridge/server.cjs",
   "computer/computer-target-router.cjs",
+  "bots/avatar-catalog.cjs",
   "bots/bot-store.cjs",
   "bots/chatgpt-relay-codec.cjs",
   "bots/conversation-router.cjs",

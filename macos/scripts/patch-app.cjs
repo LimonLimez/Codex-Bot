@@ -17,6 +17,7 @@ const VENDOR_APP_ASAR_SHA256 =
 const VENDOR_VERSION = "0.20.0";
 const RELEASE_VERSION = "0.2.0-macos.1";
 const ALLOWED_MUTATIONS = Object.freeze([
+  "dist/codex/bots/avatar-catalog.cjs",
   "dist/codex/bots/bot-store.cjs",
   "dist/codex/bots/chatgpt-relay-codec.cjs",
   "dist/codex/bots/conversation-router.cjs",
