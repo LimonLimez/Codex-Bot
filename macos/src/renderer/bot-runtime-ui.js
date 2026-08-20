@@ -3857,13 +3857,18 @@
       if (!shouldOpen && wasOpen) {
         const target = providerGateReturnFocus;
         providerGateReturnFocus = null;
-        if (target && target.isConnected !== false) target.focus?.();
-        else {
-          for (const candidate of [botSelect, newButton, rename, computerChange, modelTrigger]) {
-            if (!candidate || candidate.hidden || candidate.disabled) continue;
-            candidate.focus?.();
-            break;
-          }
+        const candidates = [target, botSelect, newButton, rename, computerChange, modelTrigger];
+        for (const candidate of candidates) {
+          if (!candidate
+            || candidate === documentRef.body
+            || candidate === documentRef.documentElement
+            || candidate === documentRef
+            || candidate.isConnected !== true
+            || candidate.hidden
+            || candidate.disabled
+            || typeof candidate.focus !== "function") continue;
+          try { candidate.focus(); } catch { continue; }
+          if (documentRef.activeElement === candidate) break;
         }
       }
       if (!shouldOpen) providerInitialFocusDone = false;

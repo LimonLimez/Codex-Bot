@@ -4076,6 +4076,16 @@ function createMountedUiHarness({
       }
       return 0;
     }
+    get isConnected() {
+      let current = this;
+      const seen = new Set();
+      while (current && !seen.has(current)) {
+        if (current === this.ownerDocument?.body) return true;
+        seen.add(current);
+        current = current.parentElement;
+      }
+      return false;
+    }
     getBoundingClientRect() {
       for (const [className, metrics] of Object.entries(viewMetrics)) {
         if (!this.className.split(/\s+/).includes(className) || typeof metrics !== "object") continue;
@@ -5228,6 +5238,87 @@ test("successful onboarding restores the active bot and never creates one", asyn
   assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
   assert.equal(createCalls, 0);
   assert.equal(harness.documentRef.activeElement, harness.focusAnchor);
+});
+
+test("successful native onboarding skips body and detached focus targets", async (context) => {
+  let connections = eightConnections();
+  let receipt = null;
+  const catalog = providerCatalog([
+    providerModel("moonshot-kimi", "kimi-k2", "Kimi K2", ["medium"], 1, { isDefault: true }),
+  ], 1);
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog,
+    onboarding: () => receipt,
+    connect(request) {
+      connections = eightConnections({ [request.providerId]: { state: "connected", generation: 1 } });
+    },
+    complete(providerId) {
+      receipt = {
+        schemaVersion: 1,
+        providerId,
+        connectionGeneration: 1,
+        catalogGeneration: 1,
+        completedAt: "2026-08-19T00:00:00.000Z",
+      };
+      return receipt;
+    },
+  });
+  const selection = Object.freeze({
+    botId: BOT_A,
+    provider: "moonshot-kimi",
+    model: "kimi-k2",
+    reasoningEffort: "medium",
+    serviceTier: null,
+    catalogGeneration: 1,
+    generation: 1,
+  });
+  const harness = createMountedUiHarness({
+    catalog,
+    initialSelection: selection,
+    nativeProtocol: true,
+    nativeHost: true,
+    providerFacade: facade,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    runtimeFacade: {
+      async selectBot() { return selection; },
+      async readModel() { return selection; },
+    },
+  });
+  context.after(() => harness.mounted.dispose());
+
+  harness.documentRef.activeElement = harness.documentRef.body;
+  const detached = harness.findPanel("codex-bot-select");
+  const computerChange = harness.findPanel("codex-computer-change");
+  const modelTrigger = harness.find("codex-model-trigger");
+  harness.documentRef.body.append(harness.documentRef.composer);
+  let detachedFocusCalls = 0;
+  detached.focus = () => {
+    detachedFocusCalls += 1;
+    harness.documentRef.activeElement = detached;
+  };
+  let computerChangeFocusCalls = 0;
+  computerChange.focus = () => { computerChangeFocusCalls += 1; };
+  assert.equal(harness.documentRef.activeElement, harness.documentRef.body);
+  assert.equal(harness.documentRef.body.isConnected, true);
+  assert.equal(detached.isConnected, false);
+  assert.equal(computerChange.isConnected, true);
+  assert.equal(modelTrigger.isConnected, true);
+
+  await new Promise((resolve) => setImmediate(resolve));
+  clickProviderCard(harness, "moonshot-kimi");
+  providerActionButton(harness).listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
+  assert.equal(detachedFocusCalls, 0);
+  assert.equal(computerChangeFocusCalls, 1);
+  assert.equal(harness.documentRef.activeElement, modelTrigger);
+  assert.equal(harness.documentRef.activeElement.isConnected, true);
 });
 
 test("mounted Advanced summary keeps a same-id provider selection provider-scoped", async (context) => {
