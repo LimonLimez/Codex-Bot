@@ -4465,6 +4465,58 @@ test("Vertex is selectable but truthfully unavailable without calling connect", 
   assert.deepEqual(requests, []);
 });
 
+test("Vertex selection focuses its labelled explanation when no enabled control exists", async (context) => {
+  const harness = connectedNativeProviderHarness({ onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "google-vertex-ai");
+  const detail = providerDetail(harness);
+  const action = providerActionButton(harness);
+  assert.equal(action.disabled, true);
+  assert.equal(detail.tabIndex, -1);
+  assert.equal(detail.attributes["aria-labelledby"], "codex-first-google-vertex-ai-details-title");
+  assert.match(providerText(harness), /secure JSON file picker is not available/i);
+  assert.equal(harness.documentRef.activeElement, detail);
+});
+
+test("provider selection focuses a connected Disconnect and an enabled retry action", async (context) => {
+  const connected = connectedNativeProviderHarness({
+    onboarding: null,
+    connections: eightConnections({
+      "openai-codex": { state: "connected", generation: 1 },
+    }),
+  });
+  const retryConnections = eightConnections({
+    "openai-api-key": { state: "unavailable", generation: 1, errorCode: "OPENBOT_PROVIDER_INVALID" },
+  });
+  const retry = connectedNativeProviderHarness({
+    onboarding: null,
+    providerFacade: providerFacade({
+      connections: retryConnections,
+      catalog: providerCatalog([], 0, "unavailable"),
+    }),
+  });
+  context.after(() => {
+    connected.mounted.dispose();
+    retry.mounted.dispose();
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(connected, "openai-codex", false);
+  const disconnect = providerControl(connected, "codex-provider-disconnect", false);
+  assert.equal(disconnect.hidden, false);
+  assert.equal(disconnect.disabled, false);
+  assert.equal(providerActionButton(connected, false).disabled, true);
+  assert.equal(connected.documentRef.activeElement === disconnect, true);
+
+  clickProviderCard(retry, "openai-api-key", false);
+  const retryAction = providerActionButton(retry, false);
+  assert.equal(retryAction.disabled, false);
+  assert.equal(retryAction.textContent, "Retry OpenAI API key");
+  assert.equal(retry.documentRef.activeElement === retryAction, true);
+});
+
 test("a failed selected route keeps safe values clears secrets and restores action focus", async (context) => {
   const facade = providerFacade({
     connect() {
@@ -4729,6 +4781,69 @@ test("an authority recovery clears a stale selected provider error", async (cont
   emitConnections(connections);
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(error.hidden, true);
+});
+
+test("route errors stay scoped across provider selection and recovery while authority errors use the global alert", async (context) => {
+  let connections = eightConnections();
+  let emitConnections = () => {};
+  const failure = new Error("private sk-secret /Users/person");
+  failure.code = "OPENBOT_PROVIDER_INVALID";
+  const facade = providerFacade({
+    connections: () => connections,
+    catalog: () => {
+      const generation = connections.reduce((max, entry) => Math.max(max, entry.generation), 0);
+      return providerCatalog([], generation, "unavailable");
+    },
+    connect() { return Promise.reject(failure); },
+    connectionsSubscription(listener) {
+      emitConnections = listener;
+      return () => {};
+    },
+  });
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "moonshot-kimi");
+  providerActionButton(harness).listeners.get("click")();
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const routeError = providerControl(harness, "codex-provider-connection-error");
+  const authorityError = harness.findPanel("codex-first-connection-error");
+  assert.equal(routeError.hidden, false);
+  assert.equal(authorityError.hidden, true);
+
+  clickProviderCard(harness, "xai");
+  assert.equal(providerControl(harness, "codex-provider-connection-error").hidden, true);
+  assert.equal(authorityError.hidden, true);
+
+  connections = eightConnections({
+    "moonshot-kimi": { state: "connected", generation: 1 },
+  });
+  emitConnections(connections);
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  clickProviderCard(harness, "moonshot-kimi");
+  assert.equal(providerControl(harness, "codex-provider-connection-error").hidden, true);
+  assert.equal(authorityError.hidden, true);
+
+  const authorityHarness = createMountedUiHarness({
+    catalog: providerCatalog([], 0, "unavailable"),
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 0,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+  });
+  context.after(() => authorityHarness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const globalAuthorityError = authorityHarness.findPanel("codex-first-connection-error");
+  assert.equal(globalAuthorityError.hidden, false);
+  assert.equal(globalAuthorityError.attributes.role, "alert");
 });
 
 test("same-provider authority labels refresh selected detail metadata without losing inputs", async (context) => {

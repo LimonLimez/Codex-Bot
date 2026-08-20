@@ -3561,6 +3561,7 @@
       const panel = surface.details;
       panel.dataset.providerId = providerId;
       panel.dataset.loginKind = kind;
+      panel.tabIndex = -1;
       const heading = element(documentRef, "h3", "codex-provider-details-title", label);
       heading.id = `codex-${surface.key}-${providerId}-details-title`;
       panel.setAttribute("aria-labelledby", heading.id);
@@ -3636,6 +3637,26 @@
       return detail;
     }
 
+    function focusProviderDetails(surface) {
+      const detail = surface.detail;
+      if (!detail) return;
+      const candidates = [detail.disconnect, detail.action, detail.firstControl];
+      for (const candidate of candidates) {
+        if (!candidate
+          || candidate.isConnected !== true
+          || candidate.hidden
+          || candidate.disabled
+          || typeof candidate.focus !== "function") continue;
+        try { candidate.focus(); } catch { continue; }
+        if (documentRef.activeElement === candidate) return;
+      }
+      const panel = detail.panel;
+      if (!panel
+        || panel.isConnected !== true
+        || typeof panel.focus !== "function") return;
+      try { panel.focus(); } catch {}
+    }
+
     function selectProvider(surface, providerId, { moveFocus = false } = {}) {
       if (!surface.cards.has(providerId)) return;
       surface.selectedProviderId = providerId;
@@ -3645,7 +3666,7 @@
         card.button.tabIndex = selected ? 0 : -1;
       }
       renderProviderSurface(surface);
-      if (moveFocus) surface.detail?.firstControl?.focus?.();
+      if (moveFocus) focusProviderDetails(surface);
     }
 
     function moveProviderChoice(surface, currentId, key) {
@@ -3825,6 +3846,7 @@
       if (!nativeProtocolMode) return;
       for (const surface of Object.values(providerSurfaces)) renderProviderSurface(surface);
       const gateActive = providerFacade !== null || providerFacadeInvalid || providerAuthorityInvalid;
+      const authorityFailure = providerFacadeInvalid || providerAuthorityInvalid;
       const shouldOpen = gateActive
         && (providerFacadeInvalid || providerAuthorityInvalid || providerOnboarding === null);
       const retryable = providerAuthorityRetryable && !providerFacadeInvalid;
@@ -3846,9 +3868,13 @@
       renderProviderLoginPrompt();
       panel.inert = shouldOpen;
       modelDock.inert = shouldOpen;
-      if (providerFacadeInvalid) {
-        firstConnectionError.textContent = "AI connections are unavailable. Update OpenBot and try again.";
+      if (authorityFailure) {
+        firstConnectionError.textContent = providerFacadeInvalid
+          ? "AI connections are unavailable. Update OpenBot and try again."
+          : "AI connections are unavailable. Try again.";
         firstConnectionError.hidden = false;
+      } else {
+        firstConnectionError.hidden = true;
       }
       if (shouldOpen && providerPending.size === 0 && !providerInitialFocusDone) {
         providerSurfaces.first.cards.get("openai-codex")?.button.focus?.();
@@ -4173,7 +4199,6 @@
             // completeOnboarding() is the durable commit acknowledgement. A
             // following snapshot failure is stale publication, not a receipt
             // write failure and must not create a Finish setup retry.
-            firstConnectionError.hidden = true;
             clearProviderError(first, providerId);
             const activeEntry = currentProviderDetail(first, providerId);
             if (activeEntry) activeEntry.error.hidden = true;
@@ -4189,12 +4214,10 @@
             throw new Error("Provider onboarding is unavailable.");
           }
           providerReceiptRetry.delete(providerId);
-          firstConnectionError.hidden = true;
         }
       } catch (error) {
         if (receiptAcknowledged) {
           if (!providerAuthorityRetryable) markProviderRefreshFailure();
-          firstConnectionError.hidden = true;
           clearProviderError(first, providerId);
           const activeEntry = currentProviderDetail(first, providerId);
           if (activeEntry) activeEntry.error.hidden = true;
@@ -4215,10 +4238,6 @@
             if (currentEntry) {
               currentEntry.error.textContent = message;
               currentEntry.error.hidden = false;
-            }
-            if (first) {
-              firstConnectionError.textContent = message;
-              firstConnectionError.hidden = false;
             }
             currentEntry?.action.focus?.();
           }
