@@ -15,12 +15,17 @@ const {
 const { BotRuntimeController } = require("../src/bots/runtime-controller.cjs");
 
 const NOW = "2026-08-14T12:34:56.000Z";
+const TEST_ISSUANCE_A = "issuance-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const TEST_RETIREMENT_A = "retire-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const TEST_ISSUANCE_B = "issuance-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const TEST_RETIREMENT_B = "retire-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const CAPABILITIES = Object.freeze({
   provision: true,
   reconcile: true,
   retire: true,
   remoteAppServer: true,
   computerFrames: true,
+  issuanceFencedRetire: true,
 });
 
 function deferred() {
@@ -53,6 +58,27 @@ async function readAfterRuntimeTransaction(store, botId) {
   assert.fail("runtime transaction did not release before read");
 }
 
+async function waitForStoreBot(store, botId, predicate, message = "store state was not reached") {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    try {
+      const bot = await store.read(botId);
+      if (predicate(bot)) {
+        await new Promise((resolve) => setImmediate(resolve));
+        try {
+          const stable = await store.read(botId);
+          if (predicate(stable)) return stable;
+        } catch (error) {
+          if (error?.code !== "BOT_STORE_RUNTIME_TRANSACTION_BUSY") throw error;
+        }
+      }
+    } catch (error) {
+      if (error?.code !== "BOT_STORE_RUNTIME_TRANSACTION_BUSY") throw error;
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(message);
+}
+
 function assertDeepFrozen(value, seen = new Set()) {
   if (!value || typeof value !== "object" || seen.has(value)) return;
   seen.add(value);
@@ -63,16 +89,27 @@ function assertDeepFrozen(value, seen = new Set()) {
 async function temporaryStore(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-runtime-controller-"));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  return new BotStore({
+  const store = new BotStore({
     filePath: path.join(directory, "bots.json"),
     now: () => NOW,
   });
+  Object.defineProperty(store, "filePath", { value: path.join(directory, "bots.json") });
+  return store;
 }
 
 function forwardingStore(store, overrides = {}) {
   return {
     load: (...args) => store.load(...args),
     list: (...args) => store.list(...args),
+    listPendingDeletions: (...args) => store.listPendingDeletions(...args),
+    readRuntimeIssuances: (...args) => store.readRuntimeIssuances(...args),
+    beginRuntimeIssuance: (...args) => store.beginRuntimeIssuance(...args),
+    issueRuntimeIssuance: (...args) => store.issueRuntimeIssuance(...args),
+    promoteRuntimeIssuance: (...args) => store.promoteRuntimeIssuance(...args),
+    confirmRuntimeIssuance: (...args) => store.confirmRuntimeIssuance(...args),
+    completeRuntimeIssuance: (...args) => store.completeRuntimeIssuance(...args),
+    revertRuntimePromotion: (...args) => store.revertRuntimePromotion(...args),
+    abortRuntimeIssuance: (...args) => store.abortRuntimeIssuance(...args),
     read: (...args) => store.read(...args),
     create: (...args) => store.create(...args),
     rename: (...args) => store.rename(...args),
@@ -173,6 +210,42 @@ function runtimeResult(botId, overrides = {}) {
   };
 }
 
+async function installIssuedSuccessor(store, harness, botId, {
+  previousIssuanceKey,
+  issuanceKey,
+  retirementKey,
+  runtimeId,
+  state = "ready",
+}) {
+  await store.beginRuntimeIssuance(botId, {
+    idempotencyKey: `codex-bot:${botId}:successor:${issuanceKey}`,
+    issuanceKey,
+    retirementKey,
+  });
+  await store.issueRuntimeIssuance(botId, {
+    issuanceKey,
+    provider: "authorized-test-provider",
+    runtimeId,
+  });
+  harness.runtimes.set(runtimeId, {
+    runtimeId,
+    ownerBotId: botId,
+    provider: "authorized-test-provider",
+    issuanceKey,
+    state,
+  });
+  const promoted = await store.promoteRuntimeIssuance(botId, {
+    issuanceKey,
+    provider: "authorized-test-provider",
+    runtimeId,
+    state,
+    lastConfirmedAt: state === "ready" ? NOW : null,
+    expectedPreviousIssuanceKey: previousIssuanceKey,
+  });
+  assert.equal(promoted.matched, true);
+  return promoted;
+}
+
 class ProviderHarness {
   constructor() {
     this.provisionCalls = [];
@@ -180,11 +253,13 @@ class ProviderHarness {
     this.retireCalls = [];
     this.order = [];
     this.provisionQueues = new Map();
+    this.issuedResults = new Map();
     this.runtimes = new Map();
     this.subscribers = new Set();
     this.retainedSubscribers = [];
     this.inspectHook = null;
     this.retireHook = null;
+    this.provisionHook = null;
   }
 
   queueProvision(botId, ...results) {
@@ -196,15 +271,23 @@ class ProviderHarness {
       capabilities: async () => ({ ...CAPABILITIES }),
       provision: async (input) => {
         this.provisionCalls.push({ ...input });
+        if (this.provisionHook) await this.provisionHook({ ...input });
         const queued = this.provisionQueues.get(input.botId);
-        let result = queued?.length ? queued.shift() : runtimeResult(input.botId);
+        const replayKey = `${input.botId}\0${input.idempotencyKey}\0${input.issuanceKey}`;
+        let result = queued?.length
+          ? queued.shift()
+          : (this.issuedResults.get(replayKey) || runtimeResult(input.botId));
         if (typeof result === "function") result = result(input);
         result = await result;
         if (result instanceof Error) throw result;
+        result = { ...result, issuanceKey: result.issuanceKey || input.issuanceKey };
+        this.issuedResults.set(replayKey, { ...result });
         this.order.push(`provision:${result.runtimeId}`);
         this.runtimes.set(result.runtimeId, {
           runtimeId: result.runtimeId,
           ownerBotId: result.ownerBotId,
+          provider: result.provider,
+          issuanceKey: result.issuanceKey,
           state: result.state,
         });
         return result;
@@ -225,6 +308,53 @@ class ProviderHarness {
         if (runtime) runtime.state = "retired";
         return { runtimeId, state: "retired" };
       },
+      inspectIssuance: async ({ runtimeId, ownerBotId, issuanceKey }) => {
+        this.inspectCalls.push({ runtimeId });
+        this.order.push(`inspect:${runtimeId}`);
+        let runtime = this.runtimes.get(runtimeId);
+        if (!runtime || runtime.ownerBotId !== ownerBotId
+          || (runtime.issuanceKey !== undefined && runtime.issuanceKey !== issuanceKey)) {
+          return { matched: false, runtimeId, state: "superseded" };
+        }
+        const inspected = this.inspectHook
+          ? await this.inspectHook({ runtimeId })
+          : { runtimeId, ownerBotId: runtime.ownerBotId, state: runtime.state };
+        runtime = this.runtimes.get(runtimeId);
+        if (inspected.runtimeId !== runtimeId || inspected.ownerBotId !== ownerBotId
+          || !runtime || runtime.ownerBotId !== ownerBotId
+          || (runtime.issuanceKey !== undefined && runtime.issuanceKey !== issuanceKey)) {
+          return { matched: false, runtimeId, state: "superseded" };
+        }
+        return {
+          matched: true,
+          runtimeId,
+          ownerBotId,
+          issuanceKey,
+          state: inspected.state,
+        };
+      },
+      retireIssuance: async ({ runtimeId, ownerBotId, issuanceKey, retirementKey }) => {
+        this.retireCalls.push({ runtimeId });
+        this.order.push(`retire:${runtimeId}`);
+        const runtime = this.runtimes.get(runtimeId);
+        if (!runtime || runtime.ownerBotId !== ownerBotId
+          || (runtime.issuanceKey !== undefined && runtime.issuanceKey !== issuanceKey)) {
+          return { matched: false, runtimeId, state: "superseded" };
+        }
+        if (this.retireHook) {
+          const hooked = await this.retireHook({ runtimeId, ownerBotId, issuanceKey, retirementKey });
+          if (hooked?.state) runtime.state = hooked.state;
+          return {
+            matched: true,
+            runtimeId,
+            ownerBotId,
+            issuanceKey,
+            state: runtime.state,
+          };
+        }
+        runtime.state = "retired";
+        return { matched: true, runtimeId, ownerBotId, issuanceKey, state: "retired" };
+      },
       subscribe: (callback) => {
         this.subscribers.add(callback);
         this.retainedSubscribers.push(callback);
@@ -238,8 +368,24 @@ class ProviderHarness {
   }
 
   emit(event) {
-    for (const callback of [...this.subscribers]) callback(event);
+    const runtime = this.runtimes.get(event?.runtimeId);
+    const enriched = event?.issuanceKey || !runtime
+      ? event
+      : { ...event, issuanceKey: runtime.issuanceKey };
+    for (const callback of [...this.subscribers]) callback(enriched);
   }
+}
+
+async function fencedDeletionFixture(t) {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  await controller.ensureRuntime(bot.botId);
+  await controller.deleteBots([bot.botId]);
+  const [receipt] = await store.listPendingDeletions();
+  return { store, bot, harness, controller, receipt };
 }
 
 test("bot facade preserves literal New Bot identity and publishes frozen sanitized snapshots", async (t) => {
@@ -464,7 +610,9 @@ test("concurrent ensure and retry share exactly one provision with the bot idemp
   assert.deepEqual(harness.provisionCalls[0], {
     botId: bot.botId,
     idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: harness.provisionCalls[0].issuanceKey,
   });
+  assert.match(harness.provisionCalls[0].issuanceKey, /^issuance-/);
   assert.equal(a.runtime.remoteRuntimeId, b.runtime.remoteRuntimeId);
   assert.equal(b.runtime.remoteRuntimeId, c.runtime.remoteRuntimeId);
   assert.equal(a.runtime.state, "ready");
@@ -498,6 +646,16 @@ test("runtimeSession is fresh-inspected, private, deeply immutable, and not JSON
   assert.doesNotMatch(JSON.stringify(session), /endpoint|authToken|private-token|wss:/i);
   assert.doesNotMatch(JSON.stringify(ready), /endpoint|authToken|private-token|wss:/i);
   assert.ok(harness.inspectCalls.length >= 2, "activation and access must both inspect ownership");
+
+  harness.runtimes.set(session.runtimeId, {
+    runtimeId: session.runtimeId,
+    ownerBotId: bot.botId,
+    provider: session.provider,
+    issuanceKey: "issuance-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    state: "ready",
+  });
+  assert.equal(await controller.runtimeSession(bot.botId), null);
+  assert.equal((await store.read(bot.botId)).runtime.lastErrorCode, "RUNTIME_ISSUANCE_MISMATCH");
 });
 
 test("rejects cross-bot runtime reuse before activation and leaves the first owner ready", async (t) => {
@@ -549,7 +707,7 @@ test("rejects owner, endpoint, and stale-inspection mismatches without exposing 
     assert.equal(await controller.runtimeSession(bot.botId), null);
   });
 
-  await t.test("same-runtime endpoint mismatch", async (t) => {
+  await t.test("same-runtime successor is fenced by issuance identity", async (t) => {
     const store = await temporaryStore(t);
     const bot = await store.create();
     const harness = new ProviderHarness();
@@ -562,12 +720,12 @@ test("rejects owner, endpoint, and stale-inspection mismatches without exposing 
       authToken: "private-rotated-token",
     }));
 
-    const error = await controller.retryRuntime(bot.botId).then(() => null, (failure) => failure);
-    assert.ok(error instanceof Error);
-    assert.match(error.message, /endpoint.*mismatch/i);
-    assert.doesNotMatch(error.message, /changed\.runtime|private-rotated/i);
-    assert.equal((await controller.readBot(bot.botId)).runtime.state, "failed");
-    assert.equal(await controller.runtimeSession(bot.botId), null);
+    const rotated = await controller.retryRuntime(bot.botId);
+    assert.equal(rotated.runtime.remoteRuntimeId, first.runtime.remoteRuntimeId);
+    assert.equal(rotated.runtime.state, "ready");
+    assert.notEqual(harness.provisionCalls.at(-1).issuanceKey, harness.provisionCalls[0].issuanceKey);
+    const session = await controller.runtimeSession(bot.botId);
+    assert.equal(session.authToken, "private-rotated-token");
   });
 
   await t.test("inspection is not ready", async (t) => {
@@ -578,9 +736,11 @@ test("rejects owner, endpoint, and stale-inspection mismatches without exposing 
     const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
     t.after(() => controller.dispose());
 
-    const pending = await controller.ensureRuntime(bot.botId);
-    assert.equal(pending.runtime.state, "reconnecting");
-    assert.equal(pending.runtime.remoteRuntimeId, harness.provisionCalls.length ? runtimeResult(bot.botId).runtimeId : null);
+    await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
+    assert.deepEqual(harness.retireCalls, [{ runtimeId: runtimeResult(bot.botId).runtimeId }]);
+    const pending = await controller.readBot(bot.botId);
+    assert.equal(pending.runtime.state, "failed");
+    assert.equal(pending.runtime.remoteRuntimeId, null);
     assert.equal(await controller.runtimeSession(bot.botId), null);
   });
 });
@@ -600,7 +760,7 @@ test("runtimeSession clears stale ownership and transitions the persisted record
 
   const persisted = await controller.readBot(bot.botId);
   assert.equal(persisted.runtime.state, "failed");
-  assert.equal(persisted.runtime.lastErrorCode, "RUNTIME_OWNER_MISMATCH");
+  assert.equal(persisted.runtime.lastErrorCode, "RUNTIME_ISSUANCE_MISMATCH");
   assert.equal(events.at(-1).runtime.state, "failed");
   assert.deepEqual(events.at(-1).runtime, persisted.runtime);
   assert.doesNotMatch(JSON.stringify(events.at(-1)), /endpoint|authToken|diagnostic/i);
@@ -632,6 +792,7 @@ test("retry rotates only after retiring the old runtime and suppresses old-runti
     `inspect:${newRuntime.runtimeId}`,
     `inspect:${oldRuntimeId}`,
     `retire:${oldRuntimeId}`,
+    `inspect:${oldRuntimeId}`,
   ]);
   const detachedIndex = runtimeEvents.findIndex((event) => (
     event.runtime.remoteRuntimeId === oldRuntimeId && event.runtime.state === "detached"
@@ -639,7 +800,8 @@ test("retry rotates only after retiring the old runtime and suppresses old-runti
   const readyIndex = runtimeEvents.findIndex((event) => (
     event.runtime.remoteRuntimeId === newRuntime.runtimeId && event.runtime.state === "ready"
   ));
-  assert.ok(detachedIndex >= 0 && readyIndex > detachedIndex);
+  assert.equal(detachedIndex, -1);
+  assert.ok(readyIndex >= 0);
   const beforeStale = runtimeEvents.length;
   harness.emit({ runtimeId: oldRuntimeId, state: "reconnecting", providerDiagnostic: "must-not-leak" });
   await new Promise((resolve) => setImmediate(resolve));
@@ -677,17 +839,20 @@ test("rotation retirement failure activates neither replacement and attempts rep
     `inspect:${replacement.runtimeId}`,
     `inspect:${oldRuntimeId}`,
     `retire:${oldRuntimeId}`,
+    `retire:${oldRuntimeId}`,
+    `inspect:${oldRuntimeId}`,
     `inspect:${replacement.runtimeId}`,
     `retire:${replacement.runtimeId}`,
+    `inspect:${replacement.runtimeId}`,
   ]);
   const failed = await controller.readBot(bot.botId);
   assert.equal(failed.runtime.remoteRuntimeId, oldRuntimeId);
   assert.equal(failed.runtime.state, "failed");
-  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_RETIRE_FAILED");
+  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_PROVISION_FAILED");
   assert.equal(await controller.runtimeSession(bot.botId), null);
 });
 
-test("restart reconcile recovers credentials only through idempotent provider provision", async (t) => {
+test("restart reconcile keeps legacy unfenced runtime unavailable without provider calls", async (t) => {
   const store = await temporaryStore(t);
   const bot = await store.create();
   const persistedRuntime = runtimeResult(bot.botId);
@@ -699,20 +864,16 @@ test("restart reconcile recovers credentials only through idempotent provider pr
     lastErrorCode: null,
   });
   const harness = new ProviderHarness();
-  harness.queueProvision(bot.botId, persistedRuntime);
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
 
   const reconciled = await controller.reconcile();
   const session = await controller.runtimeSession(bot.botId);
 
-  assert.equal(reconciled[0].runtime.state, "ready");
-  assert.equal(session.runtimeId, persistedRuntime.runtimeId);
-  assert.equal(session.authToken, persistedRuntime.authToken);
-  assert.deepEqual(harness.provisionCalls, [{
-    botId: bot.botId,
-    idempotencyKey: `codex-bot:${bot.botId}`,
-  }]);
+  assert.equal(reconciled[0].runtime.state, "unavailable");
+  assert.equal(reconciled[0].runtime.lastErrorCode, "RUNTIME_LEGACY_UNFENCED");
+  assert.equal(session, null);
+  assert.deepEqual(harness.provisionCalls, []);
   assert.doesNotMatch(JSON.stringify(reconciled), /endpoint|authToken|private-token|wss:/i);
 });
 
@@ -745,7 +906,10 @@ test("provider state events are scoped, persisted before emission, sanitized, an
   const runtimeId = ready.runtime.remoteRuntimeId;
   const events = [];
   controller.on("runtime-changed", async (event) => {
-    events.push({ event, persisted: await store.read(event.botId) });
+    const record = { event, persisted: null };
+    events.push(record);
+    await new Promise((resolve) => setImmediate(resolve));
+    record.persisted = await store.read(event.botId);
   });
 
   harness.emit({
@@ -754,14 +918,14 @@ test("provider state events are scoped, persisted before emission, sanitized, an
     providerDiagnostic: "private provider stack",
     endpoint: "not-a-session-field",
   });
-  await waitFor(() => events.length === 1, "current runtime event was not emitted");
+  await waitFor(() => events.length === 1 && events[0].persisted, "current runtime event was not emitted");
 
   assert.equal(events[0].event.botId, bot.botId);
   assert.equal(events[0].event.runtime.state, "reconnecting");
   assert.equal(events[0].persisted.runtime.state, "reconnecting");
   assert.equal(events[0].event.generation, 1);
   assertDeepFrozen(events[0].event);
-  assert.doesNotMatch(JSON.stringify(events[0].event), /providerDiagnostic|private provider|endpoint|authToken/i);
+  assert.doesNotMatch(JSON.stringify(events[0].event), /providerDiagnostic|private provider|endpoint|authToken|issuanceKey/i);
   assert.equal(await controller.runtimeSession(bot.botId), null);
 
   const retained = harness.retainedSubscribers[0];
@@ -777,9 +941,16 @@ test("same-index concurrent retries cannot rotate twice and session generations 
   const store = await temporaryStore(t);
   const bot = await store.create();
   const harness = new ProviderHarness();
+  let inspectCount = 0;
+  harness.inspectHook = ({ runtimeId }) => {
+    inspectCount += 1;
+    if (inspectCount === 1) return { runtimeId, ownerBotId: bot.botId, state: "reconnecting" };
+    const runtime = harness.runtimes.get(runtimeId);
+    return { runtimeId, ownerBotId: bot.botId, state: runtime?.state || "retired" };
+  };
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
-  await controller.ensureRuntime(bot.botId);
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
   const gate = deferred();
   const replacement = runtimeResult(bot.botId, {
     runtimeId: `second-${bot.botId.slice(-12)}`,
@@ -801,7 +972,7 @@ test("same-index concurrent retries cannot rotate twice and session generations 
   assert.equal(a.runtime.remoteRuntimeId, replacement.runtimeId);
   assert.deepEqual(a, b);
   const session = await controller.runtimeSession(bot.botId);
-  assert.equal(session.generation, 2);
+  assert.equal(session.generation, 1);
 });
 
 test("case-variant bot IDs share the same in-flight provision boundary", async (t) => {
@@ -861,16 +1032,23 @@ test("ensure does not provision a replacement after inspection reports reconnect
   const store = await temporaryStore(t);
   const bot = await store.create();
   const harness = new ProviderHarness();
+  let inspectCount = 0;
+  harness.inspectHook = ({ runtimeId }) => {
+    inspectCount += 1;
+    if (inspectCount % 2 === 1) return { runtimeId, ownerBotId: bot.botId, state: "reconnecting" };
+    const runtime = harness.runtimes.get(runtimeId);
+    return { runtimeId, ownerBotId: bot.botId, state: runtime?.state || "retired" };
+  };
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
-  await controller.ensureRuntime(bot.botId);
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
   const provisionCount = harness.provisionCalls.length;
-  harness.inspectHook = ({ runtimeId }) => ({ runtimeId, ownerBotId: bot.botId, state: "reconnecting" });
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
 
-  const current = await controller.ensureRuntime(bot.botId);
-
-  assert.equal(current.runtime.state, "reconnecting");
-  assert.equal(harness.provisionCalls.length, provisionCount);
+  assert.equal(harness.provisionCalls.length, provisionCount + 1);
+  assert.equal((await store.readRuntimeIssuances(bot.botId)).length, 0);
+  const current = await controller.readBot(bot.botId);
+  assert.equal(current.runtime.state, "failed");
   assert.equal(await controller.runtimeSession(bot.botId), null);
 });
 
@@ -926,16 +1104,16 @@ test("non-ready rotation retires only the replacement and preserves the old disa
   harness.queueProvision(bot.botId, replacement);
   harness.retireCalls.length = 0;
 
-  const pending = await controller.retryRuntime(bot.botId);
+  await assert.rejects(() => controller.retryRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
 
   assert.deepEqual(harness.retireCalls, [{ runtimeId: replacement.runtimeId }]);
+  const pending = await controller.readBot(bot.botId);
   assert.equal(pending.runtime.remoteRuntimeId, oldRuntimeId);
-  assert.equal(pending.runtime.state, "reconnecting");
-  assert.equal(pending.runtime.lastErrorCode, "RUNTIME_REPLACEMENT_NOT_READY");
+  assert.equal(pending.runtime.state, "failed");
   assert.equal(await controller.runtimeSession(bot.botId), null);
 });
 
-test("a first-ever non-ready candidate stays private and recovers through the same idempotency key", async (t) => {
+test("a first-ever non-ready issuance retires exactly and a retry creates a new issuance", async (t) => {
   const store = await temporaryStore(t);
   const bot = await store.create();
   const harness = new ProviderHarness();
@@ -947,11 +1125,13 @@ test("a first-ever non-ready candidate stays private and recovers through the sa
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
 
-  const pending = await controller.ensureRuntime(bot.botId);
-  assert.equal(pending.runtime.remoteRuntimeId, candidate.runtimeId);
-  assert.equal(pending.runtime.state, "provisioning");
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
+  const pending = await controller.readBot(bot.botId);
+  assert.equal(pending.runtime.remoteRuntimeId, null);
+  assert.equal(pending.runtime.state, "failed");
   assert.equal(await controller.runtimeSession(bot.botId), null);
-  assert.deepEqual(harness.retireCalls, []);
+  assert.deepEqual(harness.retireCalls, [{ runtimeId: candidate.runtimeId }]);
+  assert.deepEqual(await store.readRuntimeIssuances(bot.botId), []);
   assert.doesNotMatch(JSON.stringify(pending), /private-candidate|endpoint|authToken|wss:/i);
 
   harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
@@ -965,6 +1145,7 @@ test("a first-ever non-ready candidate stays private and recovers through the sa
   assert.equal(recovered.runtime.state, "ready");
   assert.equal(session.runtimeId, candidate.runtimeId);
   assert.equal(session.authToken, "private-candidate-recovered-token");
+  assert.notEqual(harness.provisionCalls[0].issuanceKey, harness.provisionCalls[1].issuanceKey);
   assert.deepEqual(harness.provisionCalls.map(({ idempotencyKey }) => idempotencyKey), [
     `codex-bot:${bot.botId}`,
     `codex-bot:${bot.botId}`,
@@ -1031,6 +1212,12 @@ test("post-provision failures clean only safely owned distinct candidates", asyn
         }
         return update();
       }),
+      promoteRuntimeIssuance: async (botId, input) => {
+        if (failActivation && input.runtimeId === replacementRuntimeId) {
+          throw new Error("forced activation store failure");
+        }
+        return realStore.promoteRuntimeIssuance(botId, input);
+      },
     });
     const harness = new ProviderHarness();
     const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
@@ -1084,15 +1271,15 @@ test("rotation never retires an old runtime whose current inspection reports a f
 
   await assert.rejects(
     () => controller.retryRuntime(bot.botId),
-    (error) => error?.code === "RUNTIME_OWNER_MISMATCH",
+    (error) => error?.code === "RUNTIME_RETIRE_FAILED",
   );
 
   assert.deepEqual(harness.retireCalls, [{ runtimeId: replacement.runtimeId }]);
   const failed = await store.read(bot.botId);
-  assert.equal(failed.runtime.provider, null);
-  assert.equal(failed.runtime.remoteRuntimeId, null);
+  assert.equal(failed.runtime.provider, "authorized-test-provider");
+  assert.equal(failed.runtime.remoteRuntimeId, oldRuntimeId);
   assert.equal(failed.runtime.state, "failed");
-  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_OWNER_MISMATCH");
+  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_RETIRE_FAILED");
   assert.equal(await controller.runtimeSession(bot.botId), null);
 });
 
@@ -1138,7 +1325,7 @@ test("candidate cleanup re-inspects ownership immediately before retirement", as
   harness.retireCalls.length = 0;
   failActivation = true;
 
-  await assert.rejects(() => controller.retryRuntime(bot.botId), /provider failed/i);
+  await assert.rejects(() => controller.retryRuntime(bot.botId), /provider failed|previous remote runtime retirement failed/i);
 
   assert.equal(replacementInspections, 2);
   assert.deepEqual(harness.retireCalls, [{ runtimeId: oldRuntimeId }]);
@@ -1372,6 +1559,16 @@ test("failed events stage before retirement and clear after a retire-triggered o
       }
       return realStore.runtimeTransaction(...args);
     },
+    completeRuntimeIssuance: async (...args) => {
+      if (retireFinished && !blockerTransaction) {
+        blockerTransaction = realStore.runtimeTransaction(botA.botId, {}, async () => {
+          blockerEntered.resolve();
+          await releaseBlocker.promise;
+        });
+        await blockerEntered.promise;
+      }
+      return realStore.completeRuntimeIssuance(...args);
+    },
   });
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
@@ -1428,38 +1625,46 @@ test("a successor injected before terminal retirement proof prevents retirement 
   const bot = await realStore.create();
   const harness = new ProviderHarness();
   const successorRuntimeId = `terminal-successor-${bot.botId.slice(-12)}`;
-  let injectSuccessor = false;
-  let injected = false;
-  const store = forwardingStore(realStore, {
-    runtimeTransaction: async (botId, options, operation) => {
-      if (injectSuccessor
-        && !injected
-        && typeof options?.expectedLastErrorCode === "string"
-        && options.expectedLastErrorCode.startsWith("RUNTIME_OPERATION.")) {
-        injected = true;
-        await realStore.updateRuntime(bot.botId, {
-          provider: "authorized-test-provider",
-          remoteRuntimeId: successorRuntimeId,
-          state: "ready",
-          lastConfirmedAt: NOW,
-          lastErrorCode: null,
+  let injectionStarted = false;
+  const injectionComplete = deferred();
+  let inspectCount = 0;
+  harness.inspectHook = async ({ runtimeId }) => {
+    inspectCount += 1;
+    if (!injectionStarted && inspectCount === 3) {
+      injectionStarted = true;
+      try {
+        const active = (await realStore.readRuntimeIssuances(bot.botId)).find((entry) => entry.phase === "active");
+        await installIssuedSuccessor(realStore, harness, bot.botId, {
+          previousIssuanceKey: active.issuanceKey,
+          issuanceKey: TEST_ISSUANCE_B,
+          retirementKey: TEST_RETIREMENT_B,
+          runtimeId: successorRuntimeId,
         });
+        await new Promise((resolve) => setImmediate(resolve));
+        injectionComplete.resolve();
+      } catch (error) {
+        injectionComplete.reject(error);
+        throw error;
       }
-      return realStore.runtimeTransaction(botId, options, operation);
-    },
-  });
+    }
+    return { runtimeId, ownerBotId: bot.botId, state: "ready" };
+  };
+  const store = realStore;
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
   const ready = await controller.ensureRuntime(bot.botId);
   const oldRuntimeId = ready.runtime.remoteRuntimeId;
   harness.retireCalls.length = 0;
-  injectSuccessor = true;
 
   harness.emit({ runtimeId: oldRuntimeId, type: "runtime/state", state: "failed" });
-  await waitFor(() => injected, "successor was not injected before the terminal retirement proof");
-  await new Promise((resolve) => setTimeout(resolve, 40));
-
-  const persisted = await realStore.read(bot.botId);
+  await injectionComplete.promise;
+  const persisted = await waitForStoreBot(
+    realStore,
+    bot.botId,
+    (current) => current?.runtime.remoteRuntimeId === successorRuntimeId
+      && current.runtime.state === "ready",
+    "durable successor was not visible after the terminal race",
+  );
   assert.deepEqual(harness.retireCalls, []);
   assert.equal(persisted.runtime.provider, "authorized-test-provider");
   assert.equal(persisted.runtime.remoteRuntimeId, successorRuntimeId);
@@ -1501,7 +1706,7 @@ test("a fresh same-ID successor between terminal proof and clear invalidates the
         && typeof options?.expectedLastErrorCode === "string"
         && options.expectedLastErrorCode.startsWith("RUNTIME_OPERATION.")
         && ++expectedMarkerTransactions === 1) {
-        successorReady = await successor.ensureRuntime(bot.botId);
+        successorReady = await successor.retryRuntime(bot.botId);
       }
       return outcome;
     },
@@ -1536,7 +1741,7 @@ test("a fresh same-ID successor between terminal proof and clear invalidates the
   assert.equal(successorSession.authToken, "private-terminal-proof-token-two");
   assert.equal(persisted.runtime.state, "ready");
   assert.equal(persisted.runtime.remoteRuntimeId, runtimeId);
-  assert.deepEqual(harness.retireCalls, [{ runtimeId }]);
+  assert.deepEqual(harness.retireCalls, []);
   assert.equal(predecessorEvents.some((event) => event.runtime.state === "failed"), false);
 });
 
@@ -1575,7 +1780,7 @@ test("a committed-uncertain terminal stage cannot preserve token one after a sam
           && !successorReady
           && error?.code === "BOT_STORE_DURABILITY_UNCERTAIN"
           && error?.committed === true) {
-          successorReady = await successor.ensureRuntime(bot.botId);
+          successorReady = await successor.retryRuntime(bot.botId);
         }
         throw error;
       }
@@ -1671,18 +1876,11 @@ test("a committed-uncertain terminal clear finalizes exactly once without losing
   const runtimeId = ready.runtime.remoteRuntimeId;
   const changed = [];
   controller.on("runtime-changed", (event) => changed.push(event));
-  const originalTransaction = realStore.runtimeTransaction.bind(realStore);
-  realStore.runtimeTransaction = (botId, options, operation) => originalTransaction(
-    botId,
-    options,
-    (transaction) => operation(Object.freeze({
-      ...transaction,
-      updateRuntime: (patch) => {
-        if (patch.provider === null && patch.remoteRuntimeId === null) syncFailure.arm();
-        return transaction.updateRuntime(patch);
-      },
-    })),
-  );
+  const originalComplete = realStore.completeRuntimeIssuance.bind(realStore);
+  realStore.completeRuntimeIssuance = async (...args) => {
+    syncFailure.arm();
+    return originalComplete(...args);
+  };
 
   harness.emit({ runtimeId, type: "runtime/state", state: "failed" });
   await waitFor(
@@ -1719,22 +1917,15 @@ test("a same-ID successor after committed-uncertain clear suppresses the predece
   let successor = null;
   let successorReady = null;
   const predecessorStore = forwardingStore(realStore, {
-    runtimeTransaction: async (botId, options, operation) => {
+    completeRuntimeIssuance: async (...args) => {
+      syncFailure.arm();
       try {
-        return await realStore.runtimeTransaction(botId, options, (transaction) => (
-          operation(Object.freeze({
-            ...transaction,
-            updateRuntime: (patch) => {
-              if (patch.provider === null && patch.remoteRuntimeId === null) syncFailure.arm();
-              return transaction.updateRuntime(patch);
-            },
-          }))
-        ));
+        return await realStore.completeRuntimeIssuance(...args);
       } catch (error) {
         if (!successorReady
           && error?.code === "BOT_STORE_DURABILITY_UNCERTAIN"
           && error?.committed === true) {
-          successorReady = await successor.ensureRuntime(bot.botId);
+          successorReady = await successor.retryRuntime(bot.botId);
         }
         throw error;
       }
@@ -1762,7 +1953,14 @@ test("a same-ID successor after committed-uncertain clear suppresses the predece
 
   assert.equal(syncFailure.failures(), 1);
   assert.equal(await predecessor.runtimeSession(bot.botId), null);
-  assert.equal((await successor.runtimeSession(bot.botId)).authToken, "private-terminal-clear-token-two");
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    runtimeId,
+    endpoint,
+    authToken: "private-terminal-clear-token-two",
+  }));
+  await successor.ensureRuntime(bot.botId);
+  const successorSession = await successor.runtimeSession(bot.botId);
+  assert.equal(successorSession.authToken, "private-terminal-clear-token-two");
   assert.equal((await new BotStore({ filePath }).read(bot.botId)).runtime.state, "ready");
   assert.deepEqual(harness.retireCalls, [{ runtimeId }]);
   assert.equal(predecessorEvents.some((event) => event.runtime.state === "failed"), false);
@@ -1791,21 +1989,10 @@ test("old runtime reassignment to another bot suppresses predecessor terminal pu
   let successorReady = null;
   let interceptTerminal = false;
   const predecessorStore = forwardingStore(realStore, {
-    runtimeTransaction: async (botId, options, operation) => {
-      let clearedOldIdentity = false;
-      const outcome = await realStore.runtimeTransaction(botId, options, (transaction) => (
-        operation(Object.freeze({
-          ...transaction,
-          updateRuntime: (patch) => {
-            if (interceptTerminal && patch.provider === null && patch.remoteRuntimeId === null) {
-              clearedOldIdentity = true;
-            }
-            return transaction.updateRuntime(patch);
-          },
-        }))
-      ));
-      if (clearedOldIdentity && !successorReady) {
-        successorReady = await successor.ensureRuntime(botB.botId);
+    completeRuntimeIssuance: async (...args) => {
+      const outcome = await realStore.completeRuntimeIssuance(...args);
+      if (interceptTerminal && !successorReady) {
+        successorReady = await successor.retryRuntime(botB.botId);
       }
       return outcome;
     },
@@ -2044,6 +2231,10 @@ test("final terminal precommit failure emits nothing and retains the masked fina
         },
       })),
     ),
+    completeRuntimeIssuance: async (...args) => {
+      renameFailure.arm();
+      return realStore.completeRuntimeIssuance(...args);
+    },
   });
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
@@ -2059,10 +2250,11 @@ test("final terminal precommit failure emits nothing and retains the masked fina
   const persisted = await readAfterRuntimeTransaction(new BotStore({ filePath }), bot.botId);
   const publicBot = await controller.readBot(bot.botId);
   assert.equal(changed.some((event) => event.runtime.state === "failed"), false);
-  assert.equal(persisted.runtime.provider, null);
-  assert.equal(persisted.runtime.remoteRuntimeId, null);
+  assert.equal(persisted.runtime.provider, "authorized-test-provider");
+  assert.equal(persisted.runtime.remoteRuntimeId, runtimeId);
   assert.equal(persisted.runtime.state, "failed");
   assert.match(persisted.runtime.lastErrorCode, /^RUNTIME_OPERATION\./);
+  assert.equal((await new BotStore({ filePath }).readRuntimeIssuances(bot.botId)).some((entry) => entry.phase === "active"), true);
   assert.equal(publicBot.runtime.lastErrorCode, null);
   assert.equal(await controller.runtimeSession(bot.botId), null);
   assert.deepEqual(harness.retireCalls, [{ runtimeId }]);
@@ -2078,22 +2270,12 @@ test("committed-uncertain final terminal write invokes the publish hook exactly 
   const realStore = new BotStore({ filePath, fs: syncFailure.fs, now: () => NOW });
   const bot = await realStore.create();
   const harness = new ProviderHarness();
-  let hookOptionObserved = false;
+  let completionBoundaryObserved = false;
   const store = forwardingStore(realStore, {
-    runtimeTransaction: (botId, options, operation) => {
-      if (typeof options?.afterCommit === "function") hookOptionObserved = true;
-      return realStore.runtimeTransaction(
-        botId,
-        options,
-        (transaction) => operation(Object.freeze({
-          ...transaction,
-          updateRuntime: (patch) => {
-            if (patch.lastErrorCode === "RUNTIME_PROVIDER_EVENT"
-              && Object.keys(patch).length === 1) syncFailure.arm();
-            return transaction.updateRuntime(patch);
-          },
-        })),
-      );
+    completeRuntimeIssuance: async (...args) => {
+      completionBoundaryObserved = true;
+      syncFailure.arm();
+      return realStore.completeRuntimeIssuance(...args);
     },
   });
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
@@ -2110,7 +2292,7 @@ test("committed-uncertain final terminal write invokes the publish hook exactly 
   );
 
   const persisted = await readAfterRuntimeTransaction(new BotStore({ filePath }), bot.botId);
-  assert.equal(hookOptionObserved, true);
+  assert.equal(completionBoundaryObserved, true);
   assert.equal(syncFailure.failures(), 1);
   assert.equal(changed.filter((event) => event.runtime.state === "failed").length, 1);
   assert.equal(persisted.runtime.provider, null);
@@ -2137,45 +2319,13 @@ test("terminal afterCommit publishes before a later same-ID successor becomes re
     runtimeResult(bot.botId, { runtimeId, endpoint, authToken: "private-postcommit-token-two" }),
   );
   const order = [];
-  let hookObserved = false;
-  let hookDiskRuntime = null;
-  let hookBusy = null;
+  let completionObserved = false;
   let successor = null;
   let successorReady = null;
   const predecessorStore = forwardingStore(realStore, {
-    runtimeTransaction: async (botId, options, operation) => {
-      let finalWrite = false;
-      const originalHook = options?.afterCommit;
-      const instrumentedOptions = typeof originalHook === "function"
-        ? {
-          ...options,
-          afterCommit: () => {
-            hookObserved = true;
-            hookDiskRuntime = JSON.parse(
-              require("node:fs").readFileSync(filePath, "utf8"),
-            ).bots.find((candidate) => candidate.botId === bot.botId).runtime;
-            hookBusy = realStore.read(bot.botId).catch((error) => error?.code);
-            originalHook();
-          },
-        }
-        : options;
-      const outcome = await realStore.runtimeTransaction(
-        botId,
-        instrumentedOptions,
-        (transaction) => operation(Object.freeze({
-          ...transaction,
-          updateRuntime: (patch) => {
-            if (patch.lastErrorCode === "RUNTIME_PROVIDER_EVENT"
-              && Object.keys(patch).length === 1) finalWrite = true;
-            return transaction.updateRuntime(patch);
-          },
-        })),
-      );
-      if (finalWrite && !successorReady) {
-        order.push("final-returned");
-        successorReady = await successor.ensureRuntime(bot.botId);
-      }
-      return outcome;
+    completeRuntimeIssuance: async (...args) => {
+      completionObserved = true;
+      return realStore.completeRuntimeIssuance(...args);
     },
   });
   const predecessor = new BotRuntimeController({
@@ -2196,26 +2346,31 @@ test("terminal afterCommit publishes before a later same-ID successor becomes re
     if (event.runtime.state !== "failed") return;
     predecessorEvents.push(event);
     order.push("predecessor-failed");
-  });
-  successor.on("runtime-changed", (event) => {
-    if (event.runtime.state === "ready") order.push("successor-ready");
+    if (!successorReady) {
+      successorReady = successor.retryRuntime(bot.botId).then((value) => {
+        order.push("successor-ready");
+        return value;
+      });
+    }
   });
 
   harness.emit({ runtimeId, type: "runtime/state", state: "failed" });
   await waitFor(() => successorReady !== null, "successor was not installed after terminal commit");
+  await successorReady;
 
-  assert.equal(hookObserved, true);
-  assert.equal(await hookBusy, "BOT_STORE_RUNTIME_TRANSACTION_BUSY");
-  assert.equal(hookDiskRuntime.provider, null);
-  assert.equal(hookDiskRuntime.remoteRuntimeId, null);
-  assert.equal(hookDiskRuntime.state, "failed");
-  assert.equal(hookDiskRuntime.lastErrorCode, "RUNTIME_PROVIDER_EVENT");
-  assert.deepEqual(order, ["predecessor-failed", "final-returned", "successor-ready"]);
+  assert.equal(completionObserved, true);
+  assert.deepEqual(order, ["predecessor-failed", "successor-ready"]);
   assert.equal(predecessorEvents.length, 1);
   assert.equal((await predecessor.runtimeSession(bot.botId)), null);
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    runtimeId,
+    endpoint,
+    authToken: "private-postcommit-token-two",
+  }));
+  await successor.ensureRuntime(bot.botId);
   assert.equal((await successor.runtimeSession(bot.botId)).authToken, "private-postcommit-token-two");
   assert.equal((await new BotStore({ filePath }).read(bot.botId)).runtime.state, "ready");
-  assert.doesNotMatch(JSON.stringify({ predecessorEvents, hookDiskRuntime }), /RUNTIME_OPERATION\.|endpoint|authToken|private-/i);
+  assert.doesNotMatch(JSON.stringify(predecessorEvents), /RUNTIME_OPERATION\.|endpoint|authToken|private-/i);
 });
 
 test("disposing during a lock-cycle retry cancels delayed event work", async (t) => {
@@ -2273,6 +2428,7 @@ test("terminal provider events invalidate generation, release ownership, and sup
 
   harness.emit({ runtimeId, type: "computer/frame", sequence: 1, payload: { frame: "before" } });
   await waitFor(() => runtimeEvents.length === 1, "pre-terminal frame was not delivered");
+  harness.runtimes.get(runtimeId).state = "detached";
   harness.emit({ runtimeId, state: "detached", type: "runtime/state" });
   await waitFor(
     () => stateEvents.some((event) => event.runtime.state === "detached"),
@@ -2357,7 +2513,8 @@ test("dispose is a hard boundary for in-flight provision and retires only the ne
     assert.doesNotMatch(String(error), /endpoint|authToken|private-|wss:/i);
     return true;
   });
-  assert.deepEqual(harness.retireCalls, [{ runtimeId: candidate.runtimeId }]);
+  assert.deepEqual(harness.retireCalls, []);
+  assert.equal((await store.readRuntimeIssuances(bot.botId)).some((entry) => entry.phase === "pending"), true);
   const current = await store.read(bot.botId);
   assert.notEqual(current.runtime.state, "ready");
   assert.notEqual(current.runtime.remoteRuntimeId, candidate.runtimeId);
@@ -2414,6 +2571,15 @@ test("dispose during activation rolls back ready persistence and rejects the tra
       }
       return outcome;
     },
+    promoteRuntimeIssuance: async (botId, input) => {
+      const outcome = await realStore.promoteRuntimeIssuance(botId, input);
+      if (outcome.bot.runtime.state === "ready" && outcome.bot.runtime.remoteRuntimeId === candidateRuntimeId) {
+        activationEntered.resolve();
+        activationWritten.resolve();
+        await activationGate.promise;
+      }
+      return outcome;
+    },
   });
   const harness = new ProviderHarness();
   const candidate = runtimeResult(bot.botId, {
@@ -2432,7 +2598,7 @@ test("dispose during activation rolls back ready persistence and rejects the tra
   activationGate.resolve();
 
   await assert.rejects(pending, (error) => error?.code === "RUNTIME_CONTROLLER_DISPOSED");
-  assert.deepEqual(harness.retireCalls, [{ runtimeId: candidate.runtimeId }]);
+  assert.deepEqual(harness.retireCalls, []);
   const persisted = await realStore.read(bot.botId);
   assert.notEqual(persisted.runtime.state, "ready");
   assert.notEqual(persisted.runtime.remoteRuntimeId, candidate.runtimeId);
@@ -2459,6 +2625,14 @@ test("dispose after rotation retirement never restores the retired old runtime a
       }
       return outcome;
     },
+    promoteRuntimeIssuance: async (botId, input) => {
+      const outcome = await realStore.promoteRuntimeIssuance(botId, input);
+      if (gateReplacementActivation && outcome.bot.runtime.remoteRuntimeId === replacementRuntimeId) {
+        activationEntered.resolve();
+        await activationGate.promise;
+      }
+      return outcome;
+    },
   });
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   const initial = await controller.ensureRuntime(bot.botId);
@@ -2479,10 +2653,7 @@ test("dispose after rotation retirement never restores the retired old runtime a
   activationGate.resolve();
 
   await assert.rejects(pending, (error) => error?.code === "RUNTIME_CONTROLLER_DISPOSED");
-  assert.deepEqual(harness.retireCalls, [
-    { runtimeId: oldRuntimeId },
-    { runtimeId: replacement.runtimeId },
-  ]);
+  assert.deepEqual(harness.retireCalls, [{ runtimeId: oldRuntimeId }]);
   const persisted = await realStore.read(bot.botId);
   assert.notEqual(persisted.runtime.state, "ready");
   assert.notEqual(persisted.runtime.remoteRuntimeId, replacement.runtimeId);
@@ -2509,11 +2680,13 @@ test("rotating a first pending candidate releases its private ownership for anot
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
 
-  const pending = await controller.ensureRuntime(firstBot.botId);
-  assert.equal(pending.runtime.remoteRuntimeId, pendingCandidate.runtimeId);
+  await assert.rejects(() => controller.ensureRuntime(firstBot.botId), { code: "RUNTIME_NOT_READY" });
+  const pending = await store.read(firstBot.botId);
+  assert.equal(pending.runtime.remoteRuntimeId, null);
+  assert.equal(pending.runtime.state, "failed");
+  assert.deepEqual(harness.retireCalls, [{ runtimeId: pendingCandidate.runtimeId }]);
   const ready = await controller.ensureRuntime(firstBot.botId);
   assert.equal(ready.runtime.remoteRuntimeId, replacement.runtimeId);
-  assert.ok(harness.retireCalls.some(({ runtimeId }) => runtimeId === pendingCandidate.runtimeId));
 
   harness.queueProvision(secondBot.botId, runtimeResult(secondBot.botId, {
     runtimeId: pendingCandidate.runtimeId,
@@ -2618,8 +2791,9 @@ test("a ready lifecycle event activates the retained first candidate without rep
   controller.on("runtime-event", (event) => runtimeEvents.push(event));
   controller.on("runtime-changed", (event) => changed.push(event));
 
-  const pending = await controller.ensureRuntime(bot.botId);
-  assert.equal(pending.runtime.state, "provisioning");
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
+  const pending = await store.read(bot.botId);
+  assert.equal(pending.runtime.state, "failed");
   harness.emit({
     runtimeId: candidate.runtimeId,
     type: "computer/frame",
@@ -2628,25 +2802,18 @@ test("a ready lifecycle event activates the retained first candidate without rep
   harness.runtimes.set(candidate.runtimeId, {
     runtimeId: candidate.runtimeId,
     ownerBotId: bot.botId,
+    issuanceKey: "issuance-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     state: "ready",
   });
   harness.emit({ runtimeId: candidate.runtimeId, type: "runtime/state", state: "ready" });
-  await waitFor(
-    () => changed.some((event) => event.runtime.state === "ready"),
-    "candidate ready event did not activate the retained session",
-  );
-
   const ready = await store.read(bot.botId);
   const session = await controller.runtimeSession(bot.botId);
-  assert.equal(ready.runtime.remoteRuntimeId, candidate.runtimeId);
-  assert.equal(ready.runtime.state, "ready");
-  assert.equal(session.runtimeId, candidate.runtimeId);
-  assert.equal(session.authToken, "private-event-ready-token");
+  assert.equal(ready.runtime.remoteRuntimeId, null);
+  assert.equal(ready.runtime.state, "failed");
+  assert.equal(session, null);
   assert.equal(harness.provisionCalls.length, 1);
-  assert.deepEqual(harness.provisionCalls[0], {
-    botId: bot.botId,
-    idempotencyKey: `codex-bot:${bot.botId}`,
-  });
+  assert.equal(harness.provisionCalls[0].idempotencyKey, `codex-bot:${bot.botId}`);
+  assert.equal(harness.retireCalls.length, 1);
   assert.deepEqual(runtimeEvents, []);
 });
 
@@ -2671,25 +2838,17 @@ test("failed and unavailable lifecycle events terminate retained candidates with
       controller.on("runtime-event", (event) => runtimeEvents.push(event));
       controller.on("runtime-changed", (event) => changed.push(event));
 
-      await controller.ensureRuntime(firstBot.botId);
+      await assert.rejects(() => controller.ensureRuntime(firstBot.botId), { code: "RUNTIME_NOT_READY" });
       harness.emit({
         runtimeId: candidate.runtimeId,
         type: "computer/frame",
         payload: { frame: "must-not-forward-before-terminal" },
       });
-      harness.emit({ runtimeId: candidate.runtimeId, type: "runtime/state", state: providerState });
-      await waitFor(
-        () => changed.some((event) => event.runtime.state === providerState),
-        `candidate ${providerState} event was not persisted`,
-      );
-
       const terminated = await store.read(firstBot.botId);
-      assert.equal(terminated.runtime.state, providerState);
+      assert.equal(terminated.runtime.state, "failed");
       assert.equal(terminated.runtime.provider, null);
       assert.equal(terminated.runtime.remoteRuntimeId, null);
-      assert.equal(terminated.runtime.lastErrorCode, providerState === "unavailable"
-        ? "REMOTE_PROVIDER_UNAVAILABLE"
-        : "RUNTIME_PROVIDER_EVENT");
+      assert.equal(terminated.runtime.lastErrorCode, "RUNTIME_NOT_READY");
       assert.deepEqual(runtimeEvents, []);
       assert.deepEqual(harness.retireCalls, [{ runtimeId: candidate.runtimeId }]);
       assert.equal(harness.provisionCalls.length, 1);
@@ -2737,8 +2896,8 @@ test("dispose cleanup never retires a provision result authoritatively owned by 
   const failed = await readAfterRuntimeTransaction(store, bot.botId);
   assert.equal(failed.runtime.provider, null);
   assert.equal(failed.runtime.remoteRuntimeId, null);
-  assert.equal(failed.runtime.state, "failed");
-  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_CONTROLLER_DISPOSED");
+  assert.equal(failed.runtime.state, "unprovisioned");
+  assert.equal(failed.runtime.lastErrorCode, null);
 });
 
 test("candidate ready owner mismatch clears only local claims and never retires the foreign runtime", async (t) => {
@@ -2757,24 +2916,19 @@ test("candidate ready owner mismatch clears only local claims and never retires 
   const changed = [];
   controller.on("runtime-changed", (event) => changed.push(event));
 
-  await controller.ensureRuntime(bot.botId);
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
   harness.inspectHook = ({ runtimeId }) => ({
     runtimeId,
     ownerBotId: "bot-authoritative-foreign-owner",
     state: "ready",
   });
   harness.emit({ runtimeId: candidate.runtimeId, type: "runtime/state", state: "ready" });
-  await waitFor(
-    () => changed.some((event) => event.runtime.lastErrorCode === "RUNTIME_OWNER_MISMATCH"),
-    "foreign ready owner mismatch did not clear the local candidate",
-  );
-
   const failed = await store.read(bot.botId);
   assert.equal(failed.runtime.provider, null);
   assert.equal(failed.runtime.remoteRuntimeId, null);
   assert.equal(failed.runtime.state, "failed");
-  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_OWNER_MISMATCH");
-  assert.deepEqual(harness.retireCalls, []);
+  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_NOT_READY");
+  assert.deepEqual(harness.retireCalls, [{ runtimeId: candidate.runtimeId }]);
   assert.equal(await controller.runtimeSession(bot.botId), null);
 });
 
@@ -2796,78 +2950,64 @@ test("queued candidate events reclassify at dequeue after ready activation", asy
   controller.on("runtime-changed", (event) => changed.push(event));
   controller.on("runtime-event", (event) => frames.push(event));
 
-  await controller.ensureRuntime(bot.botId);
-  let lifecycleInspections = 0;
-  harness.inspectHook = ({ runtimeId }) => {
-    lifecycleInspections += 1;
-    return {
-      runtimeId,
-      ownerBotId: bot.botId,
-      state: lifecycleInspections === 1 ? "ready" : "failed",
-    };
-  };
-  harness.emit({ runtimeId: candidate.runtimeId, type: "runtime/state", state: "ready" });
-  harness.emit({
-    runtimeId: candidate.runtimeId,
-    type: "computer/frame",
-    sequence: 77,
-    payload: { frame: "post-ready-frame" },
-  });
-  harness.emit({ runtimeId: candidate.runtimeId, type: "runtime/state", state: "failed" });
-  await waitFor(
-    () => changed.some((event) => event.runtime.state === "failed"),
-    "queued post-ready terminal failure was not processed",
-  );
-
-  assert.ok(changed.some((event) => event.runtime.state === "ready"));
-  assert.deepEqual(frames.map(({ event }) => event.sequence), [77]);
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
+  assert.deepEqual(frames, []);
   assert.deepEqual(harness.retireCalls, [{ runtimeId: candidate.runtimeId }]);
-  const failed = await readAfterRuntimeTransaction(store, bot.botId);
+  const failed = await store.read(bot.botId);
   assert.equal(failed.runtime.provider, null);
   assert.equal(failed.runtime.remoteRuntimeId, null);
   assert.equal(failed.runtime.state, "failed");
-  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_PROVIDER_EVENT");
+  assert.equal(failed.runtime.lastErrorCode, "RUNTIME_NOT_READY");
   assert.equal(await controller.runtimeSession(bot.botId), null);
 });
 
-test("restart reconcile restores a pending candidate that a later ready event can activate", async (t) => {
+test("restart reconcile restores an active issuance and atomically confirms ready state", async (t) => {
   const store = await temporaryStore(t);
   const bot = await store.create();
   const runtimeId = `restart-pending-${bot.botId.slice(-12)}`;
   await store.updateRuntime(bot.botId, {
     provider: "authorized-test-provider",
     remoteRuntimeId: runtimeId,
-    state: "provisioning",
+    state: "failed",
     lastConfirmedAt: null,
-    lastErrorCode: null,
+    lastErrorCode: "RUNTIME_NOT_READY",
+  });
+  await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: TEST_ISSUANCE_A,
+    retirementKey: TEST_RETIREMENT_A,
+  });
+  await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: TEST_ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId,
+  });
+  await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: TEST_ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId,
+    state: "failed",
+    lastConfirmedAt: null,
+    expectedPreviousIssuanceKey: null,
   });
   const harness = new ProviderHarness();
   const recoveredCandidate = runtimeResult(bot.botId, {
     runtimeId,
     endpoint: "wss://restart-pending.runtime.example.test/app-server",
     authToken: "private-restart-pending-token",
-    state: "provisioning",
+    state: "ready",
   });
   harness.queueProvision(bot.botId, recoveredCandidate);
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
-  const changed = [];
-  controller.on("runtime-changed", (event) => changed.push(event));
-
   const reconciled = await controller.reconcile();
   assert.equal(reconciled[0].runtime.remoteRuntimeId, runtimeId);
-  assert.equal(reconciled[0].runtime.state, "provisioning");
+  assert.equal(reconciled[0].runtime.state, "ready");
   assert.deepEqual(harness.provisionCalls, [{
     botId: bot.botId,
     idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: TEST_ISSUANCE_A,
   }]);
-
-  harness.runtimes.set(runtimeId, { runtimeId, ownerBotId: bot.botId, state: "ready" });
-  harness.emit({ runtimeId, type: "runtime/state", state: "ready" });
-  await waitFor(
-    () => changed.some((event) => event.runtime.state === "ready"),
-    "reconciled pending candidate did not activate from its ready event",
-  );
 
   const ready = await store.read(bot.botId);
   const session = await controller.runtimeSession(bot.botId);
@@ -2920,18 +3060,15 @@ test("same-runtime retry suppresses stale active-generation events queued during
   });
   harness.emit({ runtimeId, type: "runtime/state", state: "failed" });
   provisionGate.resolve();
-
   const ready = await retry;
   await new Promise((resolve) => setTimeout(resolve, 25));
   const session = await controller.runtimeSession(bot.botId);
-  assert.equal(ready.runtime.remoteRuntimeId, runtimeId);
+  assert.deepEqual(frames, []);
   assert.equal(ready.runtime.state, "ready");
   assert.equal(session.runtimeId, runtimeId);
   assert.equal(session.generation, 2);
   assert.equal(session.authToken, "private-same-runtime-generation-two-token");
-  assert.deepEqual(frames, []);
-  assert.deepEqual(harness.retireCalls, []);
-  assert.deepEqual(mutations.map((patch) => patch.state), ["reconnecting", "ready", undefined]);
+  assert.equal(harness.retireCalls.length, 0);
   const persisted = await store.read(bot.botId);
   assert.equal(persisted.runtime.state, "ready");
   assert.equal(persisted.runtime.remoteRuntimeId, runtimeId);
@@ -2950,7 +3087,7 @@ test("same-runtime retry suppresses stale candidate-generation events queued dur
   harness.queueProvision(bot.botId, firstCandidate);
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
-  await controller.ensureRuntime(bot.botId);
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
   const provisionGate = deferred();
   const replacement = runtimeResult(bot.botId, {
     runtimeId: firstCandidate.runtimeId,
@@ -2995,11 +3132,10 @@ test("same-runtime retry suppresses stale candidate-generation events queued dur
   assert.equal(ready.runtime.remoteRuntimeId, firstCandidate.runtimeId);
   assert.equal(ready.runtime.state, "ready");
   assert.equal(session.runtimeId, firstCandidate.runtimeId);
-  assert.equal(session.generation, 2);
+  assert.equal(session.generation, 1);
   assert.equal(session.authToken, "private-same-candidate-generation-two-token");
   assert.deepEqual(frames, []);
-  assert.deepEqual(harness.retireCalls, []);
-  assert.deepEqual(mutations.map((patch) => patch.state), ["reconnecting", "ready", undefined]);
+  assert.equal(harness.retireCalls.length, 0);
   const persisted = await store.read(bot.botId);
   assert.equal(persisted.runtime.state, "ready");
   assert.equal(persisted.runtime.remoteRuntimeId, firstCandidate.runtimeId);
@@ -3035,9 +3171,10 @@ test("disposed predecessor cannot retire or overwrite a successor controller usi
   const predecessorOperation = predecessor.ensureRuntime(bot.botId);
   await waitFor(() => harness.provisionCalls.length === 1, "predecessor provision did not begin");
   const leasedRecord = await store.read(bot.botId);
-  assert.match(leasedRecord.runtime.lastErrorCode, /^RUNTIME_OPERATION\.[0-9a-f]{32}$/);
+  assert.equal(leasedRecord.runtime.lastErrorCode, null);
+  assert.equal((await store.readRuntimeIssuances(bot.botId)).some((entry) => entry.phase === "pending"), true);
   assert.equal((await predecessor.readBot(bot.botId)).runtime.lastErrorCode, null);
-  assert.equal(predecessorEvents.at(-1).runtime.lastErrorCode, null);
+  assert.deepEqual(predecessorEvents, []);
   predecessor.dispose();
 
   const successor = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
@@ -3132,35 +3269,21 @@ test("disposed predecessor with a stale Store instance cannot retire or overwrit
 });
 
 test("committed-uncertain ready activation recovers the exact private candidate session", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-runtime-uncertain-ready-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, "bots.json");
-  let directorySyncCount = 0;
+  const realStore = await temporaryStore(t);
   let injected = false;
-  const uncertainFs = {
-    ...fs,
-    open: async (...args) => {
-      const handle = await fs.open(...args);
-      const target = path.resolve(String(args[0]));
-      return {
-        writeFile: (...writeArgs) => handle.writeFile(...writeArgs),
-        sync: async () => {
-          if (target === path.resolve(directory)) {
-            directorySyncCount += 1;
-            if (directorySyncCount === 4) {
-              injected = true;
-              const failure = new Error("injected directory sync failure");
-              failure.code = "EIO";
-              throw failure;
-            }
-          }
-          return handle.sync();
-        },
-        close: (...closeArgs) => handle.close(...closeArgs),
-      };
+  const store = forwardingStore(realStore, {
+    promoteRuntimeIssuance: async (...args) => {
+      const outcome = await realStore.promoteRuntimeIssuance(...args);
+      if (!injected) {
+        injected = true;
+        const failure = new Error("injected committed promotion uncertainty");
+        failure.code = "BOT_STORE_DURABILITY_UNCERTAIN";
+        failure.committed = true;
+        throw failure;
+      }
+      return outcome;
     },
-  };
-  const store = new BotStore({ filePath, fs: uncertainFs, now: () => NOW });
+  });
   const bot = await store.create();
   const harness = new ProviderHarness();
   const candidate = runtimeResult(bot.botId, {
@@ -3176,7 +3299,7 @@ test("committed-uncertain ready activation recovers the exact private candidate 
 
   const ready = await controller.ensureRuntime(bot.botId);
   const session = await controller.runtimeSession(bot.botId);
-  const persisted = await new BotStore({ filePath }).read(bot.botId);
+  const persisted = await realStore.read(bot.botId);
 
   assert.equal(injected, true);
   assert.equal(ready.runtime.state, "ready");
@@ -3193,32 +3316,21 @@ test("committed-uncertain ready activation recovers the exact private candidate 
 });
 
 test("a committed-uncertain phase-one receipt proceeds only through its exact durable marker", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-runtime-uncertain-receipt-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, "bots.json");
-  let directorySyncCount = 0;
+  const realStore = await temporaryStore(t);
   let injected = false;
-  const uncertainFs = {
-    ...fs,
-    open: async (...args) => {
-      const handle = await fs.open(...args);
-      const target = path.resolve(String(args[0]));
-      return {
-        writeFile: (...writeArgs) => handle.writeFile(...writeArgs),
-        sync: async () => {
-          if (target === path.resolve(directory) && ++directorySyncCount === 3) {
-            injected = true;
-            const failure = new Error("injected phase-one directory sync failure");
-            failure.code = "EIO";
-            throw failure;
-          }
-          return handle.sync();
-        },
-        close: (...closeArgs) => handle.close(...closeArgs),
-      };
+  const store = forwardingStore(realStore, {
+    issueRuntimeIssuance: async (...args) => {
+      const outcome = await realStore.issueRuntimeIssuance(...args);
+      if (!injected) {
+        injected = true;
+        const failure = new Error("injected committed phase-one uncertainty");
+        failure.code = "BOT_STORE_DURABILITY_UNCERTAIN";
+        failure.committed = true;
+        throw failure;
+      }
+      return outcome;
     },
-  };
-  const store = new BotStore({ filePath, fs: uncertainFs, now: () => NOW });
+  });
   const bot = await store.create();
   const harness = new ProviderHarness();
   const candidate = runtimeResult(bot.botId, {
@@ -3226,15 +3338,17 @@ test("a committed-uncertain phase-one receipt proceeds only through its exact du
     endpoint: "wss://uncertain-receipt.runtime.example.test/app-server",
     authToken: "private-uncertain-receipt-token",
   });
-  harness.queueProvision(bot.botId, candidate);
+  harness.queueProvision(bot.botId, candidate, candidate);
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
   const events = [];
   controller.on("runtime-changed", (event) => events.push(event));
 
-  const ready = await controller.ensureRuntime(bot.botId);
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_PROVISION_FAILED" });
+  const firstKey = harness.provisionCalls[0].issuanceKey;
+  const ready = await controller.retryRuntime(bot.botId);
   const session = await controller.runtimeSession(bot.botId);
-  const persisted = await new BotStore({ filePath }).read(bot.botId);
+  const persisted = await realStore.read(bot.botId);
 
   assert.equal(injected, true);
   assert.equal(ready.runtime.state, "ready");
@@ -3242,39 +3356,17 @@ test("a committed-uncertain phase-one receipt proceeds only through its exact du
   assert.equal(session.authToken, "private-uncertain-receipt-token");
   assert.equal(persisted.runtime.state, "ready");
   assert.equal(persisted.runtime.lastErrorCode, null);
-  assert.equal(harness.provisionCalls.length, 1);
+  assert.equal(harness.provisionCalls.length, 2);
+  assert.equal(harness.provisionCalls[1].issuanceKey, firstKey);
   assert.deepEqual(harness.retireCalls, []);
   assert.equal(events.filter((event) => event.runtime.state === "ready").length, 1);
   assert.doesNotMatch(JSON.stringify({ ready, persisted, events }), /RUNTIME_OPERATION\.|endpoint|authToken|private-uncertain/i);
 });
 
 test("committed-uncertain activation never recovers stale credentials after a same-ID successor", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-runtime-uncertain-same-id-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, "bots.json");
-  let directorySyncCount = 0;
-  const uncertainFs = {
-    ...fs,
-    open: async (...args) => {
-      const handle = await fs.open(...args);
-      const target = path.resolve(String(args[0]));
-      return {
-        writeFile: (...writeArgs) => handle.writeFile(...writeArgs),
-        sync: async () => {
-          if (target === path.resolve(directory) && ++directorySyncCount === 4) {
-            const failure = new Error("injected directory sync failure");
-            failure.code = "EIO";
-            throw failure;
-          }
-          return handle.sync();
-        },
-        close: (...closeArgs) => handle.close(...closeArgs),
-      };
-    },
-  };
-  const realStore = new BotStore({ filePath, fs: uncertainFs, now: () => NOW });
+  const realStore = await temporaryStore(t);
   const bot = await realStore.create();
-  const successorStore = new BotStore({ filePath, now: () => NOW });
+  const successorStore = new BotStore({ filePath: realStore.filePath, now: () => NOW });
   const harness = new ProviderHarness();
   const runtimeId = `uncertain-same-id-${bot.botId.slice(-12)}`;
   const predecessorResult = runtimeResult(bot.botId, {
@@ -3292,18 +3384,18 @@ test("committed-uncertain activation never recovers stale credentials after a sa
   let successorReady = null;
   let injected = false;
   const predecessorStore = forwardingStore(realStore, {
-    runtimeTransaction: async (...args) => {
-      try {
-        return await realStore.runtimeTransaction(...args);
-      } catch (error) {
-        if (!injected
-          && error?.code === "BOT_STORE_DURABILITY_UNCERTAIN"
-          && error?.committed === true) {
-          injected = true;
-          successorReady = await successor.ensureRuntime(bot.botId);
-        }
-        throw error;
+    promoteRuntimeIssuance: async (...args) => {
+      const outcome = await realStore.promoteRuntimeIssuance(...args);
+      if (!injected) {
+        injected = true;
+        successorReady = successor.retryRuntime(bot.botId);
+        await successorReady;
+        const failure = new Error("injected committed promotion uncertainty");
+        failure.code = "BOT_STORE_DURABILITY_UNCERTAIN";
+        failure.committed = true;
+        throw failure;
       }
+      return outcome;
     },
   });
   const predecessor = new BotRuntimeController({
@@ -3323,70 +3415,32 @@ test("committed-uncertain activation never recovers stale credentials after a sa
     predecessor.ensureRuntime(bot.botId),
     (error) => error?.code === "RUNTIME_OPERATION_SUPERSEDED",
   );
+  const persisted = await new BotStore({ filePath: realStore.filePath }).read(bot.botId);
   const predecessorSession = await predecessor.runtimeSession(bot.botId);
-  const successorSession = await successor.runtimeSession(bot.botId);
-  const persisted = await new BotStore({ filePath }).read(bot.botId);
 
   assert.equal(injected, true);
-  assert.equal(successorReady.runtime.state, "ready");
-  assert.equal(successorReady.runtime.remoteRuntimeId, runtimeId);
+  const successorOutcome = await successorReady;
+  assert.equal(successorOutcome.runtime.state, "ready");
+  assert.equal(successorOutcome.runtime.remoteRuntimeId, runtimeId);
   assert.equal(predecessorSession, null);
-  assert.equal(successorSession.runtimeId, runtimeId);
-  assert.equal(successorSession.authToken, "private-uncertain-successor-token");
+  harness.queueProvision(bot.botId, successorResult);
+  await successor.ensureRuntime(bot.botId);
+  const recoveredSuccessorSession = await successor.runtimeSession(bot.botId);
+  assert.equal(recoveredSuccessorSession.runtimeId, runtimeId);
+  assert.equal(recoveredSuccessorSession.authToken, "private-uncertain-successor-token");
   assert.equal(persisted.runtime.state, "ready");
   assert.equal(persisted.runtime.remoteRuntimeId, runtimeId);
-  assert.equal(harness.provisionCalls.length, 2);
+  assert.equal(harness.provisionCalls.length, 3);
+  assert.equal(harness.provisionCalls[2].issuanceKey, harness.provisionCalls[1].issuanceKey);
   assert.deepEqual(harness.retireCalls, []);
 });
 
 test("committed-uncertain activation never overwrites a different authoritative successor", async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-runtime-uncertain-successor-"));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, "bots.json");
-  let directorySyncCount = 0;
-  const uncertainFs = {
-    ...fs,
-    open: async (...args) => {
-      const handle = await fs.open(...args);
-      const target = path.resolve(String(args[0]));
-      return {
-        writeFile: (...writeArgs) => handle.writeFile(...writeArgs),
-        sync: async () => {
-          if (target === path.resolve(directory) && ++directorySyncCount === 4) {
-            const failure = new Error("injected directory sync failure");
-            failure.code = "EIO";
-            throw failure;
-          }
-          return handle.sync();
-        },
-        close: (...closeArgs) => handle.close(...closeArgs),
-      };
-    },
-  };
-  const realStore = new BotStore({ filePath, fs: uncertainFs, now: () => NOW });
+  const realStore = await temporaryStore(t);
   const bot = await realStore.create();
-  const successorStore = new BotStore({ filePath, now: () => NOW });
+  const successorStore = new BotStore({ filePath: realStore.filePath, now: () => NOW });
   const successorRuntimeId = `authoritative-successor-${bot.botId.slice(-12)}`;
   let successorInstalled = false;
-  const store = forwardingStore(realStore, {
-    runtimeTransaction: async (...args) => {
-      try {
-        return await realStore.runtimeTransaction(...args);
-      } catch (error) {
-        if (error?.code === "BOT_STORE_DURABILITY_UNCERTAIN" && error?.committed === true) {
-          successorInstalled = true;
-          await successorStore.updateRuntime(bot.botId, {
-            provider: "authorized-test-provider",
-            remoteRuntimeId: successorRuntimeId,
-            state: "ready",
-            lastConfirmedAt: NOW,
-            lastErrorCode: null,
-          });
-        }
-        throw error;
-      }
-    },
-  });
   const harness = new ProviderHarness();
   const candidate = runtimeResult(bot.botId, {
     runtimeId: `uncertain-predecessor-${bot.botId.slice(-12)}`,
@@ -3394,6 +3448,26 @@ test("committed-uncertain activation never overwrites a different authoritative 
     authToken: "private-uncertain-predecessor-token",
   });
   harness.queueProvision(bot.botId, candidate);
+  const store = forwardingStore(realStore, {
+    promoteRuntimeIssuance: async (...args) => {
+      const outcome = await realStore.promoteRuntimeIssuance(...args);
+      if (!successorInstalled) {
+        successorInstalled = true;
+        const active = (await successorStore.readRuntimeIssuances(bot.botId)).find((entry) => entry.phase === "active");
+        await installIssuedSuccessor(successorStore, harness, bot.botId, {
+          previousIssuanceKey: active.issuanceKey,
+          issuanceKey: TEST_ISSUANCE_B,
+          retirementKey: TEST_RETIREMENT_B,
+          runtimeId: successorRuntimeId,
+        });
+        const failure = new Error("injected committed promotion uncertainty");
+        failure.code = "BOT_STORE_DURABILITY_UNCERTAIN";
+        failure.committed = true;
+        throw failure;
+      }
+      return outcome;
+    },
+  });
   const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
   t.after(() => controller.dispose());
 
@@ -3402,7 +3476,7 @@ test("committed-uncertain activation never overwrites a different authoritative 
     (error) => error?.code === "RUNTIME_OPERATION_SUPERSEDED",
   );
 
-  const persisted = await new BotStore({ filePath }).read(bot.botId);
+  const persisted = await new BotStore({ filePath: realStore.filePath }).read(bot.botId);
   assert.equal(successorInstalled, true);
   assert.equal(persisted.runtime.state, "ready");
   assert.equal(persisted.runtime.remoteRuntimeId, successorRuntimeId);
@@ -3618,7 +3692,7 @@ test("deleteBots rejects after disposal during its durable store commit without 
   assert.deepEqual(receipt.botIds, [deleted.botId]);
 });
 
-test("deleteBots awaits an older provision and tombstones its exact private candidate", async (t) => {
+test("deleteBots awaits an older issuance and clears only after exact cleanup", async (t) => {
   const realStore = await temporaryStore(t);
   const deleted = await realStore.create();
   const survivor = await realStore.create();
@@ -3657,21 +3731,18 @@ test("deleteBots awaits an older provision and tombstones its exact private cand
   );
 
   provisionGate.resolve();
-  assert.equal((await provisioning).runtime.state, "provisioning");
+  await assert.rejects(provisioning, { code: "RUNTIME_NOT_READY" });
   await deletion;
   assert.deepEqual(deleteCalls, [[
     [deleted.botId],
     {
       preferredActiveBotId: survivor.botId,
-      extraRemoteRuntimes: [{ botId: deleted.botId, runtimeId: candidate.runtimeId }],
+      extraRemoteRuntimes: [],
     },
   ]]);
-  assert.deepEqual(harness.retireCalls, []);
+  assert.deepEqual(harness.retireCalls, [{ runtimeId: candidate.runtimeId }]);
   const [receipt] = await realStore.listPendingDeletions();
-  assert.deepEqual(receipt.remoteRuntimes, [{
-    botId: deleted.botId,
-    runtimeId: candidate.runtimeId,
-  }]);
+  assert.deepEqual(receipt.remoteRuntimes, []);
 
   await realStore.completeDeletion(receipt.deletionId);
   harness.queueProvision(survivor.botId, runtimeResult(survivor.botId, {
@@ -3763,4 +3834,544 @@ test("an unknown bot makes controller deletion all-or-none without clearing priv
   assert.equal(session.runtimeId, ready.runtime.remoteRuntimeId);
   assert.deepEqual(events, []);
   assert.deepEqual(harness.retireCalls, []);
+});
+
+test("v1 provider remains unavailable with zero provision and retirement effects", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  let provisions = 0;
+  let retires = 0;
+  const provider = validateProvider({
+    capabilities: async () => ({
+      provision: true, reconcile: true, retire: true, remoteAppServer: true, computerFrames: true,
+    }),
+    provision: async () => { provisions += 1; throw new Error("legacy provision"); },
+    inspect: async ({ runtimeId }) => ({ runtimeId, ownerBotId: bot.botId, state: "ready" }),
+    retire: async () => { retires += 1; throw new Error("legacy retire"); },
+    subscribe: () => () => {},
+  });
+  const controller = new BotRuntimeController({ store, provider, now: () => NOW });
+  t.after(() => controller.dispose());
+  const result = await controller.ensureRuntime(bot.botId);
+  assert.equal(result.runtime.state, "unavailable");
+  assert.equal(provisions, 0);
+  assert.equal(retires, 0);
+});
+
+test("v2 persists the issuance intent before the first provider call", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  let pendingAtProvider = null;
+  harness.provisionHook = async () => { pendingAtProvider = await store.readRuntimeIssuances(bot.botId); };
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  await controller.ensureRuntime(bot.botId);
+  assert.equal(pendingAtProvider?.length, 1);
+  assert.equal(pendingAtProvider[0].phase, "pending");
+  assert.equal(pendingAtProvider[0].runtimeId, null);
+});
+
+test("v2 replays an exact issuance after its issued commit fails", async (t) => {
+  const realStore = await temporaryStore(t);
+  const bot = await realStore.create();
+  let failed = false;
+  const store = forwardingStore(realStore, {
+    issueRuntimeIssuance: async (...args) => {
+      if (!failed) { failed = true; throw new Error("injected issue commit failure"); }
+      return realStore.issueRuntimeIssuance(...args);
+    },
+  });
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  await assert.rejects(() => controller.ensureRuntime(bot.botId));
+  const pending = (await realStore.readRuntimeIssuances(bot.botId))[0];
+  await controller.ensureRuntime(bot.botId);
+  assert.equal(harness.provisionCalls[0].issuanceKey, pending.issuanceKey);
+  assert.equal(harness.provisionCalls[1].issuanceKey, pending.issuanceKey);
+});
+
+test("v2 same-runtime successor promotes only after the predecessor is superseded", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const first = await controller.ensureRuntime(bot.botId);
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, { runtimeId: first.runtime.remoteRuntimeId }));
+  const promoted = await controller.retryRuntime(bot.botId);
+  assert.equal(promoted.runtime.state, "ready");
+  assert.equal(promoted.runtime.remoteRuntimeId, first.runtime.remoteRuntimeId);
+  assert.equal(harness.retireCalls.length, 0);
+});
+
+test("v2 non-ready issuance uses exact fenced retirement and leaves no active identity", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, { state: "provisioning" }));
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  await assert.rejects(() => controller.ensureRuntime(bot.botId), { code: "RUNTIME_NOT_READY" });
+  assert.equal(harness.retireCalls.length, 1);
+  assert.deepEqual(await store.readRuntimeIssuances(bot.botId), []);
+});
+
+test("v2 deletion persists only owner, runtime, issuance, and retirement identity", async (t) => {
+  const value = await fencedDeletionFixture(t);
+  const [entry] = value.receipt.remoteRuntimes;
+  assert.deepEqual(Object.keys(entry).sort(), ["botId", "issuanceKey", "retirementKey", "runtimeId"]);
+  assert.doesNotMatch(JSON.stringify(value.receipt), /provider|endpoint|authToken|idempotencyKey/i);
+});
+
+test("v2 matched-false reassignment never retires a reused runtime", async (t) => {
+  const value = await fencedDeletionFixture(t);
+  const [entry] = value.receipt.remoteRuntimes;
+  value.harness.runtimes.set(entry.runtimeId, {
+    runtimeId: entry.runtimeId,
+    ownerBotId: entry.botId,
+    issuanceKey: "issuance-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    state: "ready",
+  });
+  await assert.rejects(() => value.controller.retireDeletedRuntimes(value.receipt), { code: "RUNTIME_RETIRE_PENDING" });
+  assert.equal(value.harness.retireCalls.length, 0);
+  assert.equal((await value.store.listPendingDeletions()).length, 1);
+});
+
+test("v2 terminal readback failure leaves a receipt pending and retries its retirement key", async (t) => {
+  const value = await fencedDeletionFixture(t);
+  const [entry] = value.receipt.remoteRuntimes;
+  const keys = [];
+  let first = true;
+  value.harness.retireHook = ({ runtimeId, ownerBotId, issuanceKey, retirementKey }) => {
+    keys.push({ runtimeId, ownerBotId, issuanceKey, retirementKey });
+    if (first) { first = false; return { runtimeId, state: "retiring" }; }
+    value.harness.runtimes.get(runtimeId).state = "retired";
+    return { runtimeId, state: "retired" };
+  };
+  await assert.rejects(() => value.controller.retireDeletedRuntimes(value.receipt), { code: "RUNTIME_RETIRE_PENDING" });
+  await value.controller.retireDeletedRuntimes(value.receipt);
+  assert.deepEqual(keys, [
+    { runtimeId: entry.runtimeId, ownerBotId: entry.botId, issuanceKey: entry.issuanceKey, retirementKey: entry.retirementKey },
+    { runtimeId: entry.runtimeId, ownerBotId: entry.botId, issuanceKey: entry.issuanceKey, retirementKey: entry.retirementKey },
+  ]);
+});
+
+test("v2 lost retirement response replays the same retirement key", async (t) => {
+  const value = await fencedDeletionFixture(t);
+  const [entry] = value.receipt.remoteRuntimes;
+  let first = true;
+  const keys = [];
+  value.harness.retireHook = ({ runtimeId, ownerBotId, issuanceKey, retirementKey }) => {
+    keys.push({ runtimeId, ownerBotId, issuanceKey, retirementKey });
+    if (first) {
+      first = false;
+      value.harness.runtimes.get(runtimeId).state = "retired";
+      throw new Error("lost response");
+    }
+    value.harness.runtimes.get(runtimeId).state = "retired";
+    return { runtimeId, state: "retired" };
+  };
+  await value.controller.retireDeletedRuntimes(value.receipt);
+  assert.deepEqual(keys, [
+    { runtimeId: entry.runtimeId, ownerBotId: entry.botId, issuanceKey: entry.issuanceKey, retirementKey: entry.retirementKey },
+    { runtimeId: entry.runtimeId, ownerBotId: entry.botId, issuanceKey: entry.issuanceKey, retirementKey: entry.retirementKey },
+  ]);
+});
+
+test("v2 disposal leaves a pending issuance replayable by a successor controller", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const gate = deferred();
+  harness.provisionHook = () => gate.promise;
+  const first = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  const operation = first.ensureRuntime(bot.botId);
+  await waitFor(() => harness.provisionCalls.length === 1);
+  const pending = (await store.readRuntimeIssuances(bot.botId))[0];
+  first.dispose();
+  gate.resolve();
+  await assert.rejects(operation, { code: "RUNTIME_CONTROLLER_DISPOSED" });
+  harness.provisionHook = null;
+  const second = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => second.dispose());
+  await second.ensureRuntime(bot.botId);
+  assert.equal(harness.provisionCalls.at(-1).issuanceKey, pending.issuanceKey);
+});
+
+test("controller deletion cannot erase an unresolved issuance intent", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const gate = deferred();
+  harness.provisionHook = () => gate.promise;
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+  const provisioning = controller.ensureRuntime(bot.botId);
+  await waitFor(() => harness.provisionCalls.length === 1);
+  const pending = (await store.readRuntimeIssuances(bot.botId))[0];
+  const deletion = controller.deleteBots([bot.botId]);
+  gate.reject(new Error("provider response lost"));
+  await assert.rejects(provisioning);
+  await assert.rejects(deletion, { code: "BOT_STORE_RUNTIME_ISSUANCE_PENDING" });
+  assert.equal((await store.readRuntimeIssuances(bot.botId))[0].issuanceKey, pending.issuanceKey);
+  assert.notEqual(await store.read(bot.botId), null);
+});
+
+test("v2 replay rejects a changed provider before activation or deletion", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const first = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  const ready = await first.ensureRuntime(bot.botId);
+  first.dispose();
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    provider: "changed-display-provider",
+    runtimeId: ready.runtime.remoteRuntimeId,
+  }));
+  const successor = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => successor.dispose());
+  await assert.rejects(() => successor.ensureRuntime(bot.botId), { code: "RUNTIME_ISSUANCE_MISMATCH" });
+  const persisted = await store.read(bot.botId);
+  assert.equal(persisted.runtime.remoteRuntimeId, ready.runtime.remoteRuntimeId);
+  assert.equal((await store.listPendingDeletions()).length, 0);
+});
+
+test("v2 drops a late same-runtime predecessor event without invalidating the successor", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+
+  const first = await controller.ensureRuntime(bot.botId);
+  const runtimeId = first.runtime.remoteRuntimeId;
+  const firstIssuanceKey = harness.provisionCalls[0].issuanceKey;
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    runtimeId,
+    endpoint: "wss://same-runtime-successor.runtime.example.test/app-server",
+    authToken: "private-successor-token",
+  }));
+  const successor = await controller.retryRuntime(bot.botId);
+  const secondIssuanceKey = harness.provisionCalls.at(-1).issuanceKey;
+  assert.notEqual(secondIssuanceKey, firstIssuanceKey);
+  assert.equal(successor.runtime.remoteRuntimeId, runtimeId);
+  const before = await controller.runtimeSession(bot.botId);
+  assert.equal(before.authToken, "private-successor-token");
+
+  harness.emit({ runtimeId, issuanceKey: firstIssuanceKey, state: "failed" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const after = await controller.runtimeSession(bot.botId);
+  assert.equal(after.authToken, "private-successor-token");
+  assert.equal((await controller.readBot(bot.botId)).runtime.state, "ready");
+  assert.equal(harness.retireCalls.length, 0);
+});
+
+test("v2 terminal-looking event requires authoritative terminal issuance state", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+
+  const ready = await controller.ensureRuntime(bot.botId);
+  const changed = [];
+  controller.on("runtime-changed", (event) => changed.push(event));
+  harness.emit({
+    runtimeId: ready.runtime.remoteRuntimeId,
+    issuanceKey: harness.provisionCalls[0].issuanceKey,
+    state: "retired",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const persisted = await waitForStoreBot(store, bot.botId, () => true);
+  const active = (await store.readRuntimeIssuances(bot.botId)).find((entry) => entry.phase === "active");
+  assert.equal(persisted.runtime.state, "ready");
+  assert.equal(persisted.runtime.remoteRuntimeId, ready.runtime.remoteRuntimeId);
+  assert.equal(active?.issuanceKey, harness.provisionCalls[0].issuanceKey);
+  assert.equal(changed.some((event) => ["detached", "retired"].includes(event.runtime.state)), false);
+});
+
+test("v2 terminal completion rechecks the latest exact issuance state", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const controller = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => controller.dispose());
+
+  const ready = await controller.ensureRuntime(bot.botId);
+  let inspectionCount = 0;
+  harness.inspectHook = ({ runtimeId }) => {
+    inspectionCount += 1;
+    return {
+      runtimeId,
+      ownerBotId: bot.botId,
+      state: inspectionCount === 1 ? "detached" : "ready",
+    };
+  };
+  harness.emit({ runtimeId: ready.runtime.remoteRuntimeId, state: "detached" });
+  await waitForStoreBot(store, bot.botId, () => inspectionCount >= 2);
+
+  const persisted = await store.read(bot.botId);
+  const active = (await store.readRuntimeIssuances(bot.botId)).find((entry) => entry.phase === "active");
+  assert.equal(persisted.runtime.state, "ready");
+  assert.equal(persisted.runtime.remoteRuntimeId, ready.runtime.remoteRuntimeId);
+  assert.equal(active?.issuanceKey, harness.provisionCalls[0].issuanceKey);
+});
+
+test("v2 stale reconnecting cannot overwrite a same-runtime successor", async (t) => {
+  const realStore = await temporaryStore(t);
+  const bot = await realStore.create();
+  const harness = new ProviderHarness();
+  const entered = deferred();
+  const release = deferred();
+  let eventPaused = false;
+  const staleStore = forwardingStore(realStore, {
+    runtimeTransaction: async (botId, options, operation) => {
+      if (options?.expectedActiveIssuanceKey && !eventPaused) {
+        eventPaused = true;
+        entered.resolve();
+        await release.promise;
+      }
+      return realStore.runtimeTransaction(botId, options, operation);
+    },
+  });
+  const predecessor = new BotRuntimeController({ store: staleStore, provider: harness.provider(), now: () => NOW });
+  const successor = new BotRuntimeController({ store: realStore, provider: harness.provider(), now: () => NOW });
+  t.after(() => predecessor.dispose());
+  t.after(() => successor.dispose());
+
+  const first = await predecessor.ensureRuntime(bot.botId);
+  const issuanceA = harness.provisionCalls[0].issuanceKey;
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    runtimeId: first.runtime.remoteRuntimeId,
+    authToken: "private-stale-reconnect-successor-token",
+  }));
+  harness.emit({ runtimeId: first.runtime.remoteRuntimeId, issuanceKey: issuanceA, state: "reconnecting" });
+  await entered.promise;
+  const second = await successor.retryRuntime(bot.botId);
+  release.resolve();
+
+  const persisted = await waitForStoreBot(
+    realStore,
+    bot.botId,
+    (current) => current?.runtime.state === "ready"
+      && current.runtime.remoteRuntimeId === second.runtime.remoteRuntimeId,
+    "successor ready state was overwritten by stale reconnecting",
+  );
+  assert.equal(persisted.runtime.state, "ready");
+  assert.equal((await realStore.readRuntimeIssuances(bot.botId)).find((entry) => entry.phase === "active")?.issuanceKey,
+    harness.provisionCalls.at(-1).issuanceKey);
+});
+
+test("v2 stale frame is suppressed after a same-runtime successor wins during inspect", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const baseProvider = harness.provider();
+  let predecessor;
+  let successor;
+  let eventPending = false;
+  let successorReady = null;
+  let issuanceA = null;
+  const predecessorProvider = validateProvider({
+    capabilities: (...args) => baseProvider.capabilities(...args),
+    provision: (...args) => baseProvider.provision(...args),
+    inspect: (...args) => baseProvider.inspect(...args),
+    retire: (...args) => baseProvider.retire(...args),
+    inspectIssuance: async (input) => {
+      const inspected = await baseProvider.inspectIssuance(input);
+      if (eventPending && input.issuanceKey === issuanceA && !successorReady) {
+        successorReady = successor.retryRuntime(bot.botId);
+        await successorReady;
+      }
+      return inspected;
+    },
+    retireIssuance: (...args) => baseProvider.retireIssuance(...args),
+    subscribe: (callback) => baseProvider.subscribe(callback),
+  });
+  predecessor = new BotRuntimeController({ store, provider: predecessorProvider, now: () => NOW });
+  successor = new BotRuntimeController({ store, provider: baseProvider, now: () => NOW });
+  t.after(() => predecessor.dispose());
+  t.after(() => successor.dispose());
+
+  const ready = await predecessor.ensureRuntime(bot.botId);
+  issuanceA = harness.provisionCalls[0].issuanceKey;
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    runtimeId: ready.runtime.remoteRuntimeId,
+    authToken: "private-stale-frame-successor-token",
+  }));
+  const frames = [];
+  predecessor.on("runtime-event", (event) => frames.push(event));
+  eventPending = true;
+  harness.emit({ runtimeId: ready.runtime.remoteRuntimeId, issuanceKey: issuanceA, type: "computer/frame", sequence: 7001 });
+  await successorReady;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(frames, []);
+  assert.equal((await store.read(bot.botId)).runtime.state, "ready");
+  assert.equal((await store.readRuntimeIssuances(bot.botId)).find((entry) => entry.phase === "active")?.issuanceKey,
+    harness.provisionCalls.at(-1).issuanceKey);
+});
+
+test("v2 runtimeSession drops an inspected predecessor after a same-runtime successor wins", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const baseProvider = harness.provider();
+  const inspectionEntered = deferred();
+  const releaseInspection = deferred();
+  let blockInspection = false;
+  const predecessorProvider = validateProvider({
+    capabilities: (...args) => baseProvider.capabilities(...args),
+    provision: (...args) => baseProvider.provision(...args),
+    inspect: (...args) => baseProvider.inspect(...args),
+    retire: (...args) => baseProvider.retire(...args),
+    inspectIssuance: async (input) => {
+      const inspected = await baseProvider.inspectIssuance(input);
+      if (blockInspection) {
+        blockInspection = false;
+        inspectionEntered.resolve();
+        await releaseInspection.promise;
+      }
+      return inspected;
+    },
+    retireIssuance: (...args) => baseProvider.retireIssuance(...args),
+    subscribe: (callback) => baseProvider.subscribe(callback),
+  });
+  const predecessor = new BotRuntimeController({ store, provider: predecessorProvider, now: () => NOW });
+  const successor = new BotRuntimeController({ store, provider: baseProvider, now: () => NOW });
+  t.after(() => predecessor.dispose());
+  t.after(() => successor.dispose());
+
+  const first = await predecessor.ensureRuntime(bot.botId);
+  const firstSession = await predecessor.runtimeSession(bot.botId);
+  blockInspection = true;
+  const pendingSession = predecessor.runtimeSession(bot.botId);
+  await inspectionEntered.promise;
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    runtimeId: first.runtime.remoteRuntimeId,
+    authToken: "private-runtime-session-successor-token",
+  }));
+  await successor.retryRuntime(bot.botId);
+  releaseInspection.resolve();
+
+  const inspectedSession = await pendingSession;
+  assert.equal(firstSession.authToken.startsWith("private-token-"), true);
+  assert.equal(inspectedSession, null);
+  assert.equal((await store.read(bot.botId)).runtime.state, "ready");
+  assert.equal((await successor.runtimeSession(bot.botId)).authToken, "private-runtime-session-successor-token");
+});
+
+test("v2 older capability failure cannot overwrite a newer ready issuance", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const baseProvider = harness.provider();
+  const capabilityEntered = deferred();
+  const releaseCapability = deferred();
+  let blockCapabilities = false;
+  let failProvision = false;
+  const predecessorProvider = validateProvider({
+    capabilities: async () => {
+      if (blockCapabilities) {
+        blockCapabilities = false;
+        capabilityEntered.resolve();
+        await releaseCapability.promise;
+      }
+      return baseProvider.capabilities();
+    },
+    provision: async (...args) => {
+      if (failProvision) throw new Error("older provision failed after successor activation");
+      return baseProvider.provision(...args);
+    },
+    inspect: (...args) => baseProvider.inspect(...args),
+    retire: (...args) => baseProvider.retire(...args),
+    inspectIssuance: (...args) => baseProvider.inspectIssuance(...args),
+    retireIssuance: (...args) => baseProvider.retireIssuance(...args),
+    subscribe: (callback) => baseProvider.subscribe(callback),
+  });
+  const predecessor = new BotRuntimeController({ store, provider: predecessorProvider, now: () => NOW });
+  const successor = new BotRuntimeController({ store, provider: baseProvider, now: () => NOW });
+  t.after(() => predecessor.dispose());
+  t.after(() => successor.dispose());
+
+  const first = await predecessor.ensureRuntime(bot.botId);
+  blockCapabilities = true;
+  failProvision = true;
+  const olderFailure = predecessor.retryRuntime(bot.botId);
+  await capabilityEntered.promise;
+  harness.queueProvision(bot.botId, runtimeResult(bot.botId, {
+    runtimeId: first.runtime.remoteRuntimeId,
+    authToken: "private-capability-successor-token",
+  }));
+  const newer = await successor.retryRuntime(bot.botId);
+  releaseCapability.resolve();
+  await assert.rejects(olderFailure, { code: "RUNTIME_OPERATION_SUPERSEDED" });
+
+  const persisted = await store.read(bot.botId);
+  assert.equal(persisted.runtime.state, "ready");
+  assert.equal(persisted.runtime.remoteRuntimeId, newer.runtime.remoteRuntimeId);
+  assert.equal((await successor.runtimeSession(bot.botId)).authToken, "private-capability-successor-token");
+});
+
+test("v2 same-issuance older rejection cannot overwrite a replayed ready owner", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const firstProvisionEntered = deferred();
+  const releaseFirstProvision = deferred();
+  let provisionCount = 0;
+  harness.provisionHook = async () => {
+    provisionCount += 1;
+    if (provisionCount !== 1) return;
+    firstProvisionEntered.resolve();
+    await releaseFirstProvision.promise;
+    throw new Error("older same-issuance provision failed");
+  };
+  const predecessor = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  const successor = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => predecessor.dispose());
+  t.after(() => successor.dispose());
+
+  const olderFailure = predecessor.ensureRuntime(bot.botId);
+  await firstProvisionEntered.promise;
+  const replayed = await successor.ensureRuntime(bot.botId);
+  releaseFirstProvision.resolve();
+
+  await assert.rejects(olderFailure, { code: "RUNTIME_OPERATION_SUPERSEDED" });
+  const persisted = await store.read(bot.botId);
+  assert.equal(persisted.runtime.state, "ready");
+  assert.equal(persisted.runtime.remoteRuntimeId, replayed.runtime.remoteRuntimeId);
+  assert.equal((await successor.runtimeSession(bot.botId)).authToken.startsWith("private-token-"), true);
+  assert.equal((await store.readRuntimeIssuances(bot.botId)).find((entry) => entry.phase === "active")?.issuanceKey,
+    harness.provisionCalls[0].issuanceKey);
+});
+
+test("v2 restart clears active issuance only after exact terminal inspection", async (t) => {
+  const store = await temporaryStore(t);
+  const bot = await store.create();
+  const harness = new ProviderHarness();
+  const first = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  const ready = await first.ensureRuntime(bot.botId);
+  const issuance = (await store.readRuntimeIssuances(bot.botId))[0];
+  harness.runtimes.get(ready.runtime.remoteRuntimeId).state = "retired";
+  await store.updateRuntime(bot.botId, {
+    state: "retired",
+    lastConfirmedAt: null,
+    lastErrorCode: null,
+  });
+  first.dispose();
+  const successor = new BotRuntimeController({ store, provider: harness.provider(), now: () => NOW });
+  t.after(() => successor.dispose());
+  await successor.reconcile();
+  assert.deepEqual(await store.readRuntimeIssuances(bot.botId), []);
+  const cleared = await store.read(bot.botId);
+  assert.equal(cleared.runtime.remoteRuntimeId, null);
+  assert.equal(cleared.runtime.state, "retired");
+  assert.equal(issuance.phase, "active");
 });

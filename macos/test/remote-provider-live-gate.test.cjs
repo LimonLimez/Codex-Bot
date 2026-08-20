@@ -40,7 +40,10 @@ const { BotStore } = require("../src/bots/bot-store.cjs");
 const {
   assertBoundedAdapterData,
 } = require("../src/bots/reviewed-adapter-worker-source.cjs");
-const { validateProvider } = require("../src/bots/runtime-provider.cjs");
+const {
+  providerContractVersion,
+  validateProvider,
+} = require("../src/bots/runtime-provider.cjs");
 
 async function temporaryDirectory(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "codex-bot-live-gate-test-"));
@@ -98,6 +101,52 @@ module.exports = {
 `;
 }
 
+function providerV2Source() {
+  return `
+"use strict";
+module.exports = {
+  createProvider() {
+    return {
+      async capabilities() {
+        return {
+          provision: true,
+          reconcile: true,
+          retire: true,
+          remoteAppServer: true,
+          computerFrames: true,
+          issuanceFencedRetire: true,
+        };
+      },
+      async provision({ botId, issuanceKey }) {
+        return {
+          provider: "fixture-provider-v2",
+          runtimeId: "runtime-" + botId,
+          ownerBotId: botId,
+          issuanceKey,
+          endpoint: "wss://runtime.provider.example/app-server",
+          authToken: "fixture-private-auth-token-value",
+          state: "ready",
+        };
+      },
+      async inspect({ runtimeId }) {
+        return { runtimeId, ownerBotId: "${BOT_ID}", state: "ready" };
+      },
+      async retire({ runtimeId }) {
+        return { runtimeId, state: "retired" };
+      },
+      async inspectIssuance({ runtimeId, ownerBotId, issuanceKey }) {
+        return { matched: true, runtimeId, ownerBotId, issuanceKey, state: "ready" };
+      },
+      async retireIssuance({ runtimeId, ownerBotId, issuanceKey }) {
+        return { matched: true, runtimeId, ownerBotId, issuanceKey, state: "retired" };
+      },
+      subscribe() { return () => {}; },
+    };
+  },
+};
+`;
+}
+
 function exerciseSource(extraExport = "") {
   return `
 "use strict";
@@ -127,6 +176,18 @@ async function validModulePaths(t) {
   };
 }
 
+async function validV2ModulePaths(t) {
+  const directory = await temporaryDirectory(t);
+  const provider = providerV2Source();
+  const exercise = exerciseSource();
+  return {
+    providerModulePath: await writePrivateModule(directory, "provider-v2.cjs", provider),
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath: await writePrivateModule(directory, "exercise.cjs", exercise),
+    exerciseModuleSha256: sha256Text(exercise),
+  };
+}
+
 test("loads absolute regular private provider and exercise modules", async (t) => {
   assert.ifError(moduleLoadError);
   const loaded = loadLiveGateDependencies(await validModulePaths(t));
@@ -137,11 +198,69 @@ test("loads absolute regular private provider and exercise modules", async (t) =
     retire: true,
     remoteAppServer: true,
     computerFrames: true,
+    issuanceFencedRetire: false,
   });
   assert.equal(typeof loaded.exercise.openRemoteUrl, "function");
   assert.equal(typeof loaded.exercise.dispose, "function");
   assert.deepEqual(Reflect.ownKeys(loaded), ["provider", "exercise"]);
   assert.equal(Object.isFrozen(loaded), true);
+});
+
+test("reviewed worker handshake exposes v2 issuance methods only for enhanced providers", async (t) => {
+  const loaded = loadLiveGateDependencies(await validV2ModulePaths(t));
+  assert.equal(providerContractVersion(loaded.provider), 2);
+  assert.equal(typeof loaded.provider.inspectIssuance, "function");
+  assert.equal(typeof loaded.provider.retireIssuance, "function");
+  assert.deepEqual(await loaded.provider.capabilities(), {
+    provision: true,
+    reconcile: true,
+    retire: true,
+    remoteAppServer: true,
+    computerFrames: true,
+    issuanceFencedRetire: true,
+  });
+  const provisioned = await loaded.provider.provision({
+    botId: BOT_ID,
+    idempotencyKey: "codex-bot:v2",
+    issuanceKey: "issuance-00000000-0000-4000-8000-000000000001",
+  });
+  assert.equal(provisioned.issuanceKey, "issuance-00000000-0000-4000-8000-000000000001");
+  assert.deepEqual(await loaded.provider.inspectIssuance({
+    runtimeId: provisioned.runtimeId,
+    ownerBotId: BOT_ID,
+    issuanceKey: "issuance-00000000-0000-4000-8000-000000000001",
+  }), {
+    matched: true,
+    runtimeId: provisioned.runtimeId,
+    ownerBotId: BOT_ID,
+    issuanceKey: "issuance-00000000-0000-4000-8000-000000000001",
+    state: "ready",
+  });
+  const oversized = "x".repeat(300_000);
+  await assert.rejects(() => loaded.provider.provision({
+    botId: BOT_ID,
+    idempotencyKey: "codex-bot:v2-oversized",
+    issuanceKey: oversized,
+  }), /issuance|canonical|identifier|invalid/i);
+  await assert.rejects(() => loaded.provider.retireIssuance({
+    runtimeId: provisioned.runtimeId,
+    ownerBotId: BOT_ID,
+    issuanceKey: "issuance-00000000-0000-4000-8000-000000000001",
+    retirementKey: oversized,
+  }), /retire|canonical|identifier|invalid/i);
+  await assert.rejects(() => loaded.provider.provision({
+    botId: oversized,
+    idempotencyKey: "codex-bot:v2-oversized-bot",
+    issuanceKey: "issuance-00000000-0000-4000-8000-000000000001",
+  }), /botId|identifier|invalid/i);
+  await assert.rejects(() => loaded.provider.provision({
+    botId: BOT_ID,
+    idempotencyKey: oversized,
+    issuanceKey: "issuance-00000000-0000-4000-8000-000000000001",
+  }), /idempotency|identifier|invalid/i);
+  await loaded.exercise.dispose();
+  const unsubscribe = loaded.provider.subscribe(() => {});
+  unsubscribe();
 });
 
 test("rejects a private FIFO module path without blocking the verifier process", async (t) => {
@@ -600,6 +719,108 @@ module.exports = {
   await loaded.exercise.dispose();
 });
 
+test("reviewed v2 provider worker preserves issuance fences and rejects missing fences before IPC", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const issuanceA = "issuance-00000000-0000-4000-8000-000000000001";
+  const issuanceB = "issuance-00000000-0000-4000-8000-000000000002";
+  const provider = `
+"use strict";
+module.exports = {
+  createProvider() {
+    let emit;
+    return {
+      async capabilities() {
+        return {
+          provision: true,
+          reconcile: true,
+          retire: true,
+          remoteAppServer: true,
+          computerFrames: true,
+          issuanceFencedRetire: true,
+        };
+      },
+      async provision(input) {
+        emit?.({ runtimeId: "runtime-shared", issuanceKey: ${JSON.stringify(issuanceB)}, type: "state", state: "ready" });
+        return {
+          provider: "fixture-provider-v2",
+          runtimeId: "runtime-shared",
+          ownerBotId: input.botId,
+          issuanceKey: input.issuanceKey,
+          endpoint: "wss://runtime.provider.example/app-server",
+          authToken: "fixture-private-auth-token-value",
+          state: "ready",
+        };
+      },
+      async inspect({ runtimeId }) {
+        return { runtimeId, ownerBotId: ${JSON.stringify(BOT_ID)}, state: "ready" };
+      },
+      async retire({ runtimeId }) {
+        return { runtimeId, state: "retired" };
+      },
+      async inspectIssuance({ runtimeId, ownerBotId, issuanceKey }) {
+        return { matched: true, runtimeId, ownerBotId, issuanceKey, state: "ready" };
+      },
+      async retireIssuance({ runtimeId, ownerBotId, issuanceKey }) {
+        return { matched: true, runtimeId, ownerBotId, issuanceKey, state: "retired" };
+      },
+      subscribe(callback) {
+        emit = callback;
+        callback({ runtimeId: "runtime-shared", issuanceKey: ${JSON.stringify(issuanceA)}, type: "state", state: "ready" });
+        return () => {};
+      },
+    };
+  },
+};
+`;
+  const exercise = exerciseSource();
+  const providerModulePath = await writePrivateModule(directory, "provider.cjs", provider);
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  const loaded = loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  });
+  try {
+    const events = [];
+    const unsubscribe = loaded.provider.subscribe((event) => events.push(event));
+    await loaded.provider.provision({
+      botId: BOT_ID,
+      idempotencyKey: "worker-v2-event-fence",
+      issuanceKey: issuanceA,
+    });
+    assert.deepEqual(events.map(({ runtimeId, issuanceKey }) => ({ runtimeId, issuanceKey })), [
+      { runtimeId: "runtime-shared", issuanceKey: issuanceA },
+      { runtimeId: "runtime-shared", issuanceKey: issuanceB },
+    ]);
+    unsubscribe();
+  } finally {
+    await loaded.exercise.dispose().catch(() => {});
+  }
+
+  const earlyEvent = `callback({ runtimeId: "runtime-shared", issuanceKey: ${JSON.stringify(issuanceA)}, type: "state", state: "ready" });`;
+  const malformedEvents = [
+    ["missing", `callback({ runtimeId: "runtime-shared", type: "state", state: "ready" });`],
+    ["malformed", `callback({ runtimeId: "runtime-shared", issuanceKey: "issuance-not-canonical", type: "state", state: "ready" });`],
+    ["oversized", `callback({ runtimeId: "runtime-shared", issuanceKey: "issuance-" + "x".repeat(300), type: "state", state: "ready" });`],
+    ["accessor", `const event = { runtimeId: "runtime-shared", type: "state", state: "ready" }; Object.defineProperty(event, "issuanceKey", { enumerable: true, get() { throw new Error("accessor"); } }); callback(event);`],
+    ["proxy", `callback(new Proxy({ runtimeId: "runtime-shared", issuanceKey: ${JSON.stringify(issuanceA)}, type: "state", state: "ready" }, {}));`],
+  ];
+  for (const [name, replacement] of malformedEvents) {
+    const malformed = provider.replace(earlyEvent, replacement);
+    const malformedProviderModulePath = await writePrivateModule(directory, `${name}-provider.cjs`, malformed);
+    assert.throws(() => loadLiveGateDependencies({
+      providerModulePath: malformedProviderModulePath,
+      providerModuleSha256: sha256Text(malformed),
+      exerciseModulePath,
+      exerciseModuleSha256: sha256Text(exercise),
+    }), {
+      code: "REMOTE_PROVIDER_GATE_BLOCKED",
+      message: "Remote provider verification is not configured.",
+    });
+  }
+});
+
 test("reviewed exercise disposal keeps the provider alive for authoritative cleanup", async (t) => {
   const loaded = loadLiveGateDependencies(await validModulePaths(t));
 
@@ -751,9 +972,12 @@ test("exercise adapter rejects hostile shapes and mismatched acknowledgements wi
 async function liveGateHarness(t, options = {}) {
   const workspacePath = await temporaryDirectory(t);
   const provisionCalls = [];
+  const provisionAttempts = [];
   const idempotentProvision = new Map();
   const runtimes = new Map();
   const retired = [];
+  const issuanceInspectCalls = [];
+  const issuanceRetireCalls = [];
   const subscribers = new Set();
   const exerciseCalls = [];
   const clients = [];
@@ -768,7 +992,11 @@ async function liveGateHarness(t, options = {}) {
   let lastExerciseInput = null;
   let delayedProvision = false;
   const retirementPolls = new Map();
+  const retirementAttempts = new Map();
+  const durableRetirementKeys = new Map();
   const cleanupOrder = [];
+  const issuanceKeyFor = (runtimeId) => runtimes.get(runtimeId)?.issuanceKey
+    ?? "issuance-00000000-0000-4000-8000-000000000099";
 
   const pendingUntilAbort = (signal, counter) => new Promise((resolve, reject) => {
     if (!(signal instanceof AbortSignal)) return;
@@ -791,9 +1019,18 @@ async function liveGateHarness(t, options = {}) {
         retire: true,
         remoteAppServer: true,
         computerFrames: true,
+        issuanceFencedRetire: true,
       };
     },
     async provision(input) {
+      provisionAttempts.push(input);
+      if (options.requireDurableRetirementKey) {
+        const durableStore = new BotStore({ filePath: path.join(workspacePath, "bots.json") });
+        const durableIssuances = await durableStore.readRuntimeIssuances(input.botId);
+        const durable = durableIssuances.find((entry) => entry.issuanceKey === input.issuanceKey);
+        if (!durable) throw new Error("durable issuance intent missing before provision");
+        durableRetirementKeys.set(input.issuanceKey, durable.retirementKey);
+      }
       if (options.hungProvision && !idempotentProvision.has(input.idempotencyKey)) {
         return pendingUntilAbort(input.signal, "provider");
       }
@@ -803,10 +1040,17 @@ async function liveGateHarness(t, options = {}) {
         await new Promise((resolve) => setTimeout(resolve, 80));
       }
       const recovered = idempotentProvision.get(input.idempotencyKey);
-      if (recovered) return { ...recovered };
+      if (recovered) {
+        if (options.replayProvisionFailure) {
+          throw new Error("private replay provision response failed");
+        }
+        return { ...recovered };
+      }
       const index = provisionCalls.length;
       provisionCalls.push(input);
-      const runtimeId = options.collision === "runtimeId" ? "runtime-shared" : `runtime-${index + 1}`;
+      const runtimeId = options.runtimeIdWithSpaces && index === 0
+        ? "runtime with spaces"
+        : options.collision === "runtimeId" ? "runtime-shared" : `runtime-${index + 1}`;
       const endpointIndex = options.collision === "endpoint" ? 1 : index + 1;
       const ownerBotId = options.collision === "ownerBotId" && index === 1
         ? provisionCalls[0].botId
@@ -825,10 +1069,14 @@ async function liveGateHarness(t, options = {}) {
         authToken: options.collision === "authToken"
           ? "fixture-private-shared-auth-token-value"
           : `fixture-private-auth-token-${index + 1}-value`,
+        issuanceKey: input.issuanceKey,
         state: options.partialProvision && index === 0 ? "provisioning" : "ready",
       };
       runtimes.set(runtimeId, { ...record });
       idempotentProvision.set(input.idempotencyKey, { ...record });
+      if (options.lostProvisionResponse && index === 0) {
+        throw new Error("private provision response lost after ready side effect");
+      }
       return record;
     },
     async inspect(input) {
@@ -858,6 +1106,66 @@ async function liveGateHarness(t, options = {}) {
       if (record) record.state = options.eventuallyConsistentRetire ? "retiring" : "retired";
       retired.push(runtimeId);
       return { runtimeId, state: "retired" };
+    },
+    async inspectIssuance(input) {
+      const { runtimeId, ownerBotId, issuanceKey } = input;
+      issuanceInspectCalls.push({ runtimeId, ownerBotId, issuanceKey });
+      const record = runtimes.get(runtimeId);
+      if (options.supersededIssuance && runtimeId === "runtime-1") {
+        return { matched: false, runtimeId, state: "superseded" };
+      }
+      if (!record || record.ownerBotId !== ownerBotId || record.issuanceKey !== issuanceKey) {
+        return { matched: false, runtimeId, state: "superseded" };
+      }
+      if (record.state === "retiring") {
+        const polls = (retirementPolls.get(runtimeId) ?? 0) + 1;
+        retirementPolls.set(runtimeId, polls);
+        if (polls >= 2) record.state = "retired";
+      }
+      if (options.nonterminalReadback && runtimeId === "runtime-1") {
+        return { matched: true, runtimeId, ownerBotId, issuanceKey, state: "ready" };
+      }
+      return {
+        matched: true,
+        runtimeId,
+        ownerBotId,
+        issuanceKey,
+        state: record.state,
+      };
+    },
+    async retireIssuance(input) {
+      const { runtimeId, ownerBotId, issuanceKey, retirementKey } = input;
+      issuanceRetireCalls.push({ runtimeId, ownerBotId, issuanceKey, retirementKey });
+      if (options.requireDurableRetirementKey
+        && durableRetirementKeys.get(issuanceKey) !== retirementKey) {
+        throw new Error("retirement key did not match durable issuance intent");
+      }
+      if (options.recordCleanupOrder) cleanupOrder.push(`provider-retire:${runtimeId}`);
+      if (options.hungRetire) return pendingUntilAbort(input.signal, "provider");
+      if (options.retireFailure && runtimeId === "runtime-1") {
+        throw new Error("provider endpoint token private-retire-diagnostic");
+      }
+      const record = runtimes.get(runtimeId);
+      if (!record || record.ownerBotId !== ownerBotId || record.issuanceKey !== issuanceKey) {
+        return { matched: false, runtimeId, state: "superseded" };
+      }
+      record.state = options.eventuallyConsistentRetire ? "retiring" : "retired";
+      retired.push(runtimeId);
+      if (options.lostRetireResponse && runtimeId === "runtime-1") {
+        const attempts = (retirementAttempts.get(runtimeId) ?? 0) + 1;
+        retirementAttempts.set(runtimeId, attempts);
+        if (attempts === 1) throw new Error("private response lost after commit");
+      }
+      if (options.mismatchedTerminalReadback && runtimeId === "runtime-1") {
+        return {
+          matched: true,
+          runtimeId: "runtime-mismatched",
+          ownerBotId,
+          issuanceKey,
+          state: "retired",
+        };
+      }
+      return { matched: true, runtimeId, ownerBotId, issuanceKey, state: "retired" };
     },
     subscribe(callback) {
       subscribers.add(callback);
@@ -902,6 +1210,7 @@ async function liveGateHarness(t, options = {}) {
           for (const callback of subscribers) {
             callback({
               runtimeId,
+              issuanceKey: issuanceKeyFor(runtimeId),
               type: "computer/frame",
               sequence,
               payload: {
@@ -915,6 +1224,7 @@ async function liveGateHarness(t, options = {}) {
             if (options.frameMutation === "replayed") {
               callback({
                 runtimeId,
+                issuanceKey: issuanceKeyFor(runtimeId),
                 type: "computer/frame",
                 sequence,
                 payload: {
@@ -946,15 +1256,19 @@ async function liveGateHarness(t, options = {}) {
       }
       if (options.sameIdSuccessorOnDispose) {
         const original = idempotentProvision.get(provisionCalls[0].idempotencyKey);
-        idempotentProvision.set(provisionCalls[0].idempotencyKey, {
+        const successor = {
           ...original,
-          authToken: "fixture-private-successor-auth-token-value",
-        });
+          issuanceKey: "fixture-private-successor-issuance-key",
+        };
+        idempotentProvision.set(provisionCalls[0].idempotencyKey, successor);
+        const runtime = runtimes.get(original.runtimeId);
+        if (runtime) runtime.issuanceKey = successor.issuanceKey;
       }
       if (options.frameMutation === "late-frame" && lastExerciseInput) {
         for (const callback of subscribers) {
           callback({
             runtimeId: lastExerciseInput.runtimeId,
+            issuanceKey: issuanceKeyFor(lastExerciseInput.runtimeId),
             type: "computer/frame",
             sequence: 2,
             payload: {
@@ -975,6 +1289,7 @@ async function liveGateHarness(t, options = {}) {
           for (const callback of subscribers) {
             callback({
               runtimeId: lastExerciseInput.runtimeId,
+              issuanceKey: issuanceKeyFor(lastExerciseInput.runtimeId),
               type: "computer/cursor",
               sequence,
               payload: { x: sequence, y: sequence },
@@ -987,6 +1302,10 @@ async function liveGateHarness(t, options = {}) {
   });
 
   const dependencies = {
+    operationTimeoutMs: options.operationTimeoutMs ?? 30_000,
+    cleanupTimeoutMs: options.cleanupTimeoutMs ?? 30_000,
+    computerTimeoutMs: options.computerTimeoutMs ?? 30_000,
+    frameSettleMs: options.frameSettleMs ?? 250,
     async lookup(hostname, lookupOptions) {
       lookupCalls += 1;
       if (options.hungDns) return pendingUntilAbort(lookupOptions?.signal, "lookup");
@@ -1028,6 +1347,7 @@ async function liveGateHarness(t, options = {}) {
               for (const callback of subscribers) {
                 callback({
                   runtimeId: "runtime-1",
+                  issuanceKey: issuanceKeyFor("runtime-1"),
                   type: "computer/frame",
                   sequence: 1,
                   payload: {
@@ -1069,8 +1389,12 @@ async function liveGateHarness(t, options = {}) {
   return {
     options: { provider, exercise, workspacePath, dependencies },
     provisionCalls,
+    provisionAttempts,
     runtimes,
     retired,
+    issuanceInspectCalls,
+    issuanceRetireCalls,
+    retirementAttempts,
     subscribers,
     exerciseCalls,
     clients,
@@ -1084,6 +1408,49 @@ async function liveGateHarness(t, options = {}) {
     cleanupOrder,
   };
 }
+
+test("legacy configured providers fail closed before provision, retirement, or exercise cleanup", async (t) => {
+  const workspacePath = await temporaryDirectory(t);
+  let provisions = 0;
+  let retires = 0;
+  let disposals = 0;
+  const provider = validateProvider({
+    async capabilities() {
+      return {
+        provision: true,
+        reconcile: true,
+        retire: true,
+        remoteAppServer: true,
+        computerFrames: true,
+      };
+    },
+    async provision() {
+      provisions += 1;
+      throw new Error("legacy provision must not run");
+    },
+    async inspect({ runtimeId }) {
+      return { runtimeId, ownerBotId: BOT_ID, state: "ready" };
+    },
+    async retire() {
+      retires += 1;
+      throw new Error("legacy retirement must not run");
+    },
+    subscribe() { return () => {}; },
+  });
+  const exercise = validateComputerExercise({
+    async openRemoteUrl() {
+      throw new Error("legacy exercise must not run");
+    },
+    async dispose() { disposals += 1; },
+  });
+
+  await assert.rejects(runRemoteProviderLiveGate({ provider, exercise, workspacePath, dependencies: {} }), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+  });
+  assert.equal(provisions, 0);
+  assert.equal(retires, 0);
+  assert.equal(disposals, 0);
+});
 
 async function raceWithSentinel(promise, timeoutMs) {
   let timer;
@@ -1109,7 +1476,7 @@ function outputSink() {
 
 test("provisions two distinct bot runtimes through the production controller", async (t) => {
   assert.equal(typeof runRemoteProviderLiveGate, "function");
-  const harness = await liveGateHarness(t);
+  const harness = await liveGateHarness(t, { requireDurableRetirementKey: true });
 
   const result = await runRemoteProviderLiveGate(harness.options);
 
@@ -1123,6 +1490,12 @@ test("provisions two distinct bot runtimes through the production controller", a
     harness.provisionCalls.map(({ botId, idempotencyKey }) => idempotencyKey),
     harness.provisionCalls.map(({ botId }) => `codex-bot:${botId}`),
   );
+  assert.equal(harness.provisionCalls.every(({ issuanceKey }) => (
+    /^issuance-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(issuanceKey)
+  )), true);
+  assert.equal(harness.issuanceRetireCalls.every(({ retirementKey }) => (
+    /^retire-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(retirementKey)
+  )), true);
   assert.deepEqual(harness.protocolCalls.map(({ method }) => method), [
     "account/read", "model/list", "account/read", "model/list",
   ]);
@@ -1145,17 +1518,21 @@ test("fails before Computer work for duplicate runtimes endpoints or owners", as
       assert.equal(harness.exerciseCalls.length, 0);
       assert.equal(harness.clients.every(({ stopped }) => stopped), true);
       assert.equal(harness.exerciseDisposed, 1);
-      await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
-        code: "ENOENT",
-      });
+      const storePath = path.join(harness.options.workspacePath, "bots.json");
+      if (collision === "endpoint") {
+        await assert.rejects(fs.stat(storePath), { code: "ENOENT" });
+      } else {
+        assert.equal((await fs.stat(storePath)).isFile(), true);
+        assert.doesNotMatch(await fs.readFile(storePath, "utf8"), /authToken|fixture-private-auth-token/i);
+      }
     });
   }
 });
 
 test("rejects every shared or mismatched two-bot private transport identity", async (t) => {
   for (const collision of [
-    "authToken",
     "canonicalEndpoint",
+    "authToken",
     "provider",
     "clientObject",
     "clientTuple",
@@ -1171,7 +1548,7 @@ test("rejects every shared or mismatched two-bot private transport identity", as
   }
 });
 
-test("retirement failure keeps the gate failed while closing clients and removing local state", async (t) => {
+test("retirement failure keeps the gate failed and preserves its private replay ledger", async (t) => {
   const harness = await liveGateHarness(t, { retireFailure: true });
   harness.options.dependencies.computerTimeoutMs = 500;
   harness.options.dependencies.frameSettleMs = 80;
@@ -1186,9 +1563,9 @@ test("retirement failure keeps the gate failed while closing clients and removin
   assert.doesNotMatch(String(error?.stack), /endpoint|token|private-retire/i);
   assert.equal(harness.clients.every(({ stopped }) => stopped), true);
   assert.equal(harness.exerciseDisposed, 1);
-  await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
-    code: "ENOENT",
-  });
+  const storePath = path.join(harness.options.workspacePath, "bots.json");
+  assert.equal((await fs.stat(storePath)).isFile(), true);
+  assert.doesNotMatch(await fs.readFile(storePath, "utf8"), /authToken|fixture-private-auth-token/i);
 });
 
 test("rejects private DNS answers before constructing a remote client", async (t) => {
@@ -1370,6 +1747,88 @@ test("retires a provision that ignores abort and resolves after the operation ti
   });
 });
 
+test("replays a lost provision response from the durable issuance intent and retires it exactly", async (t) => {
+  const harness = await liveGateHarness(t, {
+    lostProvisionResponse: true,
+    requireDurableRetirementKey: true,
+  });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+
+  assert.equal(harness.provisionAttempts.length, 2);
+  assert.deepEqual(
+    harness.provisionAttempts.map(({ botId, idempotencyKey, issuanceKey }) => ({
+      botId,
+      idempotencyKey,
+      issuanceKey,
+    })),
+    Array(2).fill({
+      botId: harness.provisionCalls[0].botId,
+      idempotencyKey: harness.provisionCalls[0].idempotencyKey,
+      issuanceKey: harness.provisionCalls[0].issuanceKey,
+    }),
+  );
+  assert.deepEqual(harness.retired, ["runtime-1"]);
+  assert.equal(harness.issuanceRetireCalls.length, 1);
+  assert.equal(harness.issuanceRetireCalls[0].issuanceKey, harness.provisionCalls[0].issuanceKey);
+  await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
+    code: "ENOENT",
+  });
+});
+
+test("a failed lost-provision replay preserves the private durable issuance ledger", async (t) => {
+  const harness = await liveGateHarness(t, {
+    lostProvisionResponse: true,
+    replayProvisionFailure: true,
+  });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+
+  assert.equal(harness.provisionAttempts.length, 2);
+  assert.deepEqual(harness.retired, []);
+  const storePath = path.join(harness.options.workspacePath, "bots.json");
+  assert.equal((await fs.stat(storePath)).isFile(), true);
+  const persisted = await fs.readFile(storePath, "utf8");
+  assert.doesNotMatch(persisted, /authToken|fixture-private-auth-token|response lost|replay provision/i);
+  const store = new BotStore({ filePath: storePath });
+  const issuances = await store.readRuntimeIssuances(harness.provisionCalls[0].botId);
+  assert.equal(issuances.length, 1);
+  assert.deepEqual({
+    phase: issuances[0].phase,
+    idempotencyKey: issuances[0].idempotencyKey,
+    issuanceKey: issuances[0].issuanceKey,
+  }, {
+    phase: "pending",
+    idempotencyKey: harness.provisionCalls[0].idempotencyKey,
+    issuanceKey: harness.provisionCalls[0].issuanceKey,
+  });
+});
+
+test("an unstorable runtime result preserves its pending replay ledger without false cleanup", async (t) => {
+  const harness = await liveGateHarness(t, { runtimeIdWithSpaces: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+
+  assert.equal(harness.provisionAttempts.length, 2);
+  assert.deepEqual(harness.retired, []);
+  const storePath = path.join(harness.options.workspacePath, "bots.json");
+  assert.equal((await fs.stat(storePath)).isFile(), true);
+  const store = new BotStore({ filePath: storePath });
+  const issuances = await store.readRuntimeIssuances(harness.provisionCalls[0].botId);
+  assert.equal(issuances.length, 1);
+  assert.equal(issuances[0].phase, "pending");
+  assert.equal(issuances[0].runtimeId, null);
+});
+
 test("retires an exact partial provisioning issuance after readiness fails", async (t) => {
   const harness = await liveGateHarness(t, { partialProvision: true });
 
@@ -1378,6 +1837,7 @@ test("retires an exact partial provisioning issuance after readiness fails", asy
     message: "Remote provider verification failed.",
   });
   assert.deepEqual(harness.retired, ["runtime-1"]);
+  assert.equal(harness.issuanceRetireCalls.filter(({ runtimeId }) => runtimeId === "runtime-1").length, 1);
   assert.equal(harness.runtimes.get("runtime-1").state, "retired");
 });
 
@@ -1440,6 +1900,41 @@ test("successful proof records terminal cleanup and removes the verifier store",
   await assert.rejects(fs.stat(path.join(harness.options.workspacePath, "bots.json")), {
     code: "ENOENT",
   });
+});
+
+test("owner or issuance supersession returns matched false and performs zero fenced retirement", async (t) => {
+  const harness = await liveGateHarness(t, { supersededIssuance: true });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+  assert.equal(harness.issuanceRetireCalls.some(({ runtimeId }) => runtimeId === "runtime-1"), false);
+});
+
+test("terminal-looking retirement fails when the mandatory issuance readback is nonterminal", async (t) => {
+  const harness = await liveGateHarness(t, {
+    nonterminalReadback: true,
+    operationTimeoutMs: 100,
+    cleanupTimeoutMs: 500,
+  });
+
+  await assert.rejects(runRemoteProviderLiveGate(harness.options), {
+    code: "REMOTE_PROVIDER_GATE_FAILED",
+    message: "Remote provider verification failed.",
+  });
+  assert.equal(harness.issuanceRetireCalls.some(({ runtimeId }) => runtimeId === "runtime-1"), true);
+});
+
+test("replays a lost retirement response with the same retirement key", async (t) => {
+  const harness = await liveGateHarness(t, { lostRetireResponse: true });
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.equal(result.status, "PASS");
+  const attempts = harness.issuanceRetireCalls.filter(({ runtimeId }) => runtimeId === "runtime-1");
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0].retirementKey, attempts[1].retirementKey);
 });
 
 test("authoritative provider retirement and terminal inspection precede exercise disposal", async (t) => {

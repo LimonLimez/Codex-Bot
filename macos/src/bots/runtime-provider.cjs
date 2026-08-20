@@ -1,11 +1,21 @@
 const { isIP } = require("node:net");
 const { types } = require("node:util");
 
-const REQUIRED_METHODS = Object.freeze([
+const LEGACY_METHODS = Object.freeze([
   "capabilities",
   "provision",
   "inspect",
   "retire",
+  "subscribe",
+]);
+
+const ENHANCED_METHODS = Object.freeze([
+  "capabilities",
+  "provision",
+  "inspect",
+  "retire",
+  "inspectIssuance",
+  "retireIssuance",
   "subscribe",
 ]);
 
@@ -15,10 +25,12 @@ const CAPABILITY_NAMES = Object.freeze([
   "retire",
   "remoteAppServer",
   "computerFrames",
+  "issuanceFencedRetire",
 ]);
 
 const PROVISION_STATES = new Set(["ready", "provisioning"]);
 const RETIRE_STATES = new Set(["retired", "detached"]);
+const ISSUANCE_STATES = new Set(["ready", "provisioning", "reconnecting", "retiring", "retired", "detached"]);
 const PROVIDER_FAILURE = "Remote runtime provider failed.";
 const UNAVAILABLE = "Remote computer unavailable.";
 const MAX_PROVIDER_DATA_DEPTH = 24;
@@ -26,6 +38,12 @@ const MAX_PROVIDER_DATA_FIELDS = 256;
 const MAX_PROVIDER_DATA_NODES = 4_096;
 const MAX_PROVIDER_STRING_BYTES = 65_536;
 const MAX_PROVIDER_TOTAL_STRING_BYTES = 262_144;
+const providerContractVersions = new WeakMap();
+const MAX_PROVIDER_IDENTIFIER_BYTES = 256;
+const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const CANONICAL_UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const ISSUANCE_KEY_PATTERN = new RegExp(`^issuance-${CANONICAL_UUID}$`);
+const RETIREMENT_KEY_PATTERN = new RegExp(`^retire-${CANONICAL_UUID}$`);
 
 function requiredObject(value, label) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -34,11 +52,104 @@ function requiredObject(value, label) {
   return value;
 }
 
+function exactDataDescriptors(value, label, expectedKeys) {
+  requiredObject(value, label);
+  if (types.isProxy(value)) throw sanitizedProviderFailure();
+  let prototype;
+  let descriptors;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw sanitizedProviderFailure();
+  }
+  if (!intrinsicObjectPrototype(prototype)) {
+    throw new TypeError(`${label} must be a plain object.`);
+  }
+  const keys = Reflect.ownKeys(descriptors);
+  if (expectedKeys && (keys.length !== expectedKeys.length
+    || keys.some((key) => typeof key !== "string" || !expectedKeys.includes(key)))) {
+    throw new TypeError(`${label} has invalid fields.`);
+  }
+  for (const key of expectedKeys || keys) {
+    if (!(key in descriptors) || !("value" in descriptors[key])) {
+      throw sanitizedProviderFailure();
+    }
+  }
+  return descriptors;
+}
+
+function exactProviderTopology(provider) {
+  requiredObject(provider, "provider");
+  if (types.isProxy(provider)) throw sanitizedProviderFailure();
+  let descriptors;
+  let prototype;
+  try {
+    prototype = Object.getPrototypeOf(provider);
+    descriptors = Object.getOwnPropertyDescriptors(provider);
+  } catch {
+    throw sanitizedProviderFailure();
+  }
+  if (!intrinsicObjectPrototype(prototype)) throw sanitizedProviderFailure();
+
+  const keys = Reflect.ownKeys(descriptors);
+  const requiredMissing = LEGACY_METHODS.find((method) => !descriptors[method]);
+  if (requiredMissing) {
+    throw new TypeError(`Remote runtime provider must implement ${requiredMissing}().`);
+  }
+  for (const method of LEGACY_METHODS) {
+    const descriptor = descriptors[method];
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "function") {
+      if (descriptor && !("value" in descriptor)) throw sanitizedProviderFailure();
+      throw new TypeError(`Remote runtime provider must implement ${method}().`);
+    }
+  }
+
+  const hasInspectIssuance = Boolean(descriptors.inspectIssuance);
+  const hasRetireIssuance = Boolean(descriptors.retireIssuance);
+  if (hasInspectIssuance !== hasRetireIssuance) {
+    throw new TypeError("Remote runtime provider issuance methods must be paired.");
+  }
+  const version = hasInspectIssuance ? 2 : 1;
+  const expected = version === 2 ? ENHANCED_METHODS : LEGACY_METHODS;
+  if (keys.length !== expected.length
+    || keys.some((key) => typeof key !== "string" || !expected.includes(key))) {
+    throw new TypeError("Remote runtime provider has an invalid method topology.");
+  }
+  if (version === 2) {
+    for (const method of ["inspectIssuance", "retireIssuance"]) {
+      const descriptor = descriptors[method];
+      if (!("value" in descriptor) || typeof descriptor.value !== "function") {
+        throw new TypeError(`Remote runtime provider must implement ${method}().`);
+      }
+    }
+  }
+  return version;
+}
+
 function requiredIdentifier(value, label) {
-  if (typeof value !== "string" || value.trim().length === 0) {
+  if (typeof value !== "string" || value.trim().length === 0
+    || Buffer.byteLength(value, "utf8") > MAX_PROVIDER_IDENTIFIER_BYTES) {
     throw new TypeError(`${label} must be a non-empty string.`);
   }
   return value.trim();
+}
+
+function requiredSafeIdentifier(value, label) {
+  const normalized = requiredIdentifier(value, label);
+  if (!SAFE_IDENTIFIER_PATTERN.test(normalized)) {
+    throw new TypeError(`${label} must be a safe identifier.`);
+  }
+  return normalized;
+}
+
+function requiredCanonicalKey(value, label, pattern) {
+  if (typeof value !== "string" || value !== value.trim()) {
+    throw new TypeError(`${label} must be canonical.`);
+  }
+  const normalized = requiredIdentifier(value, label);
+  if (!pattern.test(normalized)) throw new TypeError(`${label} must be canonical.`);
+  return normalized;
 }
 
 function optionalOperationSignal(input) {
@@ -343,25 +454,51 @@ function requiredProviderMethod(provider, method) {
   }
 }
 
-function frozenProvisionResult(raw, expectedBotId) {
+function frozenProvisionResult(raw, expectedBotId, version, expectedIssuanceKey = undefined) {
   requiredObject(raw, "provision result");
-  const provider = requiredIdentifier(raw.provider, "provider");
-  const runtimeId = requiredIdentifier(raw.runtimeId, "runtimeId");
+  if (version === 2) {
+    exactDataDescriptors(raw, "provision result", [
+      "provider",
+      "runtimeId",
+      "ownerBotId",
+      "issuanceKey",
+      "endpoint",
+      "authToken",
+      "state",
+    ]);
+  }
+  const provider = requiredSafeIdentifier(raw.provider, "provider");
+  const runtimeId = requiredSafeIdentifier(raw.runtimeId, "runtimeId");
   const ownerBotId = requiredIdentifier(raw.ownerBotId, "ownerBotId");
   if (ownerBotId !== expectedBotId) throw new Error("Provider returned a mismatched ownerBotId.");
   const endpoint = validateRemoteEndpoint(raw.endpoint);
   const authToken = requiredIdentifier(raw.authToken, "authToken");
+  const issuanceKey = version === 2
+    ? requiredCanonicalKey(raw.issuanceKey, "issuanceKey", ISSUANCE_KEY_PATTERN)
+    : undefined;
+  if (version === 2 && issuanceKey !== expectedIssuanceKey) {
+    throw new Error("Provider returned a mismatched issuanceKey.");
+  }
   if (!PROVISION_STATES.has(raw.state)) {
     throw new Error("Provider returned an invalid provision state.");
   }
 
-  const result = {
-    provider,
-    runtimeId,
-    ownerBotId,
-    endpoint,
-    state: raw.state,
-  };
+  const result = version === 2
+    ? {
+      provider,
+      runtimeId,
+      ownerBotId,
+      issuanceKey,
+      endpoint,
+      state: raw.state,
+    }
+    : {
+      provider,
+      runtimeId,
+      ownerBotId,
+      endpoint,
+      state: raw.state,
+    };
   Object.defineProperty(result, "authToken", {
     value: authToken,
     enumerable: false,
@@ -371,12 +508,52 @@ function frozenProvisionResult(raw, expectedBotId) {
   return Object.freeze(result);
 }
 
+function frozenIssuanceResult(raw, expected, method) {
+  const matchedDescriptors = exactDataDescriptors(raw, `${method} result`);
+  if (!matchedDescriptors.matched || !("value" in matchedDescriptors.matched)) {
+    throw new Error(`${method} result is invalid.`);
+  }
+  const keys = Reflect.ownKeys(matchedDescriptors);
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new Error(`${method} result is invalid.`);
+  }
+  const keySet = keys.sort().join(",");
+  const matched = matchedDescriptors.matched.value;
+  if (matched === false) {
+    if (keySet !== "matched,runtimeId,state"
+      || matchedDescriptors.runtimeId.value !== expected.runtimeId
+      || matchedDescriptors.state.value !== "superseded") {
+      throw new Error(`${method} result is invalid.`);
+    }
+    return Object.freeze({
+      matched: false,
+      runtimeId: expected.runtimeId,
+      state: "superseded",
+    });
+  }
+  if (matched !== true
+    || keySet !== "issuanceKey,matched,ownerBotId,runtimeId,state"
+    || matchedDescriptors.runtimeId.value !== expected.runtimeId
+    || matchedDescriptors.ownerBotId.value !== expected.ownerBotId
+    || matchedDescriptors.issuanceKey.value !== expected.issuanceKey
+    || !ISSUANCE_STATES.has(matchedDescriptors.state.value)) {
+    throw new Error(`${method} result is invalid.`);
+  }
+  return Object.freeze({
+    matched: true,
+    runtimeId: expected.runtimeId,
+    ownerBotId: expected.ownerBotId,
+    issuanceKey: expected.issuanceKey,
+    state: matchedDescriptors.state.value,
+  });
+}
+
 function frozenInspectResult(raw, expectedRuntimeId) {
   requiredObject(raw, "inspect result");
   if (containsSecretMaterial(raw)) {
     throw new Error("Provider inspect result contains secret material.");
   }
-  const runtimeId = requiredIdentifier(raw.runtimeId, "runtimeId");
+  const runtimeId = requiredSafeIdentifier(raw.runtimeId, "runtimeId");
   if (runtimeId !== expectedRuntimeId) throw new Error("Provider returned a mismatched runtimeId.");
   const ownerBotId = requiredIdentifier(raw.ownerBotId, "ownerBotId");
   const state = requiredIdentifier(raw.state, "state");
@@ -388,7 +565,7 @@ function frozenRetireResult(raw, expectedRuntimeId) {
   if (containsSecretMaterial(raw)) {
     throw new Error("Provider retire result contains secret material.");
   }
-  const runtimeId = requiredIdentifier(raw.runtimeId, "runtimeId");
+  const runtimeId = requiredSafeIdentifier(raw.runtimeId, "runtimeId");
   if (runtimeId !== expectedRuntimeId) throw new Error("Provider returned a mismatched runtimeId.");
   if (!RETIRE_STATES.has(raw.state)) {
     throw new Error('Provider retire state must be "retired" or "detached".');
@@ -396,10 +573,30 @@ function frozenRetireResult(raw, expectedRuntimeId) {
   return Object.freeze({ runtimeId, state: raw.state });
 }
 
-function validateProvider(provider) {
-  requiredObject(provider, "provider");
-  for (const method of REQUIRED_METHODS) requiredProviderMethod(provider, method);
+function exactIssuanceInput(input, fields, label) {
+  if (input === undefined) throw new TypeError(`${label} is required.`);
+  const descriptors = exactDataDescriptors(input, label);
+  const keys = Reflect.ownKeys(descriptors);
+  const allowed = new Set([...fields, "signal"]);
+  if (keys.some((key) => typeof key !== "string" || !allowed.has(key))) {
+    throw new TypeError(`${label} has invalid fields.`);
+  }
+  if (keys.length !== fields.length && !(keys.length === fields.length + 1 && descriptors.signal)) {
+    throw new TypeError(`${label} has invalid fields.`);
+  }
+  for (const field of fields) {
+    if (!descriptors[field]) throw new TypeError(`${label} is missing ${field}.`);
+  }
+  const signal = descriptors.signal?.value;
+  if (signal !== undefined && !(signal instanceof AbortSignal)) {
+    throw new TypeError("Provider operation signal is invalid.");
+  }
+  const values = Object.fromEntries(fields.map((field) => [field, descriptors[field].value]));
+  return Object.freeze({ values, signal });
+}
 
+function validateProvider(provider) {
+  const version = exactProviderTopology(provider);
   const wrapper = {
     async capabilities(input) {
       const signal = optionalOperationSignal(input);
@@ -411,28 +608,58 @@ function validateProvider(provider) {
         )),
         "provider capabilities",
       );
-      for (const name of CAPABILITY_NAMES) {
+      for (const name of CAPABILITY_NAMES.slice(0, -1)) {
         if (raw[name] !== true) {
           throw new Error(`Remote runtime provider capability ${name} must be true.`);
         }
       }
-      return Object.freeze(Object.fromEntries(CAPABILITY_NAMES.map((name) => [name, true])));
+      if (Object.prototype.hasOwnProperty.call(raw, "issuanceFencedRetire")
+        && typeof raw.issuanceFencedRetire !== "boolean") {
+        throw new Error("Remote runtime provider capability issuanceFencedRetire must be boolean.");
+      }
+      if (version === 2 && raw.issuanceFencedRetire !== true) {
+        throw new Error("Remote runtime provider capability issuanceFencedRetire must be true.");
+      }
+      if (version === 1 && raw.issuanceFencedRetire === true) {
+        throw new Error("Remote runtime provider capability issuanceFencedRetire disagrees with provider topology.");
+      }
+      return Object.freeze(Object.fromEntries(CAPABILITY_NAMES.map((name) => [
+        name,
+        name === "issuanceFencedRetire" ? version === 2 : true,
+      ])));
     },
 
     async provision(input) {
       requiredObject(input, "provision input");
-      const botId = requiredIdentifier(input.botId, "botId");
-      const idempotencyKey = requiredIdentifier(input.idempotencyKey, "idempotencyKey");
-      const signal = optionalOperationSignal(input);
+      let fields;
+      let signal;
+      if (version === 2) {
+        const normalized = exactIssuanceInput(
+          input,
+          ["botId", "idempotencyKey", "issuanceKey"],
+          "provision input",
+        );
+        fields = {
+          botId: requiredIdentifier(normalized.values.botId, "botId"),
+          idempotencyKey: requiredIdentifier(normalized.values.idempotencyKey, "idempotencyKey"),
+          issuanceKey: requiredCanonicalKey(normalized.values.issuanceKey, "issuanceKey", ISSUANCE_KEY_PATTERN),
+        };
+        signal = normalized.signal;
+      } else {
+        const botId = requiredIdentifier(input.botId, "botId");
+        const idempotencyKey = requiredIdentifier(input.idempotencyKey, "idempotencyKey");
+        signal = optionalOperationSignal(input);
+        fields = { botId, idempotencyKey };
+      }
       const raw = detachProviderData(
-        await invoke(provider, "provision", providerOperationInput({ botId, idempotencyKey }, signal)),
+        await invoke(provider, "provision", providerOperationInput(fields, signal)),
       );
-      return frozenProvisionResult(raw, botId);
+      return frozenProvisionResult(raw, fields.botId, version, fields.issuanceKey);
     },
 
     async inspect(input) {
       requiredObject(input, "inspect input");
-      const runtimeId = requiredIdentifier(input.runtimeId, "runtimeId");
+      const runtimeId = requiredSafeIdentifier(input.runtimeId, "runtimeId");
       const signal = optionalOperationSignal(input);
       const raw = detachProviderData(
         await invoke(provider, "inspect", providerOperationInput({ runtimeId }, signal)),
@@ -442,7 +669,7 @@ function validateProvider(provider) {
 
     async retire(input) {
       requiredObject(input, "retire input");
-      const runtimeId = requiredIdentifier(input.runtimeId, "runtimeId");
+      const runtimeId = requiredSafeIdentifier(input.runtimeId, "runtimeId");
       const signal = optionalOperationSignal(input);
       const raw = detachProviderData(
         await invoke(provider, "retire", providerOperationInput({ runtimeId }, signal)),
@@ -461,12 +688,32 @@ function validateProvider(provider) {
         unsubscribe = provider.subscribe.call(provider, (rawEvent) => {
           if (!active) return;
           try {
+            // Inspect the provider-owned event descriptors before detaching any
+            // values. V2's issuance fence is the private identity that keeps a
+            // late event from a superseded runtime distinguishable from the
+            // current issuance sharing its runtimeId.
+            const rawDescriptors = exactDataDescriptors(rawEvent, "subscription event");
+            if (version === 2) {
+              if (!rawDescriptors.issuanceKey
+                || !rawDescriptors.issuanceKey.enumerable
+                || !("value" in rawDescriptors.issuanceKey)) {
+                throw new TypeError("subscription event must include an issuanceKey.");
+              }
+              requiredCanonicalKey(
+                rawDescriptors.issuanceKey.value,
+                "issuanceKey",
+                ISSUANCE_KEY_PATTERN,
+              );
+            }
             const event = detachProviderData(rawEvent);
             requiredObject(event, "subscription event");
             if (containsSecretMaterial(event)) {
               throw new Error("Provider subscription event contains secret material.");
             }
-            requiredIdentifier(event.runtimeId, "runtimeId");
+            requiredSafeIdentifier(event.runtimeId, "runtimeId");
+            if (version === 2) {
+              requiredCanonicalKey(event.issuanceKey, "issuanceKey", ISSUANCE_KEY_PATTERN);
+            }
             callback(deepFreeze(event));
           } catch (error) {
             contractFailure = error;
@@ -496,7 +743,68 @@ function validateProvider(provider) {
     },
   };
 
-  return Object.freeze(wrapper);
+  if (version === 2) {
+    wrapper.inspectIssuance = async (input) => {
+      const normalized = exactIssuanceInput(
+        input,
+        ["runtimeId", "ownerBotId", "issuanceKey"],
+        "inspectIssuance input",
+      );
+      const expected = {
+        runtimeId: requiredSafeIdentifier(normalized.values.runtimeId, "runtimeId"),
+        ownerBotId: requiredIdentifier(normalized.values.ownerBotId, "ownerBotId"),
+        issuanceKey: requiredCanonicalKey(normalized.values.issuanceKey, "issuanceKey", ISSUANCE_KEY_PATTERN),
+      };
+      const raw = detachProviderData(await invoke(
+        provider,
+        "inspectIssuance",
+        providerOperationInput(expected, normalized.signal),
+      ));
+      return frozenIssuanceResult(raw, expected, "inspectIssuance");
+    };
+    wrapper.retireIssuance = async (input) => {
+      const normalized = exactIssuanceInput(
+        input,
+        ["runtimeId", "ownerBotId", "issuanceKey", "retirementKey"],
+        "retireIssuance input",
+      );
+      const expected = {
+        runtimeId: requiredSafeIdentifier(normalized.values.runtimeId, "runtimeId"),
+        ownerBotId: requiredIdentifier(normalized.values.ownerBotId, "ownerBotId"),
+        issuanceKey: requiredCanonicalKey(normalized.values.issuanceKey, "issuanceKey", ISSUANCE_KEY_PATTERN),
+      };
+      const retirementKey = requiredCanonicalKey(
+        normalized.values.retirementKey,
+        "retirementKey",
+        RETIREMENT_KEY_PATTERN,
+      );
+      const raw = detachProviderData(await invoke(
+        provider,
+        "retireIssuance",
+        providerOperationInput({ ...expected, retirementKey }, normalized.signal),
+      ));
+      return frozenIssuanceResult(raw, expected, "retireIssuance");
+    };
+  }
+
+  const orderedWrapper = version === 2
+    ? {
+      capabilities: wrapper.capabilities,
+      provision: wrapper.provision,
+      inspect: wrapper.inspect,
+      retire: wrapper.retire,
+      inspectIssuance: wrapper.inspectIssuance,
+      retireIssuance: wrapper.retireIssuance,
+      subscribe: wrapper.subscribe,
+    }
+    : wrapper;
+  const validated = Object.freeze(orderedWrapper);
+  providerContractVersions.set(validated, version);
+  return validated;
+}
+
+function providerContractVersion(provider) {
+  return providerContractVersions.get(provider) ?? null;
 }
 
 function unavailableProvider() {
@@ -522,6 +830,7 @@ function unavailableProvider() {
 }
 
 module.exports = {
+  providerContractVersion,
   validateProvider,
   unavailableProvider,
 };

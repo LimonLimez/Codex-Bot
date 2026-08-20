@@ -673,13 +673,18 @@ function loadConfiguredProvider() {
       modulePath,
       moduleSha256,
     });
-    const rawProvider = Object.freeze({
+    const rawProviderMethods = {
       capabilities: (input) => channel.request("capabilities", input),
       provision: (input) => channel.request("provision", input),
       inspect: (input) => channel.request("inspect", input),
       retire: (input) => channel.request("retire", input),
       subscribe: (callback) => channel.subscribe(callback),
-    });
+    };
+    if (channel.providerContractVersion === 2) {
+      rawProviderMethods.inspectIssuance = (input) => channel.request("inspectIssuance", input);
+      rawProviderMethods.retireIssuance = (input) => channel.request("retireIssuance", input);
+    }
+    const rawProvider = Object.freeze(rawProviderMethods);
     const provider = validateProvider(rawProvider);
     configuredProviderClosers.set(provider, () => {
       try { channel?.shutdown(); } catch {}

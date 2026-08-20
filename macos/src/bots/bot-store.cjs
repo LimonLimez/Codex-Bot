@@ -6,9 +6,9 @@ const { createHash, randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
 
 // Bot records remain schema v3. Only the enclosing durable Store advances to
-// v4 so renderer/controller consumers keep the existing public bot contract.
+// v5 so renderer/controller consumers keep the existing public bot contract.
 const SCHEMA_VERSION = 3;
-const STORE_SCHEMA_VERSION = 4;
+const STORE_SCHEMA_VERSION = 5;
 const LEGACY_SCHEMA_VERSION = 1;
 const PREVIOUS_SCHEMA_VERSION = 2;
 const MAX_BOTS = 4096;
@@ -33,7 +33,12 @@ const SETUP_STAGES = new Set(["profile-model", "computer", "complete"]);
 const CREATION_SETUP_STAGES = new Set(["profile-model", "complete"]);
 const SETUP_TRANSITION_FIELDS = new Set(["expectedStage", "nextStage"]);
 const RUNTIME_FIELDS = new Set(["provider", "remoteRuntimeId", "state", "lastConfirmedAt", "lastErrorCode"]);
-const RUNTIME_TRANSACTION_FIELDS = new Set(["expectedLastErrorCode", "afterCommit"]);
+const RUNTIME_TRANSACTION_FIELDS = new Set([
+  "expectedLastErrorCode",
+  "expectedActiveIssuanceKey",
+  "expectedRuntimeIssuanceKey",
+  "afterCommit",
+]);
 const COMPUTER_FIELDS = new Set([
   "mode",
   "generation",
@@ -67,6 +72,7 @@ const STORE_FIELDS = new Set([
   "legacyImports",
   "deletedLegacyImports",
   "pendingDeletions",
+  "runtimeIssuances",
 ]);
 const LEGACY_FIELDS = new Set(["migrationKey", "name", "appearance", "notifications", "conversations"]);
 const LEGACY_IMPORT_FIELDS = new Set(["botId", "fingerprint"]);
@@ -78,7 +84,10 @@ const PENDING_DELETION_FIELDS = new Set([
   "remoteRuntimes",
   "localProfiles",
 ]);
-const REMOTE_CLEANUP_FIELDS = new Set(["botId", "runtimeId"]);
+const REMOTE_CLEANUP_FIELDS = new Set([
+  "botId", "runtimeId", "issuanceKey", "retirementKey",
+]);
+const LEGACY_REMOTE_CLEANUP_FIELDS = new Set(["botId", "runtimeId"]);
 const LOCAL_CLEANUP_FIELDS = new Set(["botId", "profileId"]);
 const DELETE_OPTIONS_FIELDS = new Set(["preferredActiveBotId", "extraRemoteRuntimes"]);
 const RUNTIME_STATES = new Set([
@@ -92,6 +101,8 @@ const RUNTIME_STATES = new Set([
   "retired",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ISSUANCE_KEY_PATTERN = /^issuance-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const RETIREMENT_KEY_PATTERN = /^retire-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const BOT_ID_PATTERN = /^bot-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const SAFE_APPEARANCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -102,6 +113,10 @@ const PATH_RUNTIME_REVISIONS = new Map();
 const ACTIVE_RUNTIME_TRANSACTIONS = new Map();
 const RUNTIME_TRANSACTION_CONTEXT = new AsyncLocalStorage();
 const RUNTIME_COMMIT_RECEIPTS = new WeakMap();
+const RUNTIME_ISSUANCE_PHASES = new Set(["pending", "issued", "active"]);
+const RUNTIME_ISSUANCE_FIELDS = new Set([
+  "botId", "phase", "provider", "runtimeId", "idempotencyKey", "issuanceKey", "retirementKey",
+]);
 
 const DEFAULT_APPEARANCE = Object.freeze({
   shape: "blob",
@@ -239,6 +254,11 @@ function normalizeIdentifier(value, label, { nullable = false, errorCode = false
   return value;
 }
 
+function normalizeCanonicalKey(value, label, pattern) {
+  if (typeof value !== "string" || !pattern.test(value)) throw new Error(`${label} is invalid.`);
+  return value.toLowerCase();
+}
+
 function normalizeAvatarImage(value) {
   if (value === null) return null;
   if (typeof value !== "string") throw new Error("Avatar image must be null, an HTTPS URL, or an image data URL.");
@@ -340,6 +360,22 @@ function normalizeRuntimeTransactionOptions(value) {
   }
   if (hasOwn(normalized, "afterCommit") && typeof normalized.afterCommit !== "function") {
     throw new TypeError("Runtime transaction afterCommit must be a function.");
+  }
+  if (hasOwn(normalized, "expectedActiveIssuanceKey")
+    && normalized.expectedActiveIssuanceKey !== null) {
+    normalized.expectedActiveIssuanceKey = normalizeCanonicalKey(
+      normalized.expectedActiveIssuanceKey,
+      "Expected active issuance key",
+      ISSUANCE_KEY_PATTERN,
+    );
+  }
+  if (hasOwn(normalized, "expectedRuntimeIssuanceKey")
+    && normalized.expectedRuntimeIssuanceKey !== null) {
+    normalized.expectedRuntimeIssuanceKey = normalizeCanonicalKey(
+      normalized.expectedRuntimeIssuanceKey,
+      "Expected runtime issuance key",
+      ISSUANCE_KEY_PATTERN,
+    );
   }
   return normalized;
 }
@@ -545,6 +581,29 @@ function normalizeBotRecord(value) {
   };
 }
 
+function migrateV4Store(value) {
+  const store = assertPlainObject(value, "Store");
+  const v4Fields = new Set([
+    "schemaVersion", "bots", "legacyImports", "deletedLegacyImports", "pendingDeletions",
+  ]);
+  assertExactKeys(store, v4Fields, "Store");
+  if (store.schemaVersion !== 4) throw new Error("Unsupported bot store schema version.");
+  return {
+    ...store,
+    schemaVersion: STORE_SCHEMA_VERSION,
+    runtimeIssuances: [],
+    pendingDeletions: store.pendingDeletions.map((deletion) => ({
+      ...deletion,
+      remoteRuntimes: deletion.remoteRuntimes.map((entry) => ({
+        botId: entry.botId,
+        runtimeId: entry.runtimeId,
+        issuanceKey: null,
+        retirementKey: null,
+      })),
+    })),
+  };
+}
+
 function migrateStore(value) {
   const store = assertPlainObject(value, "Store");
   assertExactKeys(store, PREVIOUS_STORE_FIELDS, "Store");
@@ -580,15 +639,18 @@ function migrateStore(value) {
     legacyImports: store.legacyImports,
     deletedLegacyImports: Object.create(null),
     pendingDeletions: [],
+    runtimeIssuances: [],
   };
 }
 
 function normalizeLoadedStore(value) {
+  if (value?.schemaVersion === 4) return normalizeStore(migrateV4Store(value));
   if (value?.schemaVersion === LEGACY_SCHEMA_VERSION
     || value?.schemaVersion === PREVIOUS_SCHEMA_VERSION
     || value?.schemaVersion === SCHEMA_VERSION) {
     return normalizeStore(migrateStore(value));
   }
+  if (value?.schemaVersion !== STORE_SCHEMA_VERSION) throw new Error("Unsupported bot store schema version.");
   return normalizeStore(value);
 }
 
@@ -642,7 +704,16 @@ function normalizePendingDeletion(value) {
     const runtimeId = normalizeIdentifier(entry.runtimeId, "Remote runtime ID");
     if (runtimeIds.has(runtimeId)) throw new Error("Pending deletion contains a duplicate remote runtime ID.");
     runtimeIds.add(runtimeId);
-    remoteRuntimes.push({ botId, runtimeId });
+    const issuanceKey = entry.issuanceKey === null
+      ? null
+      : normalizeCanonicalKey(entry.issuanceKey, "Issuance key", ISSUANCE_KEY_PATTERN);
+    const retirementKey = entry.retirementKey === null
+      ? null
+      : normalizeCanonicalKey(entry.retirementKey, "Retirement key", RETIREMENT_KEY_PATTERN);
+    if ((issuanceKey === null) !== (retirementKey === null)) {
+      throw new Error("Remote cleanup fence must be complete or legacy-unfenced.");
+    }
+    remoteRuntimes.push({ botId, runtimeId, issuanceKey, retirementKey });
   }
 
   if (!Array.isArray(deletion.localProfiles)
@@ -669,6 +740,47 @@ function normalizePendingDeletion(value) {
     remoteRuntimes,
     localProfiles,
   };
+}
+
+function normalizeRuntimeIssuance(value) {
+  const issuance = assertPlainObject(value, "Runtime issuance");
+  assertExactKeys(issuance, RUNTIME_ISSUANCE_FIELDS, "Runtime issuance");
+  const botId = normalizeBotId(issuance.botId);
+  if (!RUNTIME_ISSUANCE_PHASES.has(issuance.phase)) throw new Error("Runtime issuance phase is invalid.");
+  const provider = normalizeIdentifier(issuance.provider, "Runtime issuance provider", { nullable: true });
+  const runtimeId = normalizeIdentifier(issuance.runtimeId, "Runtime issuance runtime ID", { nullable: true });
+  const idempotencyKey = normalizeIdentifier(issuance.idempotencyKey, "Runtime issuance idempotency key");
+  const issuanceKey = normalizeCanonicalKey(issuance.issuanceKey, "Issuance key", ISSUANCE_KEY_PATTERN);
+  const retirementKey = normalizeCanonicalKey(issuance.retirementKey, "Retirement key", RETIREMENT_KEY_PATTERN);
+  if (issuance.phase === "pending" && (provider !== null || runtimeId !== null)) {
+    throw new Error("Pending runtime issuance cannot contain a provider runtime.");
+  }
+  if (issuance.phase !== "pending" && (!provider || !runtimeId)) {
+    throw new Error("Issued runtime issuance requires provider ownership.");
+  }
+  return { botId, phase: issuance.phase, provider, runtimeId, idempotencyKey, issuanceKey, retirementKey };
+}
+
+function issuanceIdentity(value, {
+  includeRuntime = false,
+  includeProvider = false,
+  includeIdempotency = true,
+  includeRetirement = true,
+} = {}) {
+  const input = cloneData(value);
+  assertPlainObject(input, "Runtime issuance mutation");
+  const allowed = new Set(["issuanceKey"]);
+  if (includeRetirement) allowed.add("retirementKey");
+  if (includeIdempotency) allowed.add("idempotencyKey");
+  if (includeRuntime) allowed.add("runtimeId");
+  if (includeProvider) allowed.add("provider");
+  assertAllowedKeys(input, allowed, "Runtime issuance mutation");
+  const result = { issuanceKey: normalizeCanonicalKey(input.issuanceKey, "Issuance key", ISSUANCE_KEY_PATTERN) };
+  if (includeRetirement) result.retirementKey = normalizeCanonicalKey(input.retirementKey, "Retirement key", RETIREMENT_KEY_PATTERN);
+  if (includeIdempotency) result.idempotencyKey = normalizeIdentifier(input.idempotencyKey, "Runtime issuance idempotency key");
+  if (includeProvider) result.provider = normalizeIdentifier(input.provider, "Runtime issuance provider");
+  if (includeRuntime) result.runtimeId = normalizeIdentifier(input.runtimeId, "Runtime issuance runtime ID");
+  return result;
 }
 
 function normalizeStore(value) {
@@ -740,6 +852,41 @@ function normalizeStore(value) {
     deletedLegacyImports[migrationKey] = { fingerprint: entry.fingerprint };
   }
 
+  if (!Array.isArray(store.runtimeIssuances)
+    || store.runtimeIssuances.length > MAX_BOTS * 2) {
+    throw new Error("Runtime issuance ledger is invalid or oversized.");
+  }
+  const runtimeIssuances = store.runtimeIssuances.map(normalizeRuntimeIssuance);
+  const issuanceKeys = new Set();
+  const issuanceRuntimeIds = new Map();
+  const issuanceByBot = new Map();
+  for (const issuance of runtimeIssuances) {
+    if (!botIds.has(issuance.botId)) throw new Error("Runtime issuance references a missing bot.");
+    if (issuanceKeys.has(issuance.issuanceKey)) throw new Error("Runtime issuance keys must be unique.");
+    issuanceKeys.add(issuance.issuanceKey);
+    if (issuance.runtimeId) {
+      const previousPhase = issuanceRuntimeIds.get(issuance.runtimeId);
+      if (previousPhase && previousPhase === issuance.phase) {
+        throw new Error("Runtime issuance runtime IDs must be unique per phase.");
+      }
+      issuanceRuntimeIds.set(issuance.runtimeId, issuance.phase);
+      if (runtimeOwners.has(issuance.runtimeId)
+        && runtimeOwners.get(issuance.runtimeId) !== issuance.botId) {
+        throw new Error("Runtime issuance is owned by a visible bot runtime.");
+      }
+    }
+    const phases = issuanceByBot.get(issuance.botId) || new Set();
+    if (phases.has(issuance.phase)) throw new Error("A bot cannot own duplicate runtime issuance phases.");
+    phases.add(issuance.phase);
+    issuanceByBot.set(issuance.botId, phases);
+    if (issuance.phase === "active") {
+      const ownerBot = bots.find((bot) => bot.botId === issuance.botId);
+      if (ownerBot.runtime.provider !== issuance.provider
+        || ownerBot.runtime.remoteRuntimeId !== issuance.runtimeId) {
+        throw new Error("Active runtime issuance does not match the bot runtime.");
+      }
+    }
+  }
   if (!Array.isArray(store.pendingDeletions)
     || store.pendingDeletions.length > MAX_PENDING_DELETIONS) {
     throw new Error("Pending deletions are invalid or oversized.");
@@ -769,6 +916,11 @@ function normalizeStore(value) {
         throw new Error("A remote runtime cannot belong to multiple pending deletions.");
       }
       pendingRuntimeIds.add(entry.runtimeId);
+      if (issuanceRuntimeIds.has(entry.runtimeId)) throw new Error("A runtime issuance cannot be active and deleted.");
+      if (entry.issuanceKey !== null) {
+        if (issuanceKeys.has(entry.issuanceKey)) throw new Error("A runtime issuance cannot be active and deleted.");
+        issuanceKeys.add(entry.issuanceKey);
+      }
     }
     for (const entry of deletion.localProfiles) {
       if (localProfileOwners.has(entry.profileId)) {
@@ -791,6 +943,7 @@ function normalizeStore(value) {
     legacyImports,
     deletedLegacyImports,
     pendingDeletions,
+    runtimeIssuances,
   };
 }
 
@@ -801,6 +954,7 @@ function emptyStore() {
     legacyImports: Object.create(null),
     deletedLegacyImports: Object.create(null),
     pendingDeletions: [],
+    runtimeIssuances: [],
   };
 }
 
@@ -973,16 +1127,27 @@ function normalizeDeleteRequest(value, options = undefined) {
   const extraRemoteRuntimes = rawExtraRuntimes.map((rawEntry) => {
     const entry = inspectDeletionRecord(
       rawEntry,
-      REMOTE_CLEANUP_FIELDS,
+      new Set([...REMOTE_CLEANUP_FIELDS, ...LEGACY_REMOTE_CLEANUP_FIELDS]),
       "Extra remote runtime",
-      { exact: true },
     );
+    if (!hasOwn(entry, "botId") || !hasOwn(entry, "runtimeId")) {
+      throw new Error("Extra remote runtime is missing its identity.");
+    }
     const botId = normalizeBotId(entry.botId);
     if (!members.has(botId)) throw new Error("Extra remote runtime references a bot outside the deletion.");
     const runtimeId = normalizeIdentifier(entry.runtimeId, "Remote runtime ID");
     if (runtimeIds.has(runtimeId)) throw new Error("Extra remote runtime IDs must be unique.");
     runtimeIds.add(runtimeId);
-    return { botId, runtimeId };
+    const issuanceKey = entry.issuanceKey === undefined || entry.issuanceKey === null
+      ? null
+      : normalizeCanonicalKey(entry.issuanceKey, "Issuance key", ISSUANCE_KEY_PATTERN);
+    const retirementKey = entry.retirementKey === undefined || entry.retirementKey === null
+      ? null
+      : normalizeCanonicalKey(entry.retirementKey, "Retirement key", RETIREMENT_KEY_PATTERN);
+    if ((issuanceKey === null) !== (retirementKey === null)) {
+      throw new Error("Extra remote runtime fence must be complete or legacy-unfenced.");
+    }
+    return { botId, runtimeId, issuanceKey, retirementKey };
   });
   return { botIds: normalizedBotIds, preferredActiveBotId, extraRemoteRuntimes };
 }
@@ -1185,6 +1350,255 @@ class BotStore {
     }));
   }
 
+  async readRuntimeIssuances(botId) {
+    const normalizedBotId = normalizeBotId(botId);
+    return this.#enqueue(() => this.#withPathLock(async () => {
+      const state = await this.#readFile();
+      return publicSnapshot(state.runtimeIssuances.filter((entry) => entry.botId === normalizedBotId));
+    }));
+  }
+
+  async beginRuntimeIssuance(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const input = issuanceIdentity(value);
+    return this.#mutateIssuance(normalizedBotId, (next) => {
+      const existing = next.runtimeIssuances.filter((entry) => entry.botId === normalizedBotId);
+      const same = existing.find((entry) => (
+        entry.phase === "pending"
+        && entry.issuanceKey === input.issuanceKey
+        && entry.idempotencyKey === input.idempotencyKey
+        && entry.retirementKey === input.retirementKey
+      ));
+      if (same) return { matched: true, issuance: same };
+      if (existing.some((entry) => entry.phase === "pending")) return { matched: false, issuance: null };
+      const issuance = {
+        botId: normalizedBotId,
+        phase: "pending",
+        provider: null,
+        runtimeId: null,
+        ...input,
+      };
+      next.runtimeIssuances.push(issuance);
+      return { matched: true, issuance };
+    });
+  }
+
+  async issueRuntimeIssuance(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const input = issuanceIdentity(value, {
+      includeRuntime: true,
+      includeProvider: true,
+      includeIdempotency: false,
+      includeRetirement: false,
+    });
+    return this.#mutateIssuance(normalizedBotId, (next) => {
+      const issuance = next.runtimeIssuances.find((entry) => (
+        entry.botId === normalizedBotId
+        && entry.phase === "pending"
+        && entry.issuanceKey === input.issuanceKey
+      ));
+      if (!issuance) return { matched: false, issuance: null };
+      issuance.phase = "issued";
+      issuance.provider = input.provider;
+      issuance.runtimeId = input.runtimeId;
+      return { matched: true, issuance };
+    });
+  }
+
+  async recordRuntimeIssuance(botId, value) {
+    return this.issueRuntimeIssuance(botId, value);
+  }
+
+  async promoteRuntimeIssuance(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const input = cloneData(value);
+    assertPlainObject(input, "Runtime issuance promotion");
+    assertAllowedKeys(input, new Set([
+      "issuanceKey", "provider", "runtimeId", "state", "lastConfirmedAt", "expectedPreviousIssuanceKey",
+    ]), "Runtime issuance promotion");
+    if (!Object.hasOwn(input, "expectedPreviousIssuanceKey")) {
+      throw new Error("Runtime issuance promotion requires a previous issuance key CAS.");
+    }
+    const issuanceKey = normalizeCanonicalKey(input.issuanceKey, "Issuance key", ISSUANCE_KEY_PATTERN);
+    const provider = normalizeIdentifier(input.provider, "Runtime issuance provider");
+    const runtimeId = normalizeIdentifier(input.runtimeId, "Runtime issuance runtime ID");
+    const state = input.state === undefined ? "ready" : input.state;
+    const lastConfirmedAt = input.lastConfirmedAt === undefined ? null : normalizeTimestamp(input.lastConfirmedAt, "Runtime confirmation", { nullable: true });
+    const expectedPreviousIssuanceKey = input.expectedPreviousIssuanceKey === null
+      ? null
+      : normalizeCanonicalKey(input.expectedPreviousIssuanceKey, "Previous issuance key", ISSUANCE_KEY_PATTERN);
+    return this.#mutateIssuance(normalizedBotId, (next) => {
+      const issuance = next.runtimeIssuances.find((entry) => (
+        entry.botId === normalizedBotId && entry.phase === "issued" && entry.issuanceKey === issuanceKey
+      ));
+      if (!issuance || issuance.provider !== provider || issuance.runtimeId !== runtimeId) {
+        return { matched: false, issuance: null };
+      }
+      const active = next.runtimeIssuances.find((entry) => entry.botId === normalizedBotId && entry.phase === "active");
+      if (expectedPreviousIssuanceKey === null && active) {
+        return { matched: false, issuance: null };
+      }
+      if (expectedPreviousIssuanceKey !== null && active?.issuanceKey !== expectedPreviousIssuanceKey) {
+        return { matched: false, issuance: null };
+      }
+      if (active && active !== issuance) {
+        next.runtimeIssuances = next.runtimeIssuances.filter((entry) => entry !== active);
+      }
+      issuance.phase = "active";
+      const bot = next.bots.find((entry) => entry.botId === normalizedBotId);
+      bot.runtime = normalizeRuntime({
+        ...bot.runtime,
+        provider,
+        remoteRuntimeId: runtimeId,
+        state,
+        lastConfirmedAt,
+        lastErrorCode: null,
+      });
+      return { matched: true, issuance };
+    });
+  }
+
+  async confirmRuntimeIssuance(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const raw = cloneData(value);
+    assertPlainObject(raw, "Runtime issuance confirmation");
+    assertAllowedKeys(raw, new Set(["issuanceKey", "provider", "runtimeId", "lastConfirmedAt"]), "Runtime issuance confirmation");
+    const input = issuanceIdentity({
+      issuanceKey: raw.issuanceKey,
+      provider: raw.provider,
+      runtimeId: raw.runtimeId,
+    }, {
+      includeRuntime: true,
+      includeProvider: true,
+      includeIdempotency: false,
+      includeRetirement: false,
+    });
+    const lastConfirmedAt = normalizeTimestamp(
+      raw.lastConfirmedAt,
+      "Runtime confirmation",
+    );
+    return this.#mutateIssuance(normalizedBotId, (next) => {
+      const issuance = next.runtimeIssuances.find((entry) => (
+        entry.botId === normalizedBotId
+        && entry.phase === "active"
+        && entry.issuanceKey === input.issuanceKey
+        && entry.provider === input.provider
+        && entry.runtimeId === input.runtimeId
+      ));
+      if (!issuance) return { matched: false, issuance: null };
+      const bot = next.bots.find((entry) => entry.botId === normalizedBotId);
+      bot.runtime = normalizeRuntime({
+        ...bot.runtime,
+        provider: input.provider,
+        remoteRuntimeId: input.runtimeId,
+        state: "ready",
+        lastConfirmedAt,
+        lastErrorCode: null,
+      });
+      return { matched: true, issuance };
+    });
+  }
+
+  async completeRuntimeIssuance(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const raw = cloneData(value);
+    assertPlainObject(raw, "Runtime issuance completion");
+    assertAllowedKeys(raw, new Set([
+      "issuanceKey", "provider", "runtimeId", "state", "runtimeState", "lastErrorCode",
+    ]), "Runtime issuance completion");
+    const input = issuanceIdentity({
+      issuanceKey: raw.issuanceKey,
+      provider: raw.provider,
+      runtimeId: raw.runtimeId,
+    }, {
+      includeRuntime: true,
+      includeProvider: true,
+      includeIdempotency: false,
+      includeRetirement: false,
+    });
+    if (!["detached", "retired"].includes(raw.state)) {
+      throw new Error("Runtime issuance completion state is invalid.");
+    }
+    const runtimeState = raw.runtimeState === undefined ? raw.state : raw.runtimeState;
+    if (!["detached", "retired", "failed", "unavailable"].includes(runtimeState)) {
+      throw new Error("Runtime issuance runtime state is invalid.");
+    }
+    const lastErrorCode = raw.lastErrorCode === null || raw.lastErrorCode === undefined
+      ? null
+      : normalizeIdentifier(raw.lastErrorCode, "Runtime error code", { errorCode: true });
+    return this.#mutateIssuance(normalizedBotId, (next) => {
+      const index = next.runtimeIssuances.findIndex((entry) => (
+        entry.botId === normalizedBotId
+        && entry.phase === "active"
+        && entry.issuanceKey === input.issuanceKey
+        && entry.provider === input.provider
+        && entry.runtimeId === input.runtimeId
+      ));
+      if (index < 0) return { matched: false, issuance: null };
+      next.runtimeIssuances.splice(index, 1);
+      const bot = next.bots.find((entry) => entry.botId === normalizedBotId);
+      bot.runtime = normalizeRuntime({
+        ...bot.runtime,
+        provider: null,
+        remoteRuntimeId: null,
+        state: runtimeState,
+        lastConfirmedAt: null,
+        lastErrorCode,
+      });
+      return { matched: true, issuance: null };
+    });
+  }
+
+  async revertRuntimePromotion(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const raw = cloneData(value);
+    assertPlainObject(raw, "Runtime issuance reversion");
+    assertAllowedKeys(raw, new Set(["issuanceKey", "provider", "runtimeId"]), "Runtime issuance reversion");
+    const input = issuanceIdentity(raw, {
+      includeRuntime: true,
+      includeProvider: true,
+      includeIdempotency: false,
+      includeRetirement: false,
+    });
+    return this.#mutateIssuance(normalizedBotId, (next) => {
+      const issuance = next.runtimeIssuances.find((entry) => (
+        entry.botId === normalizedBotId
+        && entry.phase === "active"
+        && entry.issuanceKey === input.issuanceKey
+        && entry.provider === input.provider
+        && entry.runtimeId === input.runtimeId
+      ));
+      if (!issuance) return { matched: false, issuance: null };
+      issuance.phase = "issued";
+      const bot = next.bots.find((entry) => entry.botId === normalizedBotId);
+      bot.runtime = normalizeRuntime({
+        ...bot.runtime,
+        provider: null,
+        remoteRuntimeId: null,
+        state: "failed",
+        lastConfirmedAt: null,
+        lastErrorCode: "RUNTIME_CONTROLLER_DISPOSED",
+      });
+      return { matched: true, issuance };
+    });
+  }
+
+  async abortRuntimeIssuance(botId, value) {
+    const normalizedBotId = normalizeBotId(botId);
+    const raw = cloneData(value);
+    assertPlainObject(raw, "Runtime issuance abort");
+    assertAllowedKeys(raw, new Set(["issuanceKey"]), "Runtime issuance abort");
+    const issuanceKey = normalizeCanonicalKey(raw.issuanceKey, "Issuance key", ISSUANCE_KEY_PATTERN);
+    return this.#mutateIssuance(normalizedBotId, (next) => {
+      const before = next.runtimeIssuances.length;
+      next.runtimeIssuances = next.runtimeIssuances.filter((entry) => (
+        !(entry.botId === normalizedBotId && entry.issuanceKey === issuanceKey && entry.phase !== "active")
+      ));
+      const issuance = next.runtimeIssuances.find((entry) => entry.botId === normalizedBotId && entry.issuanceKey === issuanceKey) || null;
+      return { matched: before !== next.runtimeIssuances.length, issuance };
+    });
+  }
+
   async deleteBots(botIds, options = undefined) {
     const request = normalizeDeleteRequest(botIds, options);
     return this.#enqueue(() => this.#withPathLock(async () => {
@@ -1200,7 +1614,10 @@ class BotStore {
       if (retry) {
         const cleanupMatches = request.extraRemoteRuntimes.every((requested) => (
           retry.remoteRuntimes.some((retained) => (
-            retained.botId === requested.botId && retained.runtimeId === requested.runtimeId
+            retained.botId === requested.botId
+            && retained.runtimeId === requested.runtimeId
+            && retained.issuanceKey === requested.issuanceKey
+            && retained.retirementKey === requested.retirementKey
           ))
         ));
         if (!cleanupMatches) {
@@ -1210,12 +1627,41 @@ class BotStore {
       }
 
       const deleted = request.botIds.map((botId) => this.#requiredBot(current, botId));
+      const pendingIssuances = current.runtimeIssuances.filter((entry) => (
+        request.botIds.includes(entry.botId) && entry.phase === "pending"
+      ));
+      if (pendingIssuances.length > 0) {
+        const error = new Error("Bot deletion cannot discard a pending runtime issuance.");
+        error.code = "BOT_STORE_RUNTIME_ISSUANCE_PENDING";
+        throw error;
+      }
       const remoteRuntimes = [];
       const runtimeOwners = new Map();
       for (const bot of deleted) {
+        const issuances = current.runtimeIssuances.filter((entry) => (
+          entry.botId === bot.botId && entry.phase !== "pending"
+        ));
+        if (issuances.length > 0) {
+          for (const issuance of issuances) {
+            if (!issuance.runtimeId) continue;
+            runtimeOwners.set(issuance.runtimeId, issuance.botId);
+            remoteRuntimes.push({
+              botId: issuance.botId,
+              runtimeId: issuance.runtimeId,
+              issuanceKey: issuance.issuanceKey,
+              retirementKey: issuance.retirementKey,
+            });
+          }
+          continue;
+        }
         if (!bot.runtime.remoteRuntimeId) continue;
         runtimeOwners.set(bot.runtime.remoteRuntimeId, bot.botId);
-        remoteRuntimes.push({ botId: bot.botId, runtimeId: bot.runtime.remoteRuntimeId });
+        remoteRuntimes.push({
+          botId: bot.botId,
+          runtimeId: bot.runtime.remoteRuntimeId,
+          issuanceKey: null,
+          retirementKey: null,
+        });
       }
       for (const entry of request.extraRemoteRuntimes) {
         const owner = runtimeOwners.get(entry.runtimeId);
@@ -1239,6 +1685,7 @@ class BotStore {
       const deletedIds = new Set(request.botIds);
       const next = cloneData(current);
       next.bots = next.bots.filter((bot) => !deletedIds.has(bot.botId));
+      next.runtimeIssuances = next.runtimeIssuances.filter((issuance) => !deletedIds.has(issuance.botId));
       for (const [migrationKey, entry] of Object.entries(next.legacyImports)) {
         if (!deletedIds.has(entry.botId)) continue;
         next.deletedLegacyImports[migrationKey] = { fingerprint: entry.fingerprint };
@@ -1454,12 +1901,20 @@ class BotStore {
     const normalizedOptions = normalizeRuntimeTransactionOptions(options);
     if (typeof operation !== "function") throw new TypeError("Runtime transaction operation must be a function.");
     const comparesLease = hasOwn(normalizedOptions, "expectedLastErrorCode");
+    const comparesActiveIssuance = hasOwn(normalizedOptions, "expectedActiveIssuanceKey");
+    const comparesRuntimeIssuance = hasOwn(normalizedOptions, "expectedRuntimeIssuanceKey");
     const expectedLastErrorCode = comparesLease
       ? normalizeIdentifier(
         normalizedOptions.expectedLastErrorCode,
         "Expected runtime error code",
         { nullable: true, errorCode: true },
       )
+      : undefined;
+    const expectedActiveIssuanceKey = comparesActiveIssuance
+      ? normalizedOptions.expectedActiveIssuanceKey
+      : undefined;
+    const expectedRuntimeIssuanceKey = comparesRuntimeIssuance
+      ? normalizedOptions.expectedRuntimeIssuanceKey
       : undefined;
     const afterCommit = normalizedOptions.afterCommit || null;
 
@@ -1481,6 +1936,32 @@ class BotStore {
             bot: publicSnapshot(currentBot),
           });
         }
+        if (comparesActiveIssuance) {
+          const activeIssuance = current.runtimeIssuances.find((entry) => (
+            entry.botId === normalizedBotId && entry.phase === "active"
+          ));
+          if (expectedActiveIssuanceKey === null
+            ? activeIssuance
+            : activeIssuance?.issuanceKey !== expectedActiveIssuanceKey) {
+            return deepFreeze({
+              matched: false,
+              bot: publicSnapshot(currentBot),
+            });
+          }
+        }
+        if (comparesRuntimeIssuance) {
+          const hasExpectedIssuance = current.runtimeIssuances.some((entry) => (
+            entry.botId === normalizedBotId
+            && entry.issuanceKey === expectedRuntimeIssuanceKey
+          ));
+          const hasAnyIssuance = current.runtimeIssuances.some((entry) => entry.botId === normalizedBotId);
+          if (expectedRuntimeIssuanceKey === null ? hasAnyIssuance : !hasExpectedIssuance) {
+            return deepFreeze({
+              matched: false,
+              bot: publicSnapshot(currentBot),
+            });
+          }
+        }
 
         const next = cloneData(current);
         let changed = false;
@@ -1495,6 +1976,7 @@ class BotStore {
         const context = Object.freeze({
           bot: publicSnapshot(currentBot),
           bots: publicSnapshot(current.bots),
+          runtimeIssuances: publicSnapshot(current.runtimeIssuances),
           updateRuntime,
         });
         const transactionContext = runtimeTransactionContext(this.#filePath);
@@ -1607,6 +2089,26 @@ class BotStore {
     }));
   }
 
+  async #mutateIssuance(botId, operation) {
+    return this.#enqueue(() => this.#withPathLock(async () => {
+      const current = await this.#readFile();
+      this.#requiredBot(current, botId);
+      const next = cloneData(current);
+      const result = operation(next);
+      if (!result.matched) return deepFreeze({ matched: false, issuance: null, bot: publicSnapshot(this.#requiredBot(current, botId)) });
+      const validated = normalizeStore(next);
+      await this.#commitState(current, validated);
+      const issuance = validated.runtimeIssuances.find((entry) => (
+        entry.botId === botId && entry.issuanceKey === result.issuance?.issuanceKey
+      )) || null;
+      return deepFreeze({
+        matched: true,
+        issuance,
+        bot: publicSnapshot(this.#requiredBot(validated, botId)),
+      });
+    }));
+  }
+
   async #commitState(current, committed, commitFence = null) {
     if (commitFence !== null) {
       let valid = false;
@@ -1713,4 +2215,5 @@ class BotStore {
 module.exports = {
   BotStore,
   SCHEMA_VERSION,
+  STORE_SCHEMA_VERSION,
 };

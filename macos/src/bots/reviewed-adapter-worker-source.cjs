@@ -92,6 +92,7 @@ let adapter = null;
 let unsubscribe = null;
 let ready = false;
 let stopped = false;
+let providerContractVersion = null;
 const earlyEvents = [];
 
 function signalHandshake(message) {
@@ -131,6 +132,32 @@ function exactFunctions(value, label, expectedKeys) {
   return value;
 }
 
+function validateV2SubscriptionEvent(value) {
+  plainObject(value, "Reviewed provider subscription event");
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new TypeError("Reviewed provider subscription event has invalid fields.");
+  }
+  for (const key of keys) {
+    if (!("value" in descriptors[key])) {
+      throw new TypeError("Reviewed provider subscription event cannot contain accessors.");
+    }
+  }
+  if (!descriptors.runtimeId || !("value" in descriptors.runtimeId)
+    || !descriptors.runtimeId.enumerable
+    || !descriptors.issuanceKey || !("value" in descriptors.issuanceKey)
+    || !descriptors.issuanceKey.enumerable) {
+    throw new TypeError("Reviewed provider v2 subscription event requires runtimeId and issuanceKey.");
+  }
+  const issuanceKey = descriptors.issuanceKey.value;
+  if (typeof issuanceKey !== "string"
+    || Buffer.byteLength(issuanceKey, "utf8") > 256
+    || !/^issuance-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(issuanceKey)) {
+    throw new TypeError("Reviewed provider v2 subscription event issuanceKey is invalid.");
+  }
+}
+
 function restrictedRequire() {
   throw new Error("Module imports are unavailable.");
 }
@@ -165,6 +192,9 @@ function evaluateReviewedModule() {
 
 function postEvent(value) {
   if (stopped) return;
+  if (workerData.adapterKind === "provider" && providerContractVersion === 2) {
+    validateV2SubscriptionEvent(value);
+  }
   assertBoundedAdapterData(value);
   if (!ready) {
     if (earlyEvents.length >= workerData.maxEvents) {
@@ -179,13 +209,28 @@ function postEvent(value) {
 function initializeAdapter() {
   const created = evaluateReviewedModule();
   if (workerData.adapterKind === "provider") {
-    adapter = exactFunctions(created, "Reviewed provider", [
+    const descriptors = Object.getOwnPropertyDescriptors(created);
+    const keys = Reflect.ownKeys(descriptors);
+    const legacyKeys = ["capabilities", "provision", "inspect", "retire", "subscribe"];
+    const enhancedKeys = [
       "capabilities",
       "provision",
       "inspect",
       "retire",
+      "inspectIssuance",
+      "retireIssuance",
       "subscribe",
-    ]);
+    ];
+    const exactKeys = (expected) => keys.length === expected.length
+      && keys.every((key) => typeof key === "string" && expected.includes(key));
+    if (exactKeys(enhancedKeys)) providerContractVersion = 2;
+    else if (exactKeys(legacyKeys)) providerContractVersion = 1;
+    else throw new TypeError("Reviewed provider has invalid contract topology.");
+    adapter = exactFunctions(
+      created,
+      "Reviewed provider",
+      providerContractVersion === 2 ? enhancedKeys : legacyKeys,
+    );
     unsubscribe = adapter.subscribe.call(adapter, postEvent);
     if (typeof unsubscribe !== "function") {
       throw new TypeError("Reviewed provider subscription is invalid.");
@@ -203,6 +248,7 @@ function operationInput(fields, controller) {
     fields = Object.create(null);
   }
   plainObject(fields, "Reviewed adapter operation input");
+  assertBoundedAdapterData(fields);
   const input = Object.assign(Object.create(null), fields);
   if (controller) {
     Object.defineProperty(input, "signal", {
@@ -270,7 +316,9 @@ port.on("message", (message) => {
 
 try {
   initializeAdapter();
-  signalHandshake({ type: "ready", events: earlyEvents.splice(0) });
+  const readyMessage = { type: "ready", events: earlyEvents.splice(0) };
+  if (workerData.adapterKind === "provider") readyMessage.providerContractVersion = providerContractVersion;
+  signalHandshake(readyMessage);
   ready = true;
 } catch {
   signalHandshake({ type: "error" });

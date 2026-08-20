@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   validateProvider,
+  providerContractVersion,
   unavailableProvider,
 } = require("../src/bots/runtime-provider.cjs");
 
@@ -52,6 +53,40 @@ function fakeProvider(overrides = {}) {
   return provider;
 }
 
+function fakeV2Provider(overrides = {}) {
+  const provider = fakeProvider({
+    capabilities: async () => ({ ...REQUIRED_CAPABILITIES, issuanceFencedRetire: true }),
+    provision: async ({ botId, issuanceKey }) => ({
+      provider: "authorized-test-provider",
+      runtimeId: `runtime-${botId}`,
+      ownerBotId: botId,
+      issuanceKey,
+      endpoint: "wss://runtime.example.test/app-server",
+      authToken: "memory-only-token",
+      state: "ready",
+    }),
+    inspectIssuance: async ({ runtimeId, ownerBotId, issuanceKey }) => ({
+      matched: true,
+      runtimeId,
+      ownerBotId,
+      issuanceKey,
+      state: "ready",
+    }),
+    retireIssuance: async ({ runtimeId, ownerBotId, issuanceKey }) => ({
+      matched: true,
+      runtimeId,
+      ownerBotId,
+      issuanceKey,
+      state: "retired",
+    }),
+    ...overrides,
+  });
+  return provider;
+}
+
+const ISSUANCE_KEY = "issuance-00000000-0000-4000-8000-000000000001";
+const RETIREMENT_KEY = "retire-00000000-0000-4000-8000-000000000001";
+
 function captureThrow(operation) {
   try {
     operation();
@@ -76,6 +111,226 @@ test("rejects adapters missing a required method", () => {
   const nullError = captureThrow(() => validateProvider(null));
   assert.equal(nullError.constructor, TypeError);
   assert.equal(nullError.message, "provider must be an object.");
+});
+
+test("accepts only the exact enhanced topology and exposes its issuance contract", async () => {
+  const provider = validateProvider(fakeV2Provider());
+
+  assert.equal(providerContractVersion(provider), 2);
+  assert.deepEqual(Reflect.ownKeys(provider), [
+    "capabilities",
+    "provision",
+    "inspect",
+    "retire",
+    "inspectIssuance",
+    "retireIssuance",
+    "subscribe",
+  ]);
+  assert.equal(typeof provider.inspectIssuance, "function");
+  assert.equal(typeof provider.retireIssuance, "function");
+  assert.deepEqual(await provider.capabilities(), {
+    ...REQUIRED_CAPABILITIES,
+    issuanceFencedRetire: true,
+  });
+});
+
+test("normalizes legacy capabilities to issuanceFencedRetire false and hides v2 methods", async () => {
+  const provider = validateProvider(fakeProvider());
+
+  assert.equal(providerContractVersion(provider), 1);
+  assert.deepEqual(Reflect.ownKeys(provider), [
+    "capabilities",
+    "provision",
+    "inspect",
+    "retire",
+    "subscribe",
+  ]);
+  assert.equal("inspectIssuance" in provider, false);
+  assert.equal("retireIssuance" in provider, false);
+  assert.deepEqual(await provider.capabilities(), {
+    ...REQUIRED_CAPABILITIES,
+    issuanceFencedRetire: false,
+  });
+});
+
+test("requires method topology and capability metadata to agree", async (t) => {
+  const cases = [
+    ["legacy advertises fenced retirement", fakeProvider({
+      capabilities: async () => ({ ...REQUIRED_CAPABILITIES, issuanceFencedRetire: true }),
+    })],
+    ["enhanced omits fenced retirement", fakeV2Provider({
+      capabilities: async () => ({ ...REQUIRED_CAPABILITIES }),
+    })],
+    ["enhanced disables fenced retirement", fakeV2Provider({
+      capabilities: async () => ({ ...REQUIRED_CAPABILITIES, issuanceFencedRetire: false }),
+    })],
+    ["enhanced has an extra method", fakeV2Provider({ extra: () => {} })],
+  ];
+  for (const [name, raw] of cases) {
+    await t.test(name, async () => {
+      if (name === "enhanced has an extra method") {
+        assert.throws(() => validateProvider(raw), /topology/i);
+        return;
+      }
+      const provider = validateProvider(raw);
+      await assert.rejects(() => provider.capabilities(), /issuance|topology|capability/i);
+    });
+  }
+});
+
+test("v2 provision carries one exact non-secret issuance key and rejects extras", async () => {
+  let received;
+  const provider = validateProvider(fakeV2Provider({
+    provision: async (input) => {
+      received = input;
+      return {
+        provider: "authorized-test-provider",
+        runtimeId: "runtime-bot-1",
+        ownerBotId: "bot-1",
+        issuanceKey: ISSUANCE_KEY,
+        endpoint: "wss://runtime.example.test/app-server",
+        authToken: "memory-only-token",
+        state: "ready",
+      };
+    },
+  }));
+
+  await assert.rejects(() => provider.provision({
+    botId: "bot-1",
+    idempotencyKey: "codex-bot:bot-1",
+    issuanceKey: ISSUANCE_KEY,
+    ignored: "must-not-cross-boundary",
+  }), /provision input|invalid fields/i);
+
+  const result = await provider.provision({
+    botId: "bot-1",
+    idempotencyKey: "codex-bot:bot-1",
+    issuanceKey: ISSUANCE_KEY,
+  });
+
+  assert.deepEqual(received, {
+    botId: "bot-1",
+    idempotencyKey: "codex-bot:bot-1",
+    issuanceKey: ISSUANCE_KEY,
+  });
+  assert.equal(result.issuanceKey, ISSUANCE_KEY);
+  assert.equal(Object.isFrozen(result), true);
+  assert.doesNotMatch(JSON.stringify(result), /memory-only-token/);
+});
+
+test("v2 issuance inspect and retire return exact frozen matched identities", async () => {
+  const provider = validateProvider(fakeV2Provider());
+  const input = {
+    runtimeId: "runtime-bot-1",
+    ownerBotId: "bot-1",
+    issuanceKey: ISSUANCE_KEY,
+  };
+  const inspected = await provider.inspectIssuance(input);
+  assert.deepEqual(inspected, { matched: true, ...input, state: "ready" });
+  assert.equal(Object.isFrozen(inspected), true);
+
+  const retired = await provider.retireIssuance({
+    ...input,
+    retirementKey: RETIREMENT_KEY,
+  });
+  assert.deepEqual(retired, { matched: true, ...input, state: "retired" });
+  assert.equal(Object.isFrozen(retired), true);
+});
+
+test("v2 issuance methods reject extras, accessors, proxies, and mismatched supersession", async (t) => {
+  const base = {
+    runtimeId: "runtime-bot-1",
+    ownerBotId: "bot-1",
+    issuanceKey: ISSUANCE_KEY,
+  };
+  const cases = [
+    ["inspect extra", "inspectIssuance", { ...base, extra: true }],
+    ["retire extra", "retireIssuance", { ...base, retirementKey: RETIREMENT_KEY, extra: true }],
+    ["inspect accessor", "inspectIssuance", Object.defineProperty({ ...base }, "runtimeId", {
+      enumerable: true,
+      get() { throw new Error("private accessor"); },
+    })],
+    ["retire proxy", "retireIssuance", new Proxy({ ...base, retirementKey: RETIREMENT_KEY }, {})],
+  ];
+  for (const [name, method, input] of cases) {
+    await t.test(name, async () => {
+      const provider = validateProvider(fakeV2Provider());
+      await assert.rejects(() => provider[method](input), /issuance|input|failed/i);
+    });
+  }
+
+  const superseded = validateProvider(fakeV2Provider({
+    inspectIssuance: async ({ runtimeId }) => ({ matched: false, runtimeId, state: "superseded" }),
+    retireIssuance: async ({ runtimeId }) => ({ matched: false, runtimeId, state: "superseded" }),
+  }));
+  assert.deepEqual(await superseded.inspectIssuance(base), {
+    matched: false,
+    runtimeId: base.runtimeId,
+    state: "superseded",
+  });
+  assert.deepEqual(await superseded.retireIssuance({ ...base, retirementKey: RETIREMENT_KEY }), {
+    matched: false,
+    runtimeId: base.runtimeId,
+    state: "superseded",
+  });
+});
+
+test("rejects oversized v2 issuance and retirement identifiers before crossing the adapter boundary", async (t) => {
+  const calls = [];
+  const provider = validateProvider(fakeV2Provider({
+    provision: async (input) => {
+      calls.push(["provision", input]);
+      return {
+        provider: "authorized-test-provider",
+        runtimeId: "runtime-bot-1",
+        ownerBotId: "bot-1",
+        issuanceKey: ISSUANCE_KEY,
+        endpoint: "wss://runtime.example.test/app-server",
+        authToken: "memory-only-token",
+        state: "ready",
+      };
+    },
+    inspectIssuance: async (input) => {
+      calls.push(["inspectIssuance", input]);
+      return { matched: false, runtimeId: input.runtimeId, state: "superseded" };
+    },
+    retireIssuance: async (input) => {
+      calls.push(["retireIssuance", input]);
+      return { matched: false, runtimeId: input.runtimeId, state: "superseded" };
+    },
+  }));
+  const oversized = "x".repeat(300_000);
+
+  await assert.rejects(() => provider.provision({
+    botId: "bot-1",
+    idempotencyKey: "codex-bot:bot-1",
+    issuanceKey: oversized,
+  }), /issuance|identifier|invalid/i);
+  await assert.rejects(() => provider.inspectIssuance({
+    runtimeId: "runtime-bot-1",
+    ownerBotId: "bot-1",
+    issuanceKey: oversized,
+  }), /issuance|identifier|invalid/i);
+  await assert.rejects(() => provider.retireIssuance({
+    runtimeId: "runtime-bot-1",
+    ownerBotId: "bot-1",
+    issuanceKey: ISSUANCE_KEY,
+    retirementKey: oversized,
+  }), /retire|identifier|invalid/i);
+  assert.deepEqual(calls, []);
+  await t.test("bounded legacy identifiers", async () => {
+    await assert.rejects(() => provider.provision({
+      botId: oversized,
+      idempotencyKey: "codex-bot:bot-1",
+      issuanceKey: ISSUANCE_KEY,
+    }), /identifier|botId/i);
+    await assert.rejects(() => provider.provision({
+      botId: "bot-1",
+      idempotencyKey: oversized,
+      issuanceKey: ISSUANCE_KEY,
+    }), /identifier|idempotency/i);
+  });
+  assert.deepEqual(calls, []);
 });
 
 test("sanitizes hostile getters and proxies during initial provider shape inspection", async (t) => {
@@ -131,7 +386,10 @@ test("returns frozen exact capability metadata", async () => {
 
   const capabilities = await provider.capabilities();
 
-  assert.deepEqual(capabilities, REQUIRED_CAPABILITIES);
+  assert.deepEqual(capabilities, {
+    ...REQUIRED_CAPABILITIES,
+    issuanceFencedRetire: false,
+  });
   assert.equal(Object.isFrozen(capabilities), true);
   assert.equal(Object.isFrozen(provider), true);
   assert.equal("diagnostic" in capabilities, false);
@@ -359,7 +617,9 @@ test("accepts public literal and trusted DNS wss endpoints", async (t) => {
 test("rejects malformed and mismatched provision metadata without leaking secrets", async (t) => {
   const cases = [
     ["empty provider", { provider: "" }],
+    ["provider with spaces", { provider: "authorized provider" }],
     ["empty runtime", { runtimeId: "" }],
+    ["runtime with spaces", { runtimeId: "runtime bot 1" }],
     ["wrong owner", { ownerBotId: "bot-2" }],
     ["missing token", { authToken: "" }],
     ["invalid state", { state: "local" }],
@@ -669,6 +929,73 @@ test("rejects unscoped or secret-bearing subscription events and freezes valid e
   assert.equal(Object.isFrozen(seen[0]), true);
 });
 
+test("v2 subscription events require and preserve the exact issuance fence", () => {
+  let emit;
+  const provider = validateProvider(fakeV2Provider({
+    subscribe(callback) {
+      emit = callback;
+      return () => {};
+    },
+  }));
+  const seen = [];
+  provider.subscribe((event) => seen.push(event));
+  const issuanceA = "issuance-00000000-0000-4000-8000-000000000001";
+  const issuanceB = "issuance-00000000-0000-4000-8000-000000000002";
+
+  assert.throws(
+    () => emit({ runtimeId: "runtime-shared", type: "state", state: "ready" }),
+    /issuance/i,
+  );
+  assert.throws(
+    () => emit({
+      runtimeId: "runtime-shared",
+      issuanceKey: "issuance-not-canonical",
+      type: "state",
+    }),
+    /issuance/i,
+  );
+  const accessorEvent = { runtimeId: "runtime-shared", type: "state" };
+  Object.defineProperty(accessorEvent, "issuanceKey", {
+    enumerable: true,
+    get() {
+      throw new Error("issuance accessor must not execute");
+    },
+  });
+  assert.throws(() => emit(accessorEvent), /failed|issuance/i);
+
+  emit({
+    runtimeId: "runtime-shared",
+    issuanceKey: issuanceA,
+    type: "state",
+    payload: { source: "A" },
+  });
+  emit({
+    runtimeId: "runtime-shared",
+    issuanceKey: issuanceB,
+    type: "state",
+    payload: { source: "B" },
+  });
+  // A late event from superseded issuance A must remain distinguishable even
+  // when the provider reuses the same runtimeId for issuance B.
+  emit({
+    runtimeId: "runtime-shared",
+    issuanceKey: issuanceA,
+    type: "state",
+    payload: { source: "late-A" },
+  });
+
+  assert.deepEqual(seen.map(({ runtimeId, issuanceKey, payload }) => ({
+    runtimeId,
+    issuanceKey,
+    payload,
+  })), [
+    { runtimeId: "runtime-shared", issuanceKey: issuanceA, payload: { source: "A" } },
+    { runtimeId: "runtime-shared", issuanceKey: issuanceB, payload: { source: "B" } },
+    { runtimeId: "runtime-shared", issuanceKey: issuanceA, payload: { source: "late-A" } },
+  ]);
+  assert.equal(Object.isFrozen(seen[0]), true);
+});
+
 test("subscription events allow Codex token-usage metrics", () => {
   let emit;
   const provider = validateProvider(fakeProvider({
@@ -810,6 +1137,7 @@ test("unavailable provider reports frozen false capabilities and fails closed", 
     retire: false,
     remoteAppServer: false,
     computerFrames: false,
+    issuanceFencedRetire: false,
   });
   assert.equal(Object.isFrozen(capabilities), true);
   assert.equal(Object.isFrozen(provider), true);

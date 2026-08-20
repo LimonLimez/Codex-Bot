@@ -9,7 +9,10 @@ const {
   receiveMessageOnPort,
 } = require("node:worker_threads");
 
-const { REVIEWED_ADAPTER_WORKER_SOURCE } = require("./reviewed-adapter-worker-source.cjs");
+const {
+  REVIEWED_ADAPTER_WORKER_SOURCE,
+  assertBoundedAdapterData,
+} = require("./reviewed-adapter-worker-source.cjs");
 
 const MAX_ADAPTER_MODULE_BYTES = 1_048_576;
 const MAX_ADAPTER_PENDING_OPERATIONS = 64;
@@ -154,6 +157,11 @@ function adapterInput(value) {
     if (descriptors[key].enumerable) input[key] = descriptors[key].value;
   }
   if (signal !== undefined && !(signal instanceof AbortSignal)) throw adapterWorkerFailure();
+  try {
+    assertBoundedAdapterData(input);
+  } catch {
+    throw adapterWorkerFailure();
+  }
   return Object.freeze({ input, signal });
 }
 
@@ -213,7 +221,10 @@ function createWorkerFromSource({
     || !isReviewedAdapterEnvelope(envelope.message)
     || envelope.message.type !== "ready"
     || !Array.isArray(envelope.message.events)
-    || envelope.message.events.length > maxEvents) {
+    || envelope.message.events.length > maxEvents
+    || (adapterKind === "provider"
+      && ![1, 2].includes(envelope.message.providerContractVersion))
+    || (adapterKind === "exercise" && "providerContractVersion" in envelope.message)) {
     port1.close();
     void worker.terminate();
     throw loaderError();
@@ -355,7 +366,14 @@ function createWorkerFromSource({
     };
   };
 
-  return Object.freeze({ request, shutdown, subscribe });
+  const channel = { request, shutdown, subscribe };
+  Object.defineProperty(channel, "providerContractVersion", {
+    value: adapterKind === "provider" ? envelope.message.providerContractVersion : undefined,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return Object.freeze(channel);
 }
 
 function createReviewedAdapterWorker({ modulePath, moduleSha256, ...options } = {}) {

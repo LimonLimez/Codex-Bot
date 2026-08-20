@@ -14,7 +14,10 @@ const {
 const { BotStore } = require("./bot-store.cjs");
 const { RemoteAppServerClient } = require("./remote-app-server-client.cjs");
 const { BotRuntimeController } = require("./runtime-controller.cjs");
-const { validateProvider } = require("./runtime-provider.cjs");
+const {
+  providerContractVersion,
+  validateProvider,
+} = require("./runtime-provider.cjs");
 
 const BLOCKED_CODE = "REMOTE_PROVIDER_GATE_BLOCKED";
 const BLOCKED_MESSAGE = "Remote provider verification is not configured.";
@@ -22,6 +25,12 @@ const FAILED_CODE = "REMOTE_PROVIDER_GATE_FAILED";
 const FAILED_MESSAGE = "Remote provider verification failed.";
 const YOUTUBE_URL = "https://www.youtube.com/";
 const MAX_GATE_EVENTS = 256;
+const CLEANUP_STORE_RETRY_BASE_MS = 2;
+const CLEANUP_STORE_RETRY_MAX_MS = 32;
+const CLEANUP_STORE_LOCK_ERRORS = new Set([
+  "BOT_STORE_RUNTIME_TRANSACTION_BUSY",
+  "BOT_STORE_RUNTIME_TRANSACTION_REENTRANT",
+]);
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const NON_PUBLIC_IPV4_CIDRS = Object.freeze([
@@ -198,13 +207,18 @@ function configuredModule(modulePath, expectedSha256, factoryName, adapterKind) 
     });
     let adapter;
     if (adapterKind === "provider") {
-      adapter = Object.freeze({
+      const providerMethods = {
         capabilities: (input) => channel.request("capabilities", input),
         provision: (input) => channel.request("provision", input),
         inspect: (input) => channel.request("inspect", input),
         retire: (input) => channel.request("retire", input),
         subscribe: (callback) => channel.subscribe(callback),
-      });
+      };
+      if (channel.providerContractVersion === 2) {
+        providerMethods.inspectIssuance = (input) => channel.request("inspectIssuance", input);
+        providerMethods.retireIssuance = (input) => channel.request("retireIssuance", input);
+      }
+      adapter = Object.freeze(providerMethods);
     } else {
       adapter = Object.freeze({
         openRemoteUrl: (input) => channel.request("openRemoteUrl", input),
@@ -465,6 +479,29 @@ function cooperativeDelay(milliseconds, signal) {
   });
 }
 
+function cleanupStoreRetryDelay(attempt) {
+  return Math.min(
+    CLEANUP_STORE_RETRY_BASE_MS * (2 ** Math.min(attempt, 4)),
+    CLEANUP_STORE_RETRY_MAX_MS,
+  );
+}
+
+async function retryCleanupStoreOperation(operation, signal) {
+  let attempt = 0;
+  for (;;) {
+    if (signal.aborted) throw failedError();
+    try {
+      const result = await operation();
+      if (signal.aborted) throw failedError();
+      return result;
+    } catch (error) {
+      if (!CLEANUP_STORE_LOCK_ERRORS.has(error?.code)) throw error;
+      await cooperativeDelay(cleanupStoreRetryDelay(attempt), signal);
+      attempt += 1;
+    }
+  }
+}
+
 function waitForTerminalInspection(provider, receipt, timeoutMs, signal) {
   return withCooperativeDeadline(async (operationSignal) => {
     while (true) {
@@ -480,28 +517,107 @@ function waitForTerminalInspection(provider, receipt, timeoutMs, signal) {
   }, timeoutMs, signal);
 }
 
+function waitForTerminalIssuanceInspection(provider, receipt, timeoutMs, signal) {
+  return withCooperativeDeadline(async (operationSignal) => {
+    while (true) {
+      const inspected = await provider.inspectIssuance({
+        runtimeId: receipt.runtimeId,
+        ownerBotId: receipt.botId,
+        issuanceKey: receipt.issuanceKey,
+        signal: operationSignal,
+      });
+      if (!inspected || inspected.runtimeId !== receipt.runtimeId) throw failedError();
+      if (!inspected.matched) throw failedError();
+      if (inspected.ownerBotId !== receipt.botId
+        || inspected.issuanceKey !== receipt.issuanceKey) throw failedError();
+      if (inspected.state === "retired" || inspected.state === "detached") return inspected;
+      await cooperativeDelay(10, operationSignal);
+    }
+  }, timeoutMs, signal);
+}
+
+async function retireCapturedIssuance(provider, receipt, inspected, operationTimeoutMs, signal) {
+  if (!inspected?.matched
+    || inspected.runtimeId !== receipt.runtimeId
+    || inspected.ownerBotId !== receipt.botId
+    || inspected.issuanceKey !== receipt.issuanceKey) throw failedError();
+
+  if (inspected.state !== "retired" && inspected.state !== "detached") {
+    let result;
+    try {
+      result = await provider.retireIssuance({
+        runtimeId: receipt.runtimeId,
+        ownerBotId: receipt.botId,
+        issuanceKey: receipt.issuanceKey,
+        retirementKey: receipt.retirementKey,
+        signal,
+      });
+    } catch {
+      result = await provider.retireIssuance({
+        runtimeId: receipt.runtimeId,
+        ownerBotId: receipt.botId,
+        issuanceKey: receipt.issuanceKey,
+        retirementKey: receipt.retirementKey,
+        signal,
+      });
+    }
+    if (!result?.matched
+      || result.runtimeId !== receipt.runtimeId
+      || result.ownerBotId !== receipt.botId
+      || result.issuanceKey !== receipt.issuanceKey) throw failedError();
+  }
+
+  return waitForTerminalIssuanceInspection(
+    provider,
+    receipt,
+    operationTimeoutMs,
+    signal,
+  );
+}
+
+function privateProvisionReceipt(fields, authToken) {
+  const receipt = { ...fields };
+  Object.defineProperty(receipt, "authToken", {
+    value: authToken,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+  return Object.freeze(receipt);
+}
+
 function runtimeProviderRecorder(provider, receipts, ingressEvents, options) {
   let defaultSignal = options.signal;
   const inflight = new Set();
   const recordedProvisions = new Set();
+  const issuanceKeys = new Map();
+  const retirementKeys = new Map();
+  const intentKey = (botId, idempotencyKey) => `${botId}\0${idempotencyKey}`;
+  const stableIssuanceKey = (botId, idempotencyKey, requested = undefined) => {
+    const key = intentKey(botId, idempotencyKey);
+    if (!issuanceKeys.has(key)) {
+      issuanceKeys.set(key, requested ?? `issuance-${randomUUID()}`);
+    }
+    return issuanceKeys.get(key);
+  };
+  const stableRetirementKey = (botId, idempotencyKey) => {
+    const key = intentKey(botId, idempotencyKey);
+    if (!retirementKeys.has(key)) retirementKeys.set(key, `retire-${randomUUID()}`);
+    return retirementKeys.get(key);
+  };
   const recordProvision = (input, result) => {
-    const key = `${input.botId}\0${input.idempotencyKey}`;
+    const key = intentKey(input.botId, input.idempotencyKey);
     if (recordedProvisions.has(key)) return;
-    const receipt = {
+    const receipt = privateProvisionReceipt({
       botId: input.botId,
       idempotencyKey: input.idempotencyKey,
       provider: result.provider,
       runtimeId: result.runtimeId,
-      endpoint: result.endpoint,
-    };
-    Object.defineProperty(receipt, "authToken", {
-      value: result.authToken,
-      enumerable: false,
-      configurable: false,
-      writable: false,
-    });
+      issuanceKey: result.issuanceKey,
+      retirementKey: stableRetirementKey(input.botId, input.idempotencyKey),
+    }, result.authToken);
     recordedProvisions.add(key);
-    receipts.push(Object.freeze(receipt));
+    receipts.push(receipt);
   };
   const invoke = (method, fields, signal = defaultSignal, onResolved) => withCooperativeDeadline(
     (operationSignal) => {
@@ -521,22 +637,39 @@ function runtimeProviderRecorder(provider, receipts, ingressEvents, options) {
   const adapter = Object.freeze({
     capabilities: () => invoke("capabilities", {}),
     async provision(input) {
+      const issuanceKey = stableIssuanceKey(input.botId, input.idempotencyKey, input.issuanceKey);
       return invoke("provision", {
         botId: input.botId,
         idempotencyKey: input.idempotencyKey,
+        issuanceKey,
       }, input.signal ?? defaultSignal, input.recordReceipt === false
         ? undefined
         : (result) => recordProvision(input, result));
     },
     inspect: (input) => invoke("inspect", { runtimeId: input.runtimeId }, input.signal ?? defaultSignal),
-    retire: (input) => invoke("retire", { runtimeId: input.runtimeId }, input.signal ?? defaultSignal),
+    // The production controller still requires the legacy method in its shape,
+    // but this gate never forwards an unfenced retirement to the provider.
+    retire: () => Promise.reject(failedError()),
+    inspectIssuance: (input) => invoke("inspectIssuance", {
+      runtimeId: input.runtimeId,
+      ownerBotId: input.ownerBotId,
+      issuanceKey: input.issuanceKey,
+    }, input.signal ?? defaultSignal),
+    retireIssuance: (input) => invoke("retireIssuance", {
+      runtimeId: input.runtimeId,
+      ownerBotId: input.ownerBotId,
+      issuanceKey: input.issuanceKey,
+      retirementKey: input.retirementKey,
+    }, input.signal ?? defaultSignal),
     subscribe(callback) {
       return provider.subscribe((event) => {
-        appendBoundedEvent(ingressEvents, Object.freeze({
+        const ingress = {
           runtimeId: event.runtimeId,
           type: event.type,
           sequence: event.sequence,
-        }));
+        };
+        if (providerContractVersion(provider) === 2) ingress.issuanceKey = event.issuanceKey;
+        appendBoundedEvent(ingressEvents, Object.freeze(ingress));
         callback(event);
       });
     },
@@ -949,6 +1082,100 @@ async function waitForYouTubeFrame({
   }
 }
 
+function issuanceReceiptKey(botId, issuanceKey) {
+  return `${botId}\0${issuanceKey}`;
+}
+
+async function reconcileDurableIssuanceReceipts({ store, provider, receipts, signal }) {
+  const capturedByIssuance = new Map();
+  const reconciled = [];
+  const reconciledKeys = new Set();
+  const targetKeys = new Set();
+  let complete = true;
+
+  for (const receipt of receipts) {
+    const key = issuanceReceiptKey(receipt.botId, receipt.issuanceKey);
+    targetKeys.add(key);
+    if (capturedByIssuance.has(key)) {
+      complete = false;
+      continue;
+    }
+    capturedByIssuance.set(key, receipt);
+  }
+
+  if (store) {
+    let bots = [];
+    try {
+      bots = await retryCleanupStoreOperation(() => store.list(), signal);
+    } catch {
+      complete = false;
+    }
+    for (const bot of bots) {
+      let issuances;
+      try {
+        issuances = await retryCleanupStoreOperation(
+          () => store.readRuntimeIssuances(bot.botId),
+          signal,
+        );
+      } catch {
+        complete = false;
+        continue;
+      }
+      for (const issuance of issuances) {
+        const key = issuanceReceiptKey(issuance.botId, issuance.issuanceKey);
+        targetKeys.add(key);
+        try {
+          const captured = capturedByIssuance.get(key);
+          let result;
+          if (captured) {
+            if (captured.idempotencyKey !== issuance.idempotencyKey
+              || (issuance.phase !== "pending"
+                && (captured.provider !== issuance.provider
+                  || captured.runtimeId !== issuance.runtimeId))) throw failedError();
+            result = captured;
+          } else {
+            result = await provider.provision({
+              botId: issuance.botId,
+              idempotencyKey: issuance.idempotencyKey,
+              issuanceKey: issuance.issuanceKey,
+              recordReceipt: false,
+              signal,
+            });
+            if (result.ownerBotId !== issuance.botId
+              || result.issuanceKey !== issuance.issuanceKey
+              || (issuance.phase !== "pending"
+                && (result.provider !== issuance.provider
+                  || result.runtimeId !== issuance.runtimeId))) throw failedError();
+          }
+          reconciled.push(privateProvisionReceipt({
+            botId: issuance.botId,
+            idempotencyKey: issuance.idempotencyKey,
+            provider: result.provider,
+            runtimeId: result.runtimeId,
+            issuanceKey: issuance.issuanceKey,
+            retirementKey: issuance.retirementKey,
+          }, result.authToken));
+          reconciledKeys.add(key);
+        } catch {
+          complete = false;
+        }
+      }
+    }
+  }
+
+  for (const receipt of receipts) {
+    const key = issuanceReceiptKey(receipt.botId, receipt.issuanceKey);
+    if (reconciledKeys.has(key)) continue;
+    reconciled.push(receipt);
+    reconciledKeys.add(key);
+  }
+  return Object.freeze({
+    complete,
+    receipts: Object.freeze(reconciled),
+    targetCount: targetKeys.size,
+  });
+}
+
 async function minimalCleanup({
   clients,
   exercise,
@@ -981,70 +1208,79 @@ async function minimalCleanup({
   } catch {
     safe = false;
   }
-  const retired = new Set();
-  for (const receipt of [...receipts].reverse()) {
-    if (retired.has(receipt.runtimeId)) continue;
+  let cleanupReceipts = Object.freeze([...receipts]);
+  let cleanupTargetCount = cleanupReceipts.length;
+  let durableReconciliationComplete = true;
+  try {
+    const reconciliation = await reconcileDurableIssuanceReceipts({
+      store,
+      provider,
+      receipts: cleanupReceipts,
+      signal: cleanupSignal,
+    });
+    cleanupReceipts = reconciliation.receipts;
+    cleanupTargetCount = reconciliation.targetCount;
+    durableReconciliationComplete = reconciliation.complete;
+    if (!reconciliation.complete) safe = false;
+  } catch {
+    durableReconciliationComplete = false;
+    safe = false;
+  }
+  const retiredIssuances = new Set();
+  for (const receipt of [...cleanupReceipts].reverse()) {
+    const receiptKey = issuanceReceiptKey(receipt.botId, receipt.issuanceKey);
+    if (retiredIssuances.has(receiptKey)) continue;
     try {
       const readyReceipt = readyReceipts.get(receipt.runtimeId);
-      let result;
-      let terminal;
-      const retireExactIssuance = async () => {
-        const recovered = await provider.provision({
-          botId: receipt.botId,
-          idempotencyKey: receipt.idempotencyKey,
-          recordReceipt: false,
-        });
-        if (recovered.provider !== receipt.provider
-          || recovered.runtimeId !== receipt.runtimeId
-          || recovered.ownerBotId !== receipt.botId
-          || recovered.endpoint !== receipt.endpoint
-          || recovered.authToken !== receipt.authToken) throw failedError();
-        const inspected = await provider.inspect({ runtimeId: receipt.runtimeId });
-        if (inspected.runtimeId !== receipt.runtimeId
-          || inspected.ownerBotId !== receipt.botId) throw failedError();
-        if (inspected.state === "retired" || inspected.state === "detached") {
-          result = inspected;
-          terminal = inspected;
-        } else {
-          result = await provider.retire({ runtimeId: receipt.runtimeId });
-          terminal = await waitForTerminalInspection(
-            provider,
-            receipt,
-            operationTimeoutMs,
-            cleanupSignal,
-          );
-        }
-      };
-
       if (readyReceipt) {
-        const currentSession = await controller.runtimeSession(readyReceipt.botId);
+        const currentSession = await retryCleanupStoreOperation(
+          () => controller.runtimeSession(readyReceipt.botId),
+          cleanupSignal,
+        );
         if (!currentSession
           || currentSession.provider !== readyReceipt.provider
           || currentSession.runtimeId !== readyReceipt.runtimeId
-          || currentSession.generation !== readyReceipt.generation) throw failedError();
-        await store.runtimeTransaction(readyReceipt.botId, {}, async ({ bot }) => {
-          if (bot.runtime.provider !== readyReceipt.provider
-            || bot.runtime.remoteRuntimeId !== readyReceipt.runtimeId
-            || bot.runtime.state !== "ready") throw failedError();
-          await retireExactIssuance();
-        });
+          || currentSession.generation !== readyReceipt.generation
+          || readyReceipt.issuanceKey !== receipt.issuanceKey) throw failedError();
+        await retryCleanupStoreOperation(
+          () => store.runtimeTransaction(readyReceipt.botId, {}, async ({ bot }) => {
+            if (bot.runtime.provider !== readyReceipt.provider
+              || bot.runtime.remoteRuntimeId !== readyReceipt.runtimeId
+              || bot.runtime.state !== "ready") throw failedError();
+            const inspected = await provider.inspectIssuance({
+              runtimeId: receipt.runtimeId,
+              ownerBotId: receipt.botId,
+              issuanceKey: receipt.issuanceKey,
+              signal: cleanupSignal,
+            });
+            await retireCapturedIssuance(
+              provider,
+              receipt,
+              inspected,
+              operationTimeoutMs,
+              cleanupSignal,
+            );
+          }),
+          cleanupSignal,
+        );
       } else {
-        await retireExactIssuance();
+        const inspected = await provider.inspectIssuance({
+          runtimeId: receipt.runtimeId,
+          ownerBotId: receipt.botId,
+          issuanceKey: receipt.issuanceKey,
+          signal: cleanupSignal,
+        });
+        await retireCapturedIssuance(
+          provider,
+          receipt,
+          inspected,
+          operationTimeoutMs,
+          cleanupSignal,
+        );
       }
-
-      if (result.runtimeId !== receipt.runtimeId
-        || (result.state !== "retired" && result.state !== "detached")) safe = false;
-      else {
-        retired.add(receipt.runtimeId);
-        retiredRuntimeCount += 1;
-        if (terminal.runtimeId === receipt.runtimeId
-          && terminal.ownerBotId === receipt.botId
-          && (terminal.state === "retired" || terminal.state === "detached")) {
-          terminalRuntimeCount += 1;
-        } else {
-          safe = false;
-        }
-      }
+      retiredIssuances.add(receiptKey);
+      retiredRuntimeCount += 1;
+      terminalRuntimeCount += 1;
     } catch {
       safe = false;
     }
@@ -1063,27 +1299,39 @@ async function minimalCleanup({
   } catch {
     safe = false;
   }
-  for (const receipt of receipts) {
+  let finalReceiptValidationComplete = true;
+  for (const receipt of cleanupReceipts) {
     try {
-      const recovered = await provider.provision({
-        botId: receipt.botId,
-        idempotencyKey: receipt.idempotencyKey,
-        recordReceipt: false,
+      const terminal = await provider.inspectIssuance({
+        runtimeId: receipt.runtimeId,
+        ownerBotId: receipt.botId,
+        issuanceKey: receipt.issuanceKey,
+        signal: cleanupSignal,
       });
-      if (recovered.provider !== receipt.provider
-        || recovered.runtimeId !== receipt.runtimeId
-        || recovered.ownerBotId !== receipt.botId
-        || recovered.endpoint !== receipt.endpoint
-        || recovered.authToken !== receipt.authToken) safe = false;
+      if (!terminal.matched
+        || terminal.runtimeId !== receipt.runtimeId
+        || terminal.ownerBotId !== receipt.botId
+          || terminal.issuanceKey !== receipt.issuanceKey
+          || (terminal.state !== "retired" && terminal.state !== "detached")) {
+        finalReceiptValidationComplete = false;
+        safe = false;
+      }
       const readyReceipt = readyReceipts.get(receipt.runtimeId);
       if (readyReceipt && store) {
-        const current = await store.read(receipt.botId);
+        const current = await retryCleanupStoreOperation(
+          () => store.read(receipt.botId),
+          cleanupSignal,
+        );
         if (!current
           || current.runtime.provider !== readyReceipt.provider
           || current.runtime.remoteRuntimeId !== readyReceipt.runtimeId
-          || current.runtime.state !== "ready") safe = false;
+          || current.runtime.state !== "ready") {
+          finalReceiptValidationComplete = false;
+          safe = false;
+        }
       }
     } catch {
+      finalReceiptValidationComplete = false;
       safe = false;
     }
   }
@@ -1093,19 +1341,24 @@ async function minimalCleanup({
     safe = false;
   }
   let storeRemoved = false;
-  try {
-    const stat = fs.lstatSync(storeFilePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw failedError();
-    fs.unlinkSync(storeFilePath);
-    storeRemoved = true;
-  } catch (error) {
-    if (error?.code === "ENOENT") storeRemoved = true;
-    else safe = false;
+  const issuanceCleanupComplete = durableReconciliationComplete
+    && retiredRuntimeCount === cleanupTargetCount
+    && terminalRuntimeCount === cleanupTargetCount
+    && finalReceiptValidationComplete;
+  if (issuanceCleanupComplete) {
+    try {
+      const stat = fs.lstatSync(storeFilePath);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw failedError();
+      fs.unlinkSync(storeFilePath);
+      storeRemoved = true;
+    } catch (error) {
+      if (error?.code === "ENOENT") storeRemoved = true;
+      else safe = false;
+    }
   }
   clearTimeout(cleanupTimer);
   safe = safe
-    && retiredRuntimeCount === receipts.length
-    && terminalRuntimeCount === receipts.length
+    && issuanceCleanupComplete
     && storeRemoved;
   return Object.freeze({ safe, retiredRuntimeCount, terminalRuntimeCount, storeRemoved });
 }
@@ -1129,6 +1382,12 @@ async function runRemoteProviderLiveGate(options) {
     || (signal !== undefined && !(signal instanceof AbortSignal))) {
     closeReviewedDependencies(provider, exercise);
     throw failedError();
+  }
+  if (providerContractVersion(provider) !== 2
+    || typeof provider.inspectIssuance !== "function"
+    || typeof provider.retireIssuance !== "function") {
+    closeReviewedDependencies(provider, exercise);
+    throw blockedError();
   }
 
   const clients = [];
@@ -1210,6 +1469,7 @@ async function runRemoteProviderLiveGate(options) {
         provider: bot.session.provider,
         runtimeId: bot.session.runtimeId,
         generation: bot.session.generation,
+        issuanceKey: provisionReceipt.issuanceKey,
       }));
     }
     const receiptA = receipts.find((receipt) => (
@@ -1221,8 +1481,9 @@ async function runRemoteProviderLiveGate(options) {
     if (!receiptA || !receiptB
       || botA.session.runtimeId === botB.session.runtimeId
       || canonicalEndpoint(botA.session.endpoint) === canonicalEndpoint(botB.session.endpoint)
+      || receiptA.authToken === receiptB.authToken
       || receiptA.provider !== receiptB.provider
-      || receiptA.authToken === receiptB.authToken) throw failedError();
+      || receiptA.issuanceKey === receiptB.issuanceKey) throw failedError();
 
     const firstAddresses = await Promise.all([
       resolvedPublicAddresses(botA.session.endpoint, lookup, operationTimeoutMs, signal),
@@ -1280,7 +1541,13 @@ async function runRemoteProviderLiveGate(options) {
         Object.freeze({ botId: botA.botId, runtimeId: botA.session.runtimeId, generation: botA.session.generation }),
         Object.freeze({ botId: botB.botId, runtimeId: botB.session.runtimeId, generation: botB.session.generation }),
       ]),
-      capabilities,
+      capabilities: Object.freeze({
+        provision: true,
+        reconcile: true,
+        retire: true,
+        remoteAppServer: true,
+        computerFrames: true,
+      }),
       protocol: Object.freeze([
         Object.freeze({ botId: botA.botId, ...protocol[0] }),
         Object.freeze({ botId: botB.botId, ...protocol[1] }),

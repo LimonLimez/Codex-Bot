@@ -13,7 +13,8 @@ const MAX_RECEIPTS = MAX_STORE_BOTS;
 const RECEIPT_FIELDS = new Set([
   "deletionId", "createdAt", "botIds", "remoteRuntimes", "localProfiles",
 ]);
-const REMOTE_FIELDS = new Set(["botId", "runtimeId"]);
+const REMOTE_FIELDS = new Set(["botId", "runtimeId", "issuanceKey", "retirementKey"]);
+const LEGACY_REMOTE_FIELDS = new Set(["botId", "runtimeId"]);
 const PROFILE_FIELDS = new Set(["botId", "profileId"]);
 const OUTCOME_FIELDS = new Set(["deletedBotIds", "survivingBotIds", "activeBotId"]);
 
@@ -96,12 +97,27 @@ function normalizeReceipt(value) {
   const botIds = normalizeBotIds(input.botIds, { maximum: MAX_STORE_BOTS });
   const members = new Set(botIds);
   const remoteRuntimes = denseArray(input.remoteRuntimes, MAX_CLEANUP_IDS, (entry) => {
-    const remote = ownValues(entry, REMOTE_FIELDS);
+    let remote;
+    try {
+      remote = ownValues(entry, REMOTE_FIELDS);
+    } catch {
+      const legacy = ownValues(entry, LEGACY_REMOTE_FIELDS);
+      remote = { ...legacy, issuanceKey: null, retirementKey: null };
+    }
     const botId = normalizeBotId(remote.botId);
     if (!members.has(botId) || typeof remote.runtimeId !== "string"
       || remote.runtimeId.length < 1 || remote.runtimeId.length > 512
       || /[\u0000-\u001f\u007f]/.test(remote.runtimeId)) throw invalid();
-    return Object.freeze({ botId, runtimeId: remote.runtimeId });
+    const fenced = remote.issuanceKey !== null || remote.retirementKey !== null;
+    if (fenced && (typeof remote.issuanceKey !== "string"
+      || typeof remote.retirementKey !== "string")) throw invalid();
+    if (!fenced && (remote.issuanceKey !== null || remote.retirementKey !== null)) throw invalid();
+    return Object.freeze({
+      botId,
+      runtimeId: remote.runtimeId,
+      issuanceKey: remote.issuanceKey,
+      retirementKey: remote.retirementKey,
+    });
   });
   if (new Set(remoteRuntimes.map((entry) => entry.runtimeId)).size !== remoteRuntimes.length) throw invalid();
   const localProfiles = denseArray(input.localProfiles, botIds.length, (entry) => {
@@ -193,6 +209,7 @@ function batches(values, size = MAX_LIVE_DELETE_BOTS) {
 
 class BotDeletionCoordinator {
   #botRuntimeController;
+  #retireDeletedRuntimes;
   #botStore;
   #automationController;
   #conversationController;
@@ -236,6 +253,9 @@ class BotDeletionCoordinator {
       throw new TypeError("Bot deletion coordinator dependencies are invalid.");
     }
     this.#botRuntimeController = botRuntimeController;
+    this.#retireDeletedRuntimes = typeof botRuntimeController.retireDeletedRuntimes === "function"
+      ? botRuntimeController.retireDeletedRuntimes.bind(botRuntimeController)
+      : null;
     this.#botStore = botStore;
     this.#automationController = automationController;
     this.#conversationController = conversationController;
@@ -434,7 +454,15 @@ class BotDeletionCoordinator {
     }
     await this.#deleteConversationBindings(this.#conversationBindingsFile, [...receipt.botIds]);
     if (receipt.remoteRuntimes.length > 0) {
-      throw coordinatorError("Remote Computer cleanup remains pending.", "OPENBOT_BOT_DELETE_REMOTE_PENDING");
+      if (receipt.remoteRuntimes.some((entry) => (
+        entry.issuanceKey === null || entry.retirementKey === null
+      ))) {
+        throw coordinatorError("Legacy remote Computer cleanup remains pending.", "OPENBOT_BOT_DELETE_REMOTE_PENDING");
+      }
+      if (!this.#retireDeletedRuntimes) {
+        throw coordinatorError("Remote Computer cleanup remains pending.", "OPENBOT_BOT_DELETE_REMOTE_PENDING");
+      }
+      await this.#retireDeletedRuntimes(receipt);
     }
     const completed = await this.#botStore.completeDeletion(receipt.deletionId);
     if (completed === true) return;

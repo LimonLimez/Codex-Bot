@@ -17,6 +17,9 @@ const TEMP_A_UUID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TEMP_B_UUID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const TEMP_C_UUID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const NOW = "2026-08-14T12:34:56.000Z";
+const ISSUANCE_A = "issuance-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const ISSUANCE_B = "issuance-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const RETIREMENT_A = "retire-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 function sequence(values) {
   let index = 0;
@@ -99,6 +102,23 @@ function validStoreDocument(
     legacyImports,
     deletedLegacyImports,
     pendingDeletions,
+  };
+}
+
+function validV5StoreDocument(
+  bots = [],
+  legacyImports = {},
+  deletedLegacyImports = {},
+  pendingDeletions = [],
+  runtimeIssuances = [],
+) {
+  return {
+    schemaVersion: 5,
+    bots,
+    legacyImports,
+    deletedLegacyImports,
+    pendingDeletions,
+    runtimeIssuances,
   };
 }
 
@@ -202,7 +222,7 @@ test("schema v1 migrates to an explicit not-now Computer target", async (t) => {
   const renamed = await store.rename(bot.botId, "Migrated Bot");
   const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
   assert.equal(renamed.name, "Migrated Bot");
-  assert.equal(persisted.schemaVersion, 4);
+  assert.equal(persisted.schemaVersion, 5);
   assert.deepEqual(persisted.bots[0].computer, expectedComputer());
   assert.equal(persisted.bots[0].setupStage, "complete");
 });
@@ -456,7 +476,7 @@ test("create stores a stable literal New Bot and ignores caller-owned identity",
 
   input.appearance.shape = "gem";
   const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
-  assert.deepEqual(persisted, validStoreDocument([expectedBot({
+  assert.deepEqual(persisted, validV5StoreDocument([expectedBot({
     appearance: { shape: "pebble", color: "blue" },
     notifications: false,
   })]));
@@ -1245,7 +1265,7 @@ test("load rejects malformed versions, keys, timestamps, states, and polluted re
   const { filePath } = await temporaryStore(t);
   const cases = [
     ["unsupported version", {
-      schemaVersion: 5,
+      schemaVersion: 6,
       bots: [],
       legacyImports: {},
       deletedLegacyImports: {},
@@ -1344,6 +1364,328 @@ test("load, v2 migration, and create reject duplicate non-null local profile own
   await writeDocument(previous.filePath, validV2StoreDocument(duplicateBots.map(expectedV2Bot)));
   await assert.rejects(previous.store.load(), /duplicate local profile/i);
   assert.equal((JSON.parse(await fs.readFile(previous.filePath, "utf8"))).schemaVersion, 2);
+});
+
+test("v4 migrates to schema v5 with a null legacy issuance fence and never invents retirement identity", async (t) => {
+  const { filePath } = await temporaryStore(t);
+  const active = expectedBot({
+    runtime: {
+      provider: "legacy-provider",
+      remoteRuntimeId: "active-legacy-runtime",
+      state: "ready",
+      lastConfirmedAt: NOW,
+    },
+  });
+  const deletedBot = expectedBot({ botId: `bot-${BOT_B_UUID}` });
+  const legacyReceipt = {
+    deletionId: TEMP_A_UUID,
+    createdAt: NOW,
+    botIds: [deletedBot.botId],
+    remoteRuntimes: [{ botId: deletedBot.botId, runtimeId: "legacy-runtime" }],
+    localProfiles: [],
+  };
+  await writeDocument(filePath, validStoreDocument([active], {}, {}, [legacyReceipt]));
+
+  const store = new BotStore({ filePath, now: () => NOW });
+  const pending = await store.listPendingDeletions();
+  assert.deepEqual(pending[0].remoteRuntimes, [{
+    botId: deletedBot.botId,
+    runtimeId: "legacy-runtime",
+    issuanceKey: null,
+    retirementKey: null,
+  }]);
+  await store.rename(active.botId, "Migrated legacy bot");
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.equal(persisted.schemaVersion, 5);
+  assert.deepEqual(persisted.runtimeIssuances, []);
+});
+
+test("v5 begins a private issuance intent before issuing, and exact CAS transitions never persist endpoint or token", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const bot = await store.create();
+  const begun = await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  });
+  assert.equal(begun.matched, true);
+  const beforeProvider = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.equal(beforeProvider.schemaVersion, 5);
+  assert.deepEqual(beforeProvider.runtimeIssuances, [{
+    botId: bot.botId,
+    phase: "pending",
+    provider: null,
+    runtimeId: null,
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  }]);
+  assert.doesNotMatch(JSON.stringify(beforeProvider), /endpoint|authToken|private-token/i);
+
+  const issued = await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-a",
+  });
+  assert.equal(issued.matched, true);
+  const promoted = await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-a",
+    state: "ready",
+    lastConfirmedAt: NOW,
+    expectedPreviousIssuanceKey: null,
+  });
+  assert.equal(promoted.matched, true);
+  assert.deepEqual(await store.readRuntimeIssuances(bot.botId), [{
+    botId: bot.botId,
+    phase: "active",
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-a",
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  }]);
+  await assert.equal((await store.abortRuntimeIssuance(bot.botId, { issuanceKey: ISSUANCE_B })).matched, false);
+});
+
+test("v5 deletion moves the active issuance into a fenced receipt and removes the ledger atomically", async (t) => {
+  const { filePath, store } = await temporaryStore(t, {
+    uuids: Array(20).fill(TEMP_A_UUID),
+  });
+  const bot = await store.create();
+  await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  });
+  await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-fenced",
+  });
+  await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-fenced",
+    state: "ready",
+    lastConfirmedAt: NOW,
+    expectedPreviousIssuanceKey: null,
+  });
+
+  await store.deleteBots([bot.botId]);
+  const [receipt] = await store.listPendingDeletions();
+  assert.deepEqual(receipt.remoteRuntimes, [{
+    botId: bot.botId,
+    runtimeId: "runtime-fenced",
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  }]);
+  assert.equal(Object.hasOwn(receipt.remoteRuntimes[0], "idempotencyKey"), false);
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
+  assert.deepEqual(persisted.runtimeIssuances, []);
+  assert.doesNotMatch(JSON.stringify(persisted), /endpoint|authToken|private-token/i);
+});
+
+test("v5 deletion fails closed while a pending issuance intent is unresolved", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const bot = await store.create();
+  await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  });
+
+  await assert.rejects(
+    () => store.deleteBots([bot.botId]),
+    { code: "BOT_STORE_RUNTIME_ISSUANCE_PENDING" },
+  );
+  assert.equal(await store.read(bot.botId) !== null, true);
+  assert.deepEqual((await store.readRuntimeIssuances(bot.botId)).map(({ issuanceKey, phase }) => ({ issuanceKey, phase })), [{
+    issuanceKey: ISSUANCE_A,
+    phase: "pending",
+  }]);
+  assert.doesNotMatch(await fs.readFile(filePath, "utf8"), /endpoint|authToken|private-token/i);
+});
+
+test("v5 issuance transitions are exact CAS and mismatches do not mutate the ledger", async (t) => {
+  const { store } = await temporaryStore(t, { uuids: Array(20).fill(TEMP_A_UUID) });
+  const bot = await store.create();
+  assert.equal((await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  })).matched, true);
+  assert.equal((await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_B,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-wrong",
+  })).matched, false);
+  assert.equal((await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_B,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-wrong",
+    expectedPreviousIssuanceKey: null,
+  })).matched, false);
+  assert.equal((await store.abortRuntimeIssuance(bot.botId, { issuanceKey: ISSUANCE_B })).matched, false);
+  assert.equal((await store.readRuntimeIssuances(bot.botId))[0].issuanceKey, ISSUANCE_A);
+});
+
+test("v5 issuance mutations reject accessors, proxies, symbols, and extra keys before effects", async (t) => {
+  const { store } = await temporaryStore(t);
+  const bot = await store.create();
+  const validBegin = {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  };
+  const accessor = {};
+  Object.defineProperty(accessor, "issuanceKey", {
+    get() { throw new Error("getter must not run"); },
+    enumerable: true,
+  });
+  await assert.rejects(() => store.beginRuntimeIssuance(bot.botId, accessor));
+  await assert.rejects(() => store.beginRuntimeIssuance(bot.botId, { ...validBegin, extra: true }));
+  await assert.rejects(() => store.beginRuntimeIssuance(bot.botId, { ...validBegin, [Symbol("secret")]: true }));
+  const revoked = Proxy.revocable({ ...validBegin }, {});
+  revoked.revoke();
+  await assert.rejects(() => store.beginRuntimeIssuance(bot.botId, revoked.proxy));
+  assert.deepEqual(await store.readRuntimeIssuances(bot.botId), []);
+
+  await store.beginRuntimeIssuance(bot.botId, validBegin);
+  const mutationCases = [
+    ["issue", () => store.issueRuntimeIssuance(bot.botId, accessor)],
+    ["promote", () => store.promoteRuntimeIssuance(bot.botId, accessor)],
+    ["confirm", () => store.confirmRuntimeIssuance(bot.botId, accessor)],
+    ["abort", () => store.abortRuntimeIssuance(bot.botId, accessor)],
+  ];
+  for (const [name, operation] of mutationCases) {
+    await assert.rejects(operation, undefined, `${name} accessor was accepted`);
+  }
+  const extraCases = [
+    () => store.issueRuntimeIssuance(bot.botId, {
+      issuanceKey: ISSUANCE_A, provider: "authorized-test-provider", runtimeId: "runtime-extra", extra: true,
+    }),
+    () => store.promoteRuntimeIssuance(bot.botId, {
+      issuanceKey: ISSUANCE_A, provider: "authorized-test-provider", runtimeId: "runtime-extra", extra: true,
+    }),
+    () => store.confirmRuntimeIssuance(bot.botId, {
+      issuanceKey: ISSUANCE_A, provider: "authorized-test-provider", runtimeId: "runtime-extra", lastConfirmedAt: NOW, extra: true,
+    }),
+    () => store.abortRuntimeIssuance(bot.botId, { issuanceKey: ISSUANCE_A, extra: true }),
+  ];
+  for (const operation of extraCases) await assert.rejects(operation);
+  assert.equal((await store.readRuntimeIssuances(bot.botId))[0].phase, "pending");
+});
+
+test("v5 completion cannot discard an active issuance without provider-terminal state", async (t) => {
+  const { store } = await temporaryStore(t);
+  const bot = await store.create();
+  await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  });
+  await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-terminal-proof",
+  });
+  await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-terminal-proof",
+    state: "failed",
+    lastConfirmedAt: null,
+    expectedPreviousIssuanceKey: null,
+  });
+  for (const state of ["failed", "unavailable"]) {
+    await assert.rejects(() => store.completeRuntimeIssuance(bot.botId, {
+      issuanceKey: ISSUANCE_A,
+      provider: "authorized-test-provider",
+      runtimeId: "runtime-terminal-proof",
+      state,
+      lastErrorCode: null,
+    }));
+  }
+  assert.equal((await store.readRuntimeIssuances(bot.botId))[0].phase, "active");
+  assert.equal((await store.read(bot.botId)).runtime.remoteRuntimeId, "runtime-terminal-proof");
+});
+
+test("v5 promotion requires an exact previous active issuance CAS", async (t) => {
+  const { store } = await temporaryStore(t, { uuids: Array(32).fill(TEMP_A_UUID) });
+  const bot = await store.create();
+  await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  });
+  await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-a",
+  });
+  await assert.rejects(() => store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-a",
+  }), /previous issuance key/i);
+  assert.equal((await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-a",
+    expectedPreviousIssuanceKey: null,
+  })).matched, true);
+  await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}:rotation`,
+    issuanceKey: ISSUANCE_B,
+    retirementKey: "retire-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  });
+  await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_B,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-b",
+  });
+  assert.equal((await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_B,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-b",
+    expectedPreviousIssuanceKey: null,
+  })).matched, false);
+  assert.equal((await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_B,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-b",
+    expectedPreviousIssuanceKey: ISSUANCE_A,
+  })).matched, true);
+});
+
+test("v5 runtime transaction requires the exact active issuance fence", async (t) => {
+  const { store } = await temporaryStore(t);
+  const bot = await store.create();
+  await store.beginRuntimeIssuance(bot.botId, {
+    idempotencyKey: `codex-bot:${bot.botId}`,
+    issuanceKey: ISSUANCE_A,
+    retirementKey: RETIREMENT_A,
+  });
+  await store.issueRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-fence-a",
+  });
+  await store.promoteRuntimeIssuance(bot.botId, {
+    issuanceKey: ISSUANCE_A,
+    provider: "authorized-test-provider",
+    runtimeId: "runtime-fence-a",
+    expectedPreviousIssuanceKey: null,
+  });
+  const outcome = await store.runtimeTransaction(
+    bot.botId,
+    { expectedActiveIssuanceKey: ISSUANCE_B },
+    ({ updateRuntime }) => updateRuntime({ state: "failed" }),
+  );
+  assert.equal(outcome.matched, false);
+  assert.equal((await store.read(bot.botId)).runtime.state, "ready");
 });
 
 test("adoptLegacy is idempotent, preserves allowed data, and survives later profile changes", async (t) => {
@@ -1580,7 +1922,7 @@ test("deleteBots atomically removes an exact batch and records a durable cleanup
     localProfiles: [],
   }]);
   const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
-  assert.equal(persisted.schemaVersion, 4);
+  assert.equal(persisted.schemaVersion, 5);
   assert.deepEqual(persisted.bots, [survivor]);
 });
 
@@ -1652,7 +1994,7 @@ test("deleting a bot fences every older runtime commit receipt", async (t) => {
   assert.equal(store.isCurrentRuntimeCommit(committed, created.botId), false);
 });
 
-test("schema v3 root migrates exactly to v4 without changing the public bot schema", async (t) => {
+test("schema v3 root migrates exactly to v5 without changing the public bot schema", async (t) => {
   const { filePath, store } = await temporaryStore(t, { uuids: [TEMP_A_UUID] });
   const bot = expectedBot({ setupStage: "complete" });
   await writeDocument(filePath, validV3StoreDocument([bot], {
@@ -1665,10 +2007,11 @@ test("schema v3 root migrates exactly to v4 without changing the public bot sche
   assert.equal(renamed.schemaVersion, 3);
 
   const persisted = JSON.parse(await fs.readFile(filePath, "utf8"));
-  assert.equal(persisted.schemaVersion, 4);
+  assert.equal(persisted.schemaVersion, 5);
   assert.equal(persisted.bots[0].schemaVersion, 3);
   assert.deepEqual(persisted.deletedLegacyImports, {});
   assert.deepEqual(persisted.pendingDeletions, []);
+  assert.deepEqual(persisted.runtimeIssuances, []);
 });
 
 test("delete tombstones retain only bounded cleanup identifiers", async (t) => {
@@ -1715,13 +2058,13 @@ test("delete tombstones retain only bounded cleanup identifiers", async (t) => {
     "deletionId", "createdAt", "botIds", "remoteRuntimes", "localProfiles",
   ]);
   assert.deepEqual(pending.remoteRuntimes, [
-    { botId: first.botId, runtimeId: "runtime-stored" },
-    { botId: second.botId, runtimeId: "runtime-candidate" },
+    { botId: first.botId, runtimeId: "runtime-stored", issuanceKey: null, retirementKey: null },
+    { botId: second.botId, runtimeId: "runtime-candidate", issuanceKey: null, retirementKey: null },
   ]);
   assert.deepEqual(pending.localProfiles, [{ botId: first.botId, profileId: localProfileId }]);
   assert.doesNotMatch(
     JSON.stringify(pending),
-    /Private Display|Another Private|private-avatar|native-agent|provider|endpoint|authToken|secret/i,
+    /Private Display|Another Private|private-avatar|native-agent|endpoint|authToken|secret/i,
   );
 });
 

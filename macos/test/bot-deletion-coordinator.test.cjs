@@ -15,6 +15,8 @@ const DELETION_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const LOCAL_A = "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const LOCAL_B = "local-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const RUNTIME_A = "runtime-openbot-a";
+const ISSUANCE_A = "issuance-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const RETIREMENT_A = "retire-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BINDINGS_FILE = "/private/openbot/conversation-bindings.v1.json";
 
 function deferred() {
@@ -42,6 +44,15 @@ function pendingReceipt(overrides = {}) {
   });
 }
 
+function fencedRuntime(botId, runtimeId, suffix = "a") {
+  return Object.freeze({
+    botId,
+    runtimeId,
+    issuanceKey: `issuance-${suffix.repeat(8)}-${suffix.repeat(4)}-4${suffix.repeat(3)}-8${suffix.repeat(3)}-${suffix.repeat(12)}`,
+    retirementKey: `retire-${suffix.repeat(8)}-${suffix.repeat(4)}-4${suffix.repeat(3)}-8${suffix.repeat(3)}-${suffix.repeat(12)}`,
+  });
+}
+
 function fixture({
   receipts = [pendingReceipt()],
   automationFailure = null,
@@ -55,11 +66,13 @@ function fixture({
   anchorFailure = null,
   anchorOutcome = null,
   modelActiveBotId = BOT_C,
+  remoteRetireFailure = null,
 } = {}) {
   const order = [];
   let pending = [...receipts];
   let failAutomation = automationFailure;
   let failBoundary = boundaryFailure;
+  let failRemoteRetire = remoteRetireFailure;
   const anchorFailures = Array.isArray(anchorFailure)
     ? [...anchorFailure]
     : (anchorFailure ? [anchorFailure] : []);
@@ -75,6 +88,14 @@ function fixture({
       if (anchorFailures.length > 0) throw anchorFailures.shift();
       if (anchorGate) await anchorGate;
       return outcome;
+    },
+    async retireDeletedRuntimes(receipt) {
+      order.push(`remote:${receipt.remoteRuntimes.map(({ botId, runtimeId }) => `${botId}:${runtimeId}`).join(",")}`);
+      if (failRemoteRetire) {
+        const failure = failRemoteRetire;
+        failRemoteRetire = null;
+        throw failure;
+      }
     },
   };
   const botStore = {
@@ -273,10 +294,31 @@ test("startup replay handles every receipt without re-running the durable visibi
   assert.equal(value.order.at(-1), `complete:${DELETION_A}`);
 });
 
-test("a remote-runtime receipt remains pending without an owner-bound retirement capability", async () => {
+test("a remote-runtime receipt retires exact owner-bound runtimes before completing its tombstone", async () => {
   const value = fixture({
     receipts: [pendingReceipt({
-      remoteRuntimes: Object.freeze([Object.freeze({ botId: BOT_A, runtimeId: RUNTIME_A })]),
+      remoteRuntimes: Object.freeze([fencedRuntime(BOT_A, RUNTIME_A)]),
+    })],
+  });
+
+  assert.deepEqual(await value.coordinator.reconcilePending(), {
+    completedDeletionIds: [DELETION_A],
+    pendingDeletionIds: [],
+  });
+  assert.equal(value.order.at(-2), `remote:${BOT_A}:${RUNTIME_A}`);
+  assert.equal(value.order.at(-1), `complete:${DELETION_A}`);
+  assert.deepEqual(value.pending(), []);
+});
+
+test("a legacy unfenced remote receipt remains pending without invoking retirement", async () => {
+  const value = fixture({
+    receipts: [pendingReceipt({
+      remoteRuntimes: Object.freeze([Object.freeze({
+        botId: BOT_A,
+        runtimeId: RUNTIME_A,
+        issuanceKey: null,
+        retirementKey: null,
+      })]),
     })],
   });
 
@@ -284,8 +326,71 @@ test("a remote-runtime receipt remains pending without an owner-bound retirement
     completedDeletionIds: [],
     pendingDeletionIds: [DELETION_A],
   });
-  assert.equal(value.order.some((entry) => entry.startsWith("complete:")), false);
+  assert.equal(value.order.some((entry) => entry.startsWith("remote:")), false);
   assert.equal(value.pending().length, 1);
+});
+
+test("remote receipt provider display metadata is rejected from the retirement identity", async () => {
+  const value = fixture({
+    receipts: [pendingReceipt({
+      remoteRuntimes: Object.freeze([Object.freeze({
+        ...fencedRuntime(BOT_A, RUNTIME_A),
+        provider: "unrelated-display-label",
+      })]),
+    })],
+  });
+  await assert.rejects(value.coordinator.reconcilePending(), {
+    code: "OPENBOT_BOT_DELETE_FAILED",
+  });
+  assert.equal(value.order.some((entry) => entry.startsWith("remote:")), false);
+});
+
+test("a remote retirement failure leaves its tombstone pending and replays independently", async () => {
+  const value = fixture({
+    receipts: [pendingReceipt({
+      remoteRuntimes: Object.freeze([fencedRuntime(BOT_A, RUNTIME_A)]),
+    })],
+    remoteRetireFailure: new Error("provider retirement failed"),
+  });
+
+  assert.deepEqual(await value.coordinator.reconcilePending(), {
+    completedDeletionIds: [],
+    pendingDeletionIds: [DELETION_A],
+  });
+  assert.equal(value.pending().length, 1);
+  assert.equal(value.order.at(-1), `remote:${BOT_A}:${RUNTIME_A}`);
+
+  assert.deepEqual(await value.coordinator.reconcilePending(), {
+    completedDeletionIds: [DELETION_A],
+    pendingDeletionIds: [],
+  });
+  assert.equal(value.order.at(-1), `complete:${DELETION_A}`);
+});
+
+test("an unrelated remote receipt progresses when another receipt remains pending", async () => {
+  const value = fixture({
+    receipts: [
+      pendingReceipt({
+        botIds: Object.freeze([BOT_A]),
+        remoteRuntimes: Object.freeze([fencedRuntime(BOT_A, RUNTIME_A)]),
+        localProfiles: Object.freeze([]),
+      }),
+      pendingReceipt({
+        deletionId: DELETION_B,
+        botIds: Object.freeze([BOT_B]),
+        remoteRuntimes: Object.freeze([fencedRuntime(BOT_B, "runtime-openbot-b", "b")]),
+        localProfiles: Object.freeze([]),
+      }),
+    ],
+    remoteRetireFailure: new Error("first provider retirement failed"),
+  });
+
+  assert.deepEqual(await value.coordinator.reconcilePending(), {
+    completedDeletionIds: [DELETION_B],
+    pendingDeletionIds: [DELETION_A],
+  });
+  assert.equal(value.order.includes(`complete:${DELETION_B}`), true);
+  assert.equal(value.order.includes(`complete:${DELETION_A}`), false);
 });
 
 test("exact duplicate live requests coalesce and hostile requests reach no dependency", async () => {
@@ -487,16 +592,13 @@ test("startup replay cannot consume a live deletion receipt while its anchor is 
   assert.equal(value.order.filter((entry) => entry === `complete:${DELETION_A}`).length, 1);
 });
 
-test("startup replay accepts more than 256 valid remote-pending receipts without starving them", async () => {
+test("startup replay retires more than 256 valid remote receipts without starving them", async () => {
   const receipts = Array.from({ length: 257 }, (_, index) => {
     const botId = `bot-${generatedUuid(index + 1)}`;
     return pendingReceipt({
       deletionId: generatedUuid(index + 1, 0x40000000),
       botIds: Object.freeze([botId]),
-      remoteRuntimes: Object.freeze([Object.freeze({
-        botId,
-        runtimeId: `runtime-pending-${index + 1}`,
-      })]),
+      remoteRuntimes: Object.freeze([fencedRuntime(botId, `runtime-pending-${index + 1}`, "a")]),
       localProfiles: Object.freeze([]),
     });
   });
@@ -504,8 +606,8 @@ test("startup replay accepts more than 256 valid remote-pending receipts without
 
   const result = await value.coordinator.reconcilePending();
 
-  assert.equal(result.completedDeletionIds.length, 0);
-  assert.equal(result.pendingDeletionIds.length, 257);
-  assert.deepEqual(result.pendingDeletionIds, receipts.map((entry) => entry.deletionId));
-  assert.equal(value.order.some((entry) => entry.startsWith("complete:")), false);
+  assert.equal(result.completedDeletionIds.length, 257);
+  assert.equal(result.pendingDeletionIds.length, 0);
+  assert.deepEqual(result.completedDeletionIds, receipts.map((entry) => entry.deletionId));
+  assert.equal(value.order.filter((entry) => entry.startsWith("remote:")).length, 257);
 });

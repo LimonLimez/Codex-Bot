@@ -277,6 +277,62 @@ test("desktop runtime executes a correctly hashed provider only through the revi
     retire: true,
     remoteAppServer: true,
     computerFrames: true,
+    issuanceFencedRetire: false,
+  });
+  const unsubscribe = provider.subscribe(() => {});
+  unsubscribe();
+});
+
+test("desktop runtime preserves the reviewed v2 provider contract and exposes fenced methods", async (t) => {
+  const { loadConfiguredProvider } = require(runtimePath);
+  const root = tempRoot(t);
+  const source = [
+    '"use strict";',
+    "module.exports = {",
+    "  createProvider() {",
+    "    return {",
+    "      async capabilities() { return { provision: true, reconcile: true, retire: true, remoteAppServer: true, computerFrames: true, issuanceFencedRetire: true }; },",
+    "      async provision({ botId, issuanceKey }) { return { provider: 'fixture-v2', runtimeId: 'runtime-' + botId, ownerBotId: botId, issuanceKey, endpoint: 'wss://runtime.example.test/app-server', authToken: 'memory-only-token', state: 'ready' }; },",
+    "      async inspect({ runtimeId }) { return { runtimeId, ownerBotId: 'bot-11111111-1111-4111-8111-111111111111', state: 'ready' }; },",
+    "      async retire({ runtimeId }) { return { runtimeId, state: 'retired' }; },",
+    "      async inspectIssuance({ runtimeId, ownerBotId, issuanceKey }) { return { matched: true, runtimeId, ownerBotId, issuanceKey, state: 'ready' }; },",
+    "      async retireIssuance({ runtimeId, ownerBotId, issuanceKey }) { return { matched: true, runtimeId, ownerBotId, issuanceKey, state: 'retired' }; },",
+    "      subscribe() { return () => {}; },",
+    "    };",
+    "  },",
+    "};",
+  ].join("\n");
+  const modulePath = path.join(root, "provider-v2.cjs");
+  fs.writeFileSync(modulePath, source, { mode: 0o600 });
+  fs.chmodSync(modulePath, 0o600);
+  const previousPath = process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE;
+  const previousSha = process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE;
+    else process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE = previousPath;
+    if (previousSha === undefined) delete process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+    else process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256 = previousSha;
+  });
+  process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE = modulePath;
+  process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256 = createHash("sha256").update(source).digest("hex");
+
+  const provider = loadConfiguredProvider();
+  assert.deepEqual(Reflect.ownKeys(provider), [
+    "capabilities",
+    "provision",
+    "inspect",
+    "retire",
+    "inspectIssuance",
+    "retireIssuance",
+    "subscribe",
+  ]);
+  assert.deepEqual(await provider.capabilities(), {
+    provision: true,
+    reconcile: true,
+    retire: true,
+    remoteAppServer: true,
+    computerFrames: true,
+    issuanceFencedRetire: true,
   });
   const unsubscribe = provider.subscribe(() => {});
   unsubscribe();
