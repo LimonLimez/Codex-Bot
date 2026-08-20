@@ -43,6 +43,7 @@
   });
   const PROVIDER_STATES = new Set(["connected", "connecting", "disconnected", "unavailable"]);
   const PROVIDER_LOGIN_USER_CODE = /^[A-Z0-9]{3,16}(?:-[A-Z0-9]{2,16})?$/;
+  const API_KEY_LOGIN_KIND = "api-key";
   const PROVIDER_LOGIN_KINDS = Object.freeze({
     "openai-codex": "account",
     "anthropic-claude": "oauth",
@@ -50,7 +51,7 @@
     "moonshot-kimi": "device",
     xai: "device",
     "google-vertex-ai": "service-account",
-    "openai-api-key": "api-key",
+    "openai-api-key": API_KEY_LOGIN_KIND,
     "local-openai-compatible": "local",
   });
   const EFFORT_LABELS = Object.freeze({

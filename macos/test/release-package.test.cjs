@@ -216,6 +216,22 @@ test("release audit accepts reviewed pinned binaries without treating high entro
   assert.doesNotThrow(fixture.audit);
 });
 
+test("release audit accepts every authoritative staged source without credential-shaped assignments", async (t) => {
+  const { PATCHER_SOURCE_FILES, PATCHER_SHARED_SOURCE_FILES } = require(buildInstallerPath);
+  const { credentialMaterialKind } = require(auditPath);
+  const sourceFiles = [
+    ...PATCHER_SOURCE_FILES,
+    ...PATCHER_SHARED_SOURCE_FILES,
+  ];
+  for (const relative of sourceFiles) {
+    await t.test(relative, () => {
+      const source = path.join(__dirname, "..", "src", ...relative.split("/"));
+      const contents = fs.readFileSync(source, "latin1");
+      assert.equal(credentialMaterialKind(contents), null, relative);
+    });
+  }
+});
+
 test("public CI path exemptions require a sealed exact provenance receipt", (t) => {
   const {
     credentialMaterialKind,
