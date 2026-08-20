@@ -4480,7 +4480,7 @@ test("Vertex selection focuses its labelled explanation when no enabled control 
   assert.equal(harness.documentRef.activeElement, detail);
 });
 
-test("provider selection focuses a connected Disconnect and an enabled retry action", async (context) => {
+test("provider selection prioritizes connected Disconnect, form controls, and action fallback", async (context) => {
   const connected = connectedNativeProviderHarness({
     onboarding: null,
     connections: eightConnections({
@@ -4512,9 +4512,33 @@ test("provider selection focuses a connected Disconnect and an enabled retry act
 
   clickProviderCard(retry, "openai-api-key", false);
   const retryAction = providerActionButton(retry, false);
+  const retryKey = providerControl(retry, "codex-provider-api-key", false);
   assert.equal(retryAction.disabled, false);
   assert.equal(retryAction.textContent, "Retry OpenAI API key");
-  assert.equal(retry.documentRef.activeElement === retryAction, true);
+  assert.equal(retry.documentRef.activeElement === retryKey, true);
+
+  clickProviderCard(retry, "xai", false);
+  const actionFallback = providerActionButton(retry, false);
+  assert.equal(actionFallback.disabled, false);
+  assert.equal(retry.documentRef.activeElement === actionFallback, true);
+});
+
+test("provider selection focuses the first enabled account, API-key, and local form controls", async (context) => {
+  const harness = connectedNativeProviderHarness({ onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "openai-codex");
+  const authMode = providerControl(harness, "codex-provider-auth-mode");
+  assert.equal(harness.documentRef.activeElement === authMode, true);
+
+  clickProviderCard(harness, "openai-api-key", false);
+  const apiKey = providerControl(harness, "codex-provider-api-key", false);
+  assert.equal(harness.documentRef.activeElement === apiKey, true);
+
+  clickProviderCard(harness, "local-openai-compatible", false);
+  const baseUrl = providerControl(harness, "codex-provider-base-url", false);
+  assert.equal(harness.documentRef.activeElement === baseUrl, true);
 });
 
 test("a failed selected route keeps safe values clears secrets and restores action focus", async (context) => {

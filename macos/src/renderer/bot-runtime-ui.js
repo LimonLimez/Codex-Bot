@@ -3640,7 +3640,7 @@
     function focusProviderDetails(surface) {
       const detail = surface.detail;
       if (!detail) return;
-      const candidates = [detail.disconnect, detail.action, detail.firstControl];
+      const candidates = [detail.disconnect, detail.firstControl, detail.action];
       for (const candidate of candidates) {
         if (!candidate
           || candidate.isConnected !== true
