@@ -480,7 +480,9 @@ function providerConnectInput(value, signal = null) {
   request.providerId = providerIdInput(request.providerId);
   if (request.authMode !== undefined && !new Set(["browser", "device-code"]).has(request.authMode)) throw sanitizedFailure();
   if (request.baseUrl !== undefined && typeof request.baseUrl !== "string") throw sanitizedFailure();
-  if (request.apiKey !== undefined && (typeof request.apiKey !== "string" || request.apiKey.length > 16 * 1024)) throw sanitizedFailure();
+  if (request.apiKey !== undefined
+    && !(request.providerId === "local-openai-compatible" && request.apiKey === null)
+    && (typeof request.apiKey !== "string" || request.apiKey.length > 16 * 1024)) throw sanitizedFailure();
   if (request.sourcePath !== undefined && (typeof request.sourcePath !== "string" || !path.isAbsolute(request.sourcePath))) throw sanitizedFailure();
   if (signal !== null) {
     if (!signal || typeof signal !== "object" || typeof signal.aborted !== "boolean"

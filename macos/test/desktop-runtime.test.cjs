@@ -1025,6 +1025,54 @@ test("provider browser connect opens only the private URL in main and returns no
   assert.equal(PROVIDER_LOGIN_PROMPT_CHANNEL, "openbot-provider:login-prompt");
 });
 
+test("provider IPC preserves a keyless local connect while rejecting null keys elsewhere", async (t) => {
+  const { IPC_CHANNELS } = require(runtimePath);
+  const requests = [];
+  const providerController = {
+    connect(request) {
+      requests.push(request);
+      return {
+        providerId: request.providerId,
+        state: "connected",
+        generation: 1,
+      };
+    },
+    async listConnections() { return []; },
+    async disconnect() {},
+    async catalog() { return { status: "unavailable", generation: 0, models: [] }; },
+    async readOnboarding() { return null; },
+    async completeOnboarding() {},
+    async readAuthoritySnapshot() { return null; },
+    on() {},
+    off() {},
+    dispose() {},
+  };
+  const fixture = runtimeFixture(t, { providerController });
+  const connect = fixture.handlers.get(IPC_CHANNELS.providerConnect);
+  const event = { sender: fixture.sender, senderFrame: fixture.frame };
+
+  const localResult = await connect(event, {
+    providerId: "local-openai-compatible",
+    baseUrl: "http://127.0.0.1:1234/v1",
+    apiKey: null,
+  });
+  assert.equal(localResult.providerId, "local-openai-compatible");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].providerId, "local-openai-compatible");
+  assert.equal(requests[0].baseUrl, "http://127.0.0.1:1234/v1");
+  assert.equal(requests[0].apiKey, null);
+
+  await assert.rejects(connect(event, {
+    providerId: "openai-api-key",
+    apiKey: null,
+  }), { code: "CODEX_BOT_OPERATION_FAILED" });
+  await assert.rejects(connect(event, {
+    providerId: "anthropic-claude",
+    apiKey: null,
+  }), { code: "CODEX_BOT_OPERATION_FAILED" });
+  assert.equal(requests.length, 1);
+});
+
 test("device login prompt is delivered only to the initiating current frame", async (t) => {
   const { IPC_CHANNELS, PROVIDER_LOGIN_PROMPT_CHANNEL } = require(runtimePath);
   const flight = deferred();
