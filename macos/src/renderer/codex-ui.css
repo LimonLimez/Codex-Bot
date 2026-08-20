@@ -18,6 +18,14 @@
   --codex-advanced-border: #3d4655;
   --codex-field: #9ea9b8;
   --codex-danger: #ff7373;
+  --codex-sand-text-primary: var(--sand-text-primary, var(--codex-text));
+  --codex-sand-text-secondary: var(--sand-text-secondary, var(--codex-muted));
+  --codex-sand-text-tertiary: var(--sand-text-tertiary, var(--codex-field));
+  --codex-sand-fill-secondary: var(--sand-bg-secondary, var(--codex-input));
+  --codex-sand-fill-secondary-hover: var(--sand-bg-secondary-hover, var(--codex-input-hover));
+  --codex-sand-border-subtle: var(--sand-border-subtle, color-mix(in srgb, var(--codex-border) 72%, transparent));
+  --codex-sand-border-default: var(--sand-border-default, var(--codex-border));
+  --codex-sand-border-focus: var(--sand-border-focus, var(--codex-blue));
 }
 
 :root[data-theme="light"],
@@ -39,6 +47,14 @@ body.light {
   --codex-advanced-border: #c9d2df;
   --codex-field: #59677a;
   --codex-danger: #a61b1b;
+  --codex-sand-text-primary: var(--sand-text-primary, var(--codex-text));
+  --codex-sand-text-secondary: var(--sand-text-secondary, var(--codex-muted));
+  --codex-sand-text-tertiary: var(--sand-text-tertiary, var(--codex-field));
+  --codex-sand-fill-secondary: var(--sand-bg-secondary, var(--codex-input));
+  --codex-sand-fill-secondary-hover: var(--sand-bg-secondary-hover, var(--codex-input-hover));
+  --codex-sand-border-subtle: var(--sand-border-subtle, color-mix(in srgb, var(--codex-border) 72%, transparent));
+  --codex-sand-border-default: var(--sand-border-default, var(--codex-border));
+  --codex-sand-border-focus: var(--sand-border-focus, var(--codex-blue));
 }
 
 .codex-bot-controls {
@@ -205,6 +221,118 @@ body.light {
 .codex-ai-connections-actions {
   display: grid;
   gap: 8px;
+}
+
+.codex-provider-picker {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.codex-provider-choice-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.codex-provider-choice {
+  min-width: 0;
+}
+
+.codex-provider-choice-button {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 12px;
+  width: 100%;
+  min-height: 76px;
+  padding: 12px;
+  color: var(--codex-sand-text-primary);
+  text-align: left;
+  border: 1px solid var(--codex-sand-border-subtle);
+  border-radius: 10px;
+  background: var(--codex-sand-fill-secondary);
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.codex-provider-choice-button:hover {
+  background: var(--codex-sand-fill-secondary-hover);
+}
+
+.codex-provider-choice-button[aria-pressed="true"] {
+  border-color: var(--codex-sand-border-default);
+  box-shadow: inset 0 0 0 1px var(--codex-sand-border-default);
+}
+
+.codex-provider-choice-button:focus-visible {
+  outline: 2px solid var(--codex-sand-border-focus);
+  outline-offset: 2px;
+}
+
+.codex-provider-choice-mark {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  color: var(--codex-sand-text-secondary);
+  border: 1px solid var(--codex-sand-border-subtle);
+  border-radius: 9px;
+  font: 650 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.codex-provider-choice-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.codex-provider-choice-label {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.codex-provider-choice-description,
+.codex-provider-choice-state {
+  color: var(--codex-sand-text-secondary);
+  font-size: 11px;
+  line-height: 14px;
+  overflow-wrap: anywhere;
+}
+
+.codex-provider-recommended {
+  color: var(--codex-blue-strong);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+.codex-provider-details {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+  color: var(--codex-sand-text-primary);
+  border: 1px solid var(--codex-sand-border-subtle);
+  border-radius: 12px;
+  background: var(--codex-sand-fill-secondary);
+}
+
+.codex-provider-details-title,
+.codex-provider-details-status {
+  margin: 0;
+}
+
+.codex-provider-details-title {
+  color: var(--codex-sand-text-primary);
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.codex-provider-details-status {
+  color: var(--codex-sand-text-secondary);
+  font-size: 11px;
+  line-height: 14px;
 }
 
 .codex-ai-connections-list,
@@ -480,7 +608,27 @@ body.light {
 
 .codex-new-bot-setup { width: min(420px, calc(100vw - 32px)); }
 .codex-permission-sheet { width: min(440px, calc(100vw - 32px)); }
-.codex-first-connection-setup { width: min(440px, calc(100vw - 32px)); }
+.codex-first-connection-setup {
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(720px, calc(100vw - 32px));
+  overflow: hidden;
+}
+
+.codex-provider-picker-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  min-width: 0;
+  padding-bottom: 12px;
+  background: var(--codex-advanced);
+}
+
+.codex-provider-picker-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
 
 .codex-new-bot-setup::backdrop,
 .codex-computer-setup::backdrop,
@@ -1395,6 +1543,28 @@ body.light {
   }
 }
 
+@media (max-width: 619px) {
+  .codex-first-connection-setup {
+    width: calc(100vw - 24px);
+  }
+
+  .codex-provider-choice-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .codex-provider-choice-button {
+    min-height: 68px;
+  }
+
+  .codex-provider-details {
+    padding: 12px;
+  }
+
+  .codex-provider-picker-scroll {
+    overflow-x: hidden;
+  }
+}
+
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]):not(.dark) {
     --codex-blue-strong: #0b57d0;
@@ -1412,6 +1582,14 @@ body.light {
     --codex-advanced: #f1f4f8;
     --codex-advanced-border: #c9d2df;
     --codex-field: #59677a;
+    --codex-sand-text-primary: var(--sand-text-primary, var(--codex-text));
+    --codex-sand-text-secondary: var(--sand-text-secondary, var(--codex-muted));
+    --codex-sand-text-tertiary: var(--sand-text-tertiary, var(--codex-field));
+    --codex-sand-fill-secondary: var(--sand-bg-secondary, var(--codex-input));
+    --codex-sand-fill-secondary-hover: var(--sand-bg-secondary-hover, var(--codex-input-hover));
+    --codex-sand-border-subtle: var(--sand-border-subtle, color-mix(in srgb, var(--codex-border) 72%, transparent));
+    --codex-sand-border-default: var(--sand-border-default, var(--codex-border));
+    --codex-sand-border-focus: var(--sand-border-focus, var(--codex-blue));
   }
 }
 
@@ -1428,6 +1606,12 @@ body.light {
     animation: none !important;
     scroll-behavior: auto !important;
     transition: none !important;
+  }
+
+  .codex-provider-choice-button,
+  .codex-provider-details {
+    transition: none !important;
+    animation: none !important;
   }
 
   .codex-power-warning:not([hidden]) {

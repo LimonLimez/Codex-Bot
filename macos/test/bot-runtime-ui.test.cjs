@@ -2,15 +2,31 @@
 
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
 const uiPath = path.join(__dirname, "..", "src", "renderer", "bot-runtime-ui.js");
+const cssPath = path.join(__dirname, "..", "src", "renderer", "codex-ui.css");
 const { PROVIDER_IDS, providerDescriptor } = require("../src/provider-descriptors.cjs");
 
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
 const BOT_C = "bot-33333333-3333-4333-8333-333333333333";
+
+test("provider picker uses Sand aliases two-column cards narrow reflow and reduced motion", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  for (const token of [
+    "--codex-sand-text-primary", "--codex-sand-text-secondary",
+    "--codex-sand-fill-secondary", "--codex-sand-fill-secondary-hover",
+    "--codex-sand-border-subtle", "--codex-sand-border-default", "--codex-sand-border-focus",
+  ]) assert.match(css, new RegExp(token));
+  assert.match(css, /\.codex-provider-choice-list\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*gap:\s*12px/s);
+  assert.match(css, /@media\s*\(max-width:\s*619px\)[\s\S]*\.codex-provider-choice-list\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(css, /\.codex-provider-choice-button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--codex-sand-border-focus\)/s);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-provider-choice-button[^}]*transition:\s*none/s);
+  assert.doesNotMatch(css, /\.codex-provider-(?:choice|details)[^}]*box-shadow:\s*0 0 [^;}]*(?:blue|purple|#2383ff)/is);
+});
 
 function deferred() {
   let resolve;
