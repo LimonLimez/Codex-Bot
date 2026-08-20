@@ -910,6 +910,7 @@ class StandaloneConversationController extends EventEmitter {
       tools,
       toolSession,
       disposeToolSession,
+      terminalCleanupPromise: null,
     };
     this.#active.set(record.conversationId, operation);
     this.#reservations.delete(reservationKey);
@@ -1002,7 +1003,7 @@ class StandaloneConversationController extends EventEmitter {
     operation.cancelled = true;
     try { operation.abortController.abort(failure("OPENBOT_CONVERSATION_CANCELLED")); } catch {}
     operation.cancelPromise = (async () => {
-      try { await operation.disposeToolSession(); } catch {
+      try { await (operation.terminalCleanupPromise || operation.disposeToolSession()); } catch {
         if (this.#active.get(operation.record.conversationId) === operation) {
           this.#active.delete(operation.record.conversationId);
         }
@@ -1039,6 +1040,15 @@ class StandaloneConversationController extends EventEmitter {
       return value;
     })();
     return operation.cancelPromise;
+  }
+
+  #settleTerminalCleanup(operation) {
+    if (!operation.terminalCleanupPromise) {
+      operation.terminalCleanupPromise = Promise.resolve()
+        .then(() => operation.disposeToolSession())
+        .then(() => undefined, () => undefined);
+    }
+    return operation.terminalCleanupPromise;
   }
 
   #disposeOpeningSession(reservation, rawSession) {
@@ -1174,7 +1184,7 @@ class StandaloneConversationController extends EventEmitter {
       }
       await this.#assertCurrent(operation);
       if (this.#disposed || operation.cancelled) return;
-      await operation.disposeToolSession();
+      await this.#settleTerminalCleanup(operation);
       await this.#assertCurrent(operation);
       if (this.#disposed || operation.cancelled) return;
       let completedRecord = operation.record;
@@ -1194,8 +1204,9 @@ class StandaloneConversationController extends EventEmitter {
       completedRecord.updatedAt = this.#timestamp();
       if (this.#store) {
         try { await this.#replaceDurable(completedRecord); } catch { throw failure(); }
-        this.#assertBotFence(completedRecord.botId, operation.botEpoch);
       }
+      if (this.#disposed || operation.cancelled) return;
+      this.#assertBotFence(completedRecord.botId, operation.botEpoch);
       operation.record = completedRecord;
       this.#conversations.set(completedRecord.conversationId, completedRecord);
       if (this.#active.get(operation.conversationId) === operation) {

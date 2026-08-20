@@ -417,6 +417,162 @@ test("durable text transcripts survive a fresh controller without storing stream
   second.dispose();
 });
 
+test("terminal tool cleanup failure does not suppress a durable assistant completion", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const store = memoryStore();
+  const cleanup = deferred();
+  let signalDisposeEntered;
+  const disposeEntered = new Promise((resolve) => { signalDisposeEntered = resolve; });
+  let disposeCalls = 0;
+  const controller = new StandaloneConversationController({
+    router: {
+      async stream(request) {
+        return directResult(request, [
+          { type: "text-delta", textDelta: "Local reply." },
+          { type: "finish", finishReason: "stop", usage: {} },
+        ]);
+      },
+    },
+    store,
+    toolBridge: {
+      async open(identity) {
+        return reviewedToolSession(identity, async () => ({}), async () => {
+          disposeCalls += 1;
+          signalDisposeEntered();
+          await cleanup.promise;
+        });
+      },
+    },
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const created = await controller.create({ botId: BOT_A });
+  const events = [];
+  const terminal = new Promise((resolve) => {
+    const listener = (event) => {
+      events.push(event);
+      if (["completed", "cancelled", "failed"].includes(event.type)) {
+        controller.off("event", listener);
+        resolve(event);
+      }
+    };
+    controller.on("event", listener);
+  });
+  const accepted = await controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Use the local desktop.",
+  });
+
+  assert.equal(accepted.status, "streaming");
+  await disposeEntered;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposeCalls, 1);
+  assert.deepEqual(events.map(({ type }) => type), ["text-delta"]);
+  const pending = await store.read(BOT_A, created.conversationId);
+  assert.deepEqual(pending.messages.map(({ role, text }) => ({ role, text })), [
+    { role: "user", text: "Use the local desktop." },
+  ]);
+
+  cleanup.reject(new Error("desktop cleanup unavailable"));
+  const result = await terminal;
+  assert.equal(result.type, "completed");
+  assert.equal(disposeCalls, 1);
+  const durable = await store.read(BOT_A, created.conversationId);
+  assert.deepEqual(durable.messages.map(({ role, text }) => ({ role, text })), [
+    { role: "user", text: "Use the local desktop." },
+    { role: "assistant", text: "Local reply." },
+  ]);
+  const readable = await controller.read({ botId: BOT_A, conversationId: created.conversationId });
+  assert.deepEqual(readable.messages.map(({ role, text }) => ({ role, text })), [
+    { role: "user", text: "Use the local desktop." },
+    { role: "assistant", text: "Local reply." },
+  ]);
+  controller.dispose();
+});
+
+test("cancellation fences a terminal durable replace after rejecting cleanup", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  const base = memoryStore();
+  let signalAssistantReplaceEntered;
+  const assistantReplaceEntered = new Promise((resolve) => {
+    signalAssistantReplaceEntered = resolve;
+  });
+  let releaseAssistantReplace;
+  const assistantReplaceGate = new Promise((resolve) => {
+    releaseAssistantReplace = resolve;
+  });
+  const store = {
+    ...base,
+    async replace(value) {
+      if (value.messages.some(({ role }) => role === "assistant")) {
+        signalAssistantReplaceEntered();
+        await assistantReplaceGate;
+      }
+      return base.replace(value);
+    },
+  };
+  let disposeCalls = 0;
+  const controller = new StandaloneConversationController({
+    router: {
+      async stream(request) {
+        return directResult(request, [
+          { type: "text-delta", textDelta: "Cancelled reply." },
+          { type: "finish", finishReason: "stop", usage: {} },
+        ]);
+      },
+    },
+    store,
+    toolBridge: {
+      async open(identity) {
+        return reviewedToolSession(identity, async () => ({}), async () => {
+          disposeCalls += 1;
+          throw new Error("desktop cleanup unavailable");
+        });
+      },
+    },
+    async readSelection() { return selection(); },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const created = await controller.create({ botId: BOT_A });
+  const events = [];
+  controller.on("event", (event) => events.push(event));
+  const accepted = await controller.send({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    text: "Cancel the local desktop reply.",
+  });
+  await assistantReplaceEntered;
+
+  const cancellation = controller.cancel({
+    botId: BOT_A,
+    conversationId: created.conversationId,
+    invocationId: accepted.invocationId,
+  });
+  assert.equal(await Promise.race([
+    cancellation.then(() => "settled", (error) => `rejected:${error.code}`),
+    new Promise((resolve) => setImmediate(() => resolve("pending"))),
+  ]), "pending");
+
+  releaseAssistantReplace();
+  const cancelled = await cancellation;
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(disposeCalls, 1);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events.map(({ type }) => type), ["text-delta", "cancelled"]);
+  const durable = await store.read(BOT_A, created.conversationId);
+  assert.deepEqual(durable.messages.map(({ role, text }) => ({ role, text })), [
+    { role: "user", text: "Cancel the local desktop reply." },
+  ]);
+  const readable = await controller.read({ botId: BOT_A, conversationId: created.conversationId });
+  assert.deepEqual(readable.messages.map(({ role, text }) => ({ role, text })), [
+    { role: "user", text: "Cancel the local desktop reply." },
+  ]);
+  controller.dispose();
+});
+
 test("batch delete rejects hostile non-canonical bot sets before fencing or durable effects", async () => {
   const { StandaloneConversationController } = require(controllerPath);
   const base = memoryStore();
