@@ -1608,12 +1608,9 @@ class OpenBotNativeCoordinator {
       throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
     }
     if (args.templateId !== undefined) boundedString(args.templateId, 160);
-    const appearance = {
-      shape: appearanceId(args.avatarShape, "blob"),
-      color: appearanceId(args.avatarColor, "blue"),
-      title: "",
-      description,
-    };
+    const appearance = { title: "", description };
+    if (Object.hasOwn(args, "avatarShape")) appearance.shape = appearanceId(args.avatarShape);
+    if (Object.hasOwn(args, "avatarColor")) appearance.color = appearanceId(args.avatarColor);
     let authority = null;
     try { authority = await this.#canCreateAgent(); } catch { authority = null; }
     if (this.#disposed || !authority) {

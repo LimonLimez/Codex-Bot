@@ -5,6 +5,7 @@ const { EventEmitter } = require("node:events");
 const test = require("node:test");
 
 const MODULE_PATH = "../src/desktop/openbot-native-coordinator.cjs";
+const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
 const BOT_C = "bot-33333333-3333-4333-8333-333333333333";
@@ -140,11 +141,17 @@ class BotControllerHarness extends EventEmitter {
 
   async createBot(input) {
     this.calls.push(["createBot", structuredClone(input)]);
+    const shape = Object.hasOwn(input?.appearance ?? {}, "shape")
+      ? input.appearance.shape
+      : "blob";
+    const color = Object.hasOwn(input?.appearance ?? {}, "color")
+      ? input.appearance.color
+      : "blue";
     const created = structuredClone(bot(BOT_B, {
       name: "New Bot",
       appearance: {
-        shape: input?.appearance?.shape ?? "blob",
-        color: input?.appearance?.color ?? "blue",
+        shape,
+        color,
         image: null,
         title: input?.appearance?.title ?? "",
         description: input?.appearance?.description ?? "",
@@ -743,6 +750,61 @@ test("native roster requests preserve correlation and route create, rename, prof
   });
   assert.deepEqual((await request(port, "r-list-3", "listAgents")).outcome.value.map((entry) => entry.id), [BOT_A]);
   assert.equal((await request(port, "r-list-4", "listAgents")).outcome.value[0].isActive, true);
+});
+
+test("native create forwards explicit appearance only and leaves omitted defaults to BotStore", async (t) => {
+  const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+  const bots = new BotControllerHarness();
+  const coordinator = new OpenBotNativeCoordinator({
+    botRuntimeController: bots,
+    conversationController: new ConversationHarness(),
+    canCreateAgent: async () => true,
+  });
+  t.after(() => coordinator.dispose());
+  const port = new PortHarness();
+  coordinator.bindPort(port);
+  port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+  await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+  const reply = await request(port, "create-derived-avatar", "createAgent", {
+    name: "Derived", description: "No explicit character.",
+  });
+  assert.equal(reply.outcome.status, "ok");
+  assert.deepEqual(bots.calls.find(([name]) => name === "createBot")[1], {
+    appearance: { title: "", description: "No explicit character." },
+    notifications: true,
+    setupStage: "complete",
+  });
+});
+
+test("every added shape round-trips through native create roster avatar and Character edit", async (t) => {
+  for (const shape of ADDED_AVATAR_SHAPES) {
+    await t.test(shape, async () => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const bots = new BotControllerHarness();
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: bots,
+        conversationController: new ConversationHarness(),
+        canCreateAgent: async () => true,
+      });
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      const created = await request(port, `create-${shape}`, "createAgent", {
+        name: shape, description: "catalog", avatarShape: shape, avatarColor: "cyan",
+      });
+      assert.equal(created.outcome.value.agent.avatarShape, shape);
+      assert.equal(created.outcome.value.agent.avatarColor, "cyan");
+      const edited = await request(port, `edit-${shape}`, "updateAgent", {
+        id: created.outcome.value.agent.id,
+        profile: { avatarShape: shape, avatarColor: "violet" },
+      });
+      assert.equal(edited.outcome.value.avatarShape, shape);
+      assert.equal(edited.outcome.value.avatarColor, "violet");
+      assert.equal(edited.outcome.value.avatarVersion, "2026-08-16T12:03:00.000Z");
+      coordinator.dispose();
+    });
+  }
 });
 
 test("native create requires a current provider onboarding receipt before mutating the bot store", async (t) => {
