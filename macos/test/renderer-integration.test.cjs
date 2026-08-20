@@ -15,6 +15,7 @@ const visualRuntimePath = path.join(macRoot, "test", "visual", "renderer-panel-r
 const visualFixturePath = path.join(macRoot, "test", "fixtures", "renderer-panel.html");
 const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
 const {
+  OPENBOT_GEOMETRY_TAIL,
   OPENBOT_VISIBLE_SHAPES,
   VENDOR_GEOMETRY_TAIL,
   VENDOR_VISIBLE_SHAPES,
@@ -120,11 +121,156 @@ function writeSyntheticRendererTree(root, {
   }
 }
 
+const GEOMETRY_EPSILON = 1e-6;
+
+function parseRelativeCoordinate(token) {
+  const match = /^ze(?:(?<sign>[+-])(?<magnitude>\d+))?$/.exec(token.trim());
+  assert.ok(match, `unexpected coordinate token: ${token}`);
+  return match.groups.sign === "-" ? -Number(match.groups.magnitude) : Number(match.groups.magnitude ?? 0);
+}
+
+function parseRoundedGeometryEntries(source) {
+  const entries = [];
+  const entryPattern = /([a-z]+):qo\("[^"]+",Ost\(\[\[/g;
+  let match;
+  while ((match = entryPattern.exec(source)) !== null) {
+    const pointsStart = entryPattern.lastIndex;
+    const pointsEnd = source.indexOf("]],", pointsStart);
+    assert.ok(pointsEnd >= pointsStart, `missing points terminator for ${match[1]}`);
+    const points = source
+      .slice(pointsStart, pointsEnd)
+      .split("],[")
+      .map((pair) => {
+        const [x, y] = pair.replace(/\]$/, "").split(",");
+        assert.notEqual(y, undefined, `malformed point for ${match[1]}`);
+        return { x: parseRelativeCoordinate(x), y: parseRelativeCoordinate(y) };
+      });
+    const radiiStart = pointsEnd + 3;
+    const radiiEnd = source.indexOf("))", radiiStart);
+    assert.ok(radiiEnd >= radiiStart, `missing radii terminator for ${match[1]}`);
+    const radiiSource = source.slice(radiiStart, radiiEnd);
+    const radii = radiiSource.startsWith("[")
+      ? radiiSource.slice(1, -1).split(",").map((radius) => Number(radius))
+      : Array(points.length).fill(Number(radiiSource));
+    entries.push({ name: match[1], points, radii });
+    entryPattern.lastIndex = radiiEnd + 3;
+  }
+  return entries;
+}
+
+function distance(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function cross(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function onSegment(a, b, point) {
+  return point.x >= Math.min(a.x, b.x) - GEOMETRY_EPSILON &&
+    point.x <= Math.max(a.x, b.x) + GEOMETRY_EPSILON &&
+    point.y >= Math.min(a.y, b.y) - GEOMETRY_EPSILON &&
+    point.y <= Math.max(a.y, b.y) + GEOMETRY_EPSILON;
+}
+
+function segmentsIntersect(first, second) {
+  const [a, b] = first;
+  const [c, d] = second;
+  const abC = cross(a, b, c);
+  const abD = cross(a, b, d);
+  const cdA = cross(c, d, a);
+  const cdB = cross(c, d, b);
+  if (((abC > GEOMETRY_EPSILON && abD < -GEOMETRY_EPSILON) ||
+    (abC < -GEOMETRY_EPSILON && abD > GEOMETRY_EPSILON)) &&
+    ((cdA > GEOMETRY_EPSILON && cdB < -GEOMETRY_EPSILON) ||
+      (cdA < -GEOMETRY_EPSILON && cdB > GEOMETRY_EPSILON))) return true;
+  return Math.abs(abC) <= GEOMETRY_EPSILON && onSegment(a, b, c) ||
+    Math.abs(abD) <= GEOMETRY_EPSILON && onSegment(a, b, d) ||
+    Math.abs(cdA) <= GEOMETRY_EPSILON && onSegment(c, d, a) ||
+    Math.abs(cdB) <= GEOMETRY_EPSILON && onSegment(c, d, b);
+}
+
+function roundedGeometryViolations(entry) {
+  const violations = [];
+  const { name, points, radii } = entry;
+  if (points.length !== radii.length) {
+    violations.push(`${name}: point/radius count mismatch`);
+    return violations;
+  }
+  for (let first = 0; first < points.length; first += 1) {
+    if (Math.abs(points[first].x) > 129 || Math.abs(points[first].y) > 129) {
+      violations.push(`${name}: point ${first} exceeds the stock view box`);
+    }
+    for (let second = first + 1; second < points.length; second += 1) {
+      if (points[first].x === points[second].x && points[first].y === points[second].y) {
+        violations.push(`${name}: duplicate points ${first}/${second}`);
+      }
+    }
+  }
+  const segments = [];
+  const originalSegments = [];
+  for (let index = 0; index < points.length; index += 1) {
+    const next = (index + 1) % points.length;
+    const edgeLength = distance(points[index], points[next]);
+    if (edgeLength <= GEOMETRY_EPSILON) violations.push(`${name}: zero edge ${index}`);
+    if (!Number.isFinite(radii[index]) || radii[index] < 0) {
+      violations.push(`${name}: invalid radius ${index}`);
+    }
+    if (Number.isFinite(radii[index]) && Number.isFinite(radii[next]) &&
+      radii[index] + radii[next] > edgeLength + GEOMETRY_EPSILON) {
+      violations.push(`${name}: radii ${index}/${next} overlap (${radii[index] + radii[next]} > ${edgeLength})`);
+    }
+    if (edgeLength > GEOMETRY_EPSILON) {
+      const unit = {
+        x: (points[next].x - points[index].x) / edgeLength,
+        y: (points[next].y - points[index].y) / edgeLength,
+      };
+      segments.push([
+        { x: points[index].x + unit.x * radii[index], y: points[index].y + unit.y * radii[index] },
+        { x: points[next].x - unit.x * radii[next], y: points[next].y - unit.y * radii[next] },
+      ]);
+      originalSegments.push([points[index], points[next]]);
+    } else {
+      segments.push(null);
+      originalSegments.push(null);
+    }
+  }
+  for (let first = 0; first < segments.length; first += 1) {
+    for (let second = first + 1; second < segments.length; second += 1) {
+      if (second === first + 1 || (first === 0 && second === segments.length - 1)) continue;
+      if (originalSegments[first] && originalSegments[second] &&
+        segmentsIntersect(originalSegments[first], originalSegments[second])) {
+        violations.push(`${name}: non-adjacent polygon edges ${first}/${second} cross`);
+      }
+      if (segments[first] && segments[second] && segmentsIntersect(segments[first], segments[second])) {
+        violations.push(`${name}: non-adjacent rounded path segments ${first}/${second} cross`);
+      }
+    }
+  }
+  return violations;
+}
+
+function countExact(source, anchor) {
+  let count = 0;
+  let offset = 0;
+  while (true) {
+    const index = source.indexOf(anchor, offset);
+    if (index < 0) return count;
+    count += 1;
+    offset = index + anchor.length;
+  }
+}
+
 test("avatar patch adds every geometry and visible choice and reverses exactly", () => {
   const stockFallback = 'function Jee(n){return Jst.find(t=>t===n.avatarShape)??I4e(n.id)}';
   const source = `before;${VENDOR_GEOMETRY_TAIL};middle;${VENDOR_VISIBLE_SHAPES};${stockFallback};after`;
   const patched = patchAvatarCatalogSource(source);
+  assert.equal(countExact(source, VENDOR_GEOMETRY_TAIL), 1);
+  assert.equal(countExact(source, VENDOR_VISIBLE_SHAPES), 1);
+  assert.equal(countExact(patched, OPENBOT_GEOMETRY_TAIL), 1);
+  assert.equal(countExact(patched, OPENBOT_VISIBLE_SHAPES), 1);
   for (const shape of ADDED_AVATAR_SHAPES) {
+    assert.equal(countExact(patched, `${shape}:qo(`), 1);
     assert.match(patched, new RegExp(`${shape}:qo\\(`));
   }
   assert.match(
@@ -139,6 +285,44 @@ test("avatar patch adds every geometry and visible choice and reverses exactly",
   assert.equal(reverseAvatarCatalogSource(patched), source);
   assert.throws(() => patchAvatarCatalogSource(source + VENDOR_VISIBLE_SHAPES), /ambiguous/i);
   assert.throws(() => patchAvatarCatalogSource("missing"), /not found/i);
+});
+
+test("avatar rounded geometry has safe radii and no non-adjacent crossings", () => {
+  const entries = parseRoundedGeometryEntries(OPENBOT_GEOMETRY_TAIL);
+  assert.equal(entries.length, 11);
+  assert.notDeepEqual(
+    entries.find(({ name }) => name === "dog")?.points,
+    entries.find(({ name }) => name === "wolf")?.points,
+  );
+  const violations = entries.flatMap(roundedGeometryViolations);
+  assert.deepEqual(violations, []);
+});
+
+test("avatar patch and reverse reject mixed or duplicate replacement anchors", () => {
+  const stock = `before;${VENDOR_GEOMETRY_TAIL};${VENDOR_VISIBLE_SHAPES};after`;
+  const open = `before;${OPENBOT_GEOMETRY_TAIL};${OPENBOT_VISIBLE_SHAPES};after`;
+  for (const mixed of [
+    stock.replace(VENDOR_GEOMETRY_TAIL, OPENBOT_GEOMETRY_TAIL),
+    stock.replace(VENDOR_VISIBLE_SHAPES, OPENBOT_VISIBLE_SHAPES),
+    `${stock};${OPENBOT_GEOMETRY_TAIL};${OPENBOT_VISIBLE_SHAPES}`,
+  ]) {
+    assert.throws(() => patchAvatarCatalogSource(mixed), /mixed|partial|already patched|ambiguous/i);
+  }
+  assert.throws(
+    () => patchAvatarCatalogSource(`${stock};${OPENBOT_GEOMETRY_TAIL}${OPENBOT_GEOMETRY_TAIL}`),
+    /ambiguous|mixed|already patched/i,
+  );
+  for (const mixed of [
+    open.replace(OPENBOT_GEOMETRY_TAIL, VENDOR_GEOMETRY_TAIL),
+    open.replace(OPENBOT_VISIBLE_SHAPES, VENDOR_VISIBLE_SHAPES),
+    `${open};${VENDOR_GEOMETRY_TAIL};${VENDOR_VISIBLE_SHAPES}`,
+  ]) {
+    assert.throws(() => reverseAvatarCatalogSource(mixed), /mixed|partial|already patched|ambiguous/i);
+  }
+  assert.throws(
+    () => reverseAvatarCatalogSource(`${open};${OPENBOT_VISIBLE_SHAPES}${OPENBOT_VISIBLE_SHAPES}`),
+    /ambiguous|mixed|partial/i,
+  );
 });
 
 test("the explicit local protocol bypasses only the native onboarding child", () => {

@@ -22,9 +22,9 @@ const OPENBOT_VISIBLE_SHAPES = `const Pq=${JSON.stringify(VISIBLE_AVATAR_SHAPES)
 const VENDOR_GEOMETRY_TAIL = 'teardrop:qo("Teardrop",wBt(88,ze-114,ze+26,18)),leaf:qo("Leaf",vBt(88,113,1.5))};Fo.wedge.face.leftDX=-6;const Jst=Object.keys(Fo)';
 const OPENBOT_ADDED_GEOMETRIES = `
 cat:qo("Cat",Ost([[ze-96,ze+72],[ze-94,ze-42],[ze-72,ze-104],[ze-38,ze-78],[ze,ze-92],[ze+38,ze-78],[ze+72,ze-104],[ze+94,ze-42],[ze+96,ze+72],[ze+58,ze+104],[ze-58,ze+104]],[18,10,8,18,22,18,8,10,18,24,24])),
-dog:qo("Dog",Ost([[ze-100,ze-70],[ze-66,ze-92],[ze-46,ze-62],[ze,ze-82],[ze+46,ze-62],[ze+66,ze-92],[ze+100,ze-70],[ze+88,ze+70],[ze+52,ze+104],[ze-52,ze+104],[ze-88,ze+70]],[16,20,18,24,18,20,16,26,24,24,26])),
+dog:qo("Dog",Ost([[ze-100,ze-70],[ze-66,ze-92],[ze-46,ze-62],[ze,ze-82],[ze+46,ze-62],[ze+66,ze-92],[ze+100,ze-70],[ze+88,ze+70],[ze+52,ze+104],[ze-52,ze+104],[ze-88,ze+70]],[16,18,18,24,18,18,16,24,24,24,24])),
 wolf:qo("Wolf",Ost([[ze-104,ze+52],[ze-88,ze-54],[ze-54,ze-112],[ze-24,ze-72],[ze,ze-98],[ze+24,ze-72],[ze+54,ze-112],[ze+88,ze-54],[ze+104,ze+52],[ze+66,ze+98],[ze+28,ze+82],[ze,ze+112],[ze-28,ze+82],[ze-66,ze+98]],[12,10,6,12,10,12,6,10,12,18,12,8,12,18])),
-bunny:qo("Bunny",Ost([[ze-78,ze+96],[ze-72,ze-22],[ze-58,ze-112],[ze-28,ze-108],[ze-16,ze-42],[ze+16,ze-42],[ze+28,ze-108],[ze+58,ze-112],[ze+72,ze-22],[ze+78,ze+96],[ze+42,ze+112],[ze-42,ze+112]],[22,14,12,12,18,18,12,12,14,22,20,20])),
+bunny:qo("Bunny",Ost([[ze-78,ze+96],[ze-72,ze-22],[ze-58,ze-112],[ze-28,ze-108],[ze-16,ze-42],[ze+16,ze-42],[ze+28,ze-108],[ze+58,ze-112],[ze+72,ze-22],[ze+78,ze+96],[ze+42,ze+112],[ze-42,ze+112]],[20,14,12,12,15,15,12,12,14,19,19,19])),
 fox:qo("Fox",Ost([[ze-102,ze+56],[ze-88,ze-54],[ze-50,ze-108],[ze-30,ze-64],[ze,ze-88],[ze+30,ze-64],[ze+50,ze-108],[ze+88,ze-54],[ze+102,ze+56],[ze+48,ze+88],[ze,ze+114],[ze-48,ze+88]],[12,8,6,14,18,14,6,8,12,16,8,16])),
 bear:qo("Bear",dBt([[ze-70,ze-66,40],[ze+70,ze-66,40],[ze,ze+12,104],[ze,ze+78,72]])),
 owl:qo("Owl",Ost([[ze-92,ze+88],[ze-90,ze-42],[ze-62,ze-98],[ze-24,ze-72],[ze,ze-108],[ze+24,ze-72],[ze+62,ze-98],[ze+90,ze-42],[ze+92,ze+88],[ze+44,ze+108],[ze,ze+84],[ze-44,ze+108]],[18,14,8,16,8,16,8,14,18,16,12,16])),
@@ -105,7 +105,66 @@ const VENDOR_IDENTITY_PORT_GATE =
 const OPENBOT_IDENTITY_PORT_GATE =
   'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null||hasLocalCoordinator()})';
 
+function countAnchorOccurrences(source, anchor) {
+  let count = 0;
+  let offset = 0;
+  while (true) {
+    const index = source.indexOf(anchor, offset);
+    if (index < 0) return count;
+    count += 1;
+    offset = index + anchor.length;
+  }
+}
+
+function assertAvatarCatalogSourceState(source, direction) {
+  if (typeof source !== "string") {
+    throw new TypeError("Avatar catalog source must be a string");
+  }
+  const stockGeometry = countAnchorOccurrences(source, VENDOR_GEOMETRY_TAIL);
+  const openGeometry = countAnchorOccurrences(source, OPENBOT_GEOMETRY_TAIL);
+  const stockVisible = countAnchorOccurrences(source, VENDOR_VISIBLE_SHAPES);
+  const openVisible = countAnchorOccurrences(source, OPENBOT_VISIBLE_SHAPES);
+  const openDuplicate = openGeometry > 1 || openVisible > 1;
+  const stockDuplicate = stockGeometry > 1 || stockVisible > 1;
+
+  if (direction === "patch") {
+    if (openDuplicate) {
+      throw new Error("Avatar catalog replacement anchor is ambiguous: OpenBot registry");
+    }
+    if (openGeometry > 0 || openVisible > 0) {
+      if (openGeometry === 1 && openVisible === 1 && stockGeometry === 0 && stockVisible === 0) {
+        throw new Error("Avatar catalog is already patched");
+      }
+      throw new Error("Avatar catalog replacement anchors are mixed or partial");
+    }
+    if (stockDuplicate) {
+      throw new Error("Avatar catalog replacement anchor is ambiguous: Grok registry");
+    }
+    if (stockGeometry !== 1 || stockVisible !== 1) {
+      throw new Error("Avatar catalog patch anchor not found: Grok registry");
+    }
+    return;
+  }
+
+  if (stockGeometry > 0 || stockVisible > 0) {
+    if (stockDuplicate) {
+      throw new Error("Avatar catalog inverse anchor is ambiguous: Grok registry");
+    }
+    if (openGeometry > 0 || openVisible > 0) {
+      throw new Error("Avatar catalog inverse anchors are mixed or partial");
+    }
+    throw new Error("Avatar catalog inverse requires OpenBot registry anchors");
+  }
+  if (openDuplicate) {
+    throw new Error("Avatar catalog inverse anchor is ambiguous: OpenBot registry");
+  }
+  if (openGeometry !== 1 || openVisible !== 1) {
+    throw new Error("Avatar catalog inverse anchor not found: OpenBot registry");
+  }
+}
+
 function patchAvatarCatalogSource(source) {
+  assertAvatarCatalogSourceState(source, "patch");
   let patched = replaceUnique(
     source,
     VENDOR_GEOMETRY_TAIL,
@@ -122,6 +181,7 @@ function patchAvatarCatalogSource(source) {
 }
 
 function reverseAvatarCatalogSource(source) {
+  assertAvatarCatalogSourceState(source, "reverse");
   let reversed = replaceUnique(
     source,
     OPENBOT_VISIBLE_SHAPES,

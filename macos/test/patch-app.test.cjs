@@ -31,6 +31,7 @@ const STOCK_LOCAL_IDENTITY_ANCHORS = [
 const rendererPatch = require(rendererPatchPath);
 const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
 const {
+  OPENBOT_GEOMETRY_TAIL,
   OPENBOT_VISIBLE_SHAPES,
   VENDOR_GEOMETRY_TAIL,
   VENDOR_VISIBLE_SHAPES,
@@ -140,9 +141,123 @@ function loadPatcher() {
   return require(patcherPath);
 }
 
+const PATCH_GEOMETRY_EPSILON = 1e-6;
+
+function patchParseCoordinate(token) {
+  const match = /^ze(?:(?<sign>[+-])(?<magnitude>\d+))?$/.exec(token.trim());
+  assert.ok(match, `unexpected coordinate token: ${token}`);
+  return match.groups.sign === "-" ? -Number(match.groups.magnitude) : Number(match.groups.magnitude ?? 0);
+}
+
+function patchParseRoundedGeometry(source) {
+  const entries = [];
+  const pattern = /([a-z]+):qo\("[^"]+",Ost\(\[\[/g;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    const pointsEnd = source.indexOf("]],", pattern.lastIndex);
+    assert.ok(pointsEnd >= pattern.lastIndex, `missing points terminator for ${match[1]}`);
+    const points = source
+      .slice(pattern.lastIndex, pointsEnd)
+      .split("],[")
+      .map((pair) => {
+        const [x, y] = pair.replace(/\]$/, "").split(",");
+        return { x: patchParseCoordinate(x), y: patchParseCoordinate(y) };
+      });
+    const radiiStart = pointsEnd + 3;
+    const radiiEnd = source.indexOf("))", radiiStart);
+    assert.ok(radiiEnd >= pointsEnd, `missing radii terminator for ${match[1]}`);
+    const radiiSource = source.slice(radiiStart, radiiEnd);
+    const radii = radiiSource.startsWith("[")
+      ? radiiSource.slice(1, -1).split(",").map(Number)
+      : Array(points.length).fill(Number(radiiSource));
+    entries.push({ name: match[1], points, radii });
+    pattern.lastIndex = radiiEnd + 3;
+  }
+  return entries;
+}
+
+function patchDistance(a, b) {
+  return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+function patchCross(a, b, c) {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+function patchOnSegment(a, b, point) {
+  return point.x >= Math.min(a.x, b.x) - PATCH_GEOMETRY_EPSILON &&
+    point.x <= Math.max(a.x, b.x) + PATCH_GEOMETRY_EPSILON &&
+    point.y >= Math.min(a.y, b.y) - PATCH_GEOMETRY_EPSILON &&
+    point.y <= Math.max(a.y, b.y) + PATCH_GEOMETRY_EPSILON;
+}
+
+function patchSegmentsIntersect(first, second) {
+  const [a, b] = first;
+  const [c, d] = second;
+  const abC = patchCross(a, b, c);
+  const abD = patchCross(a, b, d);
+  const cdA = patchCross(c, d, a);
+  const cdB = patchCross(c, d, b);
+  const opposite = (left, right) => (left > PATCH_GEOMETRY_EPSILON && right < -PATCH_GEOMETRY_EPSILON) ||
+    (left < -PATCH_GEOMETRY_EPSILON && right > PATCH_GEOMETRY_EPSILON);
+  return (opposite(abC, abD) && opposite(cdA, cdB)) ||
+    (Math.abs(abC) <= PATCH_GEOMETRY_EPSILON && patchOnSegment(a, b, c)) ||
+    (Math.abs(abD) <= PATCH_GEOMETRY_EPSILON && patchOnSegment(a, b, d)) ||
+    (Math.abs(cdA) <= PATCH_GEOMETRY_EPSILON && patchOnSegment(c, d, a)) ||
+    (Math.abs(cdB) <= PATCH_GEOMETRY_EPSILON && patchOnSegment(c, d, b));
+}
+
+function patchRoundedGeometryViolations({ name, points, radii }) {
+  const violations = [];
+  assert.equal(points.length, radii.length, `${name} point/radius count`);
+  for (let first = 0; first < points.length; first += 1) {
+    assert.ok(Math.abs(points[first].x) <= 129 && Math.abs(points[first].y) <= 129, `${name} point ${first} exceeds the stock view box`);
+    for (let second = first + 1; second < points.length; second += 1) {
+      assert.notDeepEqual(points[first], points[second], `${name} duplicate points ${first}/${second}`);
+    }
+  }
+  const segments = [];
+  const originalSegments = [];
+  for (let index = 0; index < points.length; index += 1) {
+    const next = (index + 1) % points.length;
+    const length = patchDistance(points[index], points[next]);
+    assert.ok(length > PATCH_GEOMETRY_EPSILON, `${name} edge ${index} is zero`);
+    assert.ok(Number.isFinite(radii[index]) && radii[index] >= 0, `${name} radius ${index} is invalid`);
+    if (radii[index] + radii[next] > length + PATCH_GEOMETRY_EPSILON) {
+      violations.push(`${name} edge ${index} radius overlap`);
+    }
+    const unit = {
+      x: (points[next].x - points[index].x) / length,
+      y: (points[next].y - points[index].y) / length,
+    };
+    segments.push([
+      { x: points[index].x + unit.x * radii[index], y: points[index].y + unit.y * radii[index] },
+      { x: points[next].x - unit.x * radii[next], y: points[next].y - unit.y * radii[next] },
+    ]);
+    originalSegments.push([points[index], points[next]]);
+  }
+  for (let first = 0; first < segments.length; first += 1) {
+    for (let second = first + 1; second < segments.length; second += 1) {
+      if (second === first + 1 || (first === 0 && second === segments.length - 1)) continue;
+      if (patchSegmentsIntersect(originalSegments[first], originalSegments[second])) {
+        violations.push(`${name} polygon edges ${first}/${second} cross`);
+      }
+      if (patchSegmentsIntersect(segments[first], segments[second])) {
+        violations.push(`${name} rounded segments ${first}/${second} cross`);
+      }
+    }
+  }
+  return violations;
+}
+
 test("patch-app renderer fixture carries the exact avatar registry contract", () => {
   const patched = patchAvatarCatalogSource(SYNTHETIC_VENDOR_RENDERER);
+  assert.equal((SYNTHETIC_VENDOR_RENDERER.match(new RegExp(VENDOR_GEOMETRY_TAIL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length, 1);
+  assert.equal((SYNTHETIC_VENDOR_RENDERER.match(new RegExp(VENDOR_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length, 1);
+  assert.equal((patched.match(new RegExp(OPENBOT_GEOMETRY_TAIL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length, 1);
+  assert.equal((patched.match(new RegExp(OPENBOT_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length, 1);
   for (const shape of ADDED_AVATAR_SHAPES) {
+    assert.equal((patched.match(new RegExp(`${shape}:qo\\(`, "g")) ?? []).length, 1);
     assert.match(patched, new RegExp(`${shape}:qo\\(`));
   }
   assert.match(
@@ -150,6 +265,16 @@ test("patch-app renderer fixture carries the exact avatar registry contract", ()
     new RegExp(OPENBOT_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
   assert.equal(reverseAvatarCatalogSource(patched), SYNTHETIC_VENDOR_RENDERER);
+});
+
+test("patch-app rounded geometry has safe radii and no non-adjacent crossings", () => {
+  const entries = patchParseRoundedGeometry(OPENBOT_GEOMETRY_TAIL);
+  assert.equal(entries.length, 11);
+  assert.notDeepEqual(
+    entries.find(({ name }) => name === "dog")?.points,
+    entries.find(({ name }) => name === "wolf")?.points,
+  );
+  assert.deepEqual(entries.flatMap(patchRoundedGeometryViolations), []);
 });
 
 test("patch-app avatar registry anchors fail closed when missing or ambiguous", () => {
@@ -171,6 +296,33 @@ test("patch-app avatar registry anchors fail closed when missing or ambiguous", 
       `${label} ambiguous`,
     );
   }
+});
+
+test("patch-app rejects mixed or duplicate avatar replacement anchors", () => {
+  const stock = `before;${VENDOR_GEOMETRY_TAIL};${VENDOR_VISIBLE_SHAPES};after`;
+  const open = `before;${OPENBOT_GEOMETRY_TAIL};${OPENBOT_VISIBLE_SHAPES};after`;
+  for (const mixed of [
+    stock.replace(VENDOR_GEOMETRY_TAIL, OPENBOT_GEOMETRY_TAIL),
+    stock.replace(VENDOR_VISIBLE_SHAPES, OPENBOT_VISIBLE_SHAPES),
+    `${stock};${OPENBOT_GEOMETRY_TAIL};${OPENBOT_VISIBLE_SHAPES}`,
+  ]) {
+    assert.throws(() => patchAvatarCatalogSource(mixed), /mixed|partial|already patched|ambiguous/i);
+  }
+  assert.throws(
+    () => patchAvatarCatalogSource(`${stock};${OPENBOT_GEOMETRY_TAIL}${OPENBOT_GEOMETRY_TAIL}`),
+    /ambiguous|mixed|already patched/i,
+  );
+  for (const mixed of [
+    open.replace(OPENBOT_GEOMETRY_TAIL, VENDOR_GEOMETRY_TAIL),
+    open.replace(OPENBOT_VISIBLE_SHAPES, VENDOR_VISIBLE_SHAPES),
+    `${open};${VENDOR_GEOMETRY_TAIL};${VENDOR_VISIBLE_SHAPES}`,
+  ]) {
+    assert.throws(() => reverseAvatarCatalogSource(mixed), /mixed|partial|already patched|ambiguous/i);
+  }
+  assert.throws(
+    () => reverseAvatarCatalogSource(`${open};${OPENBOT_VISIBLE_SHAPES}${OPENBOT_VISIBLE_SHAPES}`),
+    /ambiguous|mixed|partial/i,
+  );
 });
 
 test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, and preserves stock/unpacked bytes", async (t) => {
