@@ -3876,6 +3876,7 @@ function createMountedUiHarness({
   reducedMotion = false,
   viewMetrics = Object.freeze({}),
   viewportMetrics = Object.freeze({ width: 1040, height: 760 }),
+  focusBeforeMount = false,
 }) {
   const { mount } = require(uiPath);
   class MountElement extends FakeElement {
@@ -4086,6 +4087,12 @@ function createMountedUiHarness({
   }
   if (localDesktopViewApi) windowRef.OpenBotLocalDesktopView = localDesktopViewApi;
   if (localStorage) windowRef.localStorage = localStorage;
+  const focusAnchor = focusBeforeMount ? documentRef.createElement("button") : null;
+  if (focusAnchor) {
+    focusAnchor.className = "provider-return-focus-anchor";
+    documentRef.body.append(focusAnchor);
+    focusAnchor.focus();
+  }
   const mounted = mount({ windowRef, documentRef });
   const find = (node, className, seen = new Set()) => {
     if (seen.has(node)) return null;
@@ -4108,6 +4115,7 @@ function createMountedUiHarness({
     animationFrames,
     cancelledAnimationFrames,
     documentRef,
+    focusAnchor,
     find: (className) => find(mounted.modelDock, className),
     findAll: (className) => findAll(mounted.modelDock, className),
     findPanel: (className) => find(mounted.panel, className) ?? find(documentRef.body, className),
@@ -4124,6 +4132,144 @@ function createMountedUiHarness({
     windowListeners,
   };
 }
+
+function providerSurface(harness, first = true) {
+  return harness.findPanel(first ? "codex-first-provider-picker" : "codex-settings-provider-picker");
+}
+
+function providerCard(harness, providerId, first = true) {
+  return harness.findAllPanel("codex-provider-choice-button").find((node) => (
+    node.dataset.providerId === providerId
+      && node.dataset.surface === (first ? "first" : "settings")
+  ));
+}
+
+function providerDetail(harness, first = true) {
+  const surface = providerSurface(harness, first);
+  return harness.findAllPanel("codex-provider-details").find((node) => node.parentElement === surface);
+}
+
+function providerActionButton(harness, first = true) {
+  return providerControl(harness, "codex-provider-connect", first);
+}
+
+function providerControl(harness, className, first = true) {
+  const visit = (node) => {
+    if (node.className.split(/\s+/).includes(className)) return node;
+    for (const child of node.children) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(providerDetail(harness, first));
+}
+
+function providerText(harness, first = true) {
+  const values = [];
+  const visit = (node) => {
+    if (node.textContent) values.push(node.textContent);
+    for (const child of node.children) visit(child);
+  };
+  visit(providerDetail(harness, first));
+  return values.join(" ");
+}
+
+function clickProviderCard(harness, providerId, first = true) {
+  const card = providerCard(harness, providerId, first);
+  card.listeners.get("click")();
+  return card;
+}
+
+function connectedNativeProviderHarness({
+  providerFacade: providerOverride = null,
+  onboarding = null,
+  connections = eightConnections(),
+  providerModels = [],
+} = {}) {
+  const catalogGeneration = connections.reduce(
+    (generation, entry) => Math.max(generation, entry.generation),
+    0,
+  );
+  const providerCatalogValue = providerModels.length > 0
+    ? providerCatalog(providerModels, catalogGeneration)
+    : providerCatalog([], catalogGeneration, "unavailable");
+  const catalog = Object.freeze({
+    generation: 1,
+    status: "ready",
+    models: Object.freeze([Object.freeze({
+      id: "gpt-5.6-sol",
+      displayName: "GPT-5.6 Sol",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: Object.freeze(["medium"]),
+    })]),
+  });
+  return createMountedUiHarness({
+    catalog,
+    initialSelection: Object.freeze({
+      botId: BOT_A,
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium",
+      serviceTier: null,
+      catalogGeneration: 1,
+      generation: 1,
+    }),
+    nativeProtocol: true,
+    nativeHost: true,
+    botsFacade: {
+      async list() { return [bot(BOT_A, "A", "ready")]; },
+      onChanged() { return () => {}; },
+    },
+    providerFacade: providerOverride ?? providerFacade({
+      connections,
+      catalog: providerCatalogValue,
+      onboarding,
+    }),
+  });
+}
+
+test("provider picker shows eight canonical buttons and exactly one disclosed panel per surface", async (context) => {
+  const harness = connectedNativeProviderHarness({ onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  for (const [first, surfaceName] of [[true, "first"], [false, "settings"]]) {
+    const cards = harness.findAllPanel("codex-provider-choice-button")
+      .filter((node) => node.dataset.surface === surfaceName);
+    assert.deepEqual(cards.map((node) => node.dataset.providerId), PROVIDER_IDS);
+    assert.equal(cards.filter((node) => node.attributes["aria-pressed"] === "true").length, 1);
+    assert.equal(cards[0].dataset.providerId, "openai-codex");
+    assert.equal(cards[0].attributes["aria-pressed"], "true");
+    assert.equal(cards[0].attributes["aria-controls"], `codex-${surfaceName}-provider-details`);
+    assert.equal(providerSurface(harness, first).children
+      .filter((node) => node.className.includes("codex-provider-details")).length, 1);
+    assert.equal(providerDetail(harness, first).dataset.providerId, "openai-codex");
+  }
+  assert.equal(harness.findPanel("codex-first-connection-skip"), null);
+});
+
+test("provider selection is ephemeral and keyboard navigation follows canonical order", async (context) => {
+  const facade = providerFacade();
+  let connectCalls = 0;
+  facade.connect = async () => { connectCalls += 1; };
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const first = providerCard(harness, "openai-codex");
+  const event = {
+    key: "ArrowRight",
+    preventDefaultCalled: false,
+    preventDefault() { this.preventDefaultCalled = true; },
+  };
+  first.listeners.get("keydown")(event);
+  assert.equal(event.preventDefaultCalled, true);
+  assert.equal(providerCard(harness, "anthropic-claude").attributes["aria-pressed"], "true");
+  assert.equal(providerDetail(harness).dataset.providerId, "anthropic-claude");
+  assert.equal(harness.documentRef.activeElement, providerCard(harness, "anthropic-claude"));
+  assert.equal(connectCalls, 0);
+});
 
 test("native View Bot owns Computer controls and selects the active Free Local Desktop", async (context) => {
   const catalog = Object.freeze({
@@ -4261,19 +4407,18 @@ test("existing bots without a durable receipt still open the eight-route gate", 
   assert.equal(setup.open, true);
   assert.equal(setup.attributes["aria-modal"], "true");
   assert.equal(harness.findPanel("codex-first-connection-skip"), null);
+  const cards = PROVIDER_IDS.map((providerId) => providerCard(harness, providerId));
   assert.deepEqual(
-    harness.findAllPanel("codex-first-connection-choice").map((node) => node.dataset.providerId),
+    cards.map((node) => node.dataset.providerId),
     PROVIDER_IDS,
   );
   const expectedLabels = PROVIDER_IDS.map((providerId) => providerDescriptor(providerId).label);
   assert.deepEqual(
-    harness.findAllPanel("codex-first-connection-choice")
-      .map((node) => node.children[0].children[0].textContent),
+    cards.map((node) => node.children[1].children[0].textContent),
     expectedLabels,
   );
   assert.deepEqual(
-    harness.findAllPanel("codex-first-connection-choice")
-      .map((node) => node.children[0].children[1].textContent),
+    cards.map((node) => node.children[1].children[2].textContent),
     ["Connected", "Connecting…", "Not connected", "Not connected", "Unavailable", "Not connected", "Not connected", "Not connected"],
   );
 });
@@ -4414,24 +4559,22 @@ test("provider chooser sends exact route requests, completes first onboarding, a
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const firstVertex = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "google-vertex-ai");
-  firstVertex.children.at(-1).children[0].listeners.get("click")();
+  clickProviderCard(harness, "google-vertex-ai");
+  providerActionButton(harness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(requests[0], { providerId: "google-vertex-ai" });
   assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
 
-  const apiRow = harness.findAllPanel("codex-provider-connection")
-    .find((node) => node.dataset.providerId === "openai-api-key");
-  const apiInput = apiRow.children[1].children[0];
+  clickProviderCard(harness, "openai-api-key", false);
+  const apiInput = providerControl(harness, "codex-provider-api-key", false);
   apiInput.value = "sk-test-secret";
-  apiRow.children[2].children[0].listeners.get("click")();
+  providerActionButton(harness, false).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(requests[1], { providerId: "openai-api-key", apiKey: "sk-test-secret" });
   assert.equal(apiInput.value, "");
-  apiRow.children[2].children[1].listeners.get("click")();
+  providerControl(harness, "codex-provider-disconnect", false).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(requests.length, 2);
 });
@@ -4486,9 +4629,7 @@ test("Direct Codex exposes browser and device actions through the provider facad
   const browserHarness = makeHarness();
   context.after(() => browserHarness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const browserRow = browserHarness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  browserRow.children[2].children[0].listeners.get("click")();
+  providerActionButton(browserHarness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(requests[0], { providerId: "openai-codex", authMode: "browser" });
@@ -4499,10 +4640,8 @@ test("Direct Codex exposes browser and device actions through the provider facad
   const deviceHarness = makeHarness();
   context.after(() => deviceHarness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const deviceRow = deviceHarness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  deviceRow.children[1].children[0].value = "device-code";
-  deviceRow.children[2].children[0].listeners.get("click")();
+  providerControl(deviceHarness, "codex-provider-auth-mode").value = "device-code";
+  providerActionButton(deviceHarness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(requests[1], { providerId: "openai-codex", authMode: "device-code" });
@@ -4538,16 +4677,15 @@ test("cancelled provider connections keep the chooser open and restore focus to 
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "moonshot-kimi");
-  const action = route.children[2].children[0];
+  clickProviderCard(harness, "moonshot-kimi");
+  const action = providerActionButton(harness);
   action.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
   assert.equal(harness.documentRef.activeElement, action);
-  assert.match(route.children[0].children[2].textContent, /cancelled|try again/i);
-  assert.doesNotMatch(route.children[0].children[2].textContent, /cancelled.*secret|Users|token/i);
+  assert.match(providerText(harness), /cancelled|try again/i);
+  assert.doesNotMatch(providerText(harness), /cancelled.*secret|Users|token/i);
 });
 
 test("successful onboarding restores the active bot and never creates one", async (context) => {
@@ -4608,9 +4746,8 @@ test("successful onboarding restores the active bot and never creates one", asyn
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
-  const vertex = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "google-vertex-ai");
-  vertex.children[2].children[0].listeners.get("click")();
+  clickProviderCard(harness, "google-vertex-ai");
+  providerActionButton(harness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
@@ -5419,9 +5556,7 @@ test("mounted async provider completion never mutates detached controls after di
     providerFacade: providers,
   });
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const connect = route.children.at(-1).children[0];
+  const connect = providerActionButton(harness);
   connect.listeners.get("click")();
   assert.equal(connect.disabled, true);
   harness.mounted.dispose();
@@ -6217,9 +6352,7 @@ test("provider single-flight survives an unrelated Power repaint", async (contex
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const action = route.children.at(-1).children[0];
+  const action = providerActionButton(harness);
   action.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(connectCalls, 0);
@@ -6359,9 +6492,7 @@ test("an older all-settled provider refresh cannot overwrite a newer connection 
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  route.children.at(-1).children[0].listeners.get("click")();
+  providerActionButton(harness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
@@ -6456,7 +6587,7 @@ test("invalid or missing native provider facades keep the chooser blocked and pr
   assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
   assert.equal(harness.mounted.panel.inert, true);
   assert.equal(harness.mounted.modelDock.inert, true);
-  assert.equal(harness.findAllPanel("codex-first-connection-choice")[0].children.at(-1).children[0].disabled, true);
+  assert.equal(providerActionButton(harness).disabled, true);
 
   const missing = createMountedUiHarness({
     catalog,
@@ -6503,9 +6634,8 @@ test("an externally connecting provider route is not actionable until it becomes
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "anthropic-claude");
-  assert.equal(route.children.at(-1).children[0].disabled, true);
+  clickProviderCard(harness, "anthropic-claude");
+  assert.equal(providerActionButton(harness).disabled, true);
 });
 
 test("provider chooser and Settings render the validated connection DTO label", async (context) => {
@@ -6528,12 +6658,12 @@ test("provider chooser and Settings render the validated connection DTO label", 
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const chooser = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "xai");
-  const settings = harness.findAllPanel("codex-provider-connection")
-    .find((node) => node.dataset.providerId === "xai");
-  assert.equal(chooser.children[0].children[0].textContent, "DTO xAI label");
-  assert.equal(settings.children[0].children[0].textContent, "DTO xAI label");
+  clickProviderCard(harness, "xai");
+  clickProviderCard(harness, "xai", false);
+  const chooser = providerDetail(harness).children[0];
+  const settings = providerDetail(harness, false).children[0];
+  assert.equal(chooser.children[0].textContent, "DTO xAI label");
+  assert.equal(settings.children[0].textContent, "DTO xAI label");
   assert.equal(chooser.dataset.loginKind, providerDescriptor("xai").loginKind);
   assert.equal(settings.dataset.loginKind, providerDescriptor("xai").loginKind);
 });
@@ -6636,9 +6766,7 @@ test("external browser launch cannot complete onboarding before an authoritative
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  route.children.at(-1).children[0].listeners.get("click")();
+  providerActionButton(harness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(completeCalls, 0);
@@ -6707,13 +6835,11 @@ test("held Direct Codex browser connect stays Connecting and cannot complete onb
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const action = route.children.at(-1).children[0];
+  const action = providerActionButton(harness);
   action.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(action.disabled, true);
-  assert.equal(route.children[0].children[1].textContent, "Connecting…");
+  assert.equal(providerDetail(harness).children[0].children[1].textContent, "Connecting…");
   assert.equal(completeCalls, 0);
   assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
 
@@ -6767,10 +6893,8 @@ test("Direct Codex device prompt accepts only the exact bounded DTO for the pend
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  route.children[1].children[0].value = "device-code";
-  route.children.at(-1).children[0].listeners.get("click")();
+  providerControl(harness, "codex-provider-auth-mode").value = "device-code";
+  providerActionButton(harness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(connectCalls, 1);
 
@@ -6846,12 +6970,11 @@ test("disconnect-pending Direct Codex is model-free and exposes Settings Retry d
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const settings = harness.findAllPanel("codex-provider-connection")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const retry = settings.children.at(-1).children[1];
+  const settings = providerDetail(harness, false).children[0];
+  const retry = providerControl(harness, "codex-provider-disconnect", false);
   assert.equal(harness.mounted.controller.snapshot().modelCatalog.length, 0);
-  assert.equal(settings.children[0].children[1].textContent, "Unavailable");
-  assert.equal(settings.children.at(-1).children[0].disabled, true);
+  assert.equal(settings.children[1].textContent, "Unavailable");
+  assert.equal(providerActionButton(harness, false).disabled, true);
   assert.equal(retry.hidden, false);
   assert.equal(retry.textContent, "Retry disconnect");
   retry.listeners.get("click")();
@@ -6912,9 +7035,7 @@ test("postcommit onboarding refresh failure offers stale refresh only and never 
   });
   context.after(() => harness.mounted.dispose());
   for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const action = route.children.at(-1).children[0];
+  const action = providerActionButton(harness);
   assert.equal(action.textContent, "Continue with OpenAI Codex");
   action.listeners.get("click")();
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
@@ -7557,18 +7678,13 @@ test("concurrent provider operations keep out-of-order A and B refreshes indepen
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const settingsA = harness.findAllPanel("codex-provider-connection")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const settingsB = harness.findAllPanel("codex-provider-connection")
-    .find((node) => node.dataset.providerId === "anthropic-claude");
-  settingsA.children.at(-1).children[0].listeners.get("click")();
-  settingsB.children.at(-1).children[0].listeners.get("click")();
+  clickProviderCard(harness, "openai-codex", false);
+  providerActionButton(harness, false).listeners.get("click")();
+  clickProviderCard(harness, "anthropic-claude", false);
+  providerActionButton(harness, false).listeners.get("click")();
   for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  const errorA = settingsA.children[0].children[2];
-  const errorB = settingsB.children[0].children[2];
-  assert.equal(errorA.hidden, true);
-  assert.equal(errorB.hidden, true);
   assert.equal(connectCalls, 2);
+  assert.equal(harness.mounted.controller.snapshot().modelCatalog.length, 2);
 });
 
 test("a connected first route stays retryable when receipt completion fails", async (context) => {
@@ -7619,14 +7735,12 @@ test("a connected first route stays retryable when receipt completion fails", as
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const action = route.children.at(-1).children[0];
+  const action = providerActionButton(harness);
   action.listeners.get("click")();
   for (let index = 0; index < 5; index += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
-  const error = route.children[0].children[2];
+  const error = providerDetail(harness).children[0].children[2];
   assert.equal(connectCalls, 1);
   assert.equal(completeCalls, 1);
   assert.equal(action.disabled, false);
@@ -7957,15 +8071,11 @@ test("R3-N4 failed disconnect preserves the connected receipt-retry marker", asy
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const firstRoute = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  firstRoute.children.at(-1).children[0].listeners.get("click")();
+  const firstAction = providerActionButton(harness);
+  firstAction.listeners.get("click")();
   for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  const settingsRoute = harness.findAllPanel("codex-provider-connection")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  settingsRoute.children.at(-1).children[1].listeners.get("click")();
+  providerControl(harness, "codex-provider-disconnect", false).listeners.get("click")();
   for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  const firstAction = firstRoute.children.at(-1).children[0];
   assert.equal(firstAction.disabled, false);
   assert.equal(firstAction.textContent, "Finish setup");
 });
@@ -8145,12 +8255,10 @@ test("R4-N3 an external disconnect clears receipt retry only after the disconnec
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const firstRoute = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  firstRoute.children.at(-1).children[0].listeners.get("click")();
+  const retryAction = providerActionButton(harness);
+  retryAction.listeners.get("click")();
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(completeCalls, 1);
-  const retryAction = firstRoute.children.at(-1).children[0];
   assert.equal(retryAction.textContent, "Finish setup");
   assert.equal(retryAction.disabled, false);
 
@@ -8236,9 +8344,7 @@ test("R4-N4 an older higher-generation refresh cannot commit a mixed connection/
     await new Promise((resolve) => setImmediate(resolve));
   }
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  const settingsRoute = harness.findAllPanel("codex-provider-connection")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  assert.equal(settingsRoute.children[0].children[1].textContent, "Connected");
+  assert.equal(providerDetail(harness, false).children[0].children[1].textContent, "Connected");
   assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
   assert.deepEqual(
     harness.mounted.controller.snapshot().modelCatalog.map(({ model }) => model),
@@ -8419,9 +8525,7 @@ test("R5-N2 a connected legacy route confirms onboarding without reconnecting", 
   });
   context.after(() => harness.mounted.dispose());
   for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  const route = harness.findAllPanel("codex-first-connection-choice")
-    .find((node) => node.dataset.providerId === "openai-codex");
-  const action = route.children.at(-1).children[0];
+  const action = providerActionButton(harness);
   assert.equal(action.disabled, false);
   assert.equal(action.textContent, "Continue with OpenAI Codex");
   action.listeners.get("click")();
@@ -8580,10 +8684,10 @@ test("R5-N4 full-snapshot concurrent connects converge for either completion ord
     });
     context.after(() => harness.mounted.dispose());
     for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
-    const settings = (providerId) => harness.findAllPanel("codex-provider-connection")
-      .find((node) => node.dataset.providerId === providerId);
-    settings(order[0]).children.at(-1).children[0].listeners.get("click")();
-    settings(order[1]).children.at(-1).children[0].listeners.get("click")();
+    clickProviderCard(harness, order[0], false);
+    providerActionButton(harness, false).listeners.get("click")();
+    clickProviderCard(harness, order[1], false);
+    providerActionButton(harness, false).listeners.get("click")();
     for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setImmediate(resolve));
     connectFlights.get(order[0]).resolve();
     for (let index = 0; index < 6; index += 1) await new Promise((resolve) => setImmediate(resolve));
@@ -8593,8 +8697,10 @@ test("R5-N4 full-snapshot concurrent connects converge for either completion ord
     for (let index = 0; index < 10; index += 1) await new Promise((resolve) => setImmediate(resolve));
     assert.equal(connectCalls, 2);
     assert.equal(maxConcurrentReads, 1);
-    assert.equal(settings(order[0]).children[0].children[2].hidden, true);
-    assert.equal(settings(order[1]).children[0].children[2].hidden, true);
+    clickProviderCard(harness, order[0], false);
+    assert.equal(providerDetail(harness, false).children[0].children[2].hidden, true);
+    clickProviderCard(harness, order[1], false);
+    assert.equal(providerDetail(harness, false).children[0].children[2].hidden, true);
     assert.deepEqual(
       new Set(harness.mounted.controller.snapshot().modelCatalog.map(({ provider }) => provider)),
       new Set(order),
