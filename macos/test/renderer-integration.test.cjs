@@ -453,7 +453,13 @@ test("approved CSS docks management in the sidebar and opens native Power from t
   assert.match(css, /\.codex-model-dock\.is-warning[^}]*\.codex-power-(?:advanced|fast)-toggle/s);
   assert.match(css, /\.codex-power-menu\s*\{[^}]*position:\s*relative[^}]*overflow:\s*hidden/s);
   assert.match(css, /\.codex-power-menu\.transitions-ready\s*\{[^}]*transition:\s*height 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
-  assert.match(css, /\.codex-power-menu\.transitions-ready \.codex-power-view-track\s*\{[^}]*transition:\s*transform 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)/s);
+  assert.match(css, /\.codex-power-view-track\s*\{[^}]*align-items:\s*flex-start/s);
+  assert.match(css, /\.codex-power-view-track\s*\{[^}]*height:\s*var\(--simple-view-height,\s*auto\)/s);
+  assert.match(css, /\.codex-power-menu\[data-view="advanced"\]\s+\.codex-power-view-track\s*\{[^}]*height:\s*var\(--advanced-view-height,\s*auto\)/s);
+  assert.match(
+    css,
+    /\.codex-power-menu\.transitions-ready \.codex-power-view-track\s*\{[^}]*transition:\s*(?:transform 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\),\s*height 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\)|height 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\),\s*transform 300ms cubic-bezier\(\.23,\s*1,\s*\.32,\s*1\))/s,
+  );
   assert.match(css, /\.codex-power-view-simple\s*\{[^}]*display:\s*flex[^}]*align-items:\s*flex-start[^}]*padding:\s*8px 6px/s);
   assert.doesNotMatch(css, /\.codex-power-view-simple\s*\{[^}]*min-height:\s*121px/s);
   assert.doesNotMatch(css, /\.codex-power-view-simple\s*\{[^}]*55px/s);
