@@ -4,6 +4,10 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { replaceUnique } = require("./anchors.cjs");
+const {
+  ADDED_AVATAR_SHAPES,
+  VISIBLE_AVATAR_SHAPES,
+} = require("../bots/avatar-catalog.cjs");
 
 const ASSETS = Object.freeze([
   "bot-runtime-ui.js",
@@ -13,6 +17,26 @@ const ASSETS = Object.freeze([
   "openbot-local-desktop-view.js",
   "reasoning-control.js",
 ]);
+const VENDOR_VISIBLE_SHAPES = 'const Pq=["blob","pebble","squircle","tablet","wedge","hex","cloud","teardrop"]';
+const OPENBOT_VISIBLE_SHAPES = `const Pq=${JSON.stringify(VISIBLE_AVATAR_SHAPES)}`;
+const VENDOR_GEOMETRY_TAIL = 'teardrop:qo("Teardrop",wBt(88,ze-114,ze+26,18)),leaf:qo("Leaf",vBt(88,113,1.5))};Fo.wedge.face.leftDX=-6;const Jst=Object.keys(Fo)';
+const OPENBOT_ADDED_GEOMETRIES = `
+cat:qo("Cat",Ost([[ze-96,ze+72],[ze-94,ze-42],[ze-72,ze-104],[ze-38,ze-78],[ze,ze-92],[ze+38,ze-78],[ze+72,ze-104],[ze+94,ze-42],[ze+96,ze+72],[ze+58,ze+104],[ze-58,ze+104]],[18,10,8,18,22,18,8,10,18,24,24])),
+dog:qo("Dog",Ost([[ze-100,ze-70],[ze-66,ze-92],[ze-46,ze-62],[ze,ze-82],[ze+46,ze-62],[ze+66,ze-92],[ze+100,ze-70],[ze+88,ze+70],[ze+52,ze+104],[ze-52,ze+104],[ze-88,ze+70]],[16,20,18,24,18,20,16,26,24,24,26])),
+wolf:qo("Wolf",Ost([[ze-104,ze+52],[ze-88,ze-54],[ze-54,ze-112],[ze-24,ze-72],[ze,ze-98],[ze+24,ze-72],[ze+54,ze-112],[ze+88,ze-54],[ze+104,ze+52],[ze+66,ze+98],[ze+28,ze+82],[ze,ze+112],[ze-28,ze+82],[ze-66,ze+98]],[12,10,6,12,10,12,6,10,12,18,12,8,12,18])),
+bunny:qo("Bunny",Ost([[ze-78,ze+96],[ze-72,ze-22],[ze-58,ze-112],[ze-28,ze-108],[ze-16,ze-42],[ze+16,ze-42],[ze+28,ze-108],[ze+58,ze-112],[ze+72,ze-22],[ze+78,ze+96],[ze+42,ze+112],[ze-42,ze+112]],[22,14,12,12,18,18,12,12,14,22,20,20])),
+fox:qo("Fox",Ost([[ze-102,ze+56],[ze-88,ze-54],[ze-50,ze-108],[ze-30,ze-64],[ze,ze-88],[ze+30,ze-64],[ze+50,ze-108],[ze+88,ze-54],[ze+102,ze+56],[ze+48,ze+88],[ze,ze+114],[ze-48,ze+88]],[12,8,6,14,18,14,6,8,12,16,8,16])),
+bear:qo("Bear",dBt([[ze-70,ze-66,40],[ze+70,ze-66,40],[ze,ze+12,104],[ze,ze+78,72]])),
+owl:qo("Owl",Ost([[ze-92,ze+88],[ze-90,ze-42],[ze-62,ze-98],[ze-24,ze-72],[ze,ze-108],[ze+24,ze-72],[ze+62,ze-98],[ze+90,ze-42],[ze+92,ze+88],[ze+44,ze+108],[ze,ze+84],[ze-44,ze+108]],[18,14,8,16,8,16,8,14,18,16,12,16])),
+jelly:qo("Jelly",Ost([[ze-98,ze+54],[ze-92,ze-26],[ze-62,ze-82],[ze,ze-108],[ze+62,ze-82],[ze+92,ze-26],[ze+98,ze+54],[ze+76,ze+98],[ze+38,ze+72],[ze,ze+106],[ze-38,ze+72],[ze-76,ze+98]],[18,18,24,28,24,18,18,16,12,12,12,16])),
+terminal:qo("Terminal",Ost([[ze-104,ze-82],[ze+104,ze-82],[ze+104,ze+58],[ze+42,ze+58],[ze+58,ze+98],[ze+78,ze+98],[ze+78,ze+112],[ze-78,ze+112],[ze-78,ze+98],[ze-58,ze+98],[ze-42,ze+58],[ze-104,ze+58]],[14,14,14,10,8,6,6,6,6,8,10,14])),
+robot:qo("Robot",Ost([[ze-76,ze-96],[ze-18,ze-96],[ze-10,ze-116],[ze+10,ze-116],[ze+18,ze-96],[ze+76,ze-96],[ze+76,ze-72],[ze+104,ze-72],[ze+104,ze+78],[ze+76,ze+78],[ze+76,ze+104],[ze-76,ze+104],[ze-76,ze+78],[ze-104,ze+78],[ze-104,ze-72],[ze-76,ze-72]],[12,8,6,6,8,12,8,10,12,8,12,12,8,12,10,8])),
+microchip:qo("Microchip",Ost([[ze-62,ze-108],[ze-38,ze-108],[ze-38,ze-88],[ze-12,ze-88],[ze-12,ze-108],[ze+12,ze-108],[ze+12,ze-88],[ze+38,ze-88],[ze+38,ze-108],[ze+62,ze-108],[ze+62,ze-84],[ze+88,ze-84],[ze+88,ze-58],[ze+108,ze-58],[ze+108,ze-32],[ze+88,ze-32],[ze+88,ze+32],[ze+108,ze+32],[ze+108,ze+58],[ze+88,ze+58],[ze+88,ze+84],[ze+62,ze+84],[ze+62,ze+108],[ze+38,ze+108],[ze+38,ze+88],[ze+12,ze+88],[ze+12,ze+108],[ze-12,ze+108],[ze-12,ze+88],[ze-38,ze+88],[ze-38,ze+108],[ze-62,ze+108],[ze-62,ze+84],[ze-88,ze+84],[ze-88,ze+58],[ze-108,ze+58],[ze-108,ze+32],[ze-88,ze+32],[ze-88,ze-32],[ze-108,ze-32],[ze-108,ze-58],[ze-88,ze-58],[ze-88,ze-84],[ze-62,ze-84]],6)),
+drone:qo("Drone",Ost([[ze-112,ze-72],[ze-58,ze-72],[ze-42,ze-34],[ze-24,ze-22],[ze-18,ze-48],[ze+18,ze-48],[ze+24,ze-22],[ze+42,ze-34],[ze+58,ze-72],[ze+112,ze-72],[ze+112,ze-42],[ze+70,ze-42],[ze+54,ze-8],[ze+90,ze+42],[ze+90,ze+72],[ze+42,ze+72],[ze+18,ze+38],[ze-18,ze+38],[ze-42,ze+72],[ze-90,ze+72],[ze-90,ze+42],[ze-54,ze-8],[ze-70,ze-42],[ze-112,ze-42]],8))`;
+const OPENBOT_GEOMETRY_TAIL = VENDOR_GEOMETRY_TAIL.replace(
+  'leaf:qo("Leaf",vBt(88,113,1.5))};',
+  `leaf:qo("Leaf",vBt(88,113,1.5)),${OPENBOT_ADDED_GEOMETRIES}};`,
+);
 const TITLE = "<title>Grok Bot</title>";
 const CODEX_TITLE = "<title>OpenBot</title>";
 const HEAD_END = "  </head>";
@@ -81,6 +105,38 @@ const VENDOR_IDENTITY_PORT_GATE =
 const OPENBOT_IDENTITY_PORT_GATE =
   'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null||hasLocalCoordinator()})';
 
+function patchAvatarCatalogSource(source) {
+  let patched = replaceUnique(
+    source,
+    VENDOR_GEOMETRY_TAIL,
+    OPENBOT_GEOMETRY_TAIL,
+    "Grok avatar geometry registry",
+  );
+  patched = replaceUnique(
+    patched,
+    VENDOR_VISIBLE_SHAPES,
+    OPENBOT_VISIBLE_SHAPES,
+    "Grok visible avatar registry",
+  );
+  return patched;
+}
+
+function reverseAvatarCatalogSource(source) {
+  let reversed = replaceUnique(
+    source,
+    OPENBOT_VISIBLE_SHAPES,
+    VENDOR_VISIBLE_SHAPES,
+    "OpenBot visible avatar registry",
+  );
+  reversed = replaceUnique(
+    reversed,
+    OPENBOT_GEOMETRY_TAIL,
+    VENDOR_GEOMETRY_TAIL,
+    "OpenBot avatar geometry registry",
+  );
+  return reversed;
+}
+
 function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSET_SHA256) {
   if (typeof source !== "string" || source.length < 1) {
     throw new Error("Grok renderer asset is invalid");
@@ -92,8 +148,9 @@ function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSE
   if (actualSha256 !== expectedSha256) {
     throw new Error(`Unsupported Grok renderer asset hash: ${actualSha256}`);
   }
-  let patched = replaceUnique(
-    source,
+  let patched = patchAvatarCatalogSource(source);
+  patched = replaceUnique(
+    patched,
     VENDOR_NATIVE_SHELL_GATE,
     OPENBOT_NATIVE_SHELL_GATE,
     "Grok native shell onboarding child",
@@ -288,12 +345,18 @@ function patchRenderer(extractedRoot, options = {}) {
 
 module.exports = {
   ASSETS,
+  OPENBOT_GEOMETRY_TAIL,
+  OPENBOT_VISIBLE_SHAPES,
+  VENDOR_GEOMETRY_TAIL,
   VENDOR_RENDERER_ASSET,
   VENDOR_RENDERER_ASSET_SHA256,
   VENDOR_SETTINGS_ASSET,
   VENDOR_SETTINGS_ASSET_SHA256,
+  VENDOR_VISIBLE_SHAPES,
+  patchAvatarCatalogSource,
   patchRenderer,
   patchRendererIndexSource,
   patchVendorRendererSource,
   patchVendorSettingsSource,
+  reverseAvatarCatalogSource,
 };

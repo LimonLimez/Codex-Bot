@@ -28,7 +28,17 @@ const STOCK_LOCAL_IDENTITY_ANCHORS = [
   'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())',
   'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null})',
 ].join(";");
-const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}const after="kept";`;
+const rendererPatch = require(rendererPatchPath);
+const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
+const {
+  OPENBOT_VISIBLE_SHAPES,
+  VENDOR_GEOMETRY_TAIL,
+  VENDOR_VISIBLE_SHAPES,
+  patchAvatarCatalogSource,
+  patchVendorRendererSource,
+  reverseAvatarCatalogSource,
+} = rendererPatch;
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
 const SYNTHETIC_VENDOR_RENDERER_SHA256 = crypto
   .createHash("sha256")
   .update(SYNTHETIC_VENDOR_RENDERER, "utf8")
@@ -40,8 +50,6 @@ const SYNTHETIC_VENDOR_SETTINGS_SHA256 = crypto
 const STOCK_MACHINE_ID_MAIN = `async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}
 Ic.markPhase("update_service"),Ic.armStuckWatchdog(),F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))
 Ic.markPhase("telemetry");let x=await Ds(),C=hHn(`;
-const rendererPatch = require(rendererPatchPath);
-
 function sha256File(file) {
   return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
@@ -131,6 +139,39 @@ function loadPatcher() {
   };
   return require(patcherPath);
 }
+
+test("patch-app renderer fixture carries the exact avatar registry contract", () => {
+  const patched = patchAvatarCatalogSource(SYNTHETIC_VENDOR_RENDERER);
+  for (const shape of ADDED_AVATAR_SHAPES) {
+    assert.match(patched, new RegExp(`${shape}:qo\\(`));
+  }
+  assert.match(
+    patched,
+    new RegExp(OPENBOT_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.equal(reverseAvatarCatalogSource(patched), SYNTHETIC_VENDOR_RENDERER);
+});
+
+test("patch-app avatar registry anchors fail closed when missing or ambiguous", () => {
+  const requiredAnchors = [
+    ["avatar geometry", VENDOR_GEOMETRY_TAIL],
+    ["visible avatar registry", VENDOR_VISIBLE_SHAPES],
+  ];
+  for (const [label, anchor] of requiredAnchors) {
+    const missing = SYNTHETIC_VENDOR_RENDERER.replace(anchor, "");
+    assert.throws(
+      () => patchVendorRendererSource(missing, crypto.createHash("sha256").update(missing, "utf8").digest("hex")),
+      /anchor.*not found|not found.*anchor/i,
+      `${label} missing`,
+    );
+    const ambiguous = `${SYNTHETIC_VENDOR_RENDERER}${anchor}`;
+    assert.throws(
+      () => patchVendorRendererSource(ambiguous, crypto.createHash("sha256").update(ambiguous, "utf8").digest("hex")),
+      /anchor.*ambiguous|ambiguous.*anchor/i,
+      `${label} ambiguous`,
+    );
+  }
+});
 
 test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, and preserves stock/unpacked bytes", async (t) => {
   const fixture = await syntheticAsar(t);
@@ -398,6 +439,26 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
       "utf8",
     ),
     /children:\[p\.jsx\("div",\{"data-openbot-model-picker-host":!0\}\),Q\]/,
+  );
+  const patchedVendorRenderer = fs.readFileSync(
+    path.join(extracted, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+    "utf8",
+  );
+  for (const shape of ADDED_AVATAR_SHAPES) {
+    assert.match(patchedVendorRenderer, new RegExp(`${shape}:qo\\(`));
+  }
+  assert.match(
+    patchedVendorRenderer,
+    new RegExp(OPENBOT_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  const reversedAvatarRenderer = reverseAvatarCatalogSource(patchedVendorRenderer);
+  assert.match(
+    reversedAvatarRenderer,
+    new RegExp(VENDOR_GEOMETRY_TAIL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.match(
+    reversedAvatarRenderer,
+    new RegExp(VENDOR_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
   assert.deepEqual(
     fs.readFileSync(

@@ -13,6 +13,14 @@ const cssPath = path.join(macRoot, "src", "renderer", "codex-ui.css");
 const botUiPath = path.join(macRoot, "src", "renderer", "bot-runtime-ui.js");
 const visualRuntimePath = path.join(macRoot, "test", "visual", "renderer-panel-runtime.cjs");
 const visualFixturePath = path.join(macRoot, "test", "fixtures", "renderer-panel.html");
+const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
+const {
+  OPENBOT_VISIBLE_SHAPES,
+  VENDOR_GEOMETRY_TAIL,
+  VENDOR_VISIBLE_SHAPES,
+  patchAvatarCatalogSource,
+  reverseAvatarCatalogSource,
+} = require(patchPath);
 
 const STOCK_INDEX = `<!doctype html>
 <html lang="en">
@@ -76,6 +84,8 @@ const SYNTHETIC_VENDOR_RENDERER = [
   STOCK_ACCOUNT_SLOT_GETTER,
   STOCK_AUTH_OBSERVER,
   STOCK_IDENTITY_PORT_GATE,
+  VENDOR_GEOMETRY_TAIL,
+  VENDOR_VISIBLE_SHAPES,
   'const after="kept";',
 ].join("");
 
@@ -109,6 +119,27 @@ function writeSyntheticRendererTree(root, {
     );
   }
 }
+
+test("avatar patch adds every geometry and visible choice and reverses exactly", () => {
+  const stockFallback = 'function Jee(n){return Jst.find(t=>t===n.avatarShape)??I4e(n.id)}';
+  const source = `before;${VENDOR_GEOMETRY_TAIL};middle;${VENDOR_VISIBLE_SHAPES};${stockFallback};after`;
+  const patched = patchAvatarCatalogSource(source);
+  for (const shape of ADDED_AVATAR_SHAPES) {
+    assert.match(patched, new RegExp(`${shape}:qo\\(`));
+  }
+  assert.match(
+    patched,
+    new RegExp(OPENBOT_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.equal((patched.match(/function Jee\(n\)/g) ?? []).length, 1);
+  assert.match(
+    patched,
+    new RegExp(stockFallback.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.equal(reverseAvatarCatalogSource(patched), source);
+  assert.throws(() => patchAvatarCatalogSource(source + VENDOR_VISIBLE_SHAPES), /ambiguous/i);
+  assert.throws(() => patchAvatarCatalogSource("missing"), /not found/i);
+});
 
 test("the explicit local protocol bypasses only the native onboarding child", () => {
   const { patchVendorRendererSource } = require(patchPath);
@@ -284,6 +315,8 @@ test("the pinned native renderer patch fails closed on hash drift and every ambi
     /anchor.*not found|not found.*anchor/i,
   );
   const requiredAnchors = [
+    ["avatar geometry", VENDOR_GEOMETRY_TAIL],
+    ["visible avatar registry", VENDOR_VISIBLE_SHAPES],
     ["native shell", STOCK_NATIVE_SHELL_GATE],
     ["local capability", STOCK_SEND_JOURNAL_DEFINITION],
     ["reconnect", STOCK_RECONNECT_GATE],
@@ -362,6 +395,22 @@ test("renderer patch copies only the reviewed control assets into a synthetic st
   const vendorRenderer = fs.readFileSync(
     path.join(root, "dist", "renderer", "assets", "index-CphCyQnY.js"),
     "utf8",
+  );
+  for (const shape of ADDED_AVATAR_SHAPES) {
+    assert.match(vendorRenderer, new RegExp(`${shape}:qo\\(`));
+  }
+  assert.match(
+    vendorRenderer,
+    new RegExp(OPENBOT_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  const reversedAvatarRenderer = reverseAvatarCatalogSource(vendorRenderer);
+  assert.match(
+    reversedAvatarRenderer,
+    new RegExp(VENDOR_GEOMETRY_TAIL.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.match(
+    reversedAvatarRenderer,
+    new RegExp(VENDOR_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
   assert.match(vendorRenderer, /window\.openbotProtocol\?\.schemaVersion===1/);
   assert.doesNotMatch(vendorRenderer, new RegExp(STOCK_NATIVE_SHELL_GATE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
