@@ -164,6 +164,8 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
         "dist/codex/bots/chatgpt-relay-codec.cjs",
         "dist/codex/bots/conversation-router.cjs",
         "dist/codex/bots/remote-app-server-client.cjs",
+        "dist/codex/bots/reviewed-adapter-loader.cjs",
+        "dist/codex/bots/reviewed-adapter-worker-source.cjs",
         "dist/codex/bots/runtime-controller.cjs",
         "dist/codex/bots/runtime-provider.cjs",
         "dist/codex/bridge/codex-client.cjs",
@@ -333,6 +335,8 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
     "bots/remote-app-server-client.cjs",
     "bots/conversation-router.cjs",
     "bots/chatgpt-relay-codec.cjs",
+    "bots/reviewed-adapter-loader.cjs",
+    "bots/reviewed-adapter-worker-source.cjs",
   ]) {
     assert.equal(fs.lstatSync(path.join(extracted, "dist", "codex", relative)).isFile(), true);
   }

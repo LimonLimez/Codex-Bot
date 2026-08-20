@@ -610,6 +610,8 @@ test("desktop packaging includes every direct inference runtime module in the au
     "desktop/provider-controller.cjs",
     "desktop/provider-state-store.cjs",
     "computer/computer-target-router.cjs",
+    "bots/reviewed-adapter-loader.cjs",
+    "bots/reviewed-adapter-worker-source.cjs",
     "local/local-computer-boundary.cjs",
     "local/local-computer-runtime.cjs",
     "local/local-desktop-manager.cjs",

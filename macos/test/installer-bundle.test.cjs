@@ -196,6 +196,8 @@ test("installer stages only the exact exported patcher source script and Advance
     "bots/chatgpt-relay-codec.cjs",
     "bots/conversation-router.cjs",
     "bots/remote-app-server-client.cjs",
+    "bots/reviewed-adapter-loader.cjs",
+    "bots/reviewed-adapter-worker-source.cjs",
     "bots/runtime-controller.cjs",
     "bots/runtime-provider.cjs",
     "bridge/codex-client.cjs",
@@ -299,7 +301,6 @@ test("installer stages only the exact exported patcher source script and Advance
   for (const relative of [
     "src/bots/remote-provider-live-gate.cjs",
     "src/bots/remote-provider-live-report.cjs",
-    "src/bots/reviewed-adapter-worker-source.cjs",
     "scripts/verify-codex-runtime.cjs",
     "assets/cliproxyapi-7.2.132-darwin-aarch64.json",
     "assets/cliproxyapi-model-catalog-2026-08-14.json",

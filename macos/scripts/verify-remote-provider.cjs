@@ -100,10 +100,10 @@ async function main({
       workspacePath,
       ...(signal === undefined ? {} : { signal }),
     });
-    const report = buildReport(result);
-    await writeReport({ report, outputDirectory: reportDirectory });
     await removeWorkspace(workspacePath);
     workspacePath = null;
+    const report = buildReport(result);
+    await writeReport({ report, outputDirectory: reportDirectory });
     status = "PASS";
     code = 0;
     reportDirectoryOwned = false;

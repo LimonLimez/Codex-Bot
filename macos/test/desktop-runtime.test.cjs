@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -153,6 +154,88 @@ test("desktop runtime loads only an exact sealed sidecar receipt", (t) => {
   fs.rmSync(path.join(sidecarRoot, "receipt.json"));
   fs.symlinkSync(path.join(root, "outside.json"), path.join(sidecarRoot, "receipt.json"));
   assert.throws(() => loadSidecarReceipt(root), /receipt/i);
+});
+
+test("desktop runtime requires a paired private provider SHA and never loads the module in the main process", async (t) => {
+  const { loadConfiguredProvider } = require(runtimePath);
+  const root = tempRoot(t);
+  const marker = path.join(root, "main-process-marker");
+  const source = [
+    '"use strict";',
+    `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "main-process");`,
+    "module.exports = {",
+    "  createProvider() {",
+    "    return {",
+    "      async capabilities() { return { provision: true, reconcile: true, retire: true, remoteAppServer: true, computerFrames: true }; },",
+    "      async provision() { throw new Error(\"unused\"); },",
+    "      async inspect() { throw new Error(\"unused\"); },",
+    "      async retire() { throw new Error(\"unused\"); },",
+    "      subscribe() { return () => {}; },",
+    "    };",
+    "  },",
+    "};",
+  ].join("\n");
+  const modulePath = path.join(root, "provider.cjs");
+  fs.writeFileSync(modulePath, source, { mode: 0o600 });
+  fs.chmodSync(modulePath, 0o600);
+  const previousPath = process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE;
+  const previousSha = process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE;
+    else process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE = previousPath;
+    if (previousSha === undefined) delete process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+    else process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256 = previousSha;
+  });
+  process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE = modulePath;
+  delete process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+
+  const unavailable = loadConfiguredProvider();
+  assert.equal((await unavailable.capabilities()).provision, false);
+  assert.equal(fs.existsSync(marker), false);
+});
+
+test("desktop runtime executes a correctly hashed provider only through the reviewed worker contract", async (t) => {
+  const { loadConfiguredProvider } = require(runtimePath);
+  const root = tempRoot(t);
+  const source = [
+    '"use strict";',
+    "module.exports = {",
+    "  createProvider() {",
+    "    return {",
+    "      async capabilities() { return { provision: true, reconcile: true, retire: true, remoteAppServer: true, computerFrames: true }; },",
+    "      async provision() { throw new Error(\"unused\"); },",
+    "      async inspect() { throw new Error(\"unused\"); },",
+    "      async retire() { throw new Error(\"unused\"); },",
+    "      subscribe() { return () => {}; },",
+    "    };",
+    "  },",
+    "};",
+  ].join("\n");
+  const modulePath = path.join(root, "provider.cjs");
+  fs.writeFileSync(modulePath, source, { mode: 0o600 });
+  fs.chmodSync(modulePath, 0o600);
+  const previousPath = process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE;
+  const previousSha = process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+  t.after(() => {
+    if (previousPath === undefined) delete process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE;
+    else process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE = previousPath;
+    if (previousSha === undefined) delete process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+    else process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256 = previousSha;
+  });
+  process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE = modulePath;
+  process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256 = createHash("sha256").update(source).digest("hex");
+
+  const provider = loadConfiguredProvider();
+  assert.deepEqual(Reflect.ownKeys(provider), ["capabilities", "provision", "inspect", "retire", "subscribe"]);
+  assert.deepEqual(await provider.capabilities(), {
+    provision: true,
+    reconcile: true,
+    retire: true,
+    remoteAppServer: true,
+    computerFrames: true,
+  });
+  const unsubscribe = provider.subscribe(() => {});
+  unsubscribe();
 });
 
 test("desktop runtime exposes a frozen private machine-id reader without installing IPC", async (t) => {

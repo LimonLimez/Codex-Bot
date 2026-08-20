@@ -231,9 +231,9 @@ test("release audit accepts every authoritative staged source without credential
       source: path.join(sharedSourceRoot, ...relative.split("/")),
     })),
   ];
-  assert.equal(PATCHER_SOURCE_FILES.length, 62);
+  assert.equal(PATCHER_SOURCE_FILES.length, 64);
   assert.equal(PATCHER_SHARED_SOURCE_FILES.length, 1);
-  assert.equal(sourceFiles.length, 63);
+  assert.equal(sourceFiles.length, 65);
   const sharedDescriptor = sourceFiles.find(({ relative }) => relative === "src/provider-descriptors.cjs");
   assert.deepEqual(sharedDescriptor, {
     relative: "src/provider-descriptors.cjs",

@@ -1,20 +1,18 @@
 "use strict";
 
 const fs = require("node:fs");
-const { createHash, randomUUID } = require("node:crypto");
+const { randomUUID } = require("node:crypto");
 const dns = require("node:dns/promises");
 const { isIP } = require("node:net");
 const path = require("node:path");
 const { types } = require("node:util");
 const {
-  MessageChannel,
-  Worker,
-  receiveMessageOnPort,
-} = require("node:worker_threads");
+  createReviewedAdapterWorker,
+  isReviewedAdapterEnvelope,
+} = require("./reviewed-adapter-loader.cjs");
 
 const { BotStore } = require("./bot-store.cjs");
 const { RemoteAppServerClient } = require("./remote-app-server-client.cjs");
-const { REVIEWED_ADAPTER_WORKER_SOURCE } = require("./reviewed-adapter-worker-source.cjs");
 const { BotRuntimeController } = require("./runtime-controller.cjs");
 const { validateProvider } = require("./runtime-provider.cjs");
 
@@ -24,10 +22,6 @@ const FAILED_CODE = "REMOTE_PROVIDER_GATE_FAILED";
 const FAILED_MESSAGE = "Remote provider verification failed.";
 const YOUTUBE_URL = "https://www.youtube.com/";
 const MAX_GATE_EVENTS = 256;
-const MAX_ADAPTER_MODULE_BYTES = 1_048_576;
-const MAX_ADAPTER_PENDING_OPERATIONS = 64;
-const ADAPTER_START_TIMEOUT_MS = 1_000;
-const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const NON_PUBLIC_IPV4_CIDRS = Object.freeze([
@@ -164,242 +158,11 @@ function objectDescriptors(value, label, expectedKeys) {
   return descriptors;
 }
 
-function reviewedModuleSource(value, expectedSha256) {
-  let descriptor = null;
-  try {
-    if (typeof value !== "string" || !path.isAbsolute(value)
-      || typeof expectedSha256 !== "string" || !SHA256_PATTERN.test(expectedSha256)) {
-      throw blockedError();
-    }
-    descriptor = fs.openSync(value, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const stat = fs.fstatSync(descriptor);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0
-      || stat.size < 1 || stat.size > MAX_ADAPTER_MODULE_BYTES) throw blockedError();
-    const bytes = fs.readFileSync(descriptor);
-    if (bytes.length !== stat.size
-      || createHash("sha256").update(bytes).digest("hex") !== expectedSha256) throw blockedError();
-    return bytes.toString("utf8");
-  } catch {
-    throw blockedError();
-  } finally {
-    if (descriptor !== null) {
-      try { fs.closeSync(descriptor); } catch {}
-    }
-  }
-}
-
 const reviewedAdapterChannels = new WeakMap();
 const reviewedDependencyClosers = new WeakMap();
 
 function adapterWorkerFailure() {
   return new Error("Reviewed adapter worker failed.");
-}
-
-function isReviewedAdapterEnvelope(message) {
-  return message !== null && typeof message === "object" && !Array.isArray(message);
-}
-
-function permissionWorkerSupported(version = process.versions.node) {
-  const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/.exec(version);
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2]);
-  return major > 22 || (major === 22 && minor >= 13);
-}
-
-function permissionWorkerArguments(version = process.versions.node) {
-  const major = Number(version.split(".", 1)[0]);
-  return major >= 25 ? ["--permission", "--allow-net"] : ["--permission"];
-}
-
-function adapterInput(value) {
-  if (value === undefined) return Object.freeze({ input: undefined, signal: undefined });
-  const descriptors = objectDescriptors(value, "Reviewed adapter input");
-  const input = Object.create(null);
-  let signal;
-  for (const key of Reflect.ownKeys(descriptors)) {
-    if (key === "signal") {
-      signal = descriptors[key].value;
-      continue;
-    }
-    if (descriptors[key].enumerable) input[key] = descriptors[key].value;
-  }
-  return Object.freeze({ input, signal });
-}
-
-function createReviewedAdapterWorker({ modulePath, source, factoryName, adapterKind }) {
-  if (!permissionWorkerSupported()) throw blockedError();
-  const handshakeBuffer = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
-  const handshake = new Int32Array(handshakeBuffer);
-  const { port1, port2 } = new MessageChannel();
-  const worker = new Worker(REVIEWED_ADAPTER_WORKER_SOURCE, {
-    eval: true,
-    execArgv: permissionWorkerArguments(),
-    resourceLimits: {
-      maxOldGenerationSizeMb: 64,
-      maxYoungGenerationSizeMb: 16,
-      stackSizeMb: 2,
-    },
-    workerData: {
-      adapterKind,
-      factoryName,
-      handshake: handshakeBuffer,
-      maxEvents: MAX_GATE_EVENTS,
-      moduleDirectory: path.dirname(modulePath),
-      modulePath,
-      port: port2,
-      source,
-    },
-    transferList: [port2],
-  });
-  worker.on("error", () => {});
-  worker.unref();
-  port1.unref();
-
-  if (Atomics.load(handshake, 0) === 0) {
-    Atomics.wait(handshake, 0, 0, ADAPTER_START_TIMEOUT_MS);
-  }
-  const envelope = receiveMessageOnPort(port1);
-  if (Atomics.load(handshake, 0) !== 1
-    || !envelope
-    || !envelope.message
-    || envelope.message.type !== "ready"
-    || !Array.isArray(envelope.message.events)
-    || envelope.message.events.length > MAX_GATE_EVENTS) {
-    port1.close();
-    void worker.terminate();
-    throw blockedError();
-  }
-
-  let closed = false;
-  let nextId = 1;
-  let subscriber = null;
-  const earlyEvents = [...envelope.message.events];
-  const pending = new Map();
-
-  const rejectPending = () => {
-    for (const operation of pending.values()) {
-      operation.signal?.removeEventListener("abort", operation.onAbort);
-      operation.reject(adapterWorkerFailure());
-    }
-    pending.clear();
-  };
-  const shutdown = () => {
-    if (closed) return;
-    closed = true;
-    subscriber = null;
-    earlyEvents.length = 0;
-    rejectPending();
-    try { port1.postMessage({ type: "shutdown" }); } catch {}
-    const force = setTimeout(() => void worker.terminate(), 100);
-    force.unref();
-  };
-  const fail = () => {
-    if (closed) return;
-    closed = true;
-    subscriber = null;
-    earlyEvents.length = 0;
-    rejectPending();
-    port1.close();
-    void worker.terminate();
-  };
-
-  const settle = (message) => {
-    if (!isReviewedAdapterEnvelope(message)) {
-      fail();
-      return;
-    }
-    if (message.type === "stopped") {
-      port1.close();
-      void worker.terminate();
-      return;
-    }
-    if (closed) return;
-    if (message.type === "event" && adapterKind === "provider") {
-      if (subscriber) {
-        try {
-          subscriber(message.value);
-        } catch {
-          fail();
-        }
-      } else if (earlyEvents.length < MAX_GATE_EVENTS) {
-        earlyEvents.push(message.value);
-      } else {
-        fail();
-      }
-      return;
-    }
-    if (message.type !== "result" || !Number.isSafeInteger(message.id)
-      || message.id < 1 || !pending.has(message.id)
-      || (message.ok !== true && message.ok !== false)) {
-      fail();
-      return;
-    }
-    const operation = pending.get(message.id);
-    pending.delete(message.id);
-    operation.signal?.removeEventListener("abort", operation.onAbort);
-    if (message.ok) operation.resolve(message.value);
-    else operation.reject(adapterWorkerFailure());
-  };
-
-  port1.on("message", settle);
-  port1.on("close", () => {
-    if (!closed) fail();
-  });
-  port1.unref();
-  worker.on("error", fail);
-  worker.on("exit", () => {
-    if (!closed) fail();
-  });
-
-  const request = (method, value) => {
-    if (closed || pending.size >= MAX_ADAPTER_PENDING_OPERATIONS) {
-      return Promise.reject(adapterWorkerFailure());
-    }
-    const normalized = adapterInput(value);
-    const id = nextId;
-    nextId = nextId === Number.MAX_SAFE_INTEGER ? 1 : nextId + 1;
-    if (pending.has(id)) return Promise.reject(adapterWorkerFailure());
-    return new Promise((resolve, reject) => {
-      const onAbort = () => {
-        try { port1.postMessage({ type: "abort", id }); } catch { fail(); }
-      };
-      pending.set(id, { onAbort, reject, resolve, signal: normalized.signal });
-      normalized.signal?.addEventListener("abort", onAbort, { once: true });
-      try {
-        port1.postMessage({
-          type: "operation",
-          id,
-          method,
-          input: normalized.input,
-          abortable: normalized.signal !== undefined,
-        });
-        if (normalized.signal?.aborted) onAbort();
-      } catch {
-        pending.delete(id);
-        normalized.signal?.removeEventListener("abort", onAbort);
-        reject(adapterWorkerFailure());
-        fail();
-      }
-    });
-  };
-
-  const subscribe = (callback) => {
-    if (closed || adapterKind !== "provider" || subscriber || typeof callback !== "function") {
-      throw adapterWorkerFailure();
-    }
-    subscriber = callback;
-    for (const event of earlyEvents.splice(0)) subscriber(event);
-    let active = true;
-    return () => {
-      if (!active) return undefined;
-      active = false;
-      shutdown();
-      return undefined;
-    };
-  };
-
-  return Object.freeze({ request, shutdown, subscribe });
 }
 
 function closeReviewedAdapter(adapter) {
@@ -428,9 +191,10 @@ function configuredModule(modulePath, expectedSha256, factoryName, adapterKind) 
   try {
     const channel = createReviewedAdapterWorker({
       modulePath,
-      source: reviewedModuleSource(modulePath, expectedSha256),
+      moduleSha256: expectedSha256,
       factoryName,
       adapterKind,
+      maxEvents: MAX_GATE_EVENTS,
     });
     let adapter;
     if (adapterKind === "provider") {
@@ -482,7 +246,6 @@ function configuredModule(modulePath, expectedSha256, factoryName, adapterKind) 
     throw blockedError();
   }
 }
-
 function normalizedExerciseInput(value) {
   const descriptors = objectDescriptors(value, "Remote computer exercise input");
   const keys = Reflect.ownKeys(descriptors);
@@ -1214,15 +977,6 @@ async function minimalCleanup({
     }
   }
   try {
-    await withCooperativeDeadline(
-      (operationSignal) => exercise.dispose(operationInput({}, operationSignal)),
-      operationTimeoutMs,
-      cleanupSignal,
-    );
-  } catch {
-    safe = false;
-  }
-  try {
     await providerControl.settleInflight(cleanupSignal, cleanupTimeoutMs);
   } catch {
     safe = false;
@@ -1299,6 +1053,39 @@ async function minimalCleanup({
     await providerControl.settleInflight(cleanupSignal, cleanupTimeoutMs);
   } catch {
     safe = false;
+  }
+  try {
+    await withCooperativeDeadline(
+      (operationSignal) => exercise.dispose(operationInput({}, operationSignal)),
+      operationTimeoutMs,
+      cleanupSignal,
+    );
+  } catch {
+    safe = false;
+  }
+  for (const receipt of receipts) {
+    try {
+      const recovered = await provider.provision({
+        botId: receipt.botId,
+        idempotencyKey: receipt.idempotencyKey,
+        recordReceipt: false,
+      });
+      if (recovered.provider !== receipt.provider
+        || recovered.runtimeId !== receipt.runtimeId
+        || recovered.ownerBotId !== receipt.botId
+        || recovered.endpoint !== receipt.endpoint
+        || recovered.authToken !== receipt.authToken) safe = false;
+      const readyReceipt = readyReceipts.get(receipt.runtimeId);
+      if (readyReceipt && store) {
+        const current = await store.read(receipt.botId);
+        if (!current
+          || current.runtime.provider !== readyReceipt.provider
+          || current.runtime.remoteRuntimeId !== readyReceipt.runtimeId
+          || current.runtime.state !== "ready") safe = false;
+      }
+    } catch {
+      safe = false;
+    }
   }
   try {
     controller?.dispose();

@@ -21,6 +21,8 @@ const ALLOWED_MUTATIONS = Object.freeze([
   "dist/codex/bots/chatgpt-relay-codec.cjs",
   "dist/codex/bots/conversation-router.cjs",
   "dist/codex/bots/remote-app-server-client.cjs",
+  "dist/codex/bots/reviewed-adapter-loader.cjs",
+  "dist/codex/bots/reviewed-adapter-worker-source.cjs",
   "dist/codex/bots/runtime-controller.cjs",
   "dist/codex/bots/runtime-provider.cjs",
   "dist/codex/bridge/codex-client.cjs",

@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const childProcess = require("node:child_process");
 const { createHash } = require("node:crypto");
 const fs = require("node:fs/promises");
 const os = require("node:os");
@@ -141,6 +142,44 @@ test("loads absolute regular private provider and exercise modules", async (t) =
   assert.equal(typeof loaded.exercise.dispose, "function");
   assert.deepEqual(Reflect.ownKeys(loaded), ["provider", "exercise"]);
   assert.equal(Object.isFrozen(loaded), true);
+});
+
+test("rejects a private FIFO module path without blocking the verifier process", async (t) => {
+  assert.ifError(moduleLoadError);
+  const directory = await temporaryDirectory(t);
+  const fifoPath = path.join(directory, "provider.fifo");
+  childProcess.execFileSync("/usr/bin/mkfifo", [fifoPath]);
+  await fs.chmod(fifoPath, 0o600);
+  const exercise = exerciseSource();
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+  const gatePath = path.join(__dirname, "..", "src", "bots", "remote-provider-live-gate.cjs");
+  const childSource = [
+    `const { loadLiveGateDependencies } = require(${JSON.stringify(gatePath)});`,
+    "try {",
+    `  loadLiveGateDependencies(${JSON.stringify({
+      providerModulePath: fifoPath,
+      providerModuleSha256: "0".repeat(64),
+      exerciseModulePath,
+      exerciseModuleSha256: sha256Text(exercise),
+    })});`,
+    "  process.exitCode = 1;",
+    "} catch (error) { process.exitCode = error?.code === \"REMOTE_PROVIDER_GATE_BLOCKED\" ? 0 : 2; }",
+  ].join("\n");
+  const child = childProcess.spawn(process.execPath, ["-e", childSource], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  let exited = false;
+  const exit = new Promise((resolve) => child.once("close", (code, signal) => {
+    exited = true;
+    resolve({ code, signal });
+  }));
+  const outcome = await Promise.race([
+    exit,
+    new Promise((resolve) => setTimeout(() => resolve(null), 250)),
+  ]);
+  if (!exited) child.kill("SIGKILL");
+  await exit;
+  assert.deepEqual(outcome, { code: 0, signal: null });
 });
 
 test("rejects missing relative symlinked public and extra-export modules", async (t) => {
@@ -285,6 +324,29 @@ test("loads exact reviewed module bytes without transitive files or require-cach
   })).provider, "fixture-provider-two");
 });
 
+test("reviewed provider top-level side effects never execute in the main process", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const markerPath = path.join(directory, "top-level-marker");
+  const provider = [
+    `require("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "main-process");`,
+    providerSource().replace(/^\n/, ""),
+  ].join("\n");
+  const exercise = exerciseSource();
+  const providerModulePath = await writePrivateModule(directory, "provider.cjs", provider);
+  const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
+
+  assert.throws(() => loadLiveGateDependencies({
+    providerModulePath,
+    providerModuleSha256: sha256Text(provider),
+    exerciseModulePath,
+    exerciseModuleSha256: sha256Text(exercise),
+  }), {
+    code: "REMOTE_PROVIDER_GATE_BLOCKED",
+    message: "Remote provider verification is not configured.",
+  });
+  await assert.rejects(fs.stat(markerPath), { code: "ENOENT" });
+});
+
 test("reviewed adapter workers deny local process capabilities", async (t) => {
   const directory = await temporaryDirectory(t);
   const markerPath = path.join(directory, "must-not-exist");
@@ -292,6 +354,7 @@ test("reviewed adapter workers deny local process capabilities", async (t) => {
   const exerciseModulePath = await writePrivateModule(directory, "exercise.cjs", exercise);
   const attempts = [
     `process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "private");`,
+    `Buffer.constructor("return process")().getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(markerPath)}, "private");`,
     `process.getBuiltinModule("node:child_process").spawnSync(process.execPath, ["-e", "0"]);`,
     `new (process.getBuiltinModule("node:worker_threads").Worker)("0", { eval: true });`,
   ];
@@ -705,6 +768,7 @@ async function liveGateHarness(t, options = {}) {
   let lastExerciseInput = null;
   let delayedProvision = false;
   const retirementPolls = new Map();
+  const cleanupOrder = [];
 
   const pendingUntilAbort = (signal, counter) => new Promise((resolve, reject) => {
     if (!(signal instanceof AbortSignal)) return;
@@ -769,6 +833,7 @@ async function liveGateHarness(t, options = {}) {
     },
     async inspect(input) {
       const { runtimeId } = input;
+      if (options.recordCleanupOrder) cleanupOrder.push(`provider-inspect:${runtimeId}`);
       inspectCalls += 1;
       if (options.hungInspect && inspectCalls === 1) {
         return pendingUntilAbort(input.signal, "provider");
@@ -784,6 +849,7 @@ async function liveGateHarness(t, options = {}) {
     },
     async retire(input) {
       const { runtimeId } = input;
+      if (options.recordCleanupOrder) cleanupOrder.push(`provider-retire:${runtimeId}`);
       if (options.hungRetire) return pendingUntilAbort(input.signal, "provider");
       if (options.retireFailure && runtimeId === "runtime-1") {
         throw new Error("provider endpoint token private-retire-diagnostic");
@@ -865,6 +931,7 @@ async function liveGateHarness(t, options = {}) {
     },
     async dispose(input) {
       exerciseDisposed += 1;
+      if (options.recordCleanupOrder) cleanupOrder.push("exercise-dispose");
       if (options.hungExerciseDispose) {
         return pendingUntilAbort(input?.signal, "exercise");
       }
@@ -1014,6 +1081,7 @@ async function liveGateHarness(t, options = {}) {
     get exerciseAbortCount() { return exerciseAbortCount; },
     get lookupAbortCount() { return lookupAbortCount; },
     get lookupCalls() { return lookupCalls; },
+    cleanupOrder,
   };
 }
 
@@ -1374,6 +1442,23 @@ test("successful proof records terminal cleanup and removes the verifier store",
   });
 });
 
+test("authoritative provider retirement and terminal inspection precede exercise disposal", async (t) => {
+  const harness = await liveGateHarness(t, { recordCleanupOrder: true });
+  harness.options.dependencies.computerTimeoutMs = 500;
+  harness.options.dependencies.frameSettleMs = 80;
+
+  const result = await runRemoteProviderLiveGate(harness.options);
+
+  assert.equal(result.status, "PASS");
+  const lastExerciseDispose = harness.cleanupOrder.lastIndexOf("exercise-dispose");
+  assert.ok(lastExerciseDispose >= 0);
+  assert.ok(harness.cleanupOrder.slice(0, lastExerciseDispose).every((entry) => (
+    entry.startsWith("provider-retire:") || entry.startsWith("provider-inspect:")
+  )));
+  assert.ok(harness.cleanupOrder.indexOf("provider-retire:runtime-1") < lastExerciseDispose);
+  assert.ok(harness.cleanupOrder.indexOf("provider-inspect:runtime-1") < lastExerciseDispose);
+});
+
 test("accepts a fresh action-scoped digest after a fully settled prior frame", async (t) => {
   const harness = await liveGateHarness(t, { frameMutation: "fresh-after-cached" });
   harness.options.dependencies.computerTimeoutMs = 500;
@@ -1396,26 +1481,26 @@ test("fails closed when provider evidence exceeds the bounded verifier ledger", 
   });
 });
 
-test("cleanup never retires a captured runtime after the authoritative bot receipt changes", async (t) => {
+test("cleanup retires captured runtimes before refusing a successor receipt", async (t) => {
   const harness = await liveGateHarness(t, { successorOnDispose: true });
 
   await assert.rejects(runRemoteProviderLiveGate(harness.options), {
     code: "REMOTE_PROVIDER_GATE_FAILED",
     message: "Remote provider verification failed.",
   });
-  assert.deepEqual(harness.retired, ["runtime-2"]);
-  assert.equal(harness.runtimes.get("runtime-1").state, "ready");
+  assert.deepEqual(harness.retired, ["runtime-2", "runtime-1"]);
+  assert.equal(harness.runtimes.get("runtime-1").state, "retired");
 });
 
-test("cleanup refuses same-ID same-owner issuance replacement with different credentials", async (t) => {
+test("cleanup fences same-ID same-owner issuance replacement with different credentials", async (t) => {
   const harness = await liveGateHarness(t, { sameIdSuccessorOnDispose: true });
 
   await assert.rejects(runRemoteProviderLiveGate(harness.options), {
     code: "REMOTE_PROVIDER_GATE_FAILED",
     message: "Remote provider verification failed.",
   });
-  assert.deepEqual(harness.retired, ["runtime-2"]);
-  assert.equal(harness.runtimes.get("runtime-1").state, "ready");
+  assert.deepEqual(harness.retired, ["runtime-2", "runtime-1"]);
+  assert.equal(harness.runtimes.get("runtime-1").state, "retired");
 });
 
 test("rejects acknowledgement without an exact current YouTube frame", async (t) => {
@@ -1663,6 +1748,37 @@ test("CLI waits for workspace cleanup and forwards cancellation before PASS", as
 
   assert.equal(code, 1);
   assert.equal(removalAttempts, 2);
+  assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
+});
+
+test("CLI never writes a PASS report before workspace removal succeeds", async () => {
+  assert.ifError(cliLoadError);
+  const stdout = outputSink();
+  let reportWrites = 0;
+  let removalAttempts = 0;
+  const code = await runCliMain({
+    argv: [],
+    env: {},
+    stdout: stdout.stream,
+    stderr: outputSink().stream,
+    loadDependencies: () => Object.freeze({
+      provider: Object.freeze({}),
+      exercise: Object.freeze({ async dispose() {} }),
+    }),
+    createWorkspace: async () => "/private/tmp/private-workspace",
+    resolveOutputDirectory: async () => ({ directory: "/private/tmp/private-output", owned: false }),
+    runGate: async () => Object.freeze({ status: "PASS" }),
+    buildReport: () => Object.freeze({ status: "PASS" }),
+    writeReport: async () => { reportWrites += 1; },
+    async removeWorkspace() {
+      removalAttempts += 1;
+      throw new Error("private cleanup path");
+    },
+  });
+
+  assert.equal(code, 1);
+  assert.equal(removalAttempts, 2);
+  assert.equal(reportWrites, 0);
   assert.equal(stdout.value(), "REMOTE_PROVIDER_GATE=FAIL\n");
 });
 

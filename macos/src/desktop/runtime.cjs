@@ -7,6 +7,9 @@ const path = require("node:path");
 const { BotStore } = require("../bots/bot-store.cjs");
 const { BotRuntimeController } = require("../bots/runtime-controller.cjs");
 const { unavailableProvider, validateProvider } = require("../bots/runtime-provider.cjs");
+const {
+  createReviewedAdapterWorker,
+} = require("../bots/reviewed-adapter-loader.cjs");
 const { CLIProxyManager } = require("./cliproxy-manager.cjs");
 const { CodexAccountController } = require("./codex-account-controller.cjs");
 const { CodexAppServerManager } = require("./codex-app-server-manager.cjs");
@@ -49,6 +52,9 @@ const { StandaloneConversationStore } = require("./standalone-conversation-store
 const { StandaloneSubagentRunner } = require("./standalone-subagent-runner.cjs");
 const { ComputerTargetRouter } = require("../computer/computer-target-router.cjs");
 const { createLocalComputerRuntimeComponents } = require("../local/local-computer-runtime.cjs");
+
+const REVIEWED_PROVIDER_MAX_EVENTS = 256;
+const configuredProviderClosers = new WeakMap();
 
 const IPC_CHANNELS = Object.freeze({
   accountRead: "codex-account:read",
@@ -653,17 +659,40 @@ function setInferenceBridgeEnvironment(session) {
 
 function loadConfiguredProvider() {
   const modulePath = process.env.CODEX_BOT_REMOTE_PROVIDER_MODULE;
-  if (!modulePath) return unavailableProvider();
+  const moduleSha256 = process.env.CODEX_BOT_REMOTE_PROVIDER_SHA256;
+  if (!modulePath || !moduleSha256) return unavailableProvider();
+  let channel = null;
   try {
-    if (!path.isAbsolute(modulePath)) throw new Error("provider path");
-    const stat = fs.lstatSync(modulePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("provider file");
-    const loaded = require(modulePath);
-    const provider = typeof loaded?.createProvider === "function" ? loaded.createProvider() : loaded;
-    return validateProvider(provider);
+    channel = createReviewedAdapterWorker({
+      adapterKind: "provider",
+      factoryName: "createProvider",
+      maxEvents: REVIEWED_PROVIDER_MAX_EVENTS,
+      modulePath,
+      moduleSha256,
+    });
+    const rawProvider = Object.freeze({
+      capabilities: (input) => channel.request("capabilities", input),
+      provision: (input) => channel.request("provision", input),
+      inspect: (input) => channel.request("inspect", input),
+      retire: (input) => channel.request("retire", input),
+      subscribe: (callback) => channel.subscribe(callback),
+    });
+    const provider = validateProvider(rawProvider);
+    configuredProviderClosers.set(provider, () => {
+      try { channel?.shutdown(); } catch {}
+    });
+    return provider;
   } catch {
+    try { channel?.shutdown(); } catch {}
     return unavailableProvider();
   }
+}
+
+function closeConfiguredProvider(provider) {
+  const close = configuredProviderClosers.get(provider);
+  if (typeof close !== "function") return;
+  configuredProviderClosers.delete(provider);
+  close();
 }
 
 function loadSidecarReceipt(resourcesPath) {
@@ -1407,7 +1436,8 @@ function productionDependencies(electron) {
   const machineIdStore = new OpenBotMachineIdStore({
     filePath: path.join(stateRoot, "openbot-machine-id.v1.json"),
   });
-  const controller = new BotRuntimeController({ store: botStore, provider: loadConfiguredProvider() });
+  const provider = loadConfiguredProvider();
+  const controller = new BotRuntimeController({ store: botStore, provider });
   const modelSelectionsPath = path.join(stateRoot, "model-selections.v1.json");
   const conversationBindingsPath = path.join(stateRoot, "conversation-bindings.v1.json");
   const selectionStore = new ModelSelectionStore({ filePath: modelSelectionsPath });
@@ -1493,6 +1523,7 @@ function productionDependencies(electron) {
     computerTargetRouter: computer.targetRouter,
     localDesktopManager: computer.localManager,
     controller,
+    disposeProvider: () => closeConfiguredProvider(provider),
     inferenceBridge,
     localAutomationController: localAutomation?.controller ?? null,
     nativeCoordinatorFactory,
@@ -1562,6 +1593,9 @@ function installDesktopRuntime(electron, injected = {}) {
     ? injected
     : productionDependencies(electron);
   const { controller, selectionStore, store } = dependencies;
+  const disposeProvider = typeof dependencies.disposeProvider === "function"
+    ? dependencies.disposeProvider
+    : () => {};
   const providerController = dependencies.providerController || null;
   if (providerController !== null
     && (!providerController || typeof providerController !== "object"
@@ -2690,6 +2724,7 @@ function installDesktopRuntime(electron, injected = {}) {
         }
         captureOwner(() => sidecarManager.stop());
         captureOwner(() => controller.dispose());
+        captureOwner(() => disposeProvider());
         return Promise.all(owners).then(() => undefined);
       };
       if (botDeletionCoordinator === null && localAutomationController === null) {

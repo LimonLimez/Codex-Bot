@@ -46,6 +46,8 @@ const DESKTOP_FILES = Object.freeze([
   "bots/chatgpt-relay-codec.cjs",
   "bots/conversation-router.cjs",
   "bots/remote-app-server-client.cjs",
+  "bots/reviewed-adapter-loader.cjs",
+  "bots/reviewed-adapter-worker-source.cjs",
   "bots/runtime-controller.cjs",
   "bots/runtime-provider.cjs",
   "local/local-computer-boundary.cjs",
