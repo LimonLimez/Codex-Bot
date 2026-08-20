@@ -6,6 +6,7 @@ const path = require("node:path");
 const { replaceUnique } = require("./anchors.cjs");
 const {
   ADDED_AVATAR_SHAPES,
+  AVATAR_COLORS,
   VISIBLE_AVATAR_SHAPES,
 } = require("../bots/avatar-catalog.cjs");
 
@@ -84,6 +85,47 @@ const VENDOR_NEW_BOT_COMMIT =
   'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,Ne,Te,xe,ve,t]';
 const OPENBOT_NEW_BOT_COMMIT =
   'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;if(Ee.type==="single"&&Ee.recipient.kind==="picker"){S(),r(),W.openPicker();return}const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,W,Ne,Te,xe,ve,t]';
+const OPENBOT_NEW_BOT_AVATAR_PICKER = `
+function openbotNewBotAvatarPickerLocalProtocol(){return window.openbotProtocol?.schemaVersion===1&&window.openbotProtocol?.mode==="local-protocol"}
+function openbotNewBotAvatarPickerMerge(value,staged){const next={...value};if(staged?.avatarShape!=null){if(!Pq.includes(staged.avatarShape))throw new Error("New Bot avatar shape is unavailable");next.avatarShape=staged.avatarShape}if(staged?.avatarColor!=null){if(!DQ.some(entry=>entry.id===staged.avatarColor))throw new Error("New Bot avatar color is unavailable");next.avatarColor=staged.avatarColor}return next}
+function openbotNewBotAvatarPickerMenu({menuRef,staged,onCommit,onBack}){const active=Boolean(staged?.avatarShape!=null&&staged?.avatarColor!=null),agent={id:"openbot-create-your-own",avatarShape:active?staged.avatarShape:null,avatarColor:active?staged.avatarColor:null},character={isCommitting:!1,commitCharacter:onCommit},preview=active?p.jsx(rd,{color:staged.avatarColor,paused:!0,shape:staged.avatarShape,sizePx:64}):null;return p.jsxs(Zt.Root,{ref:menuRef,open:!0,onOpenChange:open=>{if(!open)onBack()},variant:"rich",width:360,children:[p.jsxs(Zt.Header,{children:[p.jsx(Zt.Title,{children:p.jsx(Re,{id:"5XRPbV"})}),p.jsx(Zt.CloseButton,{})]}),p.jsx(Zt.Body,{children:p.jsxs("div",{children:[preview,p.jsx(M4n,{agent,character,staged,isCharacterActive:active,shapeIsExplicit:staged?.avatarShape!=null,colorIsExplicit:staged?.avatarColor!=null})]})})]})}
+const openbotOriginalCreateOwnForm=Eyn;
+function openbotNewBotCreateOwnForm(n){const [staged,setStaged]=x.useState(null),[menuOpen,setMenuOpen]=x.useState(!1),rootRef=x.useRef(null),menuRef=x.useRef(null),local=openbotNewBotAvatarPickerLocalProtocol(),onCommit=x.useCallback(change=>setStaged(current=>({...current,...change})),[]),openbotNewBotAvatarPickerBack=x.useCallback(()=>{setMenuOpen(!1),(rootRef.current?.querySelector('button[aria-label*="Bot photo"]')??rootRef.current?.querySelector("button.sand-editable-avatar__button"))?.focus?.({preventScroll:!0})},[]),openPicker=x.useCallback(event=>{const target=event.target?.closest?.('button[aria-label*="Bot photo"]')??event.target?.closest?.("button.sand-editable-avatar__button");if(target==null)return;event.preventDefault(),event.stopPropagation(),setMenuOpen(!0)},[]),openbotNewBotAvatarPickerMergeForCreate=x.useCallback(value=>n.onCreate(openbotNewBotAvatarPickerMerge(value,staged)),[n.onCreate,staged]);x.useEffect(()=>{if(!local)setMenuOpen(!1);else if(menuOpen)menuRef.current?.focus?.({preventScroll:!0})},[local,menuOpen]);return p.jsxs("div",{ref:rootRef,style:{display:"contents"},onClickCapture:local?openPicker:void 0,children:[p.jsx(openbotOriginalCreateOwnForm,local?{...n,onCreate:openbotNewBotAvatarPickerMergeForCreate}:n,"openbot-new-bot-create-own-form"),local&&menuOpen?p.jsx(openbotNewBotAvatarPickerMenu,{menuRef,staged,onCommit,onBack:openbotNewBotAvatarPickerBack}):null]})}
+Eyn=openbotNewBotCreateOwnForm;
+`;
+const VENDOR_NEW_BOT_CHARACTER_EDITOR_PREFIX =
+  'function M4n(n){const e=ye.c(32),{agent:t,character:s,staged:r,isCharacterActive:i}=n';
+const OPENBOT_NEW_BOT_CHARACTER_EDITOR_PREFIX =
+  'function M4n(n){const e=ye.c(32),{agent:t,character:s,staged:r,isCharacterActive:i,shapeIsExplicit:a=i,colorIsExplicit:c=i}=n';
+const VENDOR_NEW_BOT_CHARACTER_SHAPE_ACTIVE = 'const O=i&&f===M';
+const OPENBOT_NEW_BOT_CHARACTER_SHAPE_ACTIVE = 'const O=a&&f===M';
+const VENDOR_NEW_BOT_CHARACTER_COLOR_ACTIVE = 'i&&d===M.id';
+const OPENBOT_NEW_BOT_CHARACTER_COLOR_ACTIVE = 'c&&d===M.id';
+const VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK =
+  'e[9]!==o||e[10]!==l||e[11]!==i||e[12]!==d||e[13]!==f?';
+const OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK =
+  'e[9]!==o||e[10]!==l||e[11]!==i+"|"+a||e[12]!==d||e[13]!==f?';
+const VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN =
+  'e[9]=o,e[10]=l,e[11]=i,e[12]=d,e[13]=f,e[14]=b';
+const OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN =
+  'e[9]=o,e[10]=l,e[11]=i+"|"+a,e[12]=d,e[13]=f,e[14]=b';
+const VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK =
+  'e[21]!==o||e[22]!==l||e[23]!==i||e[24]!==d?';
+const OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK =
+  'e[21]!==o||e[22]!==l||e[23]!==i+"|"+c||e[24]!==d?';
+const VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN =
+  'e[21]=o,e[22]=l,e[23]=i,e[24]=d,e[25]=C';
+const OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN =
+  'e[21]=o,e[22]=l,e[23]=i+"|"+c,e[24]=d,e[25]=C';
+const NEW_BOT_CHARACTER_EDITOR_END = 'class O4n';
+const VENDOR_NEW_BOT_CREATE_RESOLVE =
+  'const Me=await Ee.resolveAvatar(),Ae=await re({name:Ee.name,description:Ee.description,avatarPngBase64:Me,...Ee.templateId!=null?{templateId:Ee.templateId}:{}});';
+const OPENBOT_NEW_BOT_CREATE_RESOLVE =
+  'const Me=await Ee.resolveAvatar(),Ae=await re({name:Ee.name,description:Ee.description,avatarPngBase64:Me,...Ee.templateId!=null?{templateId:Ee.templateId}:{},...Ee.avatarShape!=null?{avatarShape:Ee.avatarShape}:{},...Ee.avatarColor!=null?{avatarColor:Ee.avatarColor}:{}});';
+const VENDOR_NEW_BOT_CREATE_DISPATCH =
+  'ee=x.useCallback(Ee=>{ae({name:Ee.name,description:Ee.description,resolveAvatar:()=>Promise.resolve(Ee.avatarPngBase64)})},[ae])';
+const OPENBOT_NEW_BOT_CREATE_DISPATCH =
+  'ee=x.useCallback(Ee=>{ae({name:Ee.name,description:Ee.description,...Ee.avatarShape!=null?{avatarShape:Ee.avatarShape}:{},...Ee.avatarColor!=null?{avatarColor:Ee.avatarColor}:{},resolveAvatar:()=>Promise.resolve(Ee.avatarPngBase64)})},[ae])';
 const VENDOR_BOT_SETTINGS_ROOT =
   'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
 const OPENBOT_BOT_SETTINGS_ROOT =
@@ -197,6 +239,307 @@ function reverseAvatarCatalogSource(source) {
   return reversed;
 }
 
+function mergeNewBotAvatarSelection(values, staged) {
+  if (values === null || typeof values !== "object" || Array.isArray(values)) {
+    throw new TypeError("New Bot create values must be an object");
+  }
+  if (staged !== null && staged !== undefined
+    && (typeof staged !== "object" || Array.isArray(staged))) {
+    throw new TypeError("New Bot avatar selection must be an object");
+  }
+  const next = { ...values };
+  if (staged?.avatarShape !== undefined) {
+    if (typeof staged.avatarShape !== "string" || !VISIBLE_AVATAR_SHAPES.includes(staged.avatarShape)) {
+      throw new Error("New Bot avatar shape is unavailable");
+    }
+    next.avatarShape = staged.avatarShape;
+  }
+  if (staged?.avatarColor !== undefined) {
+    if (typeof staged.avatarColor !== "string" || !AVATAR_COLORS.includes(staged.avatarColor)) {
+      throw new Error("New Bot avatar color is unavailable");
+    }
+    next.avatarColor = staged.avatarColor;
+  }
+  return next;
+}
+
+function assertNewBotAvatarPickerSourceState(source, direction) {
+  if (typeof source !== "string") {
+    throw new TypeError("New Bot avatar picker source must be a string");
+  }
+  const stockRegistry = countAnchorOccurrences(source, VENDOR_VISIBLE_SHAPES);
+  const openRegistry = countAnchorOccurrences(source, OPENBOT_VISIBLE_SHAPES);
+  const picker = countAnchorOccurrences(source, OPENBOT_NEW_BOT_AVATAR_PICKER);
+  const adjacent = countAnchorOccurrences(source, `${OPENBOT_VISIBLE_SHAPES}${OPENBOT_NEW_BOT_AVATAR_PICKER}`);
+  if (stockRegistry > 1 || openRegistry > 1 || (stockRegistry > 0 && openRegistry > 0)) {
+    throw new Error("New Bot avatar picker registry anchor is mixed or ambiguous");
+  }
+  if (direction === "patch") {
+    if (picker > 1) throw new Error("New Bot avatar picker anchor is ambiguous");
+    if (picker === 1) throw new Error("New Bot avatar picker is already patched");
+    if (openRegistry !== 1 || stockRegistry !== 0) {
+      throw new Error("New Bot avatar picker registry anchor not found or ambiguous");
+    }
+    return;
+  }
+  if (picker !== 1 || adjacent !== 1 || openRegistry !== 1 || stockRegistry !== 0) {
+    throw new Error("New Bot avatar picker inverse requires adjacent registry anchor");
+  }
+}
+
+function patchNewBotAvatarPickerSource(source) {
+  assertNewBotAvatarPickerSourceState(source, "patch");
+  return replaceUnique(
+    source,
+    OPENBOT_VISIBLE_SHAPES,
+    `${OPENBOT_VISIBLE_SHAPES}${OPENBOT_NEW_BOT_AVATAR_PICKER}`,
+    "Grok New Bot avatar picker",
+  );
+}
+
+function reverseNewBotAvatarPickerSource(source) {
+  assertNewBotAvatarPickerSourceState(source, "reverse");
+  return replaceUnique(
+    source,
+    `${OPENBOT_VISIBLE_SHAPES}${OPENBOT_NEW_BOT_AVATAR_PICKER}`,
+    OPENBOT_VISIBLE_SHAPES,
+    "OpenBot New Bot avatar picker",
+  );
+}
+
+function patchNewBotCharacterEditorSource(source, allowAbsent = false) {
+  if (typeof source !== "string") {
+    throw new TypeError("New Bot character editor source must be a string");
+  }
+  const stockPrefix = countAnchorOccurrences(source, VENDOR_NEW_BOT_CHARACTER_EDITOR_PREFIX);
+  const openPrefix = countAnchorOccurrences(source, OPENBOT_NEW_BOT_CHARACTER_EDITOR_PREFIX);
+  const endAnchors = countAnchorOccurrences(source, NEW_BOT_CHARACTER_EDITOR_END);
+  if (stockPrefix === 0 && openPrefix === 0) {
+    if (endAnchors > 0) {
+      throw new Error("New Bot character editor end anchor is orphaned or ambiguous");
+    }
+    if (allowAbsent) return source;
+    throw new Error("New Bot character editor anchor not found");
+  }
+  if (stockPrefix > 1 || openPrefix > 1) {
+    throw new Error("New Bot character editor anchor is ambiguous");
+  }
+  if (openPrefix > 0) {
+    if (stockPrefix > 0) throw new Error("New Bot character editor anchors are mixed");
+    throw new Error("New Bot character editor is already patched");
+  }
+  if (endAnchors !== 1) {
+    throw new Error(endAnchors === 0
+      ? "New Bot character editor end anchor not found"
+      : "New Bot character editor end anchor is ambiguous");
+  }
+  const start = source.indexOf(VENDOR_NEW_BOT_CHARACTER_EDITOR_PREFIX);
+  const end = source.indexOf(NEW_BOT_CHARACTER_EDITOR_END, start);
+  if (start < 0 || end < start) {
+    throw new Error("New Bot character editor end anchor not found");
+  }
+  const segment = source.slice(start, end);
+  const shapeActive = countAnchorOccurrences(segment, VENDOR_NEW_BOT_CHARACTER_SHAPE_ACTIVE);
+  const colorActive = countAnchorOccurrences(segment, VENDOR_NEW_BOT_CHARACTER_COLOR_ACTIVE);
+  const shapeCacheCheck = countAnchorOccurrences(segment, VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK);
+  const shapeCacheAssign = countAnchorOccurrences(segment, VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN);
+  const colorCacheCheck = countAnchorOccurrences(segment, VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK);
+  const colorCacheAssign = countAnchorOccurrences(segment, VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN);
+  if (shapeActive !== 1 || colorActive !== 3
+    || shapeCacheCheck !== 1 || shapeCacheAssign !== 1
+    || colorCacheCheck !== 1 || colorCacheAssign !== 1) {
+    throw new Error("New Bot character editor choice anchors are missing or ambiguous");
+  }
+  let patchedSegment = replaceUnique(
+    segment,
+    VENDOR_NEW_BOT_CHARACTER_EDITOR_PREFIX,
+    OPENBOT_NEW_BOT_CHARACTER_EDITOR_PREFIX,
+    "Grok Sand character editor props",
+  );
+  patchedSegment = replaceUnique(
+    patchedSegment,
+    VENDOR_NEW_BOT_CHARACTER_SHAPE_ACTIVE,
+    OPENBOT_NEW_BOT_CHARACTER_SHAPE_ACTIVE,
+    "Grok Sand shape pressed state",
+  );
+  patchedSegment = patchedSegment.replaceAll(
+    VENDOR_NEW_BOT_CHARACTER_COLOR_ACTIVE,
+    OPENBOT_NEW_BOT_CHARACTER_COLOR_ACTIVE,
+  );
+  patchedSegment = replaceUnique(
+    patchedSegment,
+    VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK,
+    OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK,
+    "Grok Sand shape cache dependency",
+  );
+  patchedSegment = replaceUnique(
+    patchedSegment,
+    VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN,
+    OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN,
+    "Grok Sand shape cache key",
+  );
+  patchedSegment = replaceUnique(
+    patchedSegment,
+    VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK,
+    OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK,
+    "Grok Sand color cache dependency",
+  );
+  patchedSegment = replaceUnique(
+    patchedSegment,
+    VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN,
+    OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN,
+    "Grok Sand color cache key",
+  );
+  return `${source.slice(0, start)}${patchedSegment}${source.slice(end)}`;
+}
+
+function reverseNewBotCharacterEditorSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("New Bot character editor source must be a string");
+  }
+  const stockPrefix = countAnchorOccurrences(source, VENDOR_NEW_BOT_CHARACTER_EDITOR_PREFIX);
+  const openPrefix = countAnchorOccurrences(source, OPENBOT_NEW_BOT_CHARACTER_EDITOR_PREFIX);
+  const endAnchors = countAnchorOccurrences(source, NEW_BOT_CHARACTER_EDITOR_END);
+  if (endAnchors === 0) throw new Error("New Bot character editor end anchor not found");
+  if (endAnchors > 1 || stockPrefix > 1 || openPrefix > 1) {
+    throw new Error("New Bot character editor inverse anchor is ambiguous");
+  }
+  if (stockPrefix > 0 && openPrefix > 0) {
+    throw new Error("New Bot character editor inverse anchors are mixed");
+  }
+  if (stockPrefix === 1) {
+    throw new Error("New Bot character editor is already reversed");
+  }
+  if (openPrefix !== 1) {
+    throw new Error("New Bot character editor inverse anchor not found");
+  }
+  const start = source.indexOf(OPENBOT_NEW_BOT_CHARACTER_EDITOR_PREFIX);
+  const end = source.indexOf(NEW_BOT_CHARACTER_EDITOR_END, start);
+  if (start < 0 || end < start) {
+    throw new Error("New Bot character editor inverse end anchor not found");
+  }
+  const segment = source.slice(start, end);
+  const shapeActive = countAnchorOccurrences(segment, OPENBOT_NEW_BOT_CHARACTER_SHAPE_ACTIVE);
+  const colorActive = countAnchorOccurrences(segment, OPENBOT_NEW_BOT_CHARACTER_COLOR_ACTIVE);
+  const shapeCacheCheck = countAnchorOccurrences(segment, OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK);
+  const shapeCacheAssign = countAnchorOccurrences(segment, OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN);
+  const colorCacheCheck = countAnchorOccurrences(segment, OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK);
+  const colorCacheAssign = countAnchorOccurrences(segment, OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN);
+  if (shapeActive !== 1 || colorActive !== 3
+    || shapeCacheCheck !== 1 || shapeCacheAssign !== 1
+    || colorCacheCheck !== 1 || colorCacheAssign !== 1) {
+    throw new Error("New Bot character editor inverse choice anchors are missing or ambiguous");
+  }
+  let reversedSegment = replaceUnique(
+    segment,
+    OPENBOT_NEW_BOT_CHARACTER_EDITOR_PREFIX,
+    VENDOR_NEW_BOT_CHARACTER_EDITOR_PREFIX,
+    "OpenBot Sand character editor props",
+  );
+  reversedSegment = replaceUnique(
+    reversedSegment,
+    OPENBOT_NEW_BOT_CHARACTER_SHAPE_ACTIVE,
+    VENDOR_NEW_BOT_CHARACTER_SHAPE_ACTIVE,
+    "OpenBot Sand shape pressed state",
+  );
+  reversedSegment = reversedSegment.replaceAll(
+    OPENBOT_NEW_BOT_CHARACTER_COLOR_ACTIVE,
+    VENDOR_NEW_BOT_CHARACTER_COLOR_ACTIVE,
+  );
+  reversedSegment = replaceUnique(
+    reversedSegment,
+    OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK,
+    VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK,
+    "OpenBot Sand shape cache dependency",
+  );
+  reversedSegment = replaceUnique(
+    reversedSegment,
+    OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN,
+    VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN,
+    "OpenBot Sand shape cache key",
+  );
+  reversedSegment = replaceUnique(
+    reversedSegment,
+    OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK,
+    VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK,
+    "OpenBot Sand color cache dependency",
+  );
+  reversedSegment = replaceUnique(
+    reversedSegment,
+    OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN,
+    VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN,
+    "OpenBot Sand color cache key",
+  );
+  return `${source.slice(0, start)}${reversedSegment}${source.slice(end)}`;
+}
+
+function patchNewBotCreatePayloadSource(source, allowAbsent = false) {
+  if (typeof source !== "string") throw new TypeError("New Bot create payload source must be a string");
+  const stockResolve = countAnchorOccurrences(source, VENDOR_NEW_BOT_CREATE_RESOLVE);
+  const openResolve = countAnchorOccurrences(source, OPENBOT_NEW_BOT_CREATE_RESOLVE);
+  const stockDispatch = countAnchorOccurrences(source, VENDOR_NEW_BOT_CREATE_DISPATCH);
+  const openDispatch = countAnchorOccurrences(source, OPENBOT_NEW_BOT_CREATE_DISPATCH);
+  const present = stockResolve + openResolve + stockDispatch + openDispatch;
+  if (present === 0) {
+    if (allowAbsent) return source;
+    throw new Error("New Bot create payload anchors not found");
+  }
+  if ([stockResolve, openResolve, stockDispatch, openDispatch].some((count) => count > 1)) {
+    throw new Error("New Bot create payload anchor is ambiguous");
+  }
+  if (openResolve > 0 || openDispatch > 0) {
+    throw new Error("New Bot create payload anchors are already patched or mixed");
+  }
+  if (stockResolve !== 1 || stockDispatch !== 1) {
+    throw new Error("New Bot create payload anchors are missing or mixed");
+  }
+  let patched = replaceUnique(
+    source,
+    VENDOR_NEW_BOT_CREATE_RESOLVE,
+    OPENBOT_NEW_BOT_CREATE_RESOLVE,
+    "Grok New Bot create payload",
+  );
+  return replaceUnique(
+    patched,
+    VENDOR_NEW_BOT_CREATE_DISPATCH,
+    OPENBOT_NEW_BOT_CREATE_DISPATCH,
+    "Grok New Bot create forwarding",
+  );
+}
+
+function reverseNewBotCreatePayloadSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("New Bot create payload source must be a string");
+  }
+  const stockResolve = countAnchorOccurrences(source, VENDOR_NEW_BOT_CREATE_RESOLVE);
+  const openResolve = countAnchorOccurrences(source, OPENBOT_NEW_BOT_CREATE_RESOLVE);
+  const stockDispatch = countAnchorOccurrences(source, VENDOR_NEW_BOT_CREATE_DISPATCH);
+  const openDispatch = countAnchorOccurrences(source, OPENBOT_NEW_BOT_CREATE_DISPATCH);
+  if ([stockResolve, openResolve, stockDispatch, openDispatch].some((count) => count > 1)) {
+    throw new Error("New Bot create payload inverse anchor is ambiguous");
+  }
+  if (stockResolve === 1 && stockDispatch === 1 && openResolve === 0 && openDispatch === 0) {
+    throw new Error("New Bot create payload is already reversed");
+  }
+  if (openResolve === 1 && openDispatch === 1 && stockResolve === 0 && stockDispatch === 0) {
+    let reversed = replaceUnique(
+      source,
+      OPENBOT_NEW_BOT_CREATE_RESOLVE,
+      VENDOR_NEW_BOT_CREATE_RESOLVE,
+      "OpenBot New Bot create payload",
+    );
+    return replaceUnique(
+      reversed,
+      OPENBOT_NEW_BOT_CREATE_DISPATCH,
+      VENDOR_NEW_BOT_CREATE_DISPATCH,
+      "OpenBot New Bot create forwarding",
+    );
+  }
+  const present = stockResolve + openResolve + stockDispatch + openDispatch;
+  if (present === 0) throw new Error("New Bot create payload inverse anchors not found");
+  throw new Error("New Bot create payload inverse anchors are mixed or missing");
+}
+
 function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSET_SHA256) {
   if (typeof source !== "string" || source.length < 1) {
     throw new Error("Grok renderer asset is invalid");
@@ -280,6 +623,15 @@ function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSE
     VENDOR_NEW_BOT_COMMIT,
     OPENBOT_NEW_BOT_COMMIT,
     "Grok native New Bot picker commit",
+  );
+  patched = patchNewBotAvatarPickerSource(patched);
+  patched = patchNewBotCharacterEditorSource(
+    patched,
+    expectedSha256 !== VENDOR_RENDERER_ASSET_SHA256,
+  );
+  patched = patchNewBotCreatePayloadSource(
+    patched,
+    expectedSha256 !== VENDOR_RENDERER_ASSET_SHA256,
   );
   return replaceUnique(
     patched,
@@ -406,6 +758,10 @@ function patchRenderer(extractedRoot, options = {}) {
 module.exports = {
   ASSETS,
   OPENBOT_GEOMETRY_TAIL,
+  OPENBOT_NEW_BOT_COMMIT,
+  OPENBOT_NEW_BOT_AVATAR_PICKER,
+  OPENBOT_NEW_BOT_CREATE_DISPATCH,
+  OPENBOT_NEW_BOT_CREATE_RESOLVE,
   OPENBOT_VISIBLE_SHAPES,
   VENDOR_GEOMETRY_TAIL,
   VENDOR_RENDERER_ASSET,
@@ -414,9 +770,16 @@ module.exports = {
   VENDOR_SETTINGS_ASSET_SHA256,
   VENDOR_VISIBLE_SHAPES,
   patchAvatarCatalogSource,
+  patchNewBotCharacterEditorSource,
+  patchNewBotAvatarPickerSource,
+  patchNewBotCreatePayloadSource,
   patchRenderer,
   patchRendererIndexSource,
   patchVendorRendererSource,
   patchVendorSettingsSource,
   reverseAvatarCatalogSource,
+  reverseNewBotCharacterEditorSource,
+  reverseNewBotCreatePayloadSource,
+  reverseNewBotAvatarPickerSource,
+  mergeNewBotAvatarSelection,
 };

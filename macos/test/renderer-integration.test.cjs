@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const vm = require("node:vm");
 const test = require("node:test");
 
 const macRoot = path.resolve(__dirname, "..");
@@ -16,11 +17,19 @@ const visualFixturePath = path.join(macRoot, "test", "fixtures", "renderer-panel
 const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
 const {
   OPENBOT_GEOMETRY_TAIL,
+  OPENBOT_NEW_BOT_COMMIT,
+  OPENBOT_NEW_BOT_AVATAR_PICKER,
+  OPENBOT_NEW_BOT_CREATE_DISPATCH,
+  OPENBOT_NEW_BOT_CREATE_RESOLVE,
   OPENBOT_VISIBLE_SHAPES,
   VENDOR_GEOMETRY_TAIL,
   VENDOR_VISIBLE_SHAPES,
   patchAvatarCatalogSource,
+  patchNewBotAvatarPickerSource,
+  mergeNewBotAvatarSelection,
   reverseAvatarCatalogSource,
+  reverseNewBotCharacterEditorSource,
+  reverseNewBotAvatarPickerSource,
 } = require(patchPath);
 
 const STOCK_INDEX = `<!doctype html>
@@ -49,6 +58,9 @@ const STOCK_COMPOSER_ACCOUNT_GATE = ':s?f!=null?W._(mbn(f)):i.length>0?U({id:"I/
 const STOCK_PROMPT_TRAILING = 'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:Q})';
 const STOCK_NEW_BOT_RECIPIENT = 'function q2e(n){return n.kind==="agent"?{kind:"agent",id:n.agent.id,name:n.agent.name,avatarDataUrl:n.agent.avatarDataUrl}:{kind:"new",name:n.kind==="create"?n.name:Jut}}';
 const STOCK_NEW_BOT_COMMIT = 'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,Ne,Te,xe,ve,t]';
+const STOCK_NEW_BOT_CREATE_RESOLVE = 'const Me=await Ee.resolveAvatar(),Ae=await re({name:Ee.name,description:Ee.description,avatarPngBase64:Me,...Ee.templateId!=null?{templateId:Ee.templateId}:{}});';
+const STOCK_NEW_BOT_CREATE_DISPATCH = 'ee=x.useCallback(Ee=>{ae({name:Ee.name,description:Ee.description,resolveAvatar:()=>Promise.resolve(Ee.avatarPngBase64)})},[ae])';
+const STOCK_M4N_FRAGMENT = 'function M4n(n){const e=ye.c(32),{agent:t,character:s,staged:r,isCharacterActive:i}=n,{commitCharacter:l}=s,f=r?.avatarShape??t.avatarShape??null,d=r?.avatarColor??t.avatarColor??null,o=()=>"";let b;e[9]!==o||e[10]!==l||e[11]!==i||e[12]!==d||e[13]!==f?(b=Pq.map(M=>{const O=i&&f===M;return p.jsx("button",{"aria-pressed":O,onClick:()=>l({avatarShape:M})},M)}),e[9]=o,e[10]=l,e[11]=i,e[12]=d,e[13]=f,e[14]=b):b=e[14];let C;e[21]!==o||e[22]!==l||e[23]!==i||e[24]!==d?(C=DQ.map(M=>{const R=i&&d===M.id,S=i&&d===M.id,T=i&&d===M.id;return p.jsx("button",{"aria-pressed":R,onClick:()=>l({avatarColor:M.id}),className:S?"selected":"",title:T?"selected":""},M.id)}),e[21]=o,e[22]=l,e[23]=i,e[24]=d,e[25]=C):C=e[25];return p.jsxs("div",{children:[b,C]})}class O4n{}';
 const STOCK_BOT_SETTINGS_ROOT = 'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
 const STOCK_SETTINGS_ROOT = 'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const STOCK_ROSTER_CONNECT_GATE = 'Ve!=null&&F.connect()';
@@ -77,6 +89,9 @@ const SYNTHETIC_VENDOR_RENDERER = [
   STOCK_PROMPT_TRAILING,
   STOCK_NEW_BOT_RECIPIENT,
   STOCK_NEW_BOT_COMMIT,
+  STOCK_NEW_BOT_CREATE_RESOLVE,
+  STOCK_NEW_BOT_CREATE_DISPATCH,
+  STOCK_M4N_FRAGMENT,
   STOCK_BOT_SETTINGS_ROOT,
   STOCK_CLIENT_RESTORE,
   STOCK_ROSTER_CONNECT_GATE,
@@ -119,6 +134,417 @@ function writeSyntheticRendererTree(root, {
       settingsAsset,
     );
   }
+}
+
+function createPickerBrowserHarness() {
+  const componentStates = new Map();
+  let currentComponent = null;
+  let filePickerCalls = 0;
+  let focusCalls = [];
+  let createdArgs = null;
+  const protocol = { value: { schemaVersion: 1, mode: "local-protocol" } };
+  const formValues = { name: "Luna", description: "Preserve me" };
+  const translations = { "5XRPbV": "Editar avatar" };
+
+  function renderComponent(component, props) {
+    const previous = currentComponent;
+    const state = componentStates.get(component) ?? { values: [], count: null };
+    componentStates.set(component, state);
+    currentComponent = { component, state, index: 0 };
+    const result = component(props);
+    const count = currentComponent.index;
+    if (state.count !== null && state.count !== count) {
+      throw new Error(`hook count changed for ${component.name}: ${state.count} -> ${count}`);
+    }
+    state.count = count;
+    currentComponent = previous;
+    return result;
+  }
+
+  const x = {
+    useState(initial) {
+      assert.ok(currentComponent, "useState must run inside a component");
+      const slot = currentComponent.index++;
+      const state = currentComponent.state;
+      if (!(slot in state.values)) state.values[slot] = typeof initial === "function" ? initial() : initial;
+      return [
+        state.values[slot],
+        (next) => {
+          state.values[slot] = typeof next === "function" ? next(state.values[slot]) : next;
+        },
+      ];
+    },
+    useRef(initial) {
+      assert.ok(currentComponent, "useRef must run inside a component");
+      const slot = currentComponent.index++;
+      const state = currentComponent.state;
+      if (!(slot in state.values)) state.values[slot] = { current: initial };
+      return state.values[slot];
+    },
+    useCallback(callback) {
+      assert.ok(currentComponent, "useCallback must run inside a component");
+      currentComponent.index += 1;
+      return callback;
+    },
+    useEffect(effect) {
+      assert.ok(currentComponent, "useEffect must run inside a component");
+      currentComponent.index += 1;
+      effect();
+    },
+  };
+
+  function element(type, props = {}, children = []) {
+    const node = { type, props: { ...props, children } };
+    if (props.ref && typeof props.ref === "object") props.ref.current = {
+      focus(options) { focusCalls.push(options ?? null); },
+      querySelector() { return { focus(options) { focusCalls.push(options ?? null); } }; },
+    };
+    return node;
+  }
+
+  const p = {
+    jsx(type, props = {}) {
+      return typeof type === "function" ? renderComponent(type, props) : element(type, props);
+    },
+    jsxs(type, props = {}) {
+      return typeof type === "function" ? renderComponent(type, props) : element(type, props, props.children ?? []);
+    },
+  };
+  const Zt = {
+    Root: (props) => element("Zt.Root", props, props.children ?? []),
+    Header: (props) => element("Zt.Header", props, props.children ?? []),
+    Title: (props) => element("Zt.Title", props, props.children ?? []),
+    CloseButton: (props) => element("Zt.CloseButton", props),
+    Body: (props) => element("Zt.Body", props, props.children ?? []),
+  };
+  const originalEyn = (props) => {
+    const [name, setName] = x.useState(formValues.name);
+    const [description, setDescription] = x.useState(formValues.description);
+    return element("stock-form", {
+      trigger: element("button", { "aria-label": "Add a Bot photo", onClick: () => { filePickerCalls += 1; } }),
+      submit: element("button", { onClick: () => props.onCreate({
+        name,
+        description,
+        avatarPngBase64: null,
+      }) }),
+      name,
+      description,
+      setName,
+      setDescription,
+    });
+  };
+  const context = {
+    window: { get openbotProtocol() { return protocol.value; } },
+    Eyn: originalEyn,
+    M4n: (props) => element("M4n", props),
+    Jee: () => "blob",
+    Lee: () => "black",
+    rd: "SandRenderer",
+    Re: (props) => element("Re", { ...props, translatedText: translations[props.id] }),
+    Zt,
+    p,
+    x,
+    Pq: ["blob", "pebble", "squircle", "tablet", "wedge", "hex", "cloud", "teardrop", "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly", "terminal", "robot", "microchip", "drone"],
+    DQ: ["black", "brown", "red", "orange", "yellow", "green", "cyan", "blue", "violet", "magenta", "gray"].map((id) => ({ id })),
+  };
+  vm.runInNewContext(OPENBOT_NEW_BOT_AVATAR_PICKER, context, { filename: "openbot-avatar-picker.cjs" });
+
+  function find(node, predicate) {
+    if (node == null || typeof node !== "object") return null;
+    if (predicate(node)) return node;
+    const children = node.props?.children;
+    if (Array.isArray(children)) {
+      for (const child of children) {
+        const found = find(child, predicate);
+        if (found) return found;
+      }
+    } else if (children != null) {
+      const found = find(children, predicate);
+      if (found) return found;
+    }
+    for (const value of Object.values(node.props ?? {})) {
+      if (value === children || typeof value === "function") continue;
+      const found = find(value, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const parentCreate = (values) => {
+    const forwarded = mergeNewBotAvatarSelection({
+      name: values.name,
+      description: values.description,
+      avatarPngBase64: values.avatarPngBase64,
+    }, {
+      ...(values.avatarShape !== undefined ? { avatarShape: values.avatarShape } : {}),
+      ...(values.avatarColor !== undefined ? { avatarColor: values.avatarColor } : {}),
+    });
+    createdArgs = {
+      name: forwarded.name,
+      description: forwarded.description,
+      avatarPngBase64: forwarded.avatarPngBase64,
+      ...(forwarded.avatarShape != null ? { avatarShape: forwarded.avatarShape } : {}),
+      ...(forwarded.avatarColor != null ? { avatarColor: forwarded.avatarColor } : {}),
+    };
+  };
+
+  return {
+    context,
+    render() {
+      return renderComponent(context.Eyn, { onCreate: parentCreate });
+    },
+    find,
+    protocol,
+    focusCalls: () => focusCalls,
+    filePickerCalls: () => filePickerCalls,
+    createdArgs: () => createdArgs,
+    originalEyn,
+  };
+}
+
+// This harness intentionally reconciles by element type/key/path instead of
+// keying state by component function alone.  The previous browser-like helper
+// could therefore miss the real React reset when the wrapper's returned root
+// changes from Eyn to a div.
+function createReconciledPickerBrowserHarness() {
+  const fiberStates = new Map();
+  let currentFiber = null;
+  let pendingEffects = [];
+  let didUpdate = false;
+  let filePickerCalls = 0;
+  let focusCalls = [];
+  let createdArgs = null;
+  const protocol = { value: { schemaVersion: 1, mode: "local-protocol" } };
+  const formValues = { name: "Luna", description: "Preserve me" };
+  const translations = { "5XRPbV": "Editar avatar" };
+
+  function typeName(type) {
+    return typeof type === "function" ? (type.name || "anonymous") : String(type);
+  }
+
+  function fiberKey(element, path) {
+    return `${path}|${typeName(element.type)}|${element.key ?? ""}`;
+  }
+
+  function renderComponent(element, path) {
+    const key = fiberKey(element, path);
+    const state = fiberStates.get(key) ?? { values: [], deps: [], count: null };
+    fiberStates.set(key, state);
+    const previous = currentFiber;
+    currentFiber = { element, path, state, index: 0 };
+    const output = element.type(element.props);
+    const count = currentFiber.index;
+    if (state.count !== null && state.count !== count) {
+      throw new Error(`hook count changed for ${typeName(element.type)}: ${state.count} -> ${count}`);
+    }
+    state.count = count;
+    currentFiber = previous;
+    return reconcile(output, `${path}.out`);
+  }
+
+  function hostNode(type, props, children) {
+    const node = { type, props: { ...props, children } };
+    node.querySelector = (selector) => {
+      const found = find(node, (candidate) => candidate.type === "button"
+        && (selector.includes("Bot photo")
+          ? String(candidate.props["aria-label"] ?? "").includes("Bot photo")
+          : candidate.props.className === "sand-editable-avatar__button"));
+      return found ?? null;
+    };
+    node.focus = (options) => focusCalls.push(options ?? null);
+    if (props.ref && typeof props.ref === "object") props.ref.current = node;
+    return node;
+  }
+
+  function reconcile(value, path) {
+    if (value == null || typeof value === "boolean" || typeof value === "string" || typeof value === "number") {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((child, index) => reconcile(child, `${path}.${index}`));
+    }
+    if (typeof value.type === "function") return renderComponent(value, path);
+    const rawChildren = value.props?.children;
+    const children = Array.isArray(rawChildren)
+      ? rawChildren.map((child, index) => reconcile(child, `${path}.${index}`))
+      : rawChildren == null ? rawChildren : reconcile(rawChildren, `${path}.0`);
+    return hostNode(value.type, value.props ?? {}, children);
+  }
+
+  const x = {
+    useState(initial) {
+      assert.ok(currentFiber, "useState must run inside a component");
+      const slot = currentFiber.index++;
+      const state = currentFiber.state;
+      if (!(slot in state.values)) state.values[slot] = typeof initial === "function" ? initial() : initial;
+      return [
+        state.values[slot],
+        (next) => {
+          const value = typeof next === "function" ? next(state.values[slot]) : next;
+          if (!Object.is(value, state.values[slot])) didUpdate = true;
+          state.values[slot] = value;
+        },
+      ];
+    },
+    useRef(initial) {
+      assert.ok(currentFiber, "useRef must run inside a component");
+      const slot = currentFiber.index++;
+      const state = currentFiber.state;
+      if (!(slot in state.values)) state.values[slot] = { current: initial };
+      return state.values[slot];
+    },
+    useCallback(callback) {
+      assert.ok(currentFiber, "useCallback must run inside a component");
+      currentFiber.index += 1;
+      return callback;
+    },
+    useEffect(effect, deps) {
+      assert.ok(currentFiber, "useEffect must run inside a component");
+      const slot = currentFiber.index++;
+      const state = currentFiber.state;
+      const previous = state.deps[slot];
+      const changed = previous === undefined || deps === undefined || deps.some((value, index) => !Object.is(value, previous[index]));
+      state.deps[slot] = deps;
+      if (changed) pendingEffects.push(effect);
+    },
+  };
+
+  function element(type, props = {}, children = [], key) {
+    return { type, key, props: { ...props, children } };
+  }
+  const p = {
+    jsx(type, props = {}, key) { return element(type, props, props.children ?? [], key); },
+    jsxs(type, props = {}, key) { return element(type, props, props.children ?? [], key); },
+  };
+  const Zt = {
+    Root: (props) => element("Zt.Root", props, props.children ?? []),
+    Header: (props) => element("Zt.Header", props, props.children ?? []),
+    Title: (props) => element("Zt.Title", props, props.children ?? []),
+    CloseButton: (props) => element("Zt.CloseButton", props),
+    Body: (props) => element("Zt.Body", props, props.children ?? []),
+  };
+  const originalEyn = (props) => {
+    const [name, setName] = x.useState(formValues.name);
+    const [description, setDescription] = x.useState(formValues.description);
+    return element("stock-form", {
+      trigger: element("button", { "aria-label": "Add a Bot photo", onClick: () => { filePickerCalls += 1; } }),
+      submit: element("button", { onClick: () => props.onCreate({ name, description, avatarPngBase64: null }) }),
+      name,
+      description,
+      setName,
+      setDescription,
+    });
+  };
+  const context = {
+    window: { get openbotProtocol() { return protocol.value; } },
+    Eyn: originalEyn,
+    M4n: (props) => element("M4n", props),
+    Jee: () => "blob",
+    Lee: () => "black",
+    rd: "SandRenderer",
+    Re: (props) => element("Re", { ...props, translatedText: translations[props.id] }),
+    Zt,
+    p,
+    x,
+    Pq: ["blob", "pebble", "squircle", "tablet", "wedge", "hex", "cloud", "teardrop", "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly", "terminal", "robot", "microchip", "drone"],
+    DQ: ["black", "brown", "red", "orange", "yellow", "green", "cyan", "blue", "violet", "magenta", "gray"].map((id) => ({ id })),
+  };
+  vm.runInNewContext(OPENBOT_NEW_BOT_AVATAR_PICKER, context, { filename: "openbot-avatar-picker-reconciled.cjs" });
+
+  function find(node, predicate) {
+    if (node == null || typeof node !== "object") return null;
+    if (predicate(node)) return node;
+    const children = node.props?.children;
+    if (Array.isArray(children)) {
+      for (const child of children) {
+        const found = find(child, predicate);
+        if (found) return found;
+      }
+    } else if (children != null) {
+      const found = find(children, predicate);
+      if (found) return found;
+    }
+    for (const value of Object.values(node.props ?? {})) {
+      if (value === children || typeof value === "function") continue;
+      const found = find(value, predicate);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const parentCreate = (values) => {
+    createdArgs = values;
+  };
+
+  return {
+    context,
+    render() {
+      let tree;
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        didUpdate = false;
+        pendingEffects = [];
+        tree = reconcile(element(context.Eyn, { onCreate: parentCreate }), "0");
+        const effects = pendingEffects;
+        pendingEffects = [];
+        for (const effect of effects) effect();
+        if (!didUpdate) return tree;
+      }
+      throw new Error("reconciler did not settle");
+    },
+    find,
+    protocol,
+    focusCalls: () => focusCalls,
+    filePickerCalls: () => filePickerCalls,
+    createdArgs: () => createdArgs,
+  };
+}
+
+async function executeNewBotCreateFragments(resolveFragment, dispatchFragment, values) {
+  const source = `(async function run(Ee, spy) {
+    const x = { useCallback: (callback) => callback };
+    const roster = { createAgent: async (request) => { spy(request); return { agent: { id: "created" } }; } };
+    const launcher = { beginCreation: () => ({}), teammateContext: () => null };
+    const Jyn = async (n, e, t) => n.createAgent({
+      name: t.name,
+      description: t.description,
+      origin: "user",
+      isKickstartRequested: true,
+      ...t.templateId != null ? { templateId: t.templateId } : {},
+      ...t.avatarShape != null ? { avatarShape: t.avatarShape } : {},
+      ...t.avatarColor != null ? { avatarColor: t.avatarColor } : {},
+    });
+    const re = async (request) => Jyn(roster, launcher, request);
+    const ae = async (Ee) => { ${resolveFragment} return Ae; };
+    ${dispatchFragment}
+    return ee(Ee);
+  })`;
+  const run = vm.runInNewContext(source, {}, { filename: "new-bot-create-fragments.cjs" });
+  let captured = null;
+  await run(values, (request) => { captured = request; });
+  return captured;
+}
+
+function createEvaluatedM4nHarness(patched) {
+  const start = patched.indexOf("function M4n(n){");
+  const end = patched.indexOf("class O4n", start);
+  assert.ok(start >= 0, "patched M4n function is missing");
+  assert.ok(end > start, "patched M4n end anchor is missing");
+  const segment = patched.slice(start, end);
+  const cache = [];
+  const context = {
+    ye: { c: () => cache },
+    Pq: ["blob", "pebble", "squircle", "tablet", "wedge", "hex", "cloud", "teardrop", "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly", "terminal", "robot", "microchip", "drone"],
+    DQ: ["black", "brown", "red", "orange", "yellow", "green", "cyan", "blue", "violet", "magenta", "gray"].map((id) => ({ id })),
+    p: {
+      jsx(type, props = {}, key) { return { type, props: { ...props, key } }; },
+      jsxs(type, props = {}, key) { return { type, props: { ...props, key } }; },
+    },
+  };
+  vm.runInNewContext(`${segment};globalThis.M4n=M4n;`, context, { filename: "evaluated-m4n.cjs" });
+  return {
+    cache,
+    render(props) { return context.M4n(props); },
+  };
 }
 
 const GEOMETRY_EPSILON = 1e-6;
@@ -568,6 +994,16 @@ test("avatar patch adds every geometry and visible choice and reverses exactly",
   assert.throws(() => patchAvatarCatalogSource("missing"), /not found/i);
 });
 
+test("avatar registry exposes the exact full twenty-shape Sand choice list", () => {
+  const visibleShapes = JSON.parse(OPENBOT_VISIBLE_SHAPES.slice("const Pq=".length));
+  assert.deepEqual(visibleShapes, [
+    "blob", "pebble", "squircle", "tablet", "wedge", "hex", "cloud", "teardrop",
+    "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly",
+    "terminal", "robot", "microchip", "drone",
+  ]);
+  assert.equal(visibleShapes.length, 20);
+});
+
 test("avatar rounded geometry has safe radii and no non-adjacent crossings", () => {
   const entries = parseRoundedGeometryEntries(OPENBOT_GEOMETRY_TAIL);
   assert.equal(entries.length, 11);
@@ -627,7 +1063,7 @@ test("the explicit local protocol bypasses only the native onboarding child", ()
       preserved,
     );
   }
-  assert.equal((patched.match(/mode==="local-protocol"/g) ?? []).length, 2);
+  assert.equal((patched.match(/mode==="local-protocol"/g) ?? []).length, 3);
   assert.doesNotMatch(patched, /window\.openbotProtocol[^}]+Upe|window\.openbotProtocol[^}]+checking/);
 });
 
@@ -733,6 +1169,687 @@ test("the pinned renderer restores Grok New Bot and adds the bot-scoped Computer
   );
   assert.doesNotMatch(patched, new RegExp(STOCK_NEW_BOT_RECIPIENT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.doesNotMatch(patched, new RegExp(STOCK_NEW_BOT_COMMIT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("local Create-your-own photo control opens the native Sand character chooser", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  assert.match(patched, /openbotNewBotAvatarPickerLocalProtocol/);
+  assert.match(patched, /window\.openbotProtocol\?\.schemaVersion===1&&window\.openbotProtocol\?\.mode==="local-protocol"/);
+  assert.match(patched, /openbotNewBotAvatarPickerMenu/);
+  assert.match(patched, /M4n/);
+  assert.match(patched, /event\.preventDefault\(\),event\.stopPropagation\(\)/);
+  assert.match(patched, /avatarShape/);
+  assert.match(patched, /avatarColor/);
+  assert.equal((patched.match(/openbotNewBotAvatarPickerLocalProtocol/g) ?? []).length, 2);
+});
+
+test("native Ozn dispatch and resolve fragments preserve explicit shape and color through Jyn", async () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  const patchedResolveAt = patched.indexOf(OPENBOT_NEW_BOT_CREATE_RESOLVE);
+  const patchedDispatchAt = patched.indexOf(OPENBOT_NEW_BOT_CREATE_DISPATCH);
+  assert.ok(patchedResolveAt >= 0);
+  assert.ok(patchedDispatchAt >= 0);
+  const createArgs = await executeNewBotCreateFragments(
+    patched.slice(patchedResolveAt, patchedResolveAt + OPENBOT_NEW_BOT_CREATE_RESOLVE.length),
+    patched.slice(patchedDispatchAt, patchedDispatchAt + OPENBOT_NEW_BOT_CREATE_DISPATCH.length),
+    {
+      name: "Luna",
+      description: "Preserve me",
+      avatarPngBase64: "data:image/png;base64,avatar",
+      avatarShape: "cat",
+      avatarColor: "violet",
+    },
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(createArgs)), {
+    name: "Luna",
+    description: "Preserve me",
+    origin: "user",
+    isKickstartRequested: true,
+    avatarShape: "cat",
+    avatarColor: "violet",
+  });
+  assert.match(patched, /avatarShape:Ee\.avatarShape/);
+  assert.match(patched, /avatarColor:Ee\.avatarColor/);
+  assert.doesNotMatch(
+    patched,
+    new RegExp(STOCK_NEW_BOT_CREATE_RESOLVE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.doesNotMatch(
+    patched,
+    new RegExp(STOCK_NEW_BOT_CREATE_DISPATCH.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+});
+
+test("native Ozn/Jyn create path omits the unselected one-sided avatar field", async () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+  const resolve = patched.slice(
+    patched.indexOf(OPENBOT_NEW_BOT_CREATE_RESOLVE),
+    patched.indexOf(OPENBOT_NEW_BOT_CREATE_RESOLVE) + OPENBOT_NEW_BOT_CREATE_RESOLVE.length,
+  );
+  const dispatch = patched.slice(
+    patched.indexOf(OPENBOT_NEW_BOT_CREATE_DISPATCH),
+    patched.indexOf(OPENBOT_NEW_BOT_CREATE_DISPATCH) + OPENBOT_NEW_BOT_CREATE_DISPATCH.length,
+  );
+  const common = {
+    name: "Luna",
+    description: "Preserve me",
+    avatarPngBase64: "data:image/png;base64,avatar",
+  };
+  const shapeOnly = await executeNewBotCreateFragments(
+    resolve,
+    dispatch,
+    { ...common, avatarShape: "cat" },
+  );
+  assert.equal(Object.hasOwn(shapeOnly, "avatarShape"), true);
+  assert.equal(Object.hasOwn(shapeOnly, "avatarColor"), false);
+  const colorOnly = await executeNewBotCreateFragments(
+    resolve,
+    dispatch,
+    { ...common, avatarColor: "violet" },
+  );
+  assert.equal(Object.hasOwn(colorOnly, "avatarShape"), false);
+  assert.equal(Object.hasOwn(colorOnly, "avatarColor"), true);
+});
+
+test("avatar picker definition is module-scope adjacent to the registry, not inside Ozn commit rendering", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+  const registryAt = patched.indexOf(OPENBOT_VISIBLE_SHAPES);
+  const pickerAt = patched.indexOf(OPENBOT_NEW_BOT_AVATAR_PICKER);
+  const commitAt = patched.indexOf(OPENBOT_NEW_BOT_COMMIT);
+  assert.equal(registryAt >= 0, true);
+  assert.equal(pickerAt, registryAt + OPENBOT_VISIBLE_SHAPES.length);
+  assert.notEqual(pickerAt, commitAt + OPENBOT_NEW_BOT_COMMIT.length);
+  assert.doesNotMatch(
+    patched,
+    /openbotNewBotAvatarPickerLocalProtocol\(\)\)return openbotOriginalCreateOwnForm\(n\);const \{onCreate\}=n,\[staged/,
+  );
+});
+
+test("avatar picker keeps hook order stable across local and non-local rerenders and validates registry values at runtime", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+  assert.match(patched, /const \[staged,setStaged\]=x\.useState\(null\)/);
+  assert.match(patched, /Pq\.includes\(staged\.avatarShape\)/);
+  assert.match(patched, /DQ\.some\(.*staged\.avatarColor/s);
+  assert.match(patched, /throw new Error\("New Bot avatar shape is unavailable"\)/);
+  assert.match(patched, /throw new Error\("New Bot avatar color is unavailable"\)/);
+  assert.match(patched, /isCharacterActive:active/);
+  assert.match(patched, /active=Boolean\(staged\?\.avatarShape!=null&&staged\?\.avatarColor!=null\)/);
+});
+
+test("stock M4n keeps independent explicit shape and color pressed states", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+  assert.match(patched, /shapeIsExplicit:a=i,colorIsExplicit:c=i/);
+  assert.match(patched, /const O=a&&f===M/);
+  assert.equal((patched.match(/c&&d===M\.id/g) ?? []).length, 3);
+  assert.equal((patched.match(/i&&d===M\.id/g) ?? []).length, 0);
+  assert.match(patched, /e\[11\]!==i\+"\|"\+a/);
+  assert.match(patched, /e\[11\]=i\+"\|"\+a/);
+  assert.match(patched, /e\[23\]!==i\+"\|"\+c/);
+  assert.match(patched, /e\[23\]=i\+"\|"\+c/);
+  assert.match(patched, /shapeIsExplicit:staged\?\.avatarShape!=null/);
+  assert.match(patched, /colorIsExplicit:staged\?\.avatarColor!=null/);
+});
+
+test("evaluated transformed M4n renders independent pressed states and refreshes memoized choices", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+  const harness = createEvaluatedM4nHarness(patched);
+  const commits = [];
+  const base = {
+    agent: { id: "create-your-own", avatarShape: null, avatarColor: null },
+    character: { commitCharacter: (value) => commits.push(value) },
+    isCharacterActive: false,
+  };
+  const shapeOnly = {
+    ...base,
+    staged: { avatarShape: "cat" },
+    shapeIsExplicit: true,
+    colorIsExplicit: false,
+  };
+  let tree = harness.render(shapeOnly);
+  let shapeButtons = tree.props.children[0];
+  let colorButtons = tree.props.children[1];
+  assert.equal(shapeButtons.find((button) => button.props.key === "cat").props["aria-pressed"], true);
+  assert.equal(colorButtons.filter((button) => button.props["aria-pressed"]).length, 0);
+  shapeButtons.find((button) => button.props.key === "cat").props.onClick();
+  assert.deepEqual(JSON.parse(JSON.stringify(commits.at(-1))), { avatarShape: "cat" });
+
+  tree = harness.render({ ...shapeOnly, shapeIsExplicit: false });
+  assert.equal(tree.props.children[0].filter((button) => button.props["aria-pressed"]).length, 0);
+  tree = harness.render(shapeOnly);
+  assert.equal(tree.props.children[0].find((button) => button.props.key === "cat").props["aria-pressed"], true);
+
+  const colorOnly = {
+    ...base,
+    staged: { avatarColor: "violet" },
+    shapeIsExplicit: false,
+    colorIsExplicit: true,
+  };
+  tree = harness.render(colorOnly);
+  shapeButtons = tree.props.children[0];
+  colorButtons = tree.props.children[1];
+  assert.equal(shapeButtons.filter((button) => button.props["aria-pressed"]).length, 0);
+  assert.equal(colorButtons.find((button) => button.props.key === "violet").props["aria-pressed"], true);
+  assert.equal(colorButtons.filter((button) => button.props["aria-pressed"]).length, 1);
+  colorButtons.find((button) => button.props.key === "violet").props.onClick();
+  assert.deepEqual(JSON.parse(JSON.stringify(commits.at(-1))), { avatarColor: "violet" });
+
+  tree = harness.render({ ...colorOnly, colorIsExplicit: false });
+  assert.equal(tree.props.children[1].filter((button) => button.props["aria-pressed"]).length, 0);
+  tree = harness.render(colorOnly);
+  assert.equal(tree.props.children[1].find((button) => button.props.key === "violet").props["aria-pressed"], true);
+});
+
+test("avatar picker uses the stock Sand modal primitives and preventScroll focus restoration", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+  assert.match(patched, /Zt\.Root/);
+  assert.match(patched, /Zt\.Header/);
+  assert.match(patched, /Zt\.Title/);
+  assert.match(patched, /Zt\.CloseButton/);
+  assert.match(patched, /Zt\.Body/);
+  assert.match(patched, /onOpenChange/);
+  assert.match(patched, /p\.jsx\(Re,\{id:"5XRPbV"\}\)/);
+  assert.match(patched, /focus\?\.\(\{preventScroll:!0\}\)/);
+  assert.doesNotMatch(patched, /aria-label:"Back"/);
+  assert.doesNotMatch(patched, /["']aria-label["']:\"Character\"/);
+});
+
+test("executable picker harness covers local/non-local click paths, staging, rerender, dismissal, focus, and final create args", () => {
+  const harness = createPickerBrowserHarness();
+  let tree = harness.render();
+  const root = tree;
+  const trigger = harness.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+  assert.ok(trigger);
+  const localEvent = {
+    target: { closest: () => trigger },
+    prevented: false,
+    stopped: false,
+    preventDefault() { this.prevented = true; },
+    stopPropagation() { this.stopped = true; },
+  };
+  root.props.onClickCapture(localEvent);
+  assert.equal(localEvent.prevented, true);
+  assert.equal(localEvent.stopped, true);
+  tree = harness.render();
+  let modal = harness.find(tree, (node) => node.type === "Zt.Root");
+  assert.ok(modal);
+  const title = harness.find(modal, (node) => node.type === "Zt.Title");
+  const localizedTitle = harness.find(title, (node) => node.type === "Re");
+  assert.equal(localizedTitle.props.id, "5XRPbV");
+  assert.equal(localizedTitle.props.translatedText, "Editar avatar");
+  let character = harness.find(tree, (node) => node.type === "M4n");
+  assert.ok(character);
+  assert.equal(character.props.isCharacterActive, false);
+  assert.equal(harness.find(tree, (node) => node.type === "SandRenderer"), null);
+  character.props.character.commitCharacter({ avatarShape: "cat" });
+  tree = harness.render();
+  character = harness.find(tree, (node) => node.type === "M4n");
+  assert.equal(character.props.isCharacterActive, false);
+  assert.equal(character.props.shapeIsExplicit, true);
+  assert.equal(character.props.colorIsExplicit, false);
+  character.props.character.commitCharacter({ avatarColor: "violet" });
+  tree = harness.render();
+  character = harness.find(tree, (node) => node.type === "M4n");
+  assert.equal(character.props.isCharacterActive, true);
+  assert.equal(character.props.shapeIsExplicit, true);
+  assert.equal(character.props.colorIsExplicit, true);
+  const preview = harness.find(tree, (node) => node.type === "SandRenderer");
+  assert.deepEqual(
+    (({ color, paused, shape, sizePx }) => ({ color, paused, shape, sizePx }))(preview.props),
+    { color: "violet", paused: true, shape: "cat", sizePx: 64 },
+  );
+  modal = harness.find(tree, (node) => node.type === "Zt.Root");
+  assert.ok(harness.find(modal, (node) => node.type === "Zt.CloseButton"));
+  let closeButtonResult;
+  const closeButtonOnOpenChange = modal.props.onOpenChange;
+  modal.props.onOpenChange = (open) => {
+    closeButtonResult = open;
+    closeButtonOnOpenChange(open);
+  };
+  // CloseButton is the stock primitive; this invokes the callback boundary it owns.
+  modal.props.onOpenChange(false);
+  assert.equal(closeButtonResult, false);
+  tree = harness.render();
+  assert.equal(harness.find(tree, (node) => node.type === "Zt.Root"), null);
+  assert.equal(harness.focusCalls().at(-1)?.preventScroll, true);
+  const form = harness.find(tree, (node) => node.type === "stock-form");
+  assert.equal(form.props.name, "Luna");
+  assert.equal(form.props.description, "Preserve me");
+  form.props.submit.props.onClick();
+  assert.deepEqual(harness.createdArgs(), {
+    name: "Luna",
+    description: "Preserve me",
+    avatarPngBase64: null,
+    avatarShape: "cat",
+    avatarColor: "violet",
+  });
+  harness.protocol.value = { schemaVersion: 1, mode: "local-protocol" };
+  tree = harness.render();
+  const reopenTrigger = harness.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+  const reopenEvent = {
+    target: { closest: () => reopenTrigger },
+    preventDefault() {},
+    stopPropagation() {},
+  };
+  tree.props.onClickCapture(reopenEvent);
+  tree = harness.render();
+  modal = harness.find(tree, (node) => node.type === "Zt.Root");
+  // The genuine Sand Root turns Escape into onOpenChange(false).
+  let escapeResult;
+  const escapeOnOpenChange = modal.props.onOpenChange;
+  modal.props.onOpenChange = (open) => {
+    escapeResult = open;
+    escapeOnOpenChange(open);
+  };
+  modal.props.onOpenChange(false);
+  assert.equal(escapeResult, false);
+  tree = harness.render();
+  assert.equal(harness.find(tree, (node) => node.type === "Zt.Root"), null);
+  assert.equal(harness.focusCalls().at(-1)?.preventScroll, true);
+  const backdropTrigger = harness.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+  tree.props.onClickCapture({
+    target: { closest: () => backdropTrigger },
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  tree = harness.render();
+  modal = harness.find(tree, (node) => node.type === "Zt.Root");
+  let backdropResult;
+  const backdropOnOpenChange = modal.props.onOpenChange;
+  modal.props.onOpenChange = (open) => {
+    backdropResult = open;
+    backdropOnOpenChange(open);
+  };
+  modal.props.onOpenChange(false);
+  assert.equal(backdropResult, false);
+  tree = harness.render();
+  assert.equal(harness.find(tree, (node) => node.type === "Zt.Root"), null);
+  assert.equal(harness.focusCalls().at(-1)?.preventScroll, true);
+  harness.protocol.value = { schemaVersion: 1, mode: "remote" };
+  tree = harness.render();
+  const nonLocalTrigger = harness.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+  nonLocalTrigger.props.onClick();
+  assert.equal(harness.filePickerCalls(), 1);
+
+  const hostile = createPickerBrowserHarness();
+  tree = hostile.render();
+  const hostileTrigger = hostile.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+  tree.props.onClickCapture({
+    target: { closest: () => hostileTrigger },
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  tree = hostile.render();
+  character = hostile.find(tree, (node) => node.type === "M4n");
+  character.props.character.commitCharacter({ avatarShape: "hostile-shape" });
+  tree = hostile.render();
+  const hostileForm = hostile.find(tree, (node) => node.type === "stock-form");
+  assert.throws(() => hostileForm.props.submit.props.onClick(), /shape.*unavailable/i);
+  assert.equal(hostile.createdArgs(), null);
+});
+
+test("one-sided shape and color choices remain pressed across reopen and send only explicit fields", () => {
+  const exercise = (field, value, expectedFlags, expectedArgs) => {
+    const harness = createPickerBrowserHarness();
+    let tree = harness.render();
+    const trigger = harness.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+    tree.props.onClickCapture({
+      target: { closest: () => trigger },
+      preventDefault() {},
+      stopPropagation() {},
+    });
+    tree = harness.render();
+    let character = harness.find(tree, (node) => node.type === "M4n");
+    character.props.character.commitCharacter({ [field]: value });
+    tree = harness.render();
+    character = harness.find(tree, (node) => node.type === "M4n");
+    assert.equal(character.props.isCharacterActive, false);
+    assert.deepEqual(
+      { shapeIsExplicit: character.props.shapeIsExplicit, colorIsExplicit: character.props.colorIsExplicit },
+      expectedFlags,
+    );
+
+    const modal = harness.find(tree, (node) => node.type === "Zt.Root");
+    modal.props.onOpenChange(false);
+    tree = harness.render();
+    const form = harness.find(tree, (node) => node.type === "stock-form");
+    form.props.submit.props.onClick();
+    assert.deepEqual(harness.createdArgs(), expectedArgs);
+
+    const reopen = harness.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+    tree.props.onClickCapture({
+      target: { closest: () => reopen },
+      preventDefault() {},
+      stopPropagation() {},
+    });
+    tree = harness.render();
+    character = harness.find(tree, (node) => node.type === "M4n");
+    assert.deepEqual(
+      { shapeIsExplicit: character.props.shapeIsExplicit, colorIsExplicit: character.props.colorIsExplicit },
+      expectedFlags,
+    );
+  };
+
+  exercise(
+    "avatarShape",
+    "cat",
+    { shapeIsExplicit: true, colorIsExplicit: false },
+    { name: "Luna", description: "Preserve me", avatarPngBase64: null, avatarShape: "cat" },
+  );
+  exercise(
+    "avatarColor",
+    "violet",
+    { shapeIsExplicit: false, colorIsExplicit: true },
+    { name: "Luna", description: "Preserve me", avatarPngBase64: null, avatarColor: "violet" },
+  );
+});
+
+test("local character choice stages only explicit shape/color and preserves form values on back", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  assert.match(patched, /openbotNewBotAvatarPickerMerge/);
+  assert.match(patched, /onCreate:openbotNewBotAvatarPickerMerge/);
+  assert.match(patched, /n\.onCreate\(openbotNewBotAvatarPickerMerge\(value,staged\)\)/);
+  assert.match(patched, /staged/);
+  assert.match(patched, /openbotNewBotAvatarPickerBack/);
+  assert.match(patched, /querySelector\('button\[aria-label\*="Bot photo"\]'\)/);
+  assert.match(patched, /\.focus\?\.\(\{preventScroll:!0\}\)/);
+  assert.match(patched, /next\.avatarShape=staged\.avatarShape/);
+  assert.match(patched, /next\.avatarColor=staged\.avatarColor/);
+});
+
+test("stock Create-your-own keeps the original file-photo form behind the local predicate", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  assert.match(patched, /style:\{display:"contents"\}/);
+  assert.match(patched, /onClickCapture:local\?openPicker:void 0/);
+  assert.match(
+    patched,
+    /p\.jsx\(openbotOriginalCreateOwnForm,local\?\{\.\.\.n,onCreate:openbotNewBotAvatarPickerMergeForCreate\}:n,"openbot-new-bot-create-own-form"\)/,
+  );
+  assert.match(patched, /openbotOriginalCreateOwnForm/);
+  assert.doesNotMatch(patched, /pickAvatarSource\(\).*openbotNewBotAvatarPickerMenu/);
+});
+
+test("wrapper keeps the original Create-your-own child boundary and form hooks stable across protocol transitions", () => {
+  const exercise = (modes) => {
+    const harness = createPickerBrowserHarness();
+    let tree;
+    for (const [index, mode] of modes.entries()) {
+      harness.protocol.value = { schemaVersion: 1, mode };
+      tree = harness.render();
+      const form = harness.find(tree, (node) => node.type === "stock-form");
+      assert.ok(form);
+      if (index === 0) {
+        form.props.setName("Nova");
+        form.props.setDescription("State survives");
+        tree = harness.render();
+      }
+      const currentForm = harness.find(tree, (node) => node.type === "stock-form");
+      assert.deepEqual(
+        { name: currentForm.props.name, description: currentForm.props.description },
+        { name: "Nova", description: "State survives" },
+      );
+    }
+  };
+
+  exercise(["remote", "local", "remote"]);
+  exercise(["local", "remote", "local"]);
+});
+
+test("real reconciliation keeps one layout-neutral root, form state, and staged choices across protocol transitions", () => {
+  const { patchVendorRendererSource } = require(patchPath);
+  const patched = patchVendorRendererSource(
+    SYNTHETIC_VENDOR_RENDERER,
+    sha256Text(SYNTHETIC_VENDOR_RENDERER),
+  );
+
+  function openAndStage(harness, tree) {
+    const trigger = harness.find(tree, (node) => node.type === "button" && node.props["aria-label"] === "Add a Bot photo");
+    assert.ok(trigger);
+    const event = {
+      target: { closest: () => trigger },
+      preventDefault() {},
+      stopPropagation() {},
+    };
+    assert.equal(typeof tree.props.onClickCapture, "function");
+    tree.props.onClickCapture(event);
+    tree = harness.render();
+    let character = harness.find(tree, (node) => node.type === "M4n");
+    assert.ok(character);
+    character.props.character.commitCharacter({ avatarShape: "cat" });
+    tree = harness.render();
+    character = harness.find(tree, (node) => node.type === "M4n");
+    character.props.character.commitCharacter({ avatarColor: "violet" });
+    return harness.render();
+  }
+
+  function exercise(modes, stageBeforeTransition) {
+    const harness = createReconciledPickerBrowserHarness();
+    let tree;
+    harness.protocol.value = { schemaVersion: 1, mode: modes[0] };
+    tree = harness.render();
+    let form = harness.find(tree, (node) => node.type === "stock-form");
+    assert.ok(form);
+    form.props.setName("Nova");
+    form.props.setDescription("State survives");
+    tree = harness.render();
+    if (stageBeforeTransition) tree = openAndStage(harness, tree);
+
+    for (const mode of modes.slice(1)) {
+      harness.protocol.value = { schemaVersion: 1, mode };
+      tree = harness.render();
+      assert.equal(tree.type, "div");
+      assert.equal(tree.props.style.display, "contents");
+      form = harness.find(tree, (node) => node.type === "stock-form");
+      assert.deepEqual(
+        { name: form.props.name, description: form.props.description },
+        { name: "Nova", description: "State survives" },
+      );
+      if (mode !== "local-protocol") {
+        assert.equal(harness.find(tree, (node) => node.type === "Zt.Root"), null);
+        assert.equal(tree.props.onClickCapture, undefined);
+      }
+      if (mode === "local-protocol") {
+        const character = harness.find(tree, (node) => node.type === "M4n");
+        assert.equal(character, null, "local reopening must wait for the photo trigger");
+        tree = openAndStage(harness, tree);
+      }
+    }
+
+    if (modes.at(-1) === "local-protocol") {
+      const character = harness.find(tree, (node) => node.type === "M4n");
+      assert.equal(character.props.staged.avatarShape, "cat");
+      assert.equal(character.props.staged.avatarColor, "violet");
+    }
+  }
+
+  // The first route exercises remote -> local -> remote and local reopening;
+  // the second exercises the inverse local -> remote -> local route.
+  exercise(["remote", "local-protocol", "remote", "local-protocol"], false);
+  exercise(["local-protocol", "remote", "local-protocol"], true);
+
+  assert.match(patched, /style:\{display:"contents"\}/);
+  assert.match(patched, /onClickCapture:local\?openPicker/);
+  assert.doesNotMatch(patched, /if\(!local\)return p\.jsx\(openbotOriginalCreateOwnForm,n\)/);
+  assert.match(patched, /p\.jsx\(openbotOriginalCreateOwnForm,local\?\{\.\.\.n,onCreate:openbotNewBotAvatarPickerMergeForCreate\}:n,"openbot-new-bot-create-own-form"\)/);
+});
+
+test("new-bot avatar picker staging omits defaults and preserves explicit form values", () => {
+  const form = { name: "Luna", description: "A focused helper", avatarPngBase64: null };
+  const untouched = mergeNewBotAvatarSelection(form, null);
+  assert.deepEqual(untouched, form);
+  assert.equal(Object.hasOwn(untouched, "avatarShape"), false);
+  assert.equal(Object.hasOwn(untouched, "avatarColor"), false);
+  assert.deepEqual(
+    mergeNewBotAvatarSelection(form, { avatarShape: "cat", avatarColor: "violet" }),
+    { ...form, avatarShape: "cat", avatarColor: "violet" },
+  );
+  assert.throws(
+    () => mergeNewBotAvatarSelection(form, { avatarShape: "not-a-shape" }),
+    /shape.*unavailable/i,
+  );
+  assert.throws(
+    () => mergeNewBotAvatarSelection(form, { avatarColor: "not-a-color" }),
+    /color.*unavailable/i,
+  );
+});
+
+test("new-bot avatar picker transform is byte-reversible and fails closed on anchor drift", () => {
+  const source = `before;${OPENBOT_VISIBLE_SHAPES};after`;
+  const patched = patchNewBotAvatarPickerSource(source);
+  assert.equal((patched.match(new RegExp(OPENBOT_NEW_BOT_AVATAR_PICKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")) ?? []).length, 1);
+  assert.equal(reverseNewBotAvatarPickerSource(patched), source);
+  assert.throws(
+    () => patchNewBotAvatarPickerSource(`${patched}${OPENBOT_VISIBLE_SHAPES}`),
+    /already|ambiguous/i,
+  );
+  assert.throws(
+    () => patchNewBotAvatarPickerSource(source.replace(OPENBOT_VISIBLE_SHAPES, "missing")),
+    /not found|ambiguous/i,
+  );
+  assert.throws(() => reverseNewBotAvatarPickerSource(source), /adjacent|not found|ambiguous/i);
+  assert.throws(
+    () => reverseNewBotAvatarPickerSource(`${patched}${OPENBOT_NEW_BOT_AVATAR_PICKER}`),
+    /adjacent|not found|ambiguous/i,
+  );
+  assert.throws(
+    () => patchNewBotAvatarPickerSource(`${VENDOR_VISIBLE_SHAPES};${OPENBOT_VISIBLE_SHAPES}`),
+    /mixed|ambiguous/i,
+  );
+});
+
+test("new-bot avatar picker inverse requires exact registry/picker adjacency", () => {
+  const source = `before;${OPENBOT_VISIBLE_SHAPES};after`;
+  let patched;
+  assert.doesNotThrow(() => { patched = patchNewBotAvatarPickerSource(source); });
+  assert.equal(reverseNewBotAvatarPickerSource(patched), source);
+  assert.throws(
+    () => reverseNewBotAvatarPickerSource(`${OPENBOT_VISIBLE_SHAPES}gap${OPENBOT_NEW_BOT_AVATAR_PICKER}`),
+    /adjacent/i,
+  );
+  assert.throws(
+    () => reverseNewBotAvatarPickerSource(`${OPENBOT_VISIBLE_SHAPES}${OPENBOT_NEW_BOT_AVATAR_PICKER}moved${OPENBOT_NEW_BOT_AVATAR_PICKER}`),
+    /ambiguous|adjacent/i,
+  );
+});
+
+test("new-bot create payload inverse round-trips adjacent resolve and dispatch anchors exactly", () => {
+  const rendererPatch = require(patchPath);
+  assert.equal(typeof rendererPatch.reverseNewBotCreatePayloadSource, "function");
+  const source = `before;${STOCK_NEW_BOT_CREATE_RESOLVE}middle;${STOCK_NEW_BOT_CREATE_DISPATCH};after`;
+  const patched = rendererPatch.patchNewBotCreatePayloadSource(source);
+  assert.equal(rendererPatch.reverseNewBotCreatePayloadSource(patched), source);
+
+  const duplicateResolve = `before;${STOCK_NEW_BOT_CREATE_RESOLVE}${STOCK_NEW_BOT_CREATE_RESOLVE}${STOCK_NEW_BOT_CREATE_DISPATCH};after`;
+  const duplicateDispatch = `before;${STOCK_NEW_BOT_CREATE_RESOLVE}${STOCK_NEW_BOT_CREATE_DISPATCH}${STOCK_NEW_BOT_CREATE_DISPATCH};after`;
+  const mixed = `before;${OPENBOT_NEW_BOT_CREATE_RESOLVE}${STOCK_NEW_BOT_CREATE_DISPATCH};after`;
+  const alreadyReversed = source;
+  for (const invalid of [
+    "before;missing;after",
+    `before;${STOCK_NEW_BOT_CREATE_RESOLVE};after`,
+    `before;${STOCK_NEW_BOT_CREATE_DISPATCH};after`,
+    duplicateResolve,
+    duplicateDispatch,
+    mixed,
+    alreadyReversed,
+  ]) {
+    assert.throws(
+      () => rendererPatch.reverseNewBotCreatePayloadSource(invalid),
+      /missing|not found|ambiguous|mixed|already|patched/i,
+    );
+  }
+  assert.throws(
+    () => rendererPatch.patchNewBotCreatePayloadSource(`${source}${STOCK_NEW_BOT_CREATE_RESOLVE}`),
+    /ambiguous|already|mixed/i,
+  );
+});
+
+test("M4n transform has an exact inverse and fails closed on every segment anchor state", () => {
+  const rendererPatch = require(patchPath);
+  assert.equal(typeof rendererPatch.patchNewBotCharacterEditorSource, "function");
+  assert.equal(typeof reverseNewBotCharacterEditorSource, "function");
+  const stock = `before;${STOCK_M4N_FRAGMENT};after`;
+  const patched = rendererPatch.patchNewBotCharacterEditorSource(stock);
+  assert.equal(reverseNewBotCharacterEditorSource(patched), stock);
+  assert.throws(
+    () => rendererPatch.patchNewBotCharacterEditorSource(patched),
+    /already|ambiguous|patched/i,
+  );
+  assert.throws(
+    () => reverseNewBotCharacterEditorSource(stock),
+    /already|reversed|ambiguous/i,
+  );
+  assert.throws(
+    () => rendererPatch.patchNewBotCharacterEditorSource(`${stock}${STOCK_M4N_FRAGMENT}`),
+    /ambiguous|duplicate/i,
+  );
+  assert.throws(
+    () => reverseNewBotCharacterEditorSource(`${patched}${patched}`),
+    /ambiguous|duplicate/i,
+  );
+  assert.throws(
+    () => rendererPatch.patchNewBotCharacterEditorSource(`${stock}class O4n`),
+    /ambiguous|duplicate|end anchor/i,
+  );
+  assert.throws(
+    () => reverseNewBotCharacterEditorSource(`${patched}class O4n`),
+    /ambiguous|duplicate|end anchor/i,
+  );
+  assert.throws(
+    () => rendererPatch.patchNewBotCharacterEditorSource("missing"),
+    /not found|anchor/i,
+  );
+  assert.throws(
+    () => reverseNewBotCharacterEditorSource("missing"),
+    /not found|anchor/i,
+  );
+  const duplicateShape = stock.replace("const O=i&&f===M", "const O=i&&f===M;const O=i&&f===M");
+  assert.throws(
+    () => rendererPatch.patchNewBotCharacterEditorSource(duplicateShape),
+    /ambiguous|duplicate/i,
+  );
 });
 
 test("renderer onboarding has no local storage authority and the native Power subtree has no Computer controls", () => {
