@@ -3226,14 +3226,17 @@
         const state = element(documentRef, "span", "codex-provider-choice-state", "Not connected");
         state.id = `codex-${key}-${providerId}-state`;
         button.setAttribute("aria-describedby", state.id);
-        copy.append(title, description, state);
+        const selected = element(documentRef, "span", "codex-provider-choice-selected", "Selected");
+        selected.setAttribute("aria-hidden", "true");
+        selected.hidden = providerId !== surface.selectedProviderId;
+        copy.append(title, description, state, selected);
         if (presentation.recommended) {
           copy.append(element(documentRef, "span", "codex-provider-recommended", "Recommended"));
         }
         button.append(mark, copy);
         item.append(button);
         list.append(item);
-        surface.cards.set(providerId, { item, button, mark, title, description, state, providerId });
+        surface.cards.set(providerId, { item, button, mark, title, description, state, selected, providerId });
         button.addEventListener("click", () => {
           selectProvider(surface, providerId, { moveFocus: true });
         });
@@ -3670,6 +3673,7 @@
       card.state.dataset.state = connection.state;
       card.button.dataset.state = connection.state;
       card.title.textContent = connection.label;
+      card.selected.hidden = surface.selectedProviderId !== connection.providerId;
     }
 
     function renderProviderSurface(surface) {

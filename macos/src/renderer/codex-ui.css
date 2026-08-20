@@ -21,8 +21,8 @@
   --codex-sand-text-primary: var(--sand-text-primary, var(--codex-text));
   --codex-sand-text-secondary: var(--sand-text-secondary, var(--codex-muted));
   --codex-sand-text-tertiary: var(--sand-text-tertiary, var(--codex-field));
-  --codex-sand-fill-secondary: var(--sand-bg-secondary, var(--codex-input));
-  --codex-sand-fill-secondary-hover: var(--sand-bg-secondary-hover, var(--codex-input-hover));
+  --codex-sand-fill-secondary: var(--sand-fill-secondary, var(--codex-input));
+  --codex-sand-fill-secondary-hover: var(--sand-fill-secondary-hover, var(--codex-input-hover));
   --codex-sand-border-subtle: var(--sand-border-subtle, color-mix(in srgb, var(--codex-border) 72%, transparent));
   --codex-sand-border-default: var(--sand-border-default, var(--codex-border));
   --codex-sand-border-focus: var(--sand-border-focus, var(--codex-blue));
@@ -50,8 +50,8 @@ body.light {
   --codex-sand-text-primary: var(--sand-text-primary, var(--codex-text));
   --codex-sand-text-secondary: var(--sand-text-secondary, var(--codex-muted));
   --codex-sand-text-tertiary: var(--sand-text-tertiary, var(--codex-field));
-  --codex-sand-fill-secondary: var(--sand-bg-secondary, var(--codex-input));
-  --codex-sand-fill-secondary-hover: var(--sand-bg-secondary-hover, var(--codex-input-hover));
+  --codex-sand-fill-secondary: var(--sand-fill-secondary, var(--codex-input));
+  --codex-sand-fill-secondary-hover: var(--sand-fill-secondary-hover, var(--codex-input-hover));
   --codex-sand-border-subtle: var(--sand-border-subtle, color-mix(in srgb, var(--codex-border) 72%, transparent));
   --codex-sand-border-default: var(--sand-border-default, var(--codex-border));
   --codex-sand-border-focus: var(--sand-border-focus, var(--codex-blue));
@@ -178,8 +178,10 @@ body.light {
   display: grid;
   gap: 8px;
   min-width: 0;
+  max-width: 100%;
   margin-top: 16px;
   padding-top: 16px;
+  overflow-x: hidden;
   border-top: 1px solid color-mix(in srgb, var(--codex-border) 76%, transparent);
   color: var(--codex-text);
   font: 500 12px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
@@ -227,12 +229,15 @@ body.light {
   display: grid;
   gap: 16px;
   min-width: 0;
+  max-width: 100%;
 }
 
 .codex-provider-choice-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -240,6 +245,7 @@ body.light {
 
 .codex-provider-choice {
   min-width: 0;
+  max-width: 100%;
 }
 
 .codex-provider-choice-button {
@@ -247,8 +253,11 @@ body.light {
   grid-template-columns: 32px minmax(0, 1fr);
   gap: 12px;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 76px;
   padding: 12px;
+  box-sizing: border-box;
   color: var(--codex-sand-text-primary);
   text-align: left;
   border: 1px solid var(--codex-sand-border-subtle);
@@ -286,19 +295,46 @@ body.light {
   display: grid;
   gap: 4px;
   min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .codex-provider-choice-label {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   font-size: 13px;
   line-height: 16px;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .codex-provider-choice-description,
 .codex-provider-choice-state {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   color: var(--codex-sand-text-secondary);
   font-size: 11px;
   line-height: 14px;
   overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.codex-provider-choice-selected {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--codex-sand-text-tertiary);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 12px;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.codex-provider-choice-selected[hidden] {
+  display: none;
 }
 
 .codex-provider-recommended {
@@ -311,7 +347,9 @@ body.light {
   display: grid;
   gap: 12px;
   min-width: 0;
+  max-width: 100%;
   padding: 16px;
+  box-sizing: border-box;
   color: var(--codex-sand-text-primary);
   border: 1px solid var(--codex-sand-border-subtle);
   border-radius: 12px;
@@ -320,7 +358,11 @@ body.light {
 
 .codex-provider-details-title,
 .codex-provider-details-status {
+  min-width: 0;
+  max-width: 100%;
   margin: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .codex-provider-details-title {
@@ -369,8 +411,12 @@ body.light {
 
 .codex-provider-connection-state,
 .codex-provider-connection-error {
+  min-width: 0;
+  max-width: 100%;
   color: var(--codex-muted);
   font-size: 10px;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .codex-provider-connection-error {
@@ -403,6 +449,8 @@ body.light {
 .codex-provider-connection-actions {
   display: flex;
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
   gap: 6px;
   align-items: center;
 }
@@ -411,7 +459,19 @@ body.light {
   grid-column: 1 / -1;
 }
 
-.codex-provider-connection-actions { justify-content: flex-end; }
+.codex-provider-connection-actions {
+  justify-content: flex-end;
+}
+
+.codex-provider-connection-actions button {
+  flex: 1 1 160px;
+  min-width: 0;
+  max-width: 100%;
+  height: auto;
+  min-height: 30px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 
 .codex-provider-connection-form input,
 .codex-provider-connection-form select {
@@ -421,7 +481,7 @@ body.light {
   padding: 0 7px;
 }
 
-.codex-ai-connections button,
+.codex-ai-connections > button,
 .codex-native-bot-settings button {
   min-height: 30px;
   padding: 0 10px;
@@ -432,7 +492,7 @@ body.light {
   font: inherit;
 }
 
-.codex-ai-connections button:hover:not(:disabled),
+.codex-ai-connections > button:hover:not(:disabled),
 .codex-native-bot-settings button:hover:not(:disabled) {
   background: var(--codex-input-hover);
 }
@@ -619,15 +679,33 @@ body.light {
   top: 0;
   z-index: 1;
   min-width: 0;
+  max-width: 100%;
   padding-bottom: 12px;
+  overflow-wrap: anywhere;
   background: var(--codex-advanced);
 }
 
 .codex-provider-picker-scroll {
   min-width: 0;
   min-height: 0;
+  max-width: 100%;
   overflow: auto;
+  overflow-x: hidden;
   overscroll-behavior: contain;
+}
+
+.codex-first-connection-title,
+.codex-first-connection-copy,
+.codex-first-connection-error,
+.codex-first-connection-status,
+.codex-first-connection-retry,
+.codex-ai-connections-copy,
+.codex-ai-connections-status,
+.codex-ai-connections-retry {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .codex-new-bot-setup::backdrop,
@@ -1585,8 +1663,8 @@ body.light {
     --codex-sand-text-primary: var(--sand-text-primary, var(--codex-text));
     --codex-sand-text-secondary: var(--sand-text-secondary, var(--codex-muted));
     --codex-sand-text-tertiary: var(--sand-text-tertiary, var(--codex-field));
-    --codex-sand-fill-secondary: var(--sand-bg-secondary, var(--codex-input));
-    --codex-sand-fill-secondary-hover: var(--sand-bg-secondary-hover, var(--codex-input-hover));
+    --codex-sand-fill-secondary: var(--sand-fill-secondary, var(--codex-input));
+    --codex-sand-fill-secondary-hover: var(--sand-fill-secondary-hover, var(--codex-input-hover));
     --codex-sand-border-subtle: var(--sand-border-subtle, color-mix(in srgb, var(--codex-border) 72%, transparent));
     --codex-sand-border-default: var(--sand-border-default, var(--codex-border));
     --codex-sand-border-focus: var(--sand-border-focus, var(--codex-blue));

@@ -14,6 +14,130 @@ const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
 const BOT_C = "bot-33333333-3333-4333-8333-333333333333";
 
+function cssRuleBody(css, selector) {
+  const start = css.indexOf(selector);
+  assert.notEqual(start, -1, `missing CSS selector: ${selector}`);
+  const open = css.indexOf("{", start);
+  const close = css.indexOf("}", open);
+  assert.ok(open > start && close > open, `malformed CSS rule: ${selector}`);
+  return css.slice(open + 1, close);
+}
+
+test("provider picker Sand aliases use exact upstream fill tokens in every theme scope", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  const aliases = [
+    ["--codex-sand-text-primary", "--sand-text-primary"],
+    ["--codex-sand-text-secondary", "--sand-text-secondary"],
+    ["--codex-sand-text-tertiary", "--sand-text-tertiary"],
+    ["--codex-sand-fill-secondary", "--sand-fill-secondary"],
+    ["--codex-sand-fill-secondary-hover", "--sand-fill-secondary-hover"],
+    ["--codex-sand-border-subtle", "--sand-border-subtle"],
+    ["--codex-sand-border-default", "--sand-border-default"],
+    ["--codex-sand-border-focus", "--sand-border-focus"],
+  ];
+  const dark = cssRuleBody(css, ":root {");
+  const explicitLight = cssRuleBody(css, ':root[data-theme="light"]');
+  const mediaLightStart = css.indexOf("@media (prefers-color-scheme: light)");
+  assert.ok(mediaLightStart >= 0, "missing prefers-color-scheme light token scope");
+  const mediaLight = css.slice(mediaLightStart);
+  for (const [alias, upstream] of aliases) {
+    const declaration = new RegExp(`${alias}\\s*:\\s*var\\(${upstream},`);
+    assert.match(dark, declaration, `${alias} missing from dark token scope`);
+    assert.match(explicitLight, declaration, `${alias} missing from explicit-light token scope`);
+    assert.match(mediaLight, declaration, `${alias} missing from media-light token scope`);
+  }
+  assert.doesNotMatch(css, /var\(--sand-bg-secondary(?:-hover)?\s*,/);
+});
+
+test("provider picker card anatomy is isolated from Settings action-button cascade", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  assert.match(css, /\.codex-ai-connections\s*>\s*button\s*,/);
+  assert.doesNotMatch(css, /\.codex-ai-connections\s+button\s*,/);
+  const cardIndex = css.indexOf(".codex-provider-choice-button {");
+  const actionIndex = css.indexOf(".codex-ai-connections > button");
+  assert.ok(cardIndex >= 0 && actionIndex > cardIndex, "card rules must precede the narrowed Settings action rule");
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /min-height:\s*76px/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /padding:\s*12px/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /background:\s*var\(--codex-sand-fill-secondary\)/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button:hover"), /background:\s*var\(--codex-sand-fill-secondary-hover\)/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button[aria-pressed=\"true\"]"), /box-shadow:\s*inset 0 0 0 1px/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button:focus-visible"), /outline:\s*2px solid var\(--codex-sand-border-focus\)/);
+});
+
+test("provider picker preserves 160-character labels errors and actions within both surfaces", async (context) => {
+  const longLabel = "L".repeat(160);
+  const harness = connectedNativeProviderHarness({
+    onboarding: null,
+    connections: eightConnections({
+      "moonshot-kimi": { label: longLabel, state: "unavailable", generation: 0, errorCode: "OPENBOT_PROVIDER_INVALID" },
+    }),
+  });
+  context.after(() => harness.mounted.dispose());
+  for (let index = 0; index < 24; index += 1) await new Promise((resolve) => setImmediate(resolve));
+
+  const css = fs.readFileSync(cssPath, "utf8");
+  for (const selector of [
+    ".codex-provider-choice-button",
+    ".codex-provider-choice-copy",
+    ".codex-provider-choice-label",
+    ".codex-provider-choice-description",
+    ".codex-provider-choice-state",
+    ".codex-provider-details",
+    ".codex-provider-details-title",
+    ".codex-provider-connection-error",
+    ".codex-provider-connection-actions",
+    ".codex-provider-connection-actions button",
+  ]) {
+    const body = cssRuleBody(css, selector);
+    assert.match(body, /min-width:\s*0/);
+    assert.match(body, /max-width:\s*100%/);
+  }
+  assert.match(cssRuleBody(css, ".codex-provider-choice-label"), /overflow-wrap:\s*anywhere/);
+  assert.match(cssRuleBody(css, ".codex-provider-details-title"), /overflow-wrap:\s*anywhere/);
+  assert.match(cssRuleBody(css, ".codex-provider-connection-error"), /overflow-wrap:\s*anywhere/);
+  assert.match(cssRuleBody(css, ".codex-provider-connection-actions button"), /white-space:\s*normal/);
+  assert.match(cssRuleBody(css, ".codex-provider-connection-actions button"), /overflow-wrap:\s*anywhere/);
+
+  for (const first of [true, false]) {
+    assert.equal(providerCardField(harness, "moonshot-kimi", "codex-provider-choice-label", first).textContent, longLabel);
+    clickProviderCard(harness, "moonshot-kimi", first);
+    assert.equal(providerControl(harness, "codex-provider-details-title", first).textContent, longLabel);
+    assert.equal(providerControl(harness, "codex-provider-connection-error", first).textContent.includes(longLabel), true);
+    assert.equal(providerActionButton(harness, first).textContent.includes(longLabel), true);
+  }
+});
+
+test("provider picker moves a visible non-announcing Selected marker on both surfaces", async (context) => {
+  const harness = connectedNativeProviderHarness({ onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  for (const first of [true, false]) {
+    const initial = providerCardField(harness, "openai-codex", "codex-provider-choice-selected", first);
+    assert.ok(initial);
+    assert.equal(initial.textContent, "Selected");
+    assert.equal(initial.hidden, false);
+    assert.equal(initial.attributes["aria-hidden"], "true");
+
+    clickProviderCard(harness, "moonshot-kimi", first);
+    const next = providerCardField(harness, "moonshot-kimi", "codex-provider-choice-selected", first);
+    assert.equal(next.hidden, false);
+    assert.equal(initial.hidden, true);
+    assert.equal(providerCard(harness, "moonshot-kimi", first).attributes["aria-pressed"], "true");
+  }
+});
+
+test("provider picker bounds both surfaces and suppresses all provider motion", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  assert.match(cssRuleBody(css, ".codex-provider-picker-scroll"), /overflow:\s*auto/);
+  assert.match(cssRuleBody(css, ".codex-provider-picker-scroll"), /overflow-x:\s*hidden/);
+  assert.match(cssRuleBody(css, ".codex-ai-connections"), /overflow-x:\s*hidden/);
+  assert.match(cssRuleBody(css, ".codex-provider-details"), /min-width:\s*0/);
+  assert.match(cssRuleBody(css, ".codex-provider-details"), /max-width:\s*100%/);
+  assert.match(css, /--codex-sand-text-tertiary\s*:\s*var\(--sand-text-tertiary,/);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-provider-choice-button\s*,\s*\.codex-provider-details\s*\{[^}]*transition:\s*none !important;[^}]*animation:\s*none !important;/s);
+});
+
 test("provider picker uses Sand aliases two-column cards narrow reflow and reduced motion", () => {
   const css = fs.readFileSync(cssPath, "utf8");
   for (const token of [
