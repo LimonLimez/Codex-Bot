@@ -4,6 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { createHash, randomUUID } = require("node:crypto");
 const { AsyncLocalStorage } = require("node:async_hooks");
+const { defaultAvatarIdentity } = require("./avatar-catalog.cjs");
 
 // Bot records remain schema v3. Only the enclosing durable Store advances to
 // v5 so renderer/controller consumers keep the existing public bot contract.
@@ -399,13 +400,13 @@ function normalizeCreateAppearance(value) {
     const field = selectedOwnDataField(value, key, "Create appearance");
     if (field.present) selected[key] = field.value;
   }
-  return normalizeAppearance(selected);
+  return normalizeAppearance(selected, { partial: true });
 }
 
 function normalizeCreateInput(value) {
   if (value === undefined) {
     return {
-      appearance: { ...DEFAULT_APPEARANCE },
+      appearance: {},
       notifications: true,
       setupStage: "profile-model",
     };
@@ -423,9 +424,20 @@ function normalizeCreateInput(value) {
     throw new Error("Bot creation setup stage is invalid.");
   }
   return {
-    appearance: appearanceField.present ? normalizeCreateAppearance(appearanceField.value) : { ...DEFAULT_APPEARANCE },
+    appearance: appearanceField.present ? normalizeCreateAppearance(appearanceField.value) : {},
     notifications,
     setupStage,
+  };
+}
+
+function completeCreateAppearance(botId, partial) {
+  const defaults = defaultAvatarIdentity(botId);
+  return {
+    shape: hasOwn(partial, "shape") ? partial.shape : defaults.shape,
+    color: hasOwn(partial, "color") ? partial.color : defaults.color,
+    image: hasOwn(partial, "image") ? partial.image : null,
+    title: hasOwn(partial, "title") ? partial.title : "",
+    description: hasOwn(partial, "description") ? partial.description : "",
   };
 }
 
@@ -1751,14 +1763,16 @@ class BotStore {
   }
 
   async create(input = undefined, options = undefined) {
-    const { appearance, notifications, setupStage } = normalizeCreateInput(input);
+    const { appearance: partialAppearance, notifications, setupStage } = normalizeCreateInput(input);
     const commitFence = normalizeCreateCommitOptions(options);
 
     return this.#mutate((next) => {
       const timestamp = safeNow(this.#now);
+      const botId = `bot-${safeUUID(this.#randomUUID)}`;
+      const appearance = completeCreateAppearance(botId, partialAppearance);
       const record = {
         schemaVersion: SCHEMA_VERSION,
-        botId: `bot-${safeUUID(this.#randomUUID)}`,
+        botId,
         name: "New Bot",
         appearance,
         notifications,

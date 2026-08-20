@@ -8,6 +8,7 @@ const path = require("node:path");
 const { AsyncResource } = require("node:async_hooks");
 
 const { BotStore } = require("../src/bots/bot-store.cjs");
+const { defaultAvatarIdentity } = require("../src/bots/avatar-catalog.cjs");
 
 const BOT_A_UUID = "11111111-1111-4111-8111-111111111111";
 const BOT_B_UUID = "22222222-2222-4222-8222-222222222222";
@@ -56,13 +57,14 @@ async function temporaryStore(t, options = {}) {
 }
 
 function expectedBot(overrides = {}) {
+  const botId = overrides.botId ?? `bot-${BOT_A_UUID}`;
+  const defaults = defaultAvatarIdentity(botId.toLowerCase());
   const base = {
     schemaVersion: 3,
-    botId: `bot-${BOT_A_UUID}`,
+    botId,
     name: "New Bot",
     appearance: {
-      shape: "blob",
-      color: "red",
+      ...defaults,
       image: null,
       title: "",
       description: "",
@@ -84,6 +86,7 @@ function expectedBot(overrides = {}) {
   return {
     ...base,
     ...overrides,
+    botId,
     appearance: { ...base.appearance, ...(overrides.appearance || {}) },
     runtime: { ...base.runtime, ...(overrides.runtime || {}) },
     computer: { ...base.computer, ...(overrides.computer || {}) },
@@ -481,6 +484,38 @@ test("create stores a stable literal New Bot and ignores caller-owned identity",
     notifications: false,
   })]));
   assert.doesNotMatch(JSON.stringify(persisted), /forged|private\.example|secret|unknown/);
+});
+
+test("create derives only omitted appearance fields in the first durable write", async (t) => {
+  const { filePath, store } = await temporaryStore(t);
+  const automatic = await store.create({ appearance: { description: "Automatic" } });
+  assert.deepEqual(
+    { shape: automatic.appearance.shape, color: automatic.appearance.color },
+    defaultAvatarIdentity(automatic.botId),
+  );
+  const persisted = JSON.parse(await fs.readFile(filePath, "utf8")).bots[0];
+  assert.deepEqual(persisted.appearance, automatic.appearance);
+
+  const explicitShape = await store.create({ appearance: { shape: "cat" } });
+  assert.equal(explicitShape.appearance.shape, "cat");
+  assert.equal(explicitShape.appearance.color, defaultAvatarIdentity(explicitShape.botId).color);
+
+  const explicitColor = await store.create({ appearance: { color: "violet" } });
+  assert.equal(explicitColor.appearance.shape, defaultAvatarIdentity(explicitColor.botId).shape);
+  assert.equal(explicitColor.appearance.color, "violet");
+});
+
+test("existing appearance survives load restart edit and deletion without reassignment", async (t) => {
+  const { filePath } = await temporaryStore(t);
+  const existing = expectedBot({ appearance: { shape: "gem", color: "blue" } });
+  await writeDocument(filePath, validV5StoreDocument([existing]));
+  const restarted = new BotStore({ filePath, now: () => NOW });
+  assert.deepEqual((await restarted.read(existing.botId)).appearance, existing.appearance);
+  const edited = await restarted.updateProfile(existing.botId, { appearance: { shape: "wolf" } });
+  assert.equal(edited.appearance.shape, "wolf");
+  assert.equal(edited.appearance.color, "blue");
+  await restarted.deleteBots([existing.botId]);
+  assert.equal(await restarted.read(existing.botId), null);
 });
 
 test("create inspects only supported fields and never traverses ignored getters or proxy traps", async (t) => {
