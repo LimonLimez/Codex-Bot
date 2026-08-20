@@ -713,7 +713,10 @@ function timestampMs(value) {
 }
 
 function appearanceId(value, fallback) {
-  if (value === undefined) return fallback;
+  if (value === undefined) {
+    if (arguments.length > 1) return fallback;
+    throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
+  }
   if (typeof value !== "string" || !APPEARANCE_ID.test(value)) {
     throw coordinatorFailure("source/malformed-request", "Malformed OpenBot native request.");
   }

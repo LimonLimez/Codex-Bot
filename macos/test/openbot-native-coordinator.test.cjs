@@ -776,6 +776,150 @@ test("native create forwards explicit appearance only and leaves omitted default
   });
 });
 
+test("native create rejects explicit undefined appearance fields before provider or bot mutation", async (t) => {
+  for (const field of ["avatarShape", "avatarColor"]) {
+    await t.test(field, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const bots = new BotControllerHarness();
+      let providerCalls = 0;
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: bots,
+        conversationController: new ConversationHarness(),
+        canCreateAgent: async () => {
+          providerCalls += 1;
+          return true;
+        },
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      const reply = await request(port, `create-undefined-${field}`, "createAgent", {
+        name: "Malformed", description: "Undefined appearance field.", [field]: undefined,
+      });
+      assert.deepEqual(reply.outcome, {
+        status: "failed",
+        failure: {
+          code: "source/malformed-request",
+          message: "Malformed OpenBot native request.",
+        },
+      });
+      assert.equal(providerCalls, 0);
+      assert.deepEqual(bots.calls.filter(([name]) => name === "createBot" || name === "renameBot"), []);
+      assert.equal(port.closed, 0);
+    });
+  }
+});
+
+test("native create forwards one-sided explicit appearance and preserves the omitted BotStore default", async (t) => {
+  const cases = [
+    {
+      name: "shape-only",
+      args: { name: "Shape only", description: "Only shape.", avatarShape: "cat" },
+      appearance: { title: "", description: "Only shape.", shape: "cat" },
+      shape: "cat",
+      color: "blue",
+    },
+    {
+      name: "color-only",
+      args: { name: "Color only", description: "Only color.", avatarColor: "violet" },
+      appearance: { title: "", description: "Only color.", color: "violet" },
+      shape: "blob",
+      color: "violet",
+    },
+  ];
+  for (const scenario of cases) {
+    await t.test(scenario.name, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const bots = new BotControllerHarness();
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: bots,
+        conversationController: new ConversationHarness(),
+        canCreateAgent: async () => true,
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      const created = await request(port, `create-${scenario.name}`, "createAgent", scenario.args);
+      assert.equal(created.outcome.status, "ok");
+      assert.deepEqual(bots.calls.find(([name]) => name === "createBot")[1].appearance,
+        scenario.appearance);
+      assert.equal(created.outcome.value.agent.avatarShape, scenario.shape);
+      assert.equal(created.outcome.value.agent.avatarColor, scenario.color);
+      const listed = await request(port, `list-${scenario.name}`, "listAgents");
+      const listedAgent = listed.outcome.value.find((entry) => entry.id === created.outcome.value.agent.id);
+      assert.deepEqual([listedAgent.avatarShape, listedAgent.avatarColor], [scenario.shape, scenario.color]);
+      assert.equal(listedAgent.avatarVersion, created.outcome.value.agent.avatarVersion);
+    });
+  }
+});
+
+test("native create rejects hostile appearance descriptors at the frame boundary", async (t) => {
+  const cases = [];
+  let accessorTouches = 0;
+  const accessorArgs = { name: "Accessor", description: "Hostile accessor." };
+  Object.defineProperty(accessorArgs, "avatarShape", {
+    enumerable: true,
+    get() {
+      accessorTouches += 1;
+      throw new Error("must not read avatarShape accessor");
+    },
+  });
+  cases.push(["accessor", accessorArgs, () => accessorTouches]);
+  let proxyTouches = 0;
+  const proxyArgs = new Proxy({
+    name: "Proxy",
+    description: "Hostile proxy.",
+    avatarColor: "violet",
+  }, {
+    get() {
+      proxyTouches += 1;
+      throw new Error("must not read avatarColor proxy");
+    },
+  });
+  cases.push(["proxy", proxyArgs, () => proxyTouches]);
+
+  for (const [name, args, touches] of cases) {
+    await t.test(name, async (st) => {
+      const { OpenBotNativeCoordinator } = require(MODULE_PATH);
+      const bots = new BotControllerHarness();
+      let providerCalls = 0;
+      const coordinator = new OpenBotNativeCoordinator({
+        botRuntimeController: bots,
+        conversationController: new ConversationHarness(),
+        canCreateAgent: async () => {
+          providerCalls += 1;
+          return true;
+        },
+      });
+      st.after(() => coordinator.dispose());
+      const port = new PortHarness();
+      coordinator.bindPort(port);
+      port.receive({ kind: "lifecycle", phase: "hello", protocolVersion: 1 });
+      await waitFor(() => port.frames.some((frame) => frame.family === "agents"));
+      port.receive({
+        kind: "request",
+        requestId: `create-hostile-${name}`,
+        method: "createAgent",
+        args,
+      });
+      await waitFor(() => port.closed === 1);
+      assert.equal(touches(), 0);
+      assert.deepEqual(port.frames.at(-1), {
+        kind: "lifecycle",
+        phase: "shutdown",
+        reason: "protocol-error",
+        detail: "malformed-frame",
+      });
+      assert.equal(providerCalls, 0);
+      assert.deepEqual(bots.calls.filter(([method]) => method === "createBot" || method === "renameBot"), []);
+    });
+  }
+});
+
 test("every added shape round-trips through native create roster avatar and Character edit", async (t) => {
   for (const shape of ADDED_AVATAR_SHAPES) {
     await t.test(shape, async () => {
@@ -795,6 +939,12 @@ test("every added shape round-trips through native create roster avatar and Char
       });
       assert.equal(created.outcome.value.agent.avatarShape, shape);
       assert.equal(created.outcome.value.agent.avatarColor, "cyan");
+      assert.equal(created.outcome.value.agent.avatarVersion, "2026-08-16T12:02:00.000Z");
+      const listed = await request(port, `list-${shape}`, "listAgents");
+      const listedAgent = listed.outcome.value.find((entry) => entry.id === created.outcome.value.agent.id);
+      assert.equal(listedAgent.avatarShape, shape);
+      assert.equal(listedAgent.avatarColor, "cyan");
+      assert.equal(listedAgent.avatarVersion, created.outcome.value.agent.avatarVersion);
       const edited = await request(port, `edit-${shape}`, "updateAgent", {
         id: created.outcome.value.agent.id,
         profile: { avatarShape: shape, avatarColor: "violet" },
