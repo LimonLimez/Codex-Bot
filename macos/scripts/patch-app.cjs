@@ -48,6 +48,7 @@ const ALLOWED_MUTATIONS = Object.freeze([
   "dist/codex/desktop/model-selection-store.cjs",
   "dist/codex/desktop/openai-compatible-inference-transport.cjs",
   "dist/codex/desktop/openai-compatible-provider.cjs",
+  "dist/codex/desktop/openbot-machine-id.cjs",
   "dist/codex/desktop/openbot-native-coordinator-ipc.cjs",
   "dist/codex/desktop/openbot-native-coordinator.cjs",
   "dist/codex/desktop/openbot-user-data.cjs",

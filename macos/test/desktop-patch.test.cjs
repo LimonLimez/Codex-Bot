@@ -9,6 +9,14 @@ const vm = require("node:vm");
 const patchPath = path.join(__dirname, "..", "src", "patch", "desktop.cjs");
 
 const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;jEr=F=>o.emit(\"mcp-auth-completed\",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase(\"auth_service\");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase(\"window\"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on(\"activate\",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const mainFeature='kept';\n";
+const STOCK_MACHINE_DS = "async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}";
+const STOCK_MACHINE_STARTUP = 'F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
+const STOCK_MACHINE_TELEMETRY = 'Ic.markPhase("telemetry");let x=await Ds(),C=hHn(';
+const STOCK_MACHINE_TOKEN_FUNCTIONS = [
+  "function z9t(){globalThis.__machine.safeStorageCalls+=1;return globalThis.__machine.safeStorageAvailable}",
+  "async function xgt(t){globalThis.__machine.safeStorageCalls+=1;return null}",
+  "async function j9t(t,e){globalThis.__machine.safeStorageCalls+=1;return e}",
+];
 const STOCK_MAIN_WITH_HELD_REMOTE_READY = `"use strict";var fjn=Object.create;
 function createWebContents(){return{kind:"window-web-contents",listeners:new Map(),on(name,listener){let values=this.listeners.get(name)??[];values.push(listener);this.listeners.set(name,values)},removeListener(name,listener){let values=this.listeners.get(name)??[],index=values.indexOf(listener);if(index>=0){values.splice(index,1);globalThis.__startup.removedWebviewGuards+=1}this.listeners.set(name,values)},emit(name,...args){for(let listener of [...(this.listeners.get(name)??[])])listener(...args)},listenerCount(name){return(this.listeners.get(name)??[]).length}}}
 const Ic=globalThis.__startup.Ic,o={emit(){}},xt={
@@ -30,6 +38,23 @@ globalThis.__bootstrapDone=(async()=>{
   let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});
   UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})
 })().catch(error=>{Ic.noteFailed(error);throw error});
+`;
+const STOCK_MAIN_WITH_MACHINE_ID = `${STOCK_MAIN_WITH_HELD_REMOTE_READY}
+const __machine = globalThis.__machine;
+const j5n={randomUUID(){__machine.stockRandomCalls+=1;return "stock-machine-id"}};
+const Ihr="cursor-machine-id";
+${STOCK_MACHINE_TOKEN_FUNCTIONS.join("\n")}
+function F5n(){z9t()}
+async function $9t(){__machine.safeStorageCalls+=1;return false}
+${STOCK_MACHINE_DS}
+function uJt(){return {version:"0.20.0"}}
+function xe(){__machine.events.push("machine-id-fallback")}
+function hHn(value){__machine.events.push(["telemetry",value]);return value}
+globalThis.__machineProbe=async()=>{Ic.markPhase("update_service"),Ic.armStuckWatchdog();${STOCK_MACHINE_STARTUP};${STOCK_MACHINE_TELEMETRY}{machineId:x});return {startupId:r,telemetryId:x,telemetry:C}};
+`;
+const STOCK_MAIN_WITH_MACHINE_ANCHORS = `${STOCK_MAIN}
+${STOCK_MACHINE_DS}
+${STOCK_MACHINE_STARTUP};${STOCK_MACHINE_TELEMETRY}{machineId:x};
 `;
 const STOCK_PRELOAD = "const stock='kept';const L=M({invokeRequest:()=>{s.ipcRenderer.invoke(\"sand:coordinator-port-request\")}});s.contextBridge.exposeInMainWorld(\"desktop\",Q);s.contextBridge.exposeInMainWorld(\"coordinatorPort\",X);s.ipcRenderer.on(\"sand:coordinator-port\",e=>{});\n";
 
@@ -100,6 +125,7 @@ function startSyntheticMain(remoteReady, overrides = {}) {
     ...overrides,
   };
   startup.Ic = {
+    armStuckWatchdog() {},
     markPhase() {},
     noteReady() {
       startup.ready = true;
@@ -111,6 +137,7 @@ function startSyntheticMain(remoteReady, overrides = {}) {
   };
   const context = {
     __remoteReady: remoteReady,
+    __machine: startup.machine,
     __startup: startup,
     require(request) {
       if (request === "../codex/desktop/runtime.cjs") {
@@ -120,6 +147,10 @@ function startSyntheticMain(remoteReady, overrides = {}) {
               releaseEarlySyncIpc() {
                 startup.earlySyncReleases += 1;
               },
+              readMachineId() {
+                startup.machine.runtimeReads += 1;
+                return Promise.resolve(startup.machine.machineId);
+              },
             };
           },
         };
@@ -128,13 +159,107 @@ function startSyntheticMain(remoteReady, overrides = {}) {
       throw new Error(`Unexpected synthetic require: ${request}`);
     },
   };
-  vm.runInNewContext(patchMainSource(STOCK_MAIN_WITH_HELD_REMOTE_READY), context);
+  vm.runInNewContext(patchMainSource(overrides.source ?? STOCK_MAIN_WITH_MACHINE_ID), context);
   return { context, startup };
 }
 
+test("desktop patch isolates the vendor machine-id path from stock secure storage", async () => {
+  const { patchMainSource } = require(patchPath);
+  const source = STOCK_MAIN_WITH_MACHINE_ID;
+  const tokenBefore = STOCK_MACHINE_TOKEN_FUNCTIONS.map((anchor) => {
+    assert.equal(source.split(anchor).length - 1, 1, `fixture must contain one ${anchor}`);
+    return anchor;
+  });
+  assert.equal(source.split(STOCK_MACHINE_DS).length - 1, 1);
+  assert.equal(source.split(STOCK_MACHINE_STARTUP).length - 1, 1);
+  assert.equal(source.split(STOCK_MACHINE_TELEMETRY).length - 1, 1);
+
+  const patched = patchMainSource(source);
+  assert.equal(
+    patched.split("async function Ds(){return __openbotDesktopRuntime.readMachineId()}").length - 1,
+    1,
+  );
+  assert.doesNotMatch(patched, new RegExp(STOCK_MACHINE_DS.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(
+    patched,
+    /let e=uJt\(\),r=await __openbotDesktopRuntime\.readMachineId\(\)\.catch\(F=>\(xe\("update","machine-id",F\),crypto\.randomUUID\(\)\)\)/,
+  );
+  assert.doesNotMatch(patched, /F5n\(\);let e=uJt\(\)/);
+  assert.match(patched, /Ic\.markPhase\("telemetry"\);let x=r,C=hHn\(/);
+  for (const anchor of tokenBefore) assert.match(patched, new RegExp(anchor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.throws(() => patchMainSource(patched), /already|anchor/i);
+
+  const machine = {
+    machineId: "openbot-machine-id",
+    runtimeReads: 0,
+    safeStorageAvailable: true,
+    safeStorageCalls: 0,
+    stockRandomCalls: 0,
+    events: [],
+  };
+  const startup = {
+    activateHandlers: 0,
+    activateHandler: null,
+    events: [],
+    earlySyncReleases: 0,
+    hardenedContents: [],
+    hardenerFailure: null,
+    liveWindows: [],
+    protocolRegistrations: 0,
+    ready: false,
+    readyCalls: 0,
+    realWebviewAttachEvents: 0,
+    remoteCompleted: false,
+    remoteFailures: [],
+    removedWebviewGuards: 0,
+    stockSyncRegistrations: 0,
+    vncConfigurations: 0,
+    window: null,
+    windows: 0,
+    machine,
+  };
+  startup.Ic = {
+    armStuckWatchdog() {},
+    markPhase() {},
+    noteReady() {},
+    noteFailed(error) { startup.remoteFailures.push(error); },
+  };
+  const context = {
+    __machine: machine,
+    __remoteReady: Promise.resolve("remote-ready"),
+    __startup: startup,
+    require(request) {
+      if (request === "../codex/desktop/runtime.cjs") {
+        return {
+          installDesktopRuntime() {
+            return {
+              releaseEarlySyncIpc() {},
+              readMachineId() {
+                machine.runtimeReads += 1;
+                return Promise.resolve(machine.machineId);
+              },
+            };
+          },
+        };
+      }
+      if (request === "electron") return {};
+      throw new Error(`Unexpected synthetic require: ${request}`);
+    },
+  };
+  vm.runInNewContext(patched, context);
+  await context.__bootstrapDone;
+  const result = await context.__machineProbe();
+  assert.equal(result.startupId, "openbot-machine-id");
+  assert.equal(result.telemetryId, "openbot-machine-id");
+  assert.equal(result.telemetry.machineId, "openbot-machine-id");
+  assert.equal(machine.runtimeReads, 1);
+  assert.equal(machine.safeStorageCalls, 0);
+  assert.equal(machine.stockRandomCalls, 0);
+});
+
 test("desktop patch adds isolated main/preload facades without changing stock exports", () => {
   const { patchMainSource, patchPreloadSource } = require(patchPath);
-  const main = patchMainSource(STOCK_MAIN);
+  const main = patchMainSource(STOCK_MAIN_WITH_MACHINE_ANCHORS);
   const preload = patchPreloadSource(STOCK_PRELOAD);
   assert.match(main, /\.\.\/codex\/desktop\/runtime\.cjs/);
   assert.match(main, /installDesktopRuntime/);

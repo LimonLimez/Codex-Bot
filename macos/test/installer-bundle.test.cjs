@@ -223,6 +223,7 @@ test("installer stages only the exact exported patcher source script and Advance
     "desktop/model-selection-store.cjs",
     "desktop/openai-compatible-inference-transport.cjs",
     "desktop/openai-compatible-provider.cjs",
+    "desktop/openbot-machine-id.cjs",
     "desktop/openbot-native-coordinator-ipc.cjs",
     "desktop/openbot-native-coordinator.cjs",
     "desktop/openbot-user-data.cjs",

@@ -24,6 +24,7 @@ const DESKTOP_FILES = Object.freeze([
   "desktop/model-selection-store.cjs",
   "desktop/openai-compatible-inference-transport.cjs",
   "desktop/openai-compatible-provider.cjs",
+  "desktop/openbot-machine-id.cjs",
   "desktop/openbot-native-coordinator-ipc.cjs",
   "desktop/openbot-native-coordinator.cjs",
   "desktop/openbot-user-data.cjs",
@@ -84,6 +85,12 @@ const WS_FILES = Object.freeze([
 
 const MAIN_ANCHOR = '"use strict";var fjn=Object.create;';
 const MAIN_PATCH = '"use strict";var __openbotDesktopRuntime=require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));var __openbotEarlyWebviewGuard;var fjn=Object.create;';
+const MAIN_MACHINE_ID_FUNCTION_ANCHOR = 'async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}';
+const MAIN_MACHINE_ID_FUNCTION_PATCH = 'async function Ds(){return __openbotDesktopRuntime.readMachineId()}';
+const MAIN_MACHINE_ID_STARTUP_ANCHOR = 'F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
+const MAIN_MACHINE_ID_STARTUP_PATCH = 'let e=uJt(),r=await __openbotDesktopRuntime.readMachineId().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
+const MAIN_MACHINE_ID_TELEMETRY_ANCHOR = 'Ic.markPhase("telemetry");let x=await Ds(),C=hHn(';
+const MAIN_MACHINE_ID_TELEMETRY_PATCH = 'Ic.markPhase("telemetry");let x=r,C=hHn(';
 const MAIN_ACTIVATE_HANDLER = 'xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})';
 // A loaded local-protocol window is app-ready; stock remote-only services keep booting under the existing catch.
 const MAIN_WINDOW_EDGE_ANCHOR = 'jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(';
@@ -115,8 +122,26 @@ function patchMainSource(source) {
     throw new Error("Codex desktop main patch is already installed or invalid.");
   }
   const runtime = replaceUnique(source, MAIN_ANCHOR, MAIN_PATCH, "Grok Electron main runtime");
-  const earlyWindow = replaceUnique(
+  const machineFunction = replaceUnique(
     runtime,
+    MAIN_MACHINE_ID_FUNCTION_ANCHOR,
+    MAIN_MACHINE_ID_FUNCTION_PATCH,
+    "Grok machine identity function",
+  );
+  const machineStartup = replaceUnique(
+    machineFunction,
+    MAIN_MACHINE_ID_STARTUP_ANCHOR,
+    MAIN_MACHINE_ID_STARTUP_PATCH,
+    "Grok machine identity startup",
+  );
+  const machineTelemetry = replaceUnique(
+    machineStartup,
+    MAIN_MACHINE_ID_TELEMETRY_ANCHOR,
+    MAIN_MACHINE_ID_TELEMETRY_PATCH,
+    "Grok machine identity telemetry",
+  );
+  const earlyWindow = replaceUnique(
+    machineTelemetry,
     MAIN_WINDOW_EDGE_ANCHOR,
     MAIN_WINDOW_EDGE_PATCH,
     "Grok Electron early window bootstrap",

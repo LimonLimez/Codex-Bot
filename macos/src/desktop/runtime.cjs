@@ -44,6 +44,7 @@ const { installStandaloneConversationIpc } = require("./standalone-conversation-
 const { installLocalDesktopFrameIpc } = require("./local-desktop-frame-ipc.cjs");
 const { OpenBotNativeCoordinator } = require("./openbot-native-coordinator.cjs");
 const { installOpenBotNativeCoordinatorIpc } = require("./openbot-native-coordinator-ipc.cjs");
+const { OpenBotMachineIdStore } = require("./openbot-machine-id.cjs");
 const { StandaloneConversationStore } = require("./standalone-conversation-store.cjs");
 const { StandaloneSubagentRunner } = require("./standalone-subagent-runner.cjs");
 const { ComputerTargetRouter } = require("../computer/computer-target-router.cjs");
@@ -1401,6 +1402,9 @@ function productionDependencies(electron) {
   prepareProductionUserData(electron);
   const stateRoot = path.join(electron.app.getPath("userData"), "codex-bot");
   const botStore = new BotStore({ filePath: path.join(stateRoot, "bots.v1.json") });
+  const machineIdStore = new OpenBotMachineIdStore({
+    filePath: path.join(stateRoot, "openbot-machine-id.v1.json"),
+  });
   const controller = new BotRuntimeController({ store: botStore, provider: loadConfiguredProvider() });
   const modelSelectionsPath = path.join(stateRoot, "model-selections.v1.json");
   const conversationBindingsPath = path.join(stateRoot, "conversation-bindings.v1.json");
@@ -1492,6 +1496,7 @@ function productionDependencies(electron) {
     nativeCoordinatorFactory,
     standaloneConversations: inferenceBridge.conversations,
     selectionStore,
+    machineIdStore,
     sidecarManager,
     providerController,
     openaiProvider,
@@ -1579,6 +1584,12 @@ function installDesktopRuntime(electron, injected = {}) {
     async connectProvider() { throw sanitizedFailure(); },
     stop() {},
   });
+  const machineIdStore = dependencies.machineIdStore || Object.freeze({
+    async read() { throw sanitizedFailure(); },
+  });
+  if (!machineIdStore || typeof machineIdStore !== "object" || typeof machineIdStore.read !== "function") {
+    throw sanitizedFailure();
+  }
   const setQuitTimeout = typeof dependencies.setQuitTimeout === "function"
     ? dependencies.setQuitTimeout
     : setTimeout;
@@ -1630,6 +1641,27 @@ function installDesktopRuntime(electron, injected = {}) {
   let quitHandoffSettled = false;
   let quitDeadlineHandle = null;
   let disposed = false;
+  let machineIdRead = null;
+  let machineIdFallback = null;
+
+  function readMachineId() {
+    if (disposed) return Promise.reject(sanitizedFailure());
+    if (machineIdRead) return machineIdRead;
+    machineIdRead = Promise.resolve()
+      .then(() => machineIdStore.read())
+      .then((value) => {
+        if (typeof value !== "string"
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+          throw new Error("machine identity");
+        }
+        return value;
+      })
+      .catch(() => {
+        if (machineIdFallback === null) machineIdFallback = crypto.randomUUID();
+        return machineIdFallback;
+      });
+    return machineIdRead;
+  }
 
   function providerLoginRequest(request) {
     return request?.providerId === "openai-codex"
@@ -2596,6 +2628,7 @@ function installDesktopRuntime(electron, injected = {}) {
 
   const api = Object.freeze({
     releaseEarlySyncIpc,
+    readMachineId,
     dispose() {
       if (disposePromise) return disposePromise;
       if (disposeComplete) return Promise.resolve();
@@ -2607,6 +2640,7 @@ function installDesktopRuntime(electron, injected = {}) {
         try { acknowledgements.push(Promise.resolve(effect()).catch(() => {})); } catch {}
       };
       capture(() => profileSetupReceipts.clear());
+      if (machineIdRead) capture(() => machineIdRead);
       capture(() => computerSetupReceipts.clear());
       capture(clearProviderLoginOwnership);
       capture(() => {

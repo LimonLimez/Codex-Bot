@@ -155,6 +155,90 @@ test("desktop runtime loads only an exact sealed sidecar receipt", (t) => {
   assert.throws(() => loadSidecarReceipt(root), /receipt/i);
 });
 
+test("desktop runtime exposes a frozen private machine-id reader without installing IPC", async (t) => {
+  const { installDesktopRuntime, IPC_CHANNELS } = require(runtimePath);
+  const handlers = new Map();
+  let reads = 0;
+  const machineIdStore = {
+    async read() {
+      reads += 1;
+      return "11111111-1111-4111-8111-111111111111";
+    },
+  };
+  const electron = {
+    app: { once() {}, on() {}, off() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { getAllWindows: () => [] },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() {} },
+    selectionStore: {},
+    machineIdStore,
+    accountController: accountWithCatalog(),
+  });
+  assert.equal(Object.isFrozen(installed), true);
+  assert.equal(typeof installed.readMachineId, "function");
+  assert.equal(reads, 0);
+  assert.equal(handlers.has("openbot-machine-id:read"), false);
+  assert.equal(await installed.readMachineId(), "11111111-1111-4111-8111-111111111111");
+  assert.equal(reads, 1);
+  await installed.dispose();
+});
+
+test("desktop runtime keeps one process-stable fallback when the durable machine-id store rejects", async (t) => {
+  const { installDesktopRuntime } = require(runtimePath);
+  const handlers = new Map();
+  const machineIdStore = { async read() { throw new Error("unsafe durable state"); } };
+  const electron = {
+    app: { once() {}, on() {}, off() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { getAllWindows: () => [] },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() {} },
+    selectionStore: {},
+    machineIdStore,
+    accountController: accountWithCatalog(),
+  });
+  const first = await installed.readMachineId();
+  const second = await installed.readMachineId();
+  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(second, first);
+  await installed.dispose();
+});
+
+test("desktop runtime fences new machine-id reads after disposal", async () => {
+  const { installDesktopRuntime } = require(runtimePath);
+  let reads = 0;
+  const handlers = new Map();
+  const electron = {
+    app: { once() {}, on() {}, off() {} },
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { getAllWindows: () => [] },
+  };
+  const installed = installDesktopRuntime(electron, {
+    controller: { on() {}, off() {}, dispose() {} },
+    selectionStore: {},
+    machineIdStore: {
+      async read() { reads += 1; return "11111111-1111-4111-8111-111111111111"; },
+    },
+    accountController: accountWithCatalog(),
+  });
+
+  await installed.dispose();
+  await assert.rejects(installed.readMachineId(), /failed|unavailable/i);
+  assert.equal(reads, 0);
+});
+
 test("desktop factories own direct Codex immediately but keep CLIProxy entirely lazy", async (t) => {
   const {
     createDirectCodexManager,

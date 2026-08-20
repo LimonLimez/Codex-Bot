@@ -37,6 +37,9 @@ const SYNTHETIC_VENDOR_SETTINGS_SHA256 = crypto
   .createHash("sha256")
   .update(STOCK_SETTINGS_ROOT, "utf8")
   .digest("hex");
+const STOCK_MACHINE_ID_MAIN = `async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}
+F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))
+Ic.markPhase("telemetry");let x=await Ds(),C=hHn(`;
 const rendererPatch = require(rendererPatchPath);
 
 function sha256File(file) {
@@ -88,7 +91,7 @@ async function syntheticAsar(t, overrides = {}) {
   );
   fs.writeFileSync(
     path.join(tree, "dist", "electron-main", "main.cjs"),
-    'const setup="kept";\n"use strict";var fjn=Object.create;jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase("auth_service");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const stockFeature="kept";\n',
+    `const setup="kept";\n"use strict";var fjn=Object.create;jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase("auth_service");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const stockFeature="kept";\n${STOCK_MACHINE_ID_MAIN}\n`,
   );
   fs.writeFileSync(
     path.join(tree, "dist", "host", "host-main.cjs"),
@@ -188,6 +191,7 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
         "dist/codex/desktop/model-selection-store.cjs",
         "dist/codex/desktop/openai-compatible-inference-transport.cjs",
         "dist/codex/desktop/openai-compatible-provider.cjs",
+        "dist/codex/desktop/openbot-machine-id.cjs",
         "dist/codex/desktop/openbot-native-coordinator-ipc.cjs",
         "dist/codex/desktop/openbot-native-coordinator.cjs",
         "dist/codex/desktop/openbot-user-data.cjs",
@@ -308,12 +312,17 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
   );
   assert.match(patchedMain, /stockFeature="kept"/);
   assert.match(patchedMain, /codex\/desktop\/runtime\.cjs/);
+  assert.match(patchedMain, /async function Ds\(\)\{return __openbotDesktopRuntime\.readMachineId\(\)\}/);
+  assert.match(patchedMain, /let e=uJt\(\),r=await __openbotDesktopRuntime\.readMachineId\(\)\.catch\(F=>\(xe\("update","machine-id",F\),crypto\.randomUUID\(\)\)\)/);
+  assert.match(patchedMain, /Ic\.markPhase\("telemetry"\);let x=r,C=hHn\(/);
+  assert.doesNotMatch(patchedMain, /F5n\(\);let e=uJt\(\)/);
   for (const relative of [
     "provider-descriptors.cjs",
     "desktop/runtime.cjs",
     "desktop/provider-controller.cjs",
     "desktop/provider-state-store.cjs",
     "desktop/keychain-secret-store.cjs",
+    "desktop/openbot-machine-id.cjs",
     "desktop/openai-compatible-provider.cjs",
     "desktop/openai-compatible-inference-transport.cjs",
     "desktop/model-selection-store.cjs",
