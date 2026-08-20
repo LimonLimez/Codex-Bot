@@ -212,12 +212,20 @@ function projectCatalog(state, directPresentation = null) {
     if (connection.providerId === DIRECT_PROVIDER_ID && directPresentation
       && directPresentation.state !== "connected") continue;
     generation = Math.max(generation, connection.generation);
-    for (const model of connection.models) models.push(model);
+    for (const model of connection.models) models.push({ providerId: connection.providerId, model });
   }
   return {
     generation,
     status: models.length > 0 ? "ready" : "unavailable",
-    models,
+    models: models.map(({ providerId, model }) => {
+      // Durable state permits an empty effort list for legacy/keyless models;
+      // let the provider descriptor supply the public defaults while applying
+      // the authoritative aggregate generation to every catalog entry.
+      const source = Array.isArray(model.efforts) && model.efforts.length === 0
+        ? { ...model, efforts: undefined, defaultReasoningEffort: undefined }
+        : model;
+      return publicModel(providerId, source, generation);
+    }),
   };
 }
 

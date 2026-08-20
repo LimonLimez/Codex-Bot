@@ -377,6 +377,58 @@ test("catalog generation ignores disconnected and unavailable connections in the
   assert.equal((await store.read()).onboarding.catalogGeneration, 1);
 });
 
+test("public catalog projects every connected model to the aggregate catalog generation", async () => {
+  const { ProviderController } = require(controllerPath);
+  const state = new FakeStateStore();
+  const controller = new ProviderController({
+    stateStore: state,
+    openai: {
+      discover: async ({ providerId }) => ({
+        models: [{ provider: providerId, model: "local-keyless", label: "Local keyless" }],
+      }),
+      streamConfiguration: () => ({
+        providerId: "local-openai-compatible",
+        baseUrl: "http://127.0.0.1:11434/v1",
+        apiKey: null,
+      }),
+    },
+  });
+
+  await controller.connect({
+    providerId: "local-openai-compatible",
+    baseUrl: "http://127.0.0.1:11434/v1",
+  });
+  assert.equal(
+    state.state.connections.find(({ providerId }) => providerId === "local-openai-compatible")
+      .models[0].catalogGeneration,
+    0,
+  );
+  await state.commitConnection({
+    providerId: "xai",
+    generation: 4,
+    state: "connected",
+    models: [{
+      provider: "xai",
+      model: "grok-4.5",
+      label: "Grok",
+      efforts: ["none"],
+      serviceTiers: [],
+      defaultReasoningEffort: "none",
+      defaultServiceTier: null,
+      isDefault: false,
+    }],
+  });
+
+  const catalog = await controller.catalog();
+  assert.equal(catalog.generation, 4);
+  assert.equal(catalog.models.some(({ provider, model }) => (
+    provider === "local-openai-compatible" && model === "local-keyless"
+  )), true);
+  assert.equal(catalog.models.every(({ catalogGeneration }) => (
+    catalogGeneration === catalog.generation
+  )), true);
+});
+
 test("onboarding rejects a catalog-generation interleaving and carries the exact generation in the receipt", async () => {
   const { ProviderController } = require(controllerPath);
   const state = new FakeStateStore();
@@ -503,7 +555,7 @@ test("atomic authority snapshot projects one coherent frozen DTO from one state 
       serviceTiers: [],
       defaultReasoningEffort: "low",
       defaultServiceTier: null,
-      catalogGeneration: 3,
+      catalogGeneration: 1,
       isDefault: true,
     }],
   });
@@ -520,7 +572,7 @@ test("atomic authority snapshot projects one coherent frozen DTO from one state 
   assert.deepEqual(externalCalls, []);
 });
 
-test("catalog metadata keeps the real Direct Codex generation independent of connection generation", async () => {
+test("public Direct Codex catalog aligns model generation with the aggregate generation", async () => {
   const { ProviderController } = require(controllerPath);
   const state = new FakeStateStore();
   let starts = 0;
@@ -554,7 +606,8 @@ test("catalog metadata keeps the real Direct Codex generation independent of con
   assert.equal(logins, 0);
   assert.equal(connection.generation, 1);
   assert.equal(snapshot.catalog.generation, 1);
-  assert.equal(snapshot.catalog.models[0].catalogGeneration, 3);
+  assert.equal(snapshot.catalog.models[0].catalogGeneration, 1);
+  assert.equal(state.state.connections[0].models[0].catalogGeneration, 3);
 });
 
 test("readAuthoritySnapshot rejects descriptor-hostile state without invoking accessors", async () => {
