@@ -4144,6 +4144,19 @@ function providerCard(harness, providerId, first = true) {
   ));
 }
 
+function providerCardField(harness, providerId, className, first = true) {
+  const card = providerCard(harness, providerId, first);
+  const visit = (node) => {
+    if (node.className.split(/\s+/).includes(className)) return node;
+    for (const child of node.children) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(card);
+}
+
 function providerDetail(harness, first = true) {
   const surface = providerSurface(harness, first);
   return harness.findAllPanel("codex-provider-details").find((node) => node.parentElement === surface);
@@ -4186,6 +4199,7 @@ function connectedNativeProviderHarness({
   onboarding = null,
   connections = eightConnections(),
   providerModels = [],
+  focusBeforeMount = false,
 } = {}) {
   const catalogGeneration = connections.reduce(
     (generation, entry) => Math.max(generation, entry.generation),
@@ -4217,6 +4231,7 @@ function connectedNativeProviderHarness({
     }),
     nativeProtocol: true,
     nativeHost: true,
+    focusBeforeMount,
     botsFacade: {
       async list() { return [bot(BOT_A, "A", "ready")]; },
       onChanged() { return () => {}; },
@@ -4269,6 +4284,85 @@ test("provider selection is ephemeral and keyboard navigation follows canonical 
   assert.equal(providerDetail(harness).dataset.providerId, "anthropic-claude");
   assert.equal(harness.documentRef.activeElement, providerCard(harness, "anthropic-claude"));
   assert.equal(connectCalls, 0);
+});
+
+test("provider keyboard navigation roves focus across both surfaces without facade calls", async (context) => {
+  const facade = providerFacade();
+  const calls = [];
+  for (const method of ["list", "catalog", "readOnboarding", "connect", "disconnect", "completeOnboarding"]) {
+    const original = facade[method];
+    facade[method] = async (...args) => {
+      calls.push([method, args]);
+      return original.apply(facade, args);
+    };
+  }
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null, focusBeforeMount: true });
+  context.after(() => harness.mounted.dispose());
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  calls.length = 0;
+
+  assert.equal(harness.documentRef.activeElement, providerActionButton(harness));
+  assert.equal(harness.documentRef.activeElement === harness.focusAnchor, false);
+  for (const providerId of PROVIDER_IDS) {
+    assert.equal(providerCard(harness, providerId).tabIndex, providerId === "openai-codex" ? 0 : -1);
+  }
+
+  const keyEvent = (key) => ({
+    key,
+    prevented: false,
+    preventDefault() { this.prevented = true; },
+  });
+  const down = keyEvent("ArrowDown");
+  providerCard(harness, "openai-codex").listeners.get("keydown")(down);
+  assert.equal(down.prevented, true);
+  assert.equal(providerCard(harness, "google-antigravity").attributes["aria-pressed"], "true");
+  assert.equal(harness.documentRef.activeElement, providerCard(harness, "google-antigravity"));
+  assert.equal(providerCard(harness, "google-antigravity").tabIndex, 0);
+  assert.equal(providerCard(harness, "openai-codex").tabIndex, -1);
+
+  providerCard(harness, "google-antigravity").listeners.get("keydown")(keyEvent("ArrowUp"));
+  assert.equal(harness.documentRef.activeElement, providerCard(harness, "openai-codex"));
+  providerCard(harness, "openai-codex").listeners.get("keydown")(keyEvent("End"));
+  assert.equal(harness.documentRef.activeElement, providerCard(harness, "local-openai-compatible"));
+  providerCard(harness, "local-openai-compatible").listeners.get("keydown")(keyEvent("Home"));
+  assert.equal(harness.documentRef.activeElement, providerCard(harness, "openai-codex"));
+
+  clickProviderCard(harness, "xai", false);
+  assert.equal(harness.documentRef.activeElement, providerActionButton(harness, false));
+  assert.equal(providerCard(harness, "xai", false).attributes["aria-pressed"], "true");
+  providerCard(harness, "xai", false).listeners.get("keydown")(keyEvent("ArrowLeft"));
+  assert.equal(harness.documentRef.activeElement, providerCard(harness, "moonshot-kimi", false));
+  assert.equal(providerCard(harness, "moonshot-kimi", false).tabIndex, 0);
+  assert.equal(providerCard(harness, "openai-codex", false).tabIndex, -1);
+  assert.equal(providerCard(harness, "openai-codex").attributes["aria-pressed"], "true");
+  assert.equal(calls.length, 0);
+});
+
+test("provider failure after a Settings detail rebuild appears and focuses the current panel", async (context) => {
+  const failure = deferred();
+  const facade = providerFacade({
+    catalog: providerCatalog([], 0, "unavailable"),
+    connect() { return failure.promise; },
+  });
+  const harness = connectedNativeProviderHarness({ providerFacade: facade, onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "moonshot-kimi", false);
+  const detachedAction = providerActionButton(harness, false);
+  detachedAction.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  clickProviderCard(harness, "openai-codex", false);
+  clickProviderCard(harness, "moonshot-kimi", false);
+  const currentAction = providerActionButton(harness, false);
+  assert.notEqual(currentAction, detachedAction);
+
+  failure.reject(new Error("settings provider failure"));
+  for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const currentDetail = providerDetail(harness, false).children[0];
+  assert.equal(currentDetail.children[2].hidden, false);
+  assert.match(currentDetail.children[2].textContent, /could not be connected|try again/i);
+  assert.equal(harness.documentRef.activeElement, currentAction);
 });
 
 test("native View Bot owns Computer controls and selects the active Free Local Desktop", async (context) => {
@@ -4414,11 +4508,11 @@ test("existing bots without a durable receipt still open the eight-route gate", 
   );
   const expectedLabels = PROVIDER_IDS.map((providerId) => providerDescriptor(providerId).label);
   assert.deepEqual(
-    cards.map((node) => node.children[1].children[0].textContent),
+    PROVIDER_IDS.map((providerId) => providerCardField(harness, providerId, "codex-provider-choice-label").textContent),
     expectedLabels,
   );
   assert.deepEqual(
-    cards.map((node) => node.children[1].children[2].textContent),
+    PROVIDER_IDS.map((providerId) => providerCardField(harness, providerId, "codex-provider-choice-state").textContent),
     ["Connected", "Connecting…", "Not connected", "Not connected", "Unavailable", "Not connected", "Not connected", "Not connected"],
   );
 });

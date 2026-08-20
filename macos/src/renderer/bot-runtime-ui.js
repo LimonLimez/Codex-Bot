@@ -3346,6 +3346,7 @@
     let providerAuthorityRetryable = false;
     let providerActionSequence = 0;
     const providerOperations = new Map();
+    const providerErrors = new Map();
     const providerReceiptRetry = new Set();
     let providerRefreshFlight = null;
     let providerRefreshDeferred = null;
@@ -3771,6 +3772,7 @@
 
     function updateProviderDetail(surface, connection) {
       const entry = renderProviderSurface(surface);
+      const scopedError = providerErrors.get(`${surface.key}:${connection.providerId}`);
       const pending = providerPending.has(connection.providerId);
       const operation = providerOperations.get(connection.providerId);
       const disconnecting = pending && operation?.kind === "disconnect";
@@ -3798,9 +3800,14 @@
       entry.disconnect.disabled = pending;
       entry.disconnect.hidden = entry.first || (!connected && !disconnectPending);
       entry.disconnect.textContent = disconnectPending ? "Retry disconnect" : "Disconnect";
-      if (!pending && connection.state === "unavailable" && connection.errorCode) {
+      if (scopedError) {
+        entry.error.textContent = scopedError;
+        entry.error.hidden = false;
+      } else if (!pending && connection.state === "unavailable" && connection.errorCode) {
         entry.error.textContent = providerErrorCopy(connection.providerId, { code: connection.errorCode });
         entry.error.hidden = false;
+      } else if (!pending) {
+        entry.error.hidden = true;
       }
       entry.action.textContent = receiptRetry ? "Finish setup"
         : legacyConfirmation ? `Continue with ${connection.label}`
@@ -4076,6 +4083,19 @@
       return !mountDisposed && providerOperations.get(operation.providerId) === operation;
     }
 
+    function currentProviderDetail(first, providerId) {
+      const surface = first ? providerSurfaces.first : providerSurfaces.settings;
+      return surface.selectedProviderId === providerId ? surface.detail : null;
+    }
+
+    function setProviderError(first, providerId, message) {
+      providerErrors.set(`${first ? "first" : "settings"}:${providerId}`, message);
+    }
+
+    function clearProviderError(first, providerId) {
+      providerErrors.delete(`${first ? "first" : "settings"}:${providerId}`);
+    }
+
     async function providerAction(providerId, first = false) {
       if (mountDisposed || !providerFacade || providerFacadeInvalid || providerPending.has(providerId)) return;
       const surface = first ? providerSurfaces.first : providerSurfaces.settings;
@@ -4092,15 +4112,20 @@
         try {
           request = requestForProvider(providerId, entry);
         } catch (error) {
-          entry.error.textContent = providerErrorCopy(providerId, error);
-          entry.error.hidden = false;
-          entry.action.focus?.();
+          const message = providerErrorCopy(providerId, error);
+          setProviderError(first, providerId, message);
+          const currentEntry = currentProviderDetail(first, providerId) ?? entry;
+          currentEntry.error.textContent = message;
+          currentEntry.error.hidden = false;
+          currentEntry.action.focus?.();
           return;
         }
       }
       const operation = beginProviderOperation(providerId, first, entry);
       if (!operation) return;
-      entry.error.hidden = true;
+      clearProviderError(first, providerId);
+      const activeEntry = currentProviderDetail(first, providerId);
+      if (activeEntry) activeEntry.error.hidden = true;
       updateConnectionPresentation(lastSnapshot);
       let failed = false;
       let receiptAttempted = false;
@@ -4126,7 +4151,9 @@
             // following snapshot failure is stale publication, not a receipt
             // write failure and must not create a Finish setup retry.
             firstConnectionError.hidden = true;
-            entry.error.hidden = true;
+            clearProviderError(first, providerId);
+            const activeEntry = currentProviderDetail(first, providerId);
+            if (activeEntry) activeEntry.error.hidden = true;
             return;
           }
           if (!currentProviderOperation(operation)) return;
@@ -4145,23 +4172,32 @@
         if (receiptAcknowledged) {
           if (!providerAuthorityRetryable) markProviderRefreshFailure();
           firstConnectionError.hidden = true;
-          entry.error.hidden = true;
+          clearProviderError(first, providerId);
+          const activeEntry = currentProviderDetail(first, providerId);
+          if (activeEntry) activeEntry.error.hidden = true;
           failed = false;
         } else {
           failed = true;
           if (currentProviderOperation(operation)) {
             const connectedAfterReceiptFailure = first && receiptAttempted
               && providerConnection(providerId).state === "connected";
+            const message = connectedAfterReceiptFailure
+              ? `${providerConnection(providerId).label} is connected, but first-connection setup could not be saved. Try again.`
+              : providerErrorCopy(providerId, error);
+            setProviderError(first, providerId, message);
+            const currentEntry = currentProviderDetail(first, providerId);
             if (connectedAfterReceiptFailure) {
               providerReceiptRetry.add(providerId);
-              entry.error.textContent = `${providerConnection(providerId).label} is connected, but first-connection setup could not be saved. Try again.`;
-            } else entry.error.textContent = providerErrorCopy(providerId, error);
-            entry.error.hidden = false;
+            }
+            if (currentEntry) {
+              currentEntry.error.textContent = message;
+              currentEntry.error.hidden = false;
+            }
             if (first) {
-              firstConnectionError.textContent = entry.error.textContent;
+              firstConnectionError.textContent = message;
               firstConnectionError.hidden = false;
             }
-            entry.action.focus?.();
+            currentEntry?.action.focus?.();
           }
         }
       } finally {
@@ -4173,7 +4209,7 @@
         }
         if (ownsOperation && !mountDisposed) {
           updateConnectionPresentation(lastSnapshot);
-          if (failed) entry.action.focus?.();
+          if (failed) currentProviderDetail(first, providerId)?.action.focus?.();
         }
       }
     }
@@ -4185,7 +4221,9 @@
       const entry = surface.selectedProviderId === providerId ? surface.detail : null;
       const operation = beginProviderOperation(providerId, false, entry, "disconnect");
       if (!operation) return;
-      if (entry) entry.error.hidden = true;
+      clearProviderError(false, providerId);
+      const activeEntry = currentProviderDetail(false, providerId);
+      if (activeEntry) activeEntry.error.hidden = true;
       updateConnectionPresentation(lastSnapshot);
       try {
         await providerFacade.disconnect(providerId);
@@ -4196,10 +4234,15 @@
           throw new Error("Provider disconnect is not confirmed.");
         }
       } catch (error) {
-        if (entry && currentProviderOperation(operation)) {
-          entry.error.textContent = providerErrorCopy(providerId, error).replace("connected", "disconnected");
-          entry.error.hidden = false;
-          entry.action.focus?.();
+        if (currentProviderOperation(operation)) {
+          const message = providerErrorCopy(providerId, error).replace("connected", "disconnected");
+          setProviderError(false, providerId, message);
+          const currentEntry = currentProviderDetail(false, providerId);
+          if (currentEntry) {
+            currentEntry.error.textContent = message;
+            currentEntry.error.hidden = false;
+            currentEntry.action.focus?.();
+          }
         }
       } finally {
         const ownsOperation = providerOperations.get(providerId) === operation;
@@ -5090,6 +5133,7 @@
         warningScope = null;
         providerOperations.clear();
         providerPending.clear();
+        providerErrors.clear();
         clearProviderLoginPrompt();
         providerReceiptRetry.clear();
         closeAdvancedFlyout();
