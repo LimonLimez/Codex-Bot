@@ -4264,6 +4264,81 @@ test("provider picker shows eight canonical buttons and exactly one disclosed pa
   assert.equal(harness.findPanel("codex-first-connection-skip"), null);
 });
 
+test("Vertex is selectable but truthfully unavailable without calling connect", async (context) => {
+  const requests = [];
+  const harness = connectedNativeProviderHarness({
+    onboarding: null,
+    providerFacade: providerFacade({ connect: (request) => requests.push(request) }),
+  });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+
+  clickProviderCard(harness, "google-vertex-ai");
+  const detail = providerDetail(harness);
+  const action = providerActionButton(harness);
+  assert.equal(detail.dataset.providerId, "google-vertex-ai");
+  assert.match(providerText(harness), /secure JSON file picker is not available/i);
+  assert.equal(action.disabled, true);
+  action.listeners.get("click")();
+  assert.deepEqual(requests, []);
+});
+
+test("a failed selected route keeps safe values clears secrets and restores action focus", async (context) => {
+  const facade = providerFacade({
+    connect() {
+      const error = new Error("private sk-secret /Users/person");
+      error.code = "OPENBOT_PROVIDER_INVALID";
+      return Promise.reject(error);
+    },
+  });
+  const harness = connectedNativeProviderHarness({ onboarding: null, providerFacade: facade });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  clickProviderCard(harness, "local-openai-compatible");
+  const detail = providerDetail(harness);
+  const baseUrl = providerControl(harness, "codex-provider-base-url");
+  const secret = providerControl(harness, "codex-provider-api-key");
+  baseUrl.value = "http://127.0.0.1:11434/v1";
+  secret.value = "local-secret";
+  const action = providerActionButton(harness);
+  action.listeners.get("click")();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(baseUrl.value, "http://127.0.0.1:11434/v1");
+  assert.equal(secret.value, "");
+  assert.equal(harness.documentRef.activeElement, action);
+  assert.doesNotMatch(providerText(harness), /sk-secret|Users\/person|local-secret/);
+});
+
+test("first provider dialog rejects cancel Escape backdrop and close dismissal", async (context) => {
+  const harness = connectedNativeProviderHarness({ onboarding: null });
+  context.after(() => harness.mounted.dispose());
+  await new Promise((resolve) => setImmediate(resolve));
+  const dialog = harness.findPanel("codex-first-connection-setup");
+  const event = (key = null, target = null) => ({
+    key,
+    target,
+    prevented: false,
+    preventDefault() { this.prevented = true; },
+  });
+  const cancel = event();
+  dialog.listeners.get("cancel")(cancel);
+  assert.equal(cancel.prevented, true);
+  const escape = event("Escape");
+  dialog.listeners.get("keydown")(escape);
+  assert.equal(escape.prevented, true);
+  const backdrop = event(null, dialog);
+  const pointerdown = dialog.listeners.get("pointerdown");
+  assert.equal(typeof pointerdown, "function");
+  pointerdown(backdrop);
+  assert.equal(backdrop.prevented, true);
+  dialog.close();
+  const close = dialog.listeners.get("close");
+  assert.equal(typeof close, "function");
+  close();
+  assert.equal(dialog.open, true);
+  assert.equal(harness.findPanel("codex-first-connection-skip"), null);
+});
+
 test("provider selection is ephemeral and keyboard navigation follows canonical order", async (context) => {
   const facade = providerFacade();
   let connectCalls = 0;
@@ -4301,7 +4376,7 @@ test("provider keyboard navigation roves focus across both surfaces without faca
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
   calls.length = 0;
 
-  assert.equal(harness.documentRef.activeElement, providerActionButton(harness));
+  assert.equal(harness.documentRef.activeElement, providerCard(harness, "openai-codex"));
   assert.equal(harness.documentRef.activeElement === harness.focusAnchor, false);
   for (const providerId of PROVIDER_IDS) {
     assert.equal(providerCard(harness, providerId).tabIndex, providerId === "openai-codex" ? 0 : -1);
@@ -4359,9 +4434,10 @@ test("provider failure after a Settings detail rebuild appears and focuses the c
 
   failure.reject(new Error("settings provider failure"));
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  const currentDetail = providerDetail(harness, false).children[0];
-  assert.equal(currentDetail.children[2].hidden, false);
-  assert.match(currentDetail.children[2].textContent, /could not be connected|try again/i);
+  const currentDetail = providerDetail(harness, false);
+  const error = providerControl(harness, "codex-provider-connection-error", false);
+  assert.equal(error.hidden, false);
+  assert.match(error.textContent, /could not be connected|try again/i);
   assert.equal(harness.documentRef.activeElement, currentAction);
 });
 
@@ -4513,7 +4589,7 @@ test("existing bots without a durable receipt still open the eight-route gate", 
   );
   assert.deepEqual(
     PROVIDER_IDS.map((providerId) => providerCardField(harness, providerId, "codex-provider-choice-state").textContent),
-    ["Connected", "Connecting…", "Not connected", "Not connected", "Unavailable", "Not connected", "Not connected", "Not connected"],
+    ["Connected", "Connecting…", "Not connected", "Not connected", "Retry available", "Unavailable", "Not connected", "Not connected"],
   );
 });
 
@@ -4579,22 +4655,9 @@ test("provider chooser sends exact route requests, completes first onboarding, a
   let connections = eightConnections();
   let onboarding = null;
   const requests = [];
-  const catalog = Object.freeze({
-    generation: 1,
-    status: "ready",
-    models: Object.freeze([Object.freeze({
-      provider: "google-vertex-ai",
-      providerLabel: "Google Vertex AI",
-      model: "gemini-3.1-pro",
-      label: "Gemini 3.1 Pro",
-      efforts: Object.freeze(["medium"]),
-      serviceTiers: Object.freeze([]),
-      defaultReasoningEffort: "medium",
-      defaultServiceTier: null,
-      catalogGeneration: 1,
-      isDefault: true,
-    })]),
-  });
+  const catalog = providerCatalog([
+    providerModel("moonshot-kimi", "kimi-k2", "Kimi K2", ["medium"], 1, { isDefault: true }),
+  ], 1);
   const facade = {
     async list() { return connections; },
     async catalog() { return catalog; },
@@ -4653,11 +4716,11 @@ test("provider chooser sends exact route requests, completes first onboarding, a
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  clickProviderCard(harness, "google-vertex-ai");
+  clickProviderCard(harness, "moonshot-kimi");
   providerActionButton(harness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(requests[0], { providerId: "google-vertex-ai" });
+  assert.deepEqual(requests[0], { providerId: "moonshot-kimi" });
   assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
 
   clickProviderCard(harness, "openai-api-key", false);
@@ -4787,7 +4850,7 @@ test("successful onboarding restores the active bot and never creates one", asyn
   let receipt = null;
   let createCalls = 0;
   const catalog = providerCatalog([
-    providerModel("google-vertex-ai", "gemini-3.1-pro", "Gemini 3.1 Pro", ["medium"], 1, { isDefault: true }),
+    providerModel("moonshot-kimi", "kimi-k2", "Kimi K2", ["medium"], 1, { isDefault: true }),
   ], 1);
   const facade = providerFacade({
     connections: () => connections,
@@ -4809,8 +4872,8 @@ test("successful onboarding restores the active bot and never creates one", asyn
   });
   const selection = (botId) => Object.freeze({
     botId,
-    provider: "google-vertex-ai",
-    model: "gemini-3.1-pro",
+    provider: "moonshot-kimi",
+    model: "kimi-k2",
     reasoningEffort: "medium",
     serviceTier: null,
     catalogGeneration: 1,
@@ -4821,6 +4884,7 @@ test("successful onboarding restores the active bot and never creates one", asyn
     initialSelection: selection(BOT_A),
     nativeProtocol: true,
     nativeHost: true,
+    focusBeforeMount: true,
     providerFacade: facade,
     botsFacade: {
       async list() { return [bot(BOT_A, "A", "ready"), bot(BOT_B, "B", "ready")]; },
@@ -4840,12 +4904,13 @@ test("successful onboarding restores the active bot and never creates one", asyn
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
-  clickProviderCard(harness, "google-vertex-ai");
+  clickProviderCard(harness, "moonshot-kimi");
   providerActionButton(harness).listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(harness.mounted.controller.snapshot().activeBotId, BOT_B);
   assert.equal(createCalls, 0);
+  assert.equal(harness.documentRef.activeElement, harness.focusAnchor);
 });
 
 test("mounted Advanced summary keeps a same-id provider selection provider-scoped", async (context) => {
@@ -6754,10 +6819,10 @@ test("provider chooser and Settings render the validated connection DTO label", 
   await new Promise((resolve) => setImmediate(resolve));
   clickProviderCard(harness, "xai");
   clickProviderCard(harness, "xai", false);
-  const chooser = providerDetail(harness).children[0];
-  const settings = providerDetail(harness, false).children[0];
-  assert.equal(chooser.children[0].textContent, "DTO xAI label");
-  assert.equal(settings.children[0].textContent, "DTO xAI label");
+  const chooser = providerDetail(harness);
+  const settings = providerDetail(harness, false);
+  assert.equal(providerControl(harness, "codex-provider-details-title").textContent, "DTO xAI label");
+  assert.equal(providerControl(harness, "codex-provider-details-title", false).textContent, "DTO xAI label");
   assert.equal(chooser.dataset.loginKind, providerDescriptor("xai").loginKind);
   assert.equal(settings.dataset.loginKind, providerDescriptor("xai").loginKind);
 });
@@ -6933,7 +6998,7 @@ test("held Direct Codex browser connect stays Connecting and cannot complete onb
   action.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(action.disabled, true);
-  assert.equal(providerDetail(harness).children[0].children[1].textContent, "Connecting…");
+  assert.equal(providerControl(harness, "codex-provider-details-status").textContent, "Connecting…");
   assert.equal(completeCalls, 0);
   assert.equal(harness.findPanel("codex-first-connection-setup").open, true);
 
@@ -7064,13 +7129,13 @@ test("disconnect-pending Direct Codex is model-free and exposes Settings Retry d
   });
   context.after(() => harness.mounted.dispose());
   await new Promise((resolve) => setImmediate(resolve));
-  const settings = providerDetail(harness, false).children[0];
+  const settings = providerDetail(harness, false);
   const retry = providerControl(harness, "codex-provider-disconnect", false);
   assert.equal(harness.mounted.controller.snapshot().modelCatalog.length, 0);
-  assert.equal(settings.children[1].textContent, "Unavailable");
+  assert.equal(providerControl(harness, "codex-provider-details-status", false).textContent, "Retry available");
   assert.equal(providerActionButton(harness, false).disabled, true);
   assert.equal(retry.hidden, false);
-  assert.equal(retry.textContent, "Retry disconnect");
+  assert.equal(retry.textContent, "Retry disconnect OpenAI Codex");
   retry.listeners.get("click")();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(calls, ["openai-codex"]);
@@ -7834,7 +7899,7 @@ test("a connected first route stays retryable when receipt completion fails", as
   for (let index = 0; index < 5; index += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
-  const error = providerDetail(harness).children[0].children[2];
+  const error = providerControl(harness, "codex-provider-connection-error");
   assert.equal(connectCalls, 1);
   assert.equal(completeCalls, 1);
   assert.equal(action.disabled, false);
@@ -8438,7 +8503,7 @@ test("R4-N4 an older higher-generation refresh cannot commit a mixed connection/
     await new Promise((resolve) => setImmediate(resolve));
   }
   for (let index = 0; index < 8; index += 1) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(providerDetail(harness, false).children[0].children[1].textContent, "Connected");
+  assert.equal(providerControl(harness, "codex-provider-details-status", false).textContent, "Connected");
   assert.equal(harness.findPanel("codex-first-connection-setup").open, false);
   assert.deepEqual(
     harness.mounted.controller.snapshot().modelCatalog.map(({ model }) => model),
@@ -8792,9 +8857,9 @@ test("R5-N4 full-snapshot concurrent connects converge for either completion ord
     assert.equal(connectCalls, 2);
     assert.equal(maxConcurrentReads, 1);
     clickProviderCard(harness, order[0], false);
-    assert.equal(providerDetail(harness, false).children[0].children[2].hidden, true);
+    assert.equal(providerControl(harness, "codex-provider-connection-error", false).hidden, true);
     clickProviderCard(harness, order[1], false);
-    assert.equal(providerDetail(harness, false).children[0].children[2].hidden, true);
+    assert.equal(providerControl(harness, "codex-provider-connection-error", false).hidden, true);
     assert.deepEqual(
       new Set(harness.mounted.controller.snapshot().modelCatalog.map(({ provider }) => provider)),
       new Set(order),

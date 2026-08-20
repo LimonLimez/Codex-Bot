@@ -3341,6 +3341,7 @@
     let providerCatalogLoaded = false;
     let providerOnboardingLoaded = false;
     let providerInitialFocusDone = false;
+    let providerGateReturnFocus = null;
     let providerAuthorityInvalid = providerFacadeInvalid;
     let providerAuthorityHasCommit = false;
     let providerAuthorityRetryable = false;
@@ -3550,18 +3551,20 @@
     const powerState = new POWER_CONTROL.PowerControlState([], null, { ownerKey: "unselected" });
     let controller;
 
-    function createProviderDetail(surface, providerId) {
-      const first = surface.first;
-      const label = PROVIDER_LABELS[providerId];
-      const kind = PROVIDER_LOGIN_KINDS[providerId];
-      const panel = element(documentRef, "div", "codex-provider-detail-panel");
+    function buildProviderDetails(surface, connection) {
+      const providerId = connection.providerId;
+      const label = connection.label;
+      const kind = connection.loginKind;
+      const panel = surface.details;
       panel.dataset.providerId = providerId;
       panel.dataset.loginKind = kind;
-      const heading = element(documentRef, "h4", "codex-provider-detail-heading", label);
-      const status = element(documentRef, "span", "codex-provider-connection-state", "Not connected");
+      const heading = element(documentRef, "h3", "codex-provider-details-title", label);
+      heading.id = `codex-${surface.key}-${providerId}-details-title`;
+      panel.setAttribute("aria-labelledby", heading.id);
+      const status = element(documentRef, "p", "codex-provider-details-status", "Not connected");
       status.setAttribute("role", "status");
       status.setAttribute("aria-live", "polite");
-      const error = element(documentRef, "span", "codex-provider-connection-error");
+      const error = element(documentRef, "p", "codex-provider-connection-error");
       error.setAttribute("role", "alert");
       error.hidden = true;
       const form = element(documentRef, "div", "codex-provider-connection-form");
@@ -3587,7 +3590,7 @@
       } else if (kind === "local") {
         const baseUrl = element(documentRef, "input", "codex-provider-base-url");
         baseUrl.type = "url";
-        baseUrl.placeholder = "http://127.0.0.1:11434/v1";
+        baseUrl.value = "http://127.0.0.1:11434/v1";
         baseUrl.setAttribute("aria-label", `${label} base URL`);
         const apiKey = element(documentRef, "input", "codex-provider-api-key");
         apiKey.type = "password";
@@ -3597,26 +3600,21 @@
         inputs.baseUrl = baseUrl;
         inputs.apiKey = apiKey;
         form.append(baseUrl, apiKey);
-      } else if (kind === "service-account" && typeof windowRef.showOpenFilePicker !== "function") {
-        form.append(element(documentRef, "p", "codex-provider-detail-note", VERTEX_UNAVAILABLE_COPY));
       }
-      const action = element(
-        documentRef,
-        "button",
-        first ? "codex-provider-connect codex-first-connection-action" : "codex-provider-connect",
-        kind === "account" ? "Connect in Browser"
-          : kind === "service-account" ? "Choose JSON"
-            : kind === "device" ? "Use Device" : "Connect",
-      );
+      if (providerId === "google-vertex-ai") {
+        form.append(element(documentRef, "p", "codex-provider-unavailable-copy", VERTEX_UNAVAILABLE_COPY));
+      }
+      const action = element(documentRef, "button", "codex-provider-connect", `Connect ${label}`);
       action.type = "button";
       action.dataset.providerId = providerId;
-      const disconnect = element(documentRef, "button", "codex-provider-disconnect", "Disconnect");
+      action.disabled = providerId === "google-vertex-ai";
+      const disconnect = element(documentRef, "button", "codex-provider-disconnect", `Disconnect ${label}`);
       disconnect.type = "button";
       disconnect.dataset.providerId = providerId;
-      disconnect.hidden = first;
+      disconnect.hidden = surface.first;
       const actions = element(documentRef, "div", "codex-provider-connection-actions");
       actions.append(action, disconnect);
-      panel.append(heading, status, error, surface.loginPrompt.prompt, form, actions);
+      panel.replaceChildren(heading, status, error, form, actions, surface.loginPrompt.prompt);
       const detail = {
         panel,
         heading,
@@ -3626,13 +3624,13 @@
         inputs,
         action,
         disconnect,
+        firstControl: inputs.authMode ?? inputs.baseUrl ?? inputs.apiKey ?? action,
         providerId,
-        first,
+        first: surface.first,
       };
-      Object.defineProperty(detail, "firstControl", { value: action });
-      action.addEventListener("click", () => { void providerAction(providerId, first); });
+      action.addEventListener("click", () => { void providerAction(providerId, surface.first); });
       disconnect.addEventListener("click", () => { void disconnectProvider(providerId); });
-      return Object.freeze(detail);
+      return detail;
     }
 
     function selectProvider(surface, providerId, { moveFocus = false } = {}) {
@@ -3644,7 +3642,6 @@
         card.button.tabIndex = selected ? 0 : -1;
       }
       renderProviderSurface(surface);
-      updateProviderDetail(surface, providerConnection(providerId));
       if (moveFocus) surface.detail?.firstControl?.focus?.();
     }
 
@@ -3660,18 +3657,33 @@
       surface.cards.get(PROVIDER_IDS[target])?.button.focus?.();
     }
 
+    function renderProviderCard(surface, card, connection) {
+      const operation = providerOperations.get(connection.providerId);
+      const pending = providerPending.has(connection.providerId);
+      const stateText = operation?.kind === "disconnect" ? "Disconnecting…"
+        : pending ? "Connecting…"
+          : connection.state === "connected" ? "Connected"
+            : connection.state === "connecting" ? "Connecting…"
+              : connection.providerId === "google-vertex-ai" ? "Unavailable"
+                : connection.state === "unavailable" ? "Retry available" : "Not connected";
+      card.state.textContent = stateText;
+      card.state.dataset.state = connection.state;
+      card.button.dataset.state = connection.state;
+      card.title.textContent = connection.label;
+    }
+
     function renderProviderSurface(surface) {
-      const providerId = surface.selectedProviderId;
-      if (surface.detail?.providerId === providerId
-        && surface.detail.panel.parentElement === surface.details) {
-        return surface.detail;
+      for (const providerId of PROVIDER_IDS) {
+        renderProviderCard(surface, surface.cards.get(providerId), providerConnection(providerId));
       }
-      const detail = createProviderDetail(surface, providerId);
-      surface.detail = detail;
-      surface.details.dataset.providerId = providerId;
-      surface.details.replaceChildren(detail.panel);
+      const connection = providerConnection(surface.selectedProviderId);
+      const previous = surface.detail;
+      if (!previous || previous.providerId !== connection.providerId) {
+        surface.detail = buildProviderDetails(surface, connection);
+      }
+      updateProviderDetails(surface, surface.detail, connection);
       renderProviderLoginPrompt();
-      return detail;
+      return surface.detail;
     }
 
     renderProviderSurface(providerSurfaces.first);
@@ -3693,17 +3705,16 @@
 
     function renderProviderLoginPrompt() {
       const operation = providerLoginPrompt?.operation;
-      const visible = Boolean(
+      const operationVisible = Boolean(
         providerLoginPrompt
         && operation
         && providerOperations.get("openai-codex") === operation
         && !mountDisposed,
       );
       for (const surface of Object.values(providerSurfaces)) {
-        const target = surface.loginPrompt;
-        const surfaceVisible = visible && surface.selectedProviderId === "openai-codex";
-        target.code.textContent = surfaceVisible ? providerLoginPrompt.prompt.userCode : "";
-        target.prompt.hidden = !surfaceVisible;
+        const visible = operationVisible && surface.selectedProviderId === "openai-codex";
+        surface.loginPrompt.code.textContent = visible ? providerLoginPrompt.prompt.userCode : "";
+        surface.loginPrompt.prompt.hidden = !visible;
       }
     }
 
@@ -3750,29 +3761,7 @@
         && left.completedAt === right.completedAt;
     }
 
-    function updateProviderCard(card, connection) {
-      if (!card || !connection) return;
-      const pending = providerPending.has(connection.providerId);
-      const operation = providerOperations.get(connection.providerId);
-      const disconnecting = pending && operation?.kind === "disconnect";
-      const connected = connection.state === "connected";
-      const externallyConnecting = connection.state === "connecting";
-      const stateText = disconnecting ? "Disconnecting…" : pending ? "Connecting…"
-        : connected ? "Connected"
-        : connection.state === "connecting" ? "Connecting…"
-        : connection.state === "unavailable" ? "Unavailable" : "Not connected";
-      card.state.textContent = stateText;
-      card.state.dataset.state = connection.state;
-      card.title.textContent = connection.label;
-      card.button.dataset.state = connection.state;
-      card.button.disabled = false;
-      if (externallyConnecting) card.button.setAttribute("aria-busy", "true");
-      else card.button.removeAttribute?.("aria-busy");
-    }
-
-    function updateProviderDetail(surface, connection) {
-      const entry = renderProviderSurface(surface);
-      const scopedError = providerErrors.get(`${surface.key}:${connection.providerId}`);
+    function updateProviderDetails(surface, entry, connection) {
       const pending = providerPending.has(connection.providerId);
       const operation = providerOperations.get(connection.providerId);
       const disconnecting = pending && operation?.kind === "disconnect";
@@ -3781,54 +3770,43 @@
       const disconnectPending = connection.providerId === "openai-codex"
         && connection.state === "unavailable"
         && connection.errorCode === "OPENBOT_PROVIDER_DISCONNECT_PENDING";
-      const receiptRetry = entry.first && providerReceiptRetry.has(connection.providerId);
-      const legacyConfirmation = entry.first && connected && !receiptRetry
+      const receiptRetry = surface.first && providerReceiptRetry.has(connection.providerId);
+      const legacyConfirmation = surface.first && connected && !receiptRetry
         && providerOnboarding === null
         && providerCatalog.models.some((model) => model.provider === connection.providerId);
+      const vertexUnavailable = connection.providerId === "google-vertex-ai";
       const stateText = disconnecting ? "Disconnecting…" : pending ? "Connecting…"
         : connected ? "Connected"
-        : connection.state === "connecting" ? "Connecting…"
-        : connection.state === "unavailable" ? "Unavailable" : "Not connected";
+        : externallyConnecting ? "Connecting…"
+          : vertexUnavailable ? "Unavailable"
+            : connection.state === "unavailable" ? "Retry available" : "Not connected";
       entry.status.textContent = stateText;
-      entry.heading.textContent = connection.label;
       entry.status.dataset.state = connection.state;
-      entry.panel.dataset.loginKind = connection.loginKind;
-      entry.action.disabled = providerFacadeInvalid || pending
-        || disconnectPending
-        || (entry.first && providerAuthorityRetryable)
-        || (connected && !receiptRetry && !legacyConfirmation) || externallyConnecting;
+      entry.panel.setAttribute("aria-busy", String(pending));
+      entry.action.disabled = providerFacadeInvalid || pending || vertexUnavailable
+        || disconnectPending || externallyConnecting
+        || (surface.first && providerAuthorityRetryable)
+        || (connected && !receiptRetry && !legacyConfirmation);
       entry.disconnect.disabled = pending;
-      entry.disconnect.hidden = entry.first || (!connected && !disconnectPending);
-      entry.disconnect.textContent = disconnectPending ? "Retry disconnect" : "Disconnect";
-      if (scopedError) {
-        entry.error.textContent = scopedError;
-        entry.error.hidden = false;
-      } else if (!pending && connection.state === "unavailable" && connection.errorCode) {
+      entry.disconnect.hidden = surface.first || (!connected && !disconnectPending);
+      entry.disconnect.textContent = disconnectPending
+        ? `Retry disconnect ${connection.label}` : `Disconnect ${connection.label}`;
+      if (!pending && connection.state === "unavailable" && connection.errorCode && !vertexUnavailable) {
         entry.error.textContent = providerErrorCopy(connection.providerId, { code: connection.errorCode });
         entry.error.hidden = false;
-      } else if (!pending) {
-        entry.error.hidden = true;
       }
       entry.action.textContent = receiptRetry ? "Finish setup"
         : legacyConfirmation ? `Continue with ${connection.label}`
-        : connected ? "Connected"
-        : entry.first && connection.providerId === "openai-codex" ? "Continue with Direct Codex"
-          : entry.first && connection.loginKind === "service-account" ? "Choose JSON"
-          : entry.first && connection.loginKind === "device" ? "Use Device" : "Connect";
-    }
-
-    function renderProviderSurfaces() {
-      for (const surface of Object.values(providerSurfaces)) {
-        for (const providerId of PROVIDER_IDS) {
-          updateProviderCard(surface.cards.get(providerId), providerConnection(providerId));
-        }
-        updateProviderDetail(surface, providerConnection(surface.selectedProviderId));
-      }
+          : connected ? "Connected"
+            : connection.state === "unavailable" && !vertexUnavailable ? `Retry ${connection.label}`
+              : `Connect ${connection.label}`;
+      const lockSelection = pending && surface.selectedProviderId === connection.providerId;
+      for (const card of surface.cards.values()) card.button.disabled = lockSelection;
     }
 
     function updateConnectionPresentation(snapshot = lastSnapshot) {
       if (!nativeProtocolMode) return;
-      renderProviderSurfaces();
+      for (const surface of Object.values(providerSurfaces)) renderProviderSurface(surface);
       const gateActive = providerFacade !== null || providerFacadeInvalid || providerAuthorityInvalid;
       const shouldOpen = gateActive
         && (providerFacadeInvalid || providerAuthorityInvalid || providerOnboarding === null);
@@ -3843,6 +3821,10 @@
       firstConnectionStatus.hidden = !(retryable && shouldOpen);
       firstConnectionRetry.hidden = !(retryable && shouldOpen);
       firstConnectionRetry.disabled = refreshPending;
+      const wasOpen = firstConnectionSetup.open === true;
+      if (shouldOpen && !wasOpen) {
+        providerGateReturnFocus = documentRef.activeElement ?? null;
+      }
       setDialogOpen(firstConnectionSetup, shouldOpen);
       renderProviderLoginPrompt();
       panel.inert = shouldOpen;
@@ -3852,11 +3834,20 @@
         firstConnectionError.hidden = false;
       }
       if (shouldOpen && providerPending.size === 0 && !providerInitialFocusDone) {
-        const firstDetail = providerSurfaces.first.detail;
-        const firstPending = firstDetail && !firstDetail.action.disabled
-          ? firstDetail.action : providerSurfaces.first.cards.get("openai-codex")?.button;
-        firstPending?.focus?.();
+        providerSurfaces.first.cards.get("openai-codex")?.button.focus?.();
         providerInitialFocusDone = true;
+      }
+      if (!shouldOpen && wasOpen) {
+        const target = providerGateReturnFocus;
+        providerGateReturnFocus = null;
+        if (target && target.isConnected !== false) target.focus?.();
+        else {
+          for (const candidate of [botSelect, newButton, rename, computerChange, modelTrigger]) {
+            if (!candidate || candidate.hidden || candidate.disabled) continue;
+            candidate.focus?.();
+            break;
+          }
+        }
       }
       if (!shouldOpen) providerInitialFocusDone = false;
       if (snapshot && gateActive && !shouldOpen) {
@@ -3877,8 +3868,6 @@
         request.apiKey = typeof entry?.inputs.apiKey?.value === "string" && entry.inputs.apiKey.value.length > 0
           ? entry.inputs.apiKey.value : null;
         if (entry?.inputs.apiKey) entry.inputs.apiKey.value = "";
-      } else if (providerId === "google-vertex-ai") {
-        return Object.freeze({ providerId });
       }
       return Object.freeze(request);
     }
@@ -4099,8 +4088,11 @@
     async function providerAction(providerId, first = false) {
       if (mountDisposed || !providerFacade || providerFacadeInvalid || providerPending.has(providerId)) return;
       const surface = first ? providerSurfaces.first : providerSurfaces.settings;
-      const entry = surface.selectedProviderId === providerId ? surface.detail : null;
-      if (!entry || entry.action.disabled || typeof providerFacade.connect !== "function") return;
+      const entry = surface.detail;
+      if (!entry || entry.providerId !== providerId
+        || surface.selectedProviderId !== providerId
+        || entry.action.disabled
+        || typeof providerFacade.connect !== "function") return;
       const receiptRetry = first && providerReceiptRetry.has(providerId);
       const current = providerConnection(providerId);
       const legacyConfirmation = first && current.state === "connected"
@@ -4218,7 +4210,8 @@
       if (mountDisposed || !providerFacade || typeof providerFacade.disconnect !== "function"
         || providerFacadeInvalid || providerPending.has(providerId)) return;
       const surface = providerSurfaces.settings;
-      const entry = surface.selectedProviderId === providerId ? surface.detail : null;
+      const entry = surface.detail;
+      if (!entry || entry.providerId !== providerId || surface.selectedProviderId !== providerId) return;
       const operation = beginProviderOperation(providerId, false, entry, "disconnect");
       if (!operation) return;
       clearProviderError(false, providerId);
@@ -4914,6 +4907,15 @@
     firstConnectionSetup.addEventListener("cancel", (event) => event.preventDefault?.());
     firstConnectionSetup.addEventListener("keydown", (event) => {
       if (event.key === "Escape") event.preventDefault?.();
+    });
+    firstConnectionSetup.addEventListener("pointerdown", (event) => {
+      if (event.target === firstConnectionSetup) event.preventDefault?.();
+    });
+    firstConnectionSetup.addEventListener("close", () => {
+      if (providerOnboarding === null && !mountDisposed) {
+        setDialogOpen(firstConnectionSetup, true);
+        providerSurfaces.first.cards.get("openai-codex")?.button.focus?.();
+      }
     });
 
     const setPopoverOpen = (open) => {
