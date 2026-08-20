@@ -1,7 +1,7 @@
 "use strict";
 
 const { createHash } = require("node:crypto");
-const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const AVATAR_CATALOG_VERSION = 1;
 const SHAPE_SALT = `openbot-avatar-shape-v${AVATAR_CATALOG_VERSION}`;
 const COLOR_SALT = `openbot-avatar-color-v${AVATAR_CATALOG_VERSION}`;
