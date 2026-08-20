@@ -198,8 +198,8 @@ function roundedGeometryViolations(entry) {
     return violations;
   }
   for (let first = 0; first < points.length; first += 1) {
-    if (Math.abs(points[first].x) > 129 || Math.abs(points[first].y) > 129) {
-      violations.push(`${name}: point ${first} exceeds the stock view box`);
+    if (Math.abs(points[first].x) > 116 || Math.abs(points[first].y) > 116) {
+      violations.push(`${name}: point ${first} exceeds the identity view box`);
     }
     for (let second = first + 1; second < points.length; second += 1) {
       if (points[first].x === points[second].x && points[first].y === points[second].y) {
@@ -249,6 +249,287 @@ function roundedGeometryViolations(entry) {
   }
   return violations;
 }
+
+const IDENTITY_BOUND = 116;
+const PATH_EPSILON = 1e-6;
+
+function pathNumber(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function normalizeVector(from, to) {
+  const dx = from[0] - to[0];
+  const dy = from[1] - to[1];
+  const length = Math.hypot(dx, dy) || 1;
+  return [dx / length, dy / length];
+}
+
+// Independent copy of the pinned Grok eX.corner/Ost math. This intentionally
+// does not call production helpers: it proves the emitted Q paths from the
+// exact vendor algorithm rather than only checking source vertices.
+function pinnedOstPath(points, radii) {
+  let path = "";
+  for (let index = 0; index < points.length; index += 1) {
+    const previous = points[(index - 1 + points.length) % points.length];
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const incoming = normalizeVector(previous, current);
+    const outgoing = normalizeVector(next, current);
+    const from = [current[0] + incoming[0] * radii[index], current[1] + incoming[1] * radii[index]];
+    const to = [current[0] + outgoing[0] * radii[index], current[1] + outgoing[1] * radii[index]];
+    path += path.length === 0
+      ? `M${pathNumber(from[0])} ${pathNumber(from[1])}`
+      : `L${pathNumber(from[0])} ${pathNumber(from[1])}`;
+    path += `Q${pathNumber(current[0])} ${pathNumber(current[1])} ${pathNumber(to[0])} ${pathNumber(to[1])}`;
+  }
+  return `${path}Z`;
+}
+
+// Independent copy of the pinned Grok Mst helper, including its two-decimal
+// Lr rounding. dBt's exact 160 radial samples feed this cubic path builder.
+function pinnedMstPath(points) {
+  let path = `M${pathNumber(points[0][0])} ${pathNumber(points[0][1])}`;
+  for (let index = 0; index < points.length; index += 1) {
+    const previous = points[(index - 1 + points.length) % points.length];
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const nextNext = points[(index + 2) % points.length];
+    path += `C${pathNumber(current[0] + (next[0] - previous[0]) / 6)} ${pathNumber(current[1] + (next[1] - previous[1]) / 6)} `;
+    path += `${pathNumber(next[0] - (nextNext[0] - current[0]) / 6)} ${pathNumber(next[1] - (nextNext[1] - current[1]) / 6)} `;
+    path += `${pathNumber(next[0])} ${pathNumber(next[1])}`;
+  }
+  return `${path}Z`;
+}
+
+function pinnedDBtPath(circles, sampleCount = 160) {
+  const points = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    const angle = index / sampleCount * Math.PI * 2;
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    let radius = 0;
+    for (const [centerX, centerY, circleRadius] of circles) {
+      const projection = cosine * centerX + sine * centerY;
+      const discriminant = projection * projection - (centerX * centerX + centerY * centerY) + circleRadius * circleRadius;
+      if (discriminant <= 0) continue;
+      const hit = projection + Math.sqrt(discriminant);
+      if (hit > radius) radius = hit;
+    }
+    points.push([cosine * radius, sine * radius]);
+  }
+  return pinnedMstPath(points);
+}
+
+function parsePathCommands(path) {
+  const commands = [];
+  const commandPattern = /([MLCQZ])([^MLCQZ]*)/g;
+  const arities = { M: 2, L: 2, Q: 4, C: 6, Z: 0 };
+  let match;
+  while ((match = commandPattern.exec(path)) !== null) {
+    const values = (match[2].match(/-?(?:\d+(?:\.\d+)?|\.\d+)/g) ?? []).map(Number);
+    assert.equal(values.length, arities[match[1]], `malformed ${match[1]} path command`);
+    commands.push({ type: match[1], values });
+  }
+  assert.ok(commands.length > 0, "path has no commands");
+  return commands;
+}
+
+function quadraticPoint(start, control, end, time) {
+  const inverse = 1 - time;
+  return {
+    x: inverse * inverse * start.x + 2 * inverse * time * control.x + time * time * end.x,
+    y: inverse * inverse * start.y + 2 * inverse * time * control.y + time * time * end.y,
+  };
+}
+
+function cubicPoint(start, firstControl, secondControl, end, time) {
+  const inverse = 1 - time;
+  return {
+    x: inverse ** 3 * start.x + 3 * inverse ** 2 * time * firstControl.x +
+      3 * inverse * time ** 2 * secondControl.x + time ** 3 * end.x,
+    y: inverse ** 3 * start.y + 3 * inverse ** 2 * time * firstControl.y +
+      3 * inverse * time ** 2 * secondControl.y + time ** 3 * end.y,
+  };
+}
+
+function curveExtrema(bounds, pointAt, derivativeRoots) {
+  const times = [0, 1, ...derivativeRoots.filter((time) => time > 0 && time < 1)];
+  for (const time of times) {
+    const point = pointAt(time);
+    bounds.minX = Math.min(bounds.minX, point.x);
+    bounds.maxX = Math.max(bounds.maxX, point.x);
+    bounds.minY = Math.min(bounds.minY, point.y);
+    bounds.maxY = Math.max(bounds.maxY, point.y);
+  }
+}
+
+function quadraticDerivativeRoots(start, control, end, axis) {
+  const denominator = start[axis] - 2 * control[axis] + end[axis];
+  if (Math.abs(denominator) <= PATH_EPSILON) return [];
+  return [(start[axis] - control[axis]) / denominator];
+}
+
+function cubicDerivativeRoots(start, firstControl, secondControl, end, axis) {
+  const a = 3 * (-start[axis] + 3 * firstControl[axis] - 3 * secondControl[axis] + end[axis]);
+  const b = 6 * (start[axis] - 2 * firstControl[axis] + secondControl[axis]);
+  const c = 3 * (firstControl[axis] - start[axis]);
+  if (Math.abs(a) <= PATH_EPSILON) return Math.abs(b) <= PATH_EPSILON ? [] : [-c / b];
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < -PATH_EPSILON) return [];
+  const root = Math.sqrt(Math.max(0, discriminant));
+  return [(-b - root) / (2 * a), (-b + root) / (2 * a)];
+}
+
+function pathExtrema(path) {
+  const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+  const commands = parsePathCommands(path);
+  let current = null;
+  let start = null;
+  for (const { type, values } of commands) {
+    if (type === "M") {
+      current = { x: values[0], y: values[1] };
+      start = current;
+      curveExtrema(bounds, () => current, []);
+      continue;
+    }
+    if (type === "Z") {
+      if (current && start) {
+        curveExtrema(bounds, (time) => ({
+          x: current.x + (start.x - current.x) * time,
+          y: current.y + (start.y - current.y) * time,
+        }), []);
+        current = start;
+      }
+      continue;
+    }
+    assert.ok(current, `path ${type} command precedes move`);
+    const startPoint = current;
+    if (type === "L") {
+      current = { x: values[0], y: values[1] };
+      curveExtrema(bounds, (time) => ({
+        x: startPoint.x + (current.x - startPoint.x) * time,
+        y: startPoint.y + (current.y - startPoint.y) * time,
+      }), []);
+      continue;
+    }
+    if (type === "Q") {
+      const control = { x: values[0], y: values[1] };
+      const end = { x: values[2], y: values[3] };
+      curveExtrema(
+        bounds,
+        (time) => quadraticPoint(startPoint, control, end, time),
+        [...quadraticDerivativeRoots([startPoint.x, startPoint.y], [control.x, control.y], [end.x, end.y], 0),
+          ...quadraticDerivativeRoots([startPoint.x, startPoint.y], [control.x, control.y], [end.x, end.y], 1)],
+      );
+      current = end;
+      continue;
+    }
+    const firstControl = { x: values[0], y: values[1] };
+    const secondControl = { x: values[2], y: values[3] };
+    const end = { x: values[4], y: values[5] };
+    curveExtrema(
+      bounds,
+      (time) => cubicPoint(startPoint, firstControl, secondControl, end, time),
+      [...cubicDerivativeRoots([startPoint.x, startPoint.y], [firstControl.x, firstControl.y], [secondControl.x, secondControl.y], [end.x, end.y], 0),
+        ...cubicDerivativeRoots([startPoint.x, startPoint.y], [firstControl.x, firstControl.y], [secondControl.x, secondControl.y], [end.x, end.y], 1)],
+    );
+    current = end;
+  }
+  return bounds;
+}
+
+function pathSamples(path, steps = 12) {
+  const samples = [];
+  const commands = parsePathCommands(path);
+  let current = null;
+  let start = null;
+  for (const { type, values } of commands) {
+    if (type === "M") {
+      current = { x: values[0], y: values[1] };
+      start = current;
+      samples.push(current);
+      continue;
+    }
+    if (type === "Z") {
+      if (current && start) samples.push(start);
+      current = start;
+      continue;
+    }
+    assert.ok(current, `path ${type} command precedes move`);
+    const from = current;
+    if (type === "L") {
+      current = { x: values[0], y: values[1] };
+      samples.push(current);
+      continue;
+    }
+    const points = type === "Q"
+      ? [from, { x: values[0], y: values[1] }, { x: values[2], y: values[3] }]
+      : [from, { x: values[0], y: values[1] }, { x: values[2], y: values[3] }, { x: values[4], y: values[5] }];
+    for (let index = 1; index <= steps; index += 1) {
+      const time = index / steps;
+      samples.push(type === "Q"
+        ? quadraticPoint(points[0], points[1], points[2], time)
+        : cubicPoint(points[0], points[1], points[2], points[3], time));
+    }
+    current = points.at(-1);
+  }
+  return samples;
+}
+
+function assertSimplePath(path, label) {
+  const bounds = pathExtrema(path);
+  assert.ok(bounds.minX >= -IDENTITY_BOUND - PATH_EPSILON, `${label} exceeds -ze-${IDENTITY_BOUND}: ${bounds.minX}`);
+  assert.ok(bounds.maxX <= IDENTITY_BOUND + PATH_EPSILON, `${label} exceeds ze+${IDENTITY_BOUND}: ${bounds.maxX}`);
+  assert.ok(bounds.minY >= -IDENTITY_BOUND - PATH_EPSILON, `${label} exceeds -ze-${IDENTITY_BOUND}: ${bounds.minY}`);
+  assert.ok(bounds.maxY <= IDENTITY_BOUND + PATH_EPSILON, `${label} exceeds ze+${IDENTITY_BOUND}: ${bounds.maxY}`);
+  const samples = pathSamples(path);
+  assert.ok(samples.length >= 4, `${label} is degenerate`);
+  const segments = samples.slice(1).map((point, index) => [samples[index], point]);
+  const closureWindow = segments.length > 24 ? 12 : 1;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segmentLength = distance(...segments[index]);
+    const isZeroLengthClose = index === segments.length - 1 && segmentLength <= PATH_EPSILON;
+    if (!isZeroLengthClose) assert.ok(segmentLength > PATH_EPSILON, `${label} has a degenerate segment ${index}`);
+    for (let other = index + 1; other < segments.length; other += 1) {
+      if (other === index + 1 || (index === 0 && other === segments.length - 1)) continue;
+      if (index < closureWindow && other >= segments.length - closureWindow) continue;
+      assert.equal(segmentsIntersect(segments[index], segments[other]), false, `${label} self-intersects at ${index}/${other}`);
+    }
+  }
+  return bounds;
+}
+
+function parseBearCircles(source) {
+  const match = /bear:qo\("Bear",dBt\(\[\[([\s\S]*?)\]\]\)\)/.exec(source);
+  assert.ok(match, "bear dBt geometry is missing");
+  return match[1].split("],[").map((tuple) => {
+    const [x, y, radius] = tuple.replace(/^\[|\]$/g, "").split(",");
+    return [parseRelativeCoordinate(x), parseRelativeCoordinate(y), Number(radius)];
+  });
+}
+
+test("pinned Sand helper paths stay inside ze plus or minus 116 with real extrema", () => {
+  const entries = parseRoundedGeometryEntries(OPENBOT_GEOMETRY_TAIL);
+  assert.equal(entries.length, 11);
+  for (const entry of entries) {
+    const path = pinnedOstPath(
+      entry.points.map(({ x, y }) => [x, y]),
+      entry.radii,
+    );
+    assert.match(path, /Q/, `${entry.name} must contain quadratic corners`);
+    const bounds = assertSimplePath(path, `${entry.name} Ost`);
+    assert.ok(Number.isFinite(bounds.minX + bounds.maxX + bounds.minY + bounds.maxY));
+  }
+  const bearPath = pinnedDBtPath(parseBearCircles(OPENBOT_GEOMETRY_TAIL));
+  assert.match(bearPath, /C/, "bear must contain the pinned Mst cubic path");
+  const bearBounds = assertSimplePath(bearPath, "bear dBt/Mst");
+  assert.ok(Number.isFinite(bearBounds.minX + bearBounds.maxX + bearBounds.minY + bearBounds.maxY));
+});
+
+test("the pinned path validator rejects degenerate and self-intersecting paths", () => {
+  assert.throws(() => assertSimplePath("M0 0L0 0Z", "degenerate fixture"), /degenerate/);
+  assert.throws(() => assertSimplePath("M-10 -10L10 10L-10 10L10 -10Z", "crossing fixture"), /self-intersects/);
+});
 
 function countExact(source, anchor) {
   let count = 0;

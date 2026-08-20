@@ -211,7 +211,7 @@ function patchRoundedGeometryViolations({ name, points, radii }) {
   const violations = [];
   assert.equal(points.length, radii.length, `${name} point/radius count`);
   for (let first = 0; first < points.length; first += 1) {
-    assert.ok(Math.abs(points[first].x) <= 129 && Math.abs(points[first].y) <= 129, `${name} point ${first} exceeds the stock view box`);
+    assert.ok(Math.abs(points[first].x) <= 116 && Math.abs(points[first].y) <= 116, `${name} point ${first} exceeds the identity view box`);
     for (let second = first + 1; second < points.length; second += 1) {
       assert.notDeepEqual(points[first], points[second], `${name} duplicate points ${first}/${second}`);
     }
@@ -249,6 +249,266 @@ function patchRoundedGeometryViolations({ name, points, radii }) {
   }
   return violations;
 }
+
+const PATCH_IDENTITY_BOUND = 116;
+
+function patchPathNumber(value) {
+  return Math.round(value * 100) / 100;
+}
+
+function patchNormalizeVector(from, to) {
+  const dx = from[0] - to[0];
+  const dy = from[1] - to[1];
+  const length = Math.hypot(dx, dy) || 1;
+  return [dx / length, dy / length];
+}
+
+// Reproduce the pinned vendor helpers independently so patch-app validates the
+// actual Q/C path math, not only source vertices and trimmed straight edges.
+function patchPinnedOstPath(points, radii) {
+  let path = "";
+  for (let index = 0; index < points.length; index += 1) {
+    const previous = points[(index - 1 + points.length) % points.length];
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const incoming = patchNormalizeVector(previous, current);
+    const outgoing = patchNormalizeVector(next, current);
+    const from = [current[0] + incoming[0] * radii[index], current[1] + incoming[1] * radii[index]];
+    const to = [current[0] + outgoing[0] * radii[index], current[1] + outgoing[1] * radii[index]];
+    path += path.length === 0
+      ? `M${patchPathNumber(from[0])} ${patchPathNumber(from[1])}`
+      : `L${patchPathNumber(from[0])} ${patchPathNumber(from[1])}`;
+    path += `Q${patchPathNumber(current[0])} ${patchPathNumber(current[1])} ${patchPathNumber(to[0])} ${patchPathNumber(to[1])}`;
+  }
+  return `${path}Z`;
+}
+
+function patchPinnedMstPath(points) {
+  let path = `M${patchPathNumber(points[0][0])} ${patchPathNumber(points[0][1])}`;
+  for (let index = 0; index < points.length; index += 1) {
+    const previous = points[(index - 1 + points.length) % points.length];
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const nextNext = points[(index + 2) % points.length];
+    path += `C${patchPathNumber(current[0] + (next[0] - previous[0]) / 6)} ${patchPathNumber(current[1] + (next[1] - previous[1]) / 6)} `;
+    path += `${patchPathNumber(next[0] - (nextNext[0] - current[0]) / 6)} ${patchPathNumber(next[1] - (nextNext[1] - current[1]) / 6)} `;
+    path += `${patchPathNumber(next[0])} ${patchPathNumber(next[1])}`;
+  }
+  return `${path}Z`;
+}
+
+function patchPinnedDBtPath(circles, sampleCount = 160) {
+  const points = [];
+  for (let index = 0; index < sampleCount; index += 1) {
+    const angle = index / sampleCount * Math.PI * 2;
+    const cosine = Math.cos(angle);
+    const sine = Math.sin(angle);
+    let radius = 0;
+    for (const [centerX, centerY, circleRadius] of circles) {
+      const projection = cosine * centerX + sine * centerY;
+      const discriminant = projection * projection - (centerX * centerX + centerY * centerY) + circleRadius * circleRadius;
+      if (discriminant <= 0) continue;
+      const hit = projection + Math.sqrt(discriminant);
+      if (hit > radius) radius = hit;
+    }
+    points.push([cosine * radius, sine * radius]);
+  }
+  return patchPinnedMstPath(points);
+}
+
+function patchParsePath(path) {
+  const commands = [];
+  const arities = { M: 2, L: 2, Q: 4, C: 6, Z: 0 };
+  const pattern = /([MLCQZ])([^MLCQZ]*)/g;
+  let match;
+  while ((match = pattern.exec(path)) !== null) {
+    const values = (match[2].match(/-?(?:\d+(?:\.\d+)?|\.\d+)/g) ?? []).map(Number);
+    assert.equal(values.length, arities[match[1]], `malformed ${match[1]} path command`);
+    commands.push({ type: match[1], values });
+  }
+  assert.ok(commands.length > 0, "path has no commands");
+  return commands;
+}
+
+function patchQuadraticPoint(start, control, end, time) {
+  const inverse = 1 - time;
+  return {
+    x: inverse * inverse * start.x + 2 * inverse * time * control.x + time * time * end.x,
+    y: inverse * inverse * start.y + 2 * inverse * time * control.y + time * time * end.y,
+  };
+}
+
+function patchCubicPoint(start, firstControl, secondControl, end, time) {
+  const inverse = 1 - time;
+  return {
+    x: inverse ** 3 * start.x + 3 * inverse ** 2 * time * firstControl.x + 3 * inverse * time ** 2 * secondControl.x + time ** 3 * end.x,
+    y: inverse ** 3 * start.y + 3 * inverse ** 2 * time * firstControl.y + 3 * inverse * time ** 2 * secondControl.y + time ** 3 * end.y,
+  };
+}
+
+function patchQuadraticRoots(start, control, end, axis) {
+  const denominator = start[axis] - 2 * control[axis] + end[axis];
+  return Math.abs(denominator) <= PATCH_GEOMETRY_EPSILON
+    ? []
+    : [(start[axis] - control[axis]) / denominator];
+}
+
+function patchCubicRoots(start, firstControl, secondControl, end, axis) {
+  const a = 3 * (-start[axis] + 3 * firstControl[axis] - 3 * secondControl[axis] + end[axis]);
+  const b = 6 * (start[axis] - 2 * firstControl[axis] + secondControl[axis]);
+  const c = 3 * (firstControl[axis] - start[axis]);
+  if (Math.abs(a) <= PATCH_GEOMETRY_EPSILON) return Math.abs(b) <= PATCH_GEOMETRY_EPSILON ? [] : [-c / b];
+  const discriminant = b * b - 4 * a * c;
+  if (discriminant < -PATCH_GEOMETRY_EPSILON) return [];
+  const root = Math.sqrt(Math.max(0, discriminant));
+  return [(-b - root) / (2 * a), (-b + root) / (2 * a)];
+}
+
+function patchPathExtrema(path) {
+  const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+  const include = (point) => {
+    bounds.minX = Math.min(bounds.minX, point.x);
+    bounds.maxX = Math.max(bounds.maxX, point.x);
+    bounds.minY = Math.min(bounds.minY, point.y);
+    bounds.maxY = Math.max(bounds.maxY, point.y);
+  };
+  const includeCurve = (pointAt, roots) => {
+    for (const time of [0, 1, ...roots.filter((value) => value > 0 && value < 1)]) include(pointAt(time));
+  };
+  let current = null;
+  let start = null;
+  for (const { type, values } of patchParsePath(path)) {
+    if (type === "M") {
+      current = { x: values[0], y: values[1] };
+      start = current;
+      include(current);
+      continue;
+    }
+    if (type === "Z") {
+      if (current && start) include({ x: current.x, y: current.y });
+      current = start;
+      continue;
+    }
+    assert.ok(current, `path ${type} command precedes move`);
+    const from = current;
+    if (type === "L") {
+      current = { x: values[0], y: values[1] };
+      include(from);
+      include(current);
+      continue;
+    }
+    if (type === "Q") {
+      const control = { x: values[0], y: values[1] };
+      const end = { x: values[2], y: values[3] };
+      includeCurve(
+        (time) => patchQuadraticPoint(from, control, end, time),
+        [...patchQuadraticRoots([from.x, from.y], [control.x, control.y], [end.x, end.y], 0),
+          ...patchQuadraticRoots([from.x, from.y], [control.x, control.y], [end.x, end.y], 1)],
+      );
+      current = end;
+      continue;
+    }
+    const firstControl = { x: values[0], y: values[1] };
+    const secondControl = { x: values[2], y: values[3] };
+    const end = { x: values[4], y: values[5] };
+    includeCurve(
+      (time) => patchCubicPoint(from, firstControl, secondControl, end, time),
+      [...patchCubicRoots([from.x, from.y], [firstControl.x, firstControl.y], [secondControl.x, secondControl.y], [end.x, end.y], 0),
+        ...patchCubicRoots([from.x, from.y], [firstControl.x, firstControl.y], [secondControl.x, secondControl.y], [end.x, end.y], 1)],
+    );
+    current = end;
+  }
+  return bounds;
+}
+
+function patchPathSamples(path, steps = 12) {
+  const samples = [];
+  let current = null;
+  let start = null;
+  for (const { type, values } of patchParsePath(path)) {
+    if (type === "M") {
+      current = { x: values[0], y: values[1] };
+      start = current;
+      samples.push(current);
+      continue;
+    }
+    if (type === "Z") {
+      if (current && start) samples.push(start);
+      current = start;
+      continue;
+    }
+    assert.ok(current, `path ${type} command precedes move`);
+    const from = current;
+    if (type === "L") {
+      current = { x: values[0], y: values[1] };
+      samples.push(current);
+      continue;
+    }
+    const points = type === "Q"
+      ? [from, { x: values[0], y: values[1] }, { x: values[2], y: values[3] }]
+      : [from, { x: values[0], y: values[1] }, { x: values[2], y: values[3] }, { x: values[4], y: values[5] }];
+    for (let index = 1; index <= steps; index += 1) {
+      const time = index / steps;
+      samples.push(type === "Q"
+        ? patchQuadraticPoint(points[0], points[1], points[2], time)
+        : patchCubicPoint(points[0], points[1], points[2], points[3], time));
+    }
+    current = points.at(-1);
+  }
+  return samples;
+}
+
+function patchAssertSimplePath(path, label) {
+  const bounds = patchPathExtrema(path);
+  assert.ok(bounds.minX >= -PATCH_IDENTITY_BOUND - PATCH_GEOMETRY_EPSILON, `${label} exceeds -ze-${PATCH_IDENTITY_BOUND}: ${bounds.minX}`);
+  assert.ok(bounds.maxX <= PATCH_IDENTITY_BOUND + PATCH_GEOMETRY_EPSILON, `${label} exceeds ze+${PATCH_IDENTITY_BOUND}: ${bounds.maxX}`);
+  assert.ok(bounds.minY >= -PATCH_IDENTITY_BOUND - PATCH_GEOMETRY_EPSILON, `${label} exceeds -ze-${PATCH_IDENTITY_BOUND}: ${bounds.minY}`);
+  assert.ok(bounds.maxY <= PATCH_IDENTITY_BOUND + PATCH_GEOMETRY_EPSILON, `${label} exceeds ze+${PATCH_IDENTITY_BOUND}: ${bounds.maxY}`);
+  const samples = patchPathSamples(path);
+  assert.ok(samples.length >= 4, `${label} is degenerate`);
+  const segments = samples.slice(1).map((point, index) => [samples[index], point]);
+  const closureWindow = segments.length > 24 ? 12 : 1;
+  for (let index = 0; index < segments.length; index += 1) {
+    const segmentLength = patchDistance(...segments[index]);
+    const isZeroLengthClose = index === segments.length - 1 && segmentLength <= PATCH_GEOMETRY_EPSILON;
+    if (!isZeroLengthClose) assert.ok(segmentLength > PATCH_GEOMETRY_EPSILON, `${label} has a degenerate segment ${index}`);
+    for (let other = index + 1; other < segments.length; other += 1) {
+      if (other === index + 1 || (index === 0 && other === segments.length - 1)) continue;
+      if (index < closureWindow && other >= segments.length - closureWindow) continue;
+      assert.equal(patchSegmentsIntersect(segments[index], segments[other]), false, `${label} self-intersects at ${index}/${other}`);
+    }
+  }
+  return bounds;
+}
+
+function patchParseBearCircles(source) {
+  const match = /bear:qo\("Bear",dBt\(\[\[([\s\S]*?)\]\]\)\)/.exec(source);
+  assert.ok(match, "bear dBt geometry is missing");
+  return match[1].split("],[").map((tuple) => {
+    const [x, y, radius] = tuple.replace(/^\[|\]$/g, "").split(",");
+    return [patchParseCoordinate(x), patchParseCoordinate(y), Number(radius)];
+  });
+}
+
+test("patch-app validates pinned Ost Q and dBt/Mst C extrema inside ze plus or minus 116", () => {
+  const entries = patchParseRoundedGeometry(OPENBOT_GEOMETRY_TAIL);
+  assert.equal(entries.length, 11);
+  for (const entry of entries) {
+    const path = patchPinnedOstPath(entry.points.map(({ x, y }) => [x, y]), entry.radii);
+    assert.match(path, /Q/, `${entry.name} must contain quadratic corners`);
+    const bounds = patchAssertSimplePath(path, `${entry.name} Ost`);
+    assert.ok(Number.isFinite(bounds.minX + bounds.maxX + bounds.minY + bounds.maxY));
+  }
+  const bearPath = patchPinnedDBtPath(patchParseBearCircles(OPENBOT_GEOMETRY_TAIL));
+  assert.match(bearPath, /C/, "bear must contain the pinned Mst cubic path");
+  const bearBounds = patchAssertSimplePath(bearPath, "bear dBt/Mst");
+  assert.ok(Number.isFinite(bearBounds.minX + bearBounds.maxX + bearBounds.minY + bearBounds.maxY));
+});
+
+test("patch-app path validator rejects degenerate and self-intersecting fixtures", () => {
+  assert.throws(() => patchAssertSimplePath("M0 0L0 0Z", "degenerate fixture"), /degenerate/);
+  assert.throws(() => patchAssertSimplePath("M-10 -10L10 10L-10 10L10 -10Z", "crossing fixture"), /self-intersects/);
+});
 
 test("patch-app renderer fixture carries the exact avatar registry contract", () => {
   const patched = patchAvatarCatalogSource(SYNTHETIC_VENDOR_RENDERER);

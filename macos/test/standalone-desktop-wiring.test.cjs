@@ -13,6 +13,15 @@ const runtimePath = path.join(macRoot, "src", "desktop", "runtime.cjs");
 const desktopPatchPath = path.join(macRoot, "src", "patch", "desktop.cjs");
 const rendererPatchPath = path.join(macRoot, "src", "patch", "renderer.cjs");
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
+const {
+  ADDED_AVATAR_SHAPES,
+} = require("../src/bots/avatar-catalog.cjs");
+const {
+  OPENBOT_GEOMETRY_TAIL,
+  OPENBOT_VISIBLE_SHAPES,
+  VENDOR_GEOMETRY_TAIL,
+  VENDOR_VISIBLE_SHAPES,
+} = require(rendererPatchPath);
 
 const STOCK_PRELOAD = 'const stock="kept";const L=M({invokeRequest:()=>{s.ipcRenderer.invoke("sand:coordinator-port-request")}});s.contextBridge.exposeInMainWorld("desktop",Q);s.contextBridge.exposeInMainWorld("coordinatorPort",X);s.ipcRenderer.on("sand:coordinator-port",e=>{});\n';
 const STOCK_INDEX = `<!doctype html>
@@ -42,7 +51,11 @@ const STOCK_LOCAL_IDENTITY_ANCHORS = [
   'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())',
   'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null})',
 ].join(";");
-const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}const after="kept";`;
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
+
+function countExact(source, anchor) {
+  return source.split(anchor).length - 1;
+}
 
 function sha256Text(source) {
   return crypto.createHash("sha256").update(source, "utf8").digest("hex");
@@ -131,6 +144,15 @@ test("patching keeps the native Grok shell and does not stage the replacement st
     expectedVendorRendererSha256: sha256Text(SYNTHETIC_VENDOR_RENDERER),
     expectedVendorSettingsSha256: sha256Text(STOCK_SETTINGS_ROOT),
   });
+  const patchedRenderer = fs.readFileSync(
+    path.join(root, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+    "utf8",
+  );
+  assert.equal(countExact(SYNTHETIC_VENDOR_RENDERER, VENDOR_GEOMETRY_TAIL), 1);
+  assert.equal(countExact(SYNTHETIC_VENDOR_RENDERER, VENDOR_VISIBLE_SHAPES), 1);
+  assert.equal(countExact(patchedRenderer, OPENBOT_GEOMETRY_TAIL), 1);
+  assert.equal(countExact(patchedRenderer, OPENBOT_VISIBLE_SHAPES), 1);
+  for (const shape of ADDED_AVATAR_SHAPES) assert.equal(countExact(patchedRenderer, `${shape}:qo(`), 1);
   const staged = path.join(root, "dist", "renderer", "codex");
   assert.deepEqual(fs.readdirSync(staged).sort(), ASSETS);
   for (const asset of [
