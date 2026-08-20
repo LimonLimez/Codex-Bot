@@ -219,13 +219,34 @@ test("release audit accepts reviewed pinned binaries without treating high entro
 test("release audit accepts every authoritative staged source without credential-shaped assignments", async (t) => {
   const { PATCHER_SOURCE_FILES, PATCHER_SHARED_SOURCE_FILES } = require(buildInstallerPath);
   const { credentialMaterialKind } = require(auditPath);
+  const macosSourceRoot = path.resolve(__dirname, "..", "src");
+  const sharedSourceRoot = path.resolve(__dirname, "..", "..", "src");
   const sourceFiles = [
-    ...PATCHER_SOURCE_FILES,
-    ...PATCHER_SHARED_SOURCE_FILES,
+    ...PATCHER_SOURCE_FILES.map((relative) => ({
+      relative: `macos/src/${relative}`,
+      source: path.join(macosSourceRoot, ...relative.split("/")),
+    })),
+    ...PATCHER_SHARED_SOURCE_FILES.map((relative) => ({
+      relative: `src/${relative}`,
+      source: path.join(sharedSourceRoot, ...relative.split("/")),
+    })),
   ];
-  for (const relative of sourceFiles) {
+  assert.equal(PATCHER_SOURCE_FILES.length, 61);
+  assert.equal(PATCHER_SHARED_SOURCE_FILES.length, 1);
+  assert.equal(sourceFiles.length, 62);
+  const sharedDescriptor = sourceFiles.find(({ relative }) => relative === "src/provider-descriptors.cjs");
+  assert.deepEqual(sharedDescriptor, {
+    relative: "src/provider-descriptors.cjs",
+    source: path.join(sharedSourceRoot, "provider-descriptors.cjs"),
+  });
+  const sharedBytes = fs.readFileSync(sharedDescriptor.source);
+  assert.equal(sharedBytes.byteLength, 8506);
+  assert.equal(
+    crypto.createHash("sha256").update(sharedBytes).digest("hex"),
+    "56f298a06f706ebd5fde1180e2a23ccb26b79e5ecaa6ff534e40ea374b1aba8d",
+  );
+  for (const { relative, source } of sourceFiles) {
     await t.test(relative, () => {
-      const source = path.join(__dirname, "..", "src", ...relative.split("/"));
       const contents = fs.readFileSync(source, "latin1");
       assert.equal(credentialMaterialKind(contents), null, relative);
     });
