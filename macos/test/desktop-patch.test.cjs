@@ -331,7 +331,7 @@ test("local desktop preload facade exposes exact frame and status channels with 
     "presentation", "releaseControl", "reload", "retry", "select", "sendInput",
   ]);
 
-  await localDesktop.select({ botId: "bot-a", viewGeneration: 1 });
+  const selectResult = await localDesktop.select({ botId: "bot-a", viewGeneration: 1 });
   await localDesktop.retry({ botId: "bot-a", viewGeneration: 1 });
   await localDesktop.clear({ viewGeneration: 1 });
   await localDesktop.presentation({ botId: "bot-a", presentation: "interactive" });
@@ -342,6 +342,10 @@ test("local desktop preload facade exposes exact frame and status channels with 
   await localDesktop.acquireControl({ botId: "bot-a" });
   await localDesktop.releaseControl({ botId: "bot-a" });
   await localDesktop.sendInput({ botId: "bot-a" });
+  assert.deepEqual(selectResult, {
+    channel: "openbot-local-frame:select",
+    args: [{ botId: "bot-a", viewGeneration: 1 }],
+  }, "the preload must return the main-process selection result without reshaping it");
   assert.deepEqual(harness.calls.map(({ channel, args }) => ({ channel, args })), [
     { channel: "openbot-local-frame:select", args: [{ botId: "bot-a", viewGeneration: 1 }] },
     { channel: "openbot-local-frame:retry", args: [{ botId: "bot-a", viewGeneration: 1 }] },

@@ -479,6 +479,31 @@ function statusDto(state, stateName, code = null) {
   });
 }
 
+function selectionResultDto(state) {
+  if (!state || state.presentation !== "preview" || !BOT_ID.test(state.botId) || !TARGET_ID.test(state.targetId)
+    || !Number.isSafeInteger(state.targetGeneration) || state.targetGeneration < 0
+    || !Number.isSafeInteger(state.sessionGeneration) || state.sessionGeneration < 1
+    || !Number.isSafeInteger(state.pageGeneration) || state.pageGeneration < 1
+    || !Number.isSafeInteger(state.viewGeneration) || state.viewGeneration < 1
+    || typeof state.frameId !== "string" || !FRAME_ID.test(state.frameId)
+    || !Number.isSafeInteger(state.frameSequence) || state.frameSequence < 1
+    || !Number.isSafeInteger(state.inputSequence) || state.inputSequence < 0) throw failure();
+  return Object.freeze({
+    botId: state.botId,
+    targetId: state.targetId,
+    targetGeneration: state.targetGeneration,
+    sessionGeneration: state.sessionGeneration,
+    pageGeneration: state.pageGeneration,
+    viewGeneration: state.viewGeneration,
+    frameId: state.frameId,
+    frameSequence: state.frameSequence,
+    inputSequence: state.inputSequence,
+    presentation: "preview",
+    state: "live",
+    code: null,
+  });
+}
+
 function installLocalDesktopFrameIpc({
   electron,
   manager,
@@ -913,6 +938,10 @@ function installLocalDesktopFrameIpc({
       captureStarted = true;
       const result = await capture(state, state.presentation);
       if (disposed) throw failure();
+      if (!currentState(state) || !currentAdmission(state)) return null;
+      if (result?.state === "live" && result.code === null && state.presentation === "preview") {
+        return selectionResultDto(state);
+      }
       return result;
     } catch (error) {
       if (disposed) throw failure();

@@ -3,12 +3,17 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const test = require("node:test");
+const { types } = require("node:util");
 
 const frameIpcPath = "../src/desktop/local-desktop-frame-ipc.cjs";
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const BOT_B = "bot-22222222-2222-4222-8222-222222222222";
 const LOCAL_A = "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const LOCAL_B = "local-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const SELECTION_RESULT_FIELDS = Object.freeze([
+  "botId", "code", "frameId", "frameSequence", "inputSequence", "pageGeneration", "presentation",
+  "sessionGeneration", "state", "targetGeneration", "targetId", "viewGeneration",
+]);
 
 function deferred() {
   let resolve;
@@ -25,6 +30,18 @@ async function tick() {
 function handled(promise) {
   void promise.catch(() => {});
   return promise;
+}
+
+function assertSelectionResult(value, expected) {
+  assert.equal(types.isProxy(value), false);
+  assert.equal(Object.getPrototypeOf(value), Object.prototype);
+  assert.equal(Object.isFrozen(value), true);
+  assert.deepEqual(Object.keys(value).sort(), SELECTION_RESULT_FIELDS);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  assert.equal(Reflect.ownKeys(descriptors).every((key) => "value" in descriptors[key]
+    && descriptors[key].get === undefined && descriptors[key].set === undefined), true);
+  assert.deepEqual(value, expected);
+  assert.deepEqual(structuredClone(value), expected);
 }
 
 function computer(botId, targetId, generation = 1, state = "ready", mode = "local") {
@@ -466,6 +483,14 @@ test("selection awaits first capture and reports sanitized unavailable status", 
     state: "unavailable",
     code: "OPENBOT_LOCAL_CAPTURE_FAILED",
   });
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.getPrototypeOf(result), Object.prototype);
+  assert.deepEqual(Object.keys(result).sort(), [
+    "botId", "code", "state", "targetGeneration", "targetId", "viewGeneration",
+  ]);
+  assert.equal("sessionGeneration" in result, false);
+  assert.equal("pageGeneration" in result, false);
+  assert.equal("presentation" in result, false);
   assert.equal(value.first.sent.at(-1).channel, LOCAL_DESKTOP_STATUS_EVENT_CHANNEL);
   assert.deepEqual(value.first.sent.at(-1).value, result);
   assert.doesNotMatch(JSON.stringify(value.first.sent), /Users|token|secret/);
@@ -1033,6 +1058,175 @@ test("retry uses the manager retry lifecycle when the interactive core provides 
   installed.dispose();
 });
 
+test("successful select returns one exact rich preview bootstrap while preview events stay legacy", async () => {
+  const value = fixture();
+  enableInteractive(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const result = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+
+  assertSelectionResult(result, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    viewGeneration: 1,
+    frameId: "frame-preview-1",
+    frameSequence: 1,
+    inputSequence: 0,
+    presentation: "preview",
+    state: "live",
+    code: null,
+  });
+  assert.deepEqual(Object.keys(frameEvents(value).at(-1).value).sort(), [
+    "botId", "bytes", "height", "mimeType", "sequence", "targetGeneration", "targetId", "viewGeneration", "width",
+  ]);
+  assert.deepEqual(Object.keys(statusEvents(value).at(-1).value).sort(), [
+    "botId", "code", "state", "targetGeneration", "targetId", "viewGeneration",
+  ]);
+
+  const interactive = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(event, {
+    botId: result.botId,
+    targetId: result.targetId,
+    targetGeneration: result.targetGeneration,
+    sessionGeneration: result.sessionGeneration,
+    pageGeneration: result.pageGeneration,
+    viewGeneration: result.viewGeneration,
+    presentation: "interactive",
+  });
+  assert.equal(interactive.presentation, "interactive");
+  assert.equal(interactive.state, "live");
+  await installed.dispose();
+});
+
+test("successful retry returns the exact current replacement preview bootstrap", async () => {
+  const value = fixture();
+  enableInteractive(value, {
+    capturePreviewFrame(identity, call) {
+      return richFrame(identity, {
+        frameId: `frame-retry-bootstrap-${call}`,
+        frameSequence: call,
+        sessionGeneration: call === 1 ? 4 : 5,
+        presentation: "preview",
+      });
+    },
+  });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  const result = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry)(event, {
+    botId: BOT_A,
+    viewGeneration: 2,
+  });
+
+  assertSelectionResult(result, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 5,
+    pageGeneration: 2,
+    viewGeneration: 2,
+    frameId: "frame-retry-bootstrap-2",
+    frameSequence: 2,
+    inputSequence: 0,
+    presentation: "preview",
+    state: "live",
+    code: null,
+  });
+  assert.deepEqual(Object.keys(statusEvents(value).at(-1).value).sort(), [
+    "botId", "code", "state", "targetGeneration", "targetId", "viewGeneration",
+  ]);
+  await installed.dispose();
+});
+
+test("held preview work never returns a usable bootstrap after invalidation", async (t) => {
+  await t.test("switch", async () => {
+    const held = deferred();
+    const value = fixture({
+      captureDisplayFrame(identity) {
+        return identity.botId === BOT_A
+          ? held.promise
+          : frame(BOT_B, LOCAL_B, 1, "frame-current-b", 8);
+      },
+    });
+    const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    const event = ipcEvent(value.first.sender);
+    const stale = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+      botId: BOT_A,
+      viewGeneration: 1,
+    });
+    await tick();
+    await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+      botId: BOT_B,
+      viewGeneration: 2,
+    });
+    held.resolve(frame(BOT_A, LOCAL_A, 1, "frame-stale-a", 1));
+    assert.equal(await stale, null);
+    await installed.dispose();
+  });
+
+  await t.test("clear", async () => {
+    const held = deferred();
+    const value = fixture({ captureDisplayFrame: () => held.promise });
+    const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    const event = ipcEvent(value.first.sender);
+    const stale = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+      botId: BOT_A,
+      viewGeneration: 1,
+    });
+    await tick();
+    const cleared = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(event, { viewGeneration: 2 });
+    held.resolve(frame(BOT_A, LOCAL_A, 1, "frame-cleared", 2));
+    const [result] = await Promise.all([stale, cleared]);
+    assert.equal(result, null);
+    await installed.dispose();
+  });
+
+  await t.test("authority generation change", async () => {
+    const held = deferred();
+    const value = fixture({ captureDisplayFrame: () => held.promise });
+    const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    const stale = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), {
+      botId: BOT_A,
+      viewGeneration: 1,
+    });
+    await tick();
+    value.states.set(BOT_A, computer(BOT_A, LOCAL_A, 2));
+    value.computerBoundary.emit("changed", value.states.get(BOT_A));
+    held.resolve(frame(BOT_A, LOCAL_A, 1, "frame-old-generation", 3));
+    assert.equal(await stale, null);
+    await installed.dispose();
+  });
+
+  await t.test("dispose", async () => {
+    const readiness = deferred();
+    const value = fixture();
+    const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc({ ...value, ready: readiness.promise });
+    const stale = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), {
+      botId: BOT_A,
+      viewGeneration: 1,
+    }));
+    const disposed = installed.dispose();
+    readiness.resolve();
+    const outcome = await stale.then(() => "resolved", () => "rejected");
+    await disposed;
+    assert.equal(outcome, "rejected");
+  });
+});
+
 test("real-manager rich preview is projected to the exact legacy DTO consumed by the shipping renderer", async () => {
   const value = fixture();
   enableInteractive(value);
@@ -1044,6 +1238,7 @@ test("real-manager rich preview is projected to the exact legacy DTO consumed by
   } = require(frameIpcPath);
   const installed = installLocalDesktopFrameIpc(value);
   let frameListener = null;
+  let selectionResult = null;
   let statusListener = null;
   const draws = [];
   const context = {
@@ -1067,7 +1262,8 @@ test("real-manager rich preview is projected to the exact legacy DTO consumed by
     };
   }
   const facade = {
-    select: (request) => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), request),
+    select: (request) => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), request)
+      .then((result) => { selectionResult = result; return result; }),
     retry: (request) => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry)(ipcEvent(value.first.sender), request),
     clear: (request) => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(ipcEvent(value.first.sender), request),
     onFrame(callback) { frameListener = callback; return () => { frameListener = null; }; },
@@ -1098,6 +1294,20 @@ test("real-manager rich preview is projected to the exact legacy DTO consumed by
   assert.deepEqual(Object.keys(publishedStatus).sort(), [
     "botId", "code", "state", "targetGeneration", "targetId", "viewGeneration",
   ]);
+  assertSelectionResult(selectionResult, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    viewGeneration: 1,
+    frameId: "frame-preview-1",
+    frameSequence: 1,
+    inputSequence: 0,
+    presentation: "preview",
+    state: "live",
+    code: null,
+  });
   assert.equal(draws.length, 1, "the exact production preview must be accepted by the current renderer validator");
   mounted.dispose();
   await tick();
