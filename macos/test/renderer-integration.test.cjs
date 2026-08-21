@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const asar = require("@electron/asar");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -16,20 +17,32 @@ const visualRuntimePath = path.join(macRoot, "test", "visual", "renderer-panel-r
 const visualFixturePath = path.join(macRoot, "test", "fixtures", "renderer-panel.html");
 const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
 const {
+  OPENBOT_AVATAR_ACCENT_FACE,
+  OPENBOT_AVATAR_ACCENT_MORPH,
+  OPENBOT_AVATAR_ACCENT_REF,
+  OPENBOT_AVATAR_ACCENT_STATIC,
   OPENBOT_GEOMETRY_TAIL,
   OPENBOT_NEW_BOT_COMMIT,
   OPENBOT_NEW_BOT_AVATAR_PICKER,
   OPENBOT_NEW_BOT_CREATE_DISPATCH,
   OPENBOT_NEW_BOT_CREATE_RESOLVE,
   OPENBOT_VISIBLE_SHAPES,
+  VENDOR_AVATAR_ACCENT_FACE,
+  VENDOR_AVATAR_ACCENT_MORPH,
+  VENDOR_AVATAR_ACCENT_REF,
+  VENDOR_AVATAR_ACCENT_STATIC,
   VENDOR_GEOMETRY_TAIL,
+  VENDOR_RENDERER_ASSET_SHA256,
   VENDOR_VISIBLE_SHAPES,
   patchAvatarCatalogSource,
+  patchAvatarAccentSource,
   patchNewBotAvatarPickerSource,
   mergeNewBotAvatarSelection,
   reverseAvatarCatalogSource,
+  reverseAvatarAccentSource,
   reverseNewBotCharacterEditorSource,
   reverseNewBotAvatarPickerSource,
+  validateAvatarAccentPath,
 } = require(patchPath);
 
 const STOCK_INDEX = `<!doctype html>
@@ -549,41 +562,6 @@ function createEvaluatedM4nHarness(patched) {
 
 const GEOMETRY_EPSILON = 1e-6;
 
-function parseRelativeCoordinate(token) {
-  const match = /^ze(?:(?<sign>[+-])(?<magnitude>\d+))?$/.exec(token.trim());
-  assert.ok(match, `unexpected coordinate token: ${token}`);
-  return match.groups.sign === "-" ? -Number(match.groups.magnitude) : Number(match.groups.magnitude ?? 0);
-}
-
-function parseRoundedGeometryEntries(source) {
-  const entries = [];
-  const entryPattern = /([a-z]+):qo\("[^"]+",Ost\(\[\[/g;
-  let match;
-  while ((match = entryPattern.exec(source)) !== null) {
-    const pointsStart = entryPattern.lastIndex;
-    const pointsEnd = source.indexOf("]],", pointsStart);
-    assert.ok(pointsEnd >= pointsStart, `missing points terminator for ${match[1]}`);
-    const points = source
-      .slice(pointsStart, pointsEnd)
-      .split("],[")
-      .map((pair) => {
-        const [x, y] = pair.replace(/\]$/, "").split(",");
-        assert.notEqual(y, undefined, `malformed point for ${match[1]}`);
-        return { x: parseRelativeCoordinate(x), y: parseRelativeCoordinate(y) };
-      });
-    const radiiStart = pointsEnd + 3;
-    const radiiEnd = source.indexOf("))", radiiStart);
-    assert.ok(radiiEnd >= radiiStart, `missing radii terminator for ${match[1]}`);
-    const radiiSource = source.slice(radiiStart, radiiEnd);
-    const radii = radiiSource.startsWith("[")
-      ? radiiSource.slice(1, -1).split(",").map((radius) => Number(radius))
-      : Array(points.length).fill(Number(radiiSource));
-    entries.push({ name: match[1], points, radii });
-    entryPattern.lastIndex = radiiEnd + 3;
-  }
-  return entries;
-}
-
 function distance(a, b) {
   return Math.hypot(b.x - a.x, b.y - a.y);
 }
@@ -616,135 +594,8 @@ function segmentsIntersect(first, second) {
     Math.abs(cdB) <= GEOMETRY_EPSILON && onSegment(c, d, b);
 }
 
-function roundedGeometryViolations(entry) {
-  const violations = [];
-  const { name, points, radii } = entry;
-  if (points.length !== radii.length) {
-    violations.push(`${name}: point/radius count mismatch`);
-    return violations;
-  }
-  for (let first = 0; first < points.length; first += 1) {
-    if (Math.abs(points[first].x) > 116 || Math.abs(points[first].y) > 116) {
-      violations.push(`${name}: point ${first} exceeds the identity view box`);
-    }
-    for (let second = first + 1; second < points.length; second += 1) {
-      if (points[first].x === points[second].x && points[first].y === points[second].y) {
-        violations.push(`${name}: duplicate points ${first}/${second}`);
-      }
-    }
-  }
-  const segments = [];
-  const originalSegments = [];
-  for (let index = 0; index < points.length; index += 1) {
-    const next = (index + 1) % points.length;
-    const edgeLength = distance(points[index], points[next]);
-    if (edgeLength <= GEOMETRY_EPSILON) violations.push(`${name}: zero edge ${index}`);
-    if (!Number.isFinite(radii[index]) || radii[index] < 0) {
-      violations.push(`${name}: invalid radius ${index}`);
-    }
-    if (Number.isFinite(radii[index]) && Number.isFinite(radii[next]) &&
-      radii[index] + radii[next] > edgeLength + GEOMETRY_EPSILON) {
-      violations.push(`${name}: radii ${index}/${next} overlap (${radii[index] + radii[next]} > ${edgeLength})`);
-    }
-    if (edgeLength > GEOMETRY_EPSILON) {
-      const unit = {
-        x: (points[next].x - points[index].x) / edgeLength,
-        y: (points[next].y - points[index].y) / edgeLength,
-      };
-      segments.push([
-        { x: points[index].x + unit.x * radii[index], y: points[index].y + unit.y * radii[index] },
-        { x: points[next].x - unit.x * radii[next], y: points[next].y - unit.y * radii[next] },
-      ]);
-      originalSegments.push([points[index], points[next]]);
-    } else {
-      segments.push(null);
-      originalSegments.push(null);
-    }
-  }
-  for (let first = 0; first < segments.length; first += 1) {
-    for (let second = first + 1; second < segments.length; second += 1) {
-      if (second === first + 1 || (first === 0 && second === segments.length - 1)) continue;
-      if (originalSegments[first] && originalSegments[second] &&
-        segmentsIntersect(originalSegments[first], originalSegments[second])) {
-        violations.push(`${name}: non-adjacent polygon edges ${first}/${second} cross`);
-      }
-      if (segments[first] && segments[second] && segmentsIntersect(segments[first], segments[second])) {
-        violations.push(`${name}: non-adjacent rounded path segments ${first}/${second} cross`);
-      }
-    }
-  }
-  return violations;
-}
-
 const IDENTITY_BOUND = 116;
 const PATH_EPSILON = 1e-6;
-
-function pathNumber(value) {
-  return Math.round(value * 100) / 100;
-}
-
-function normalizeVector(from, to) {
-  const dx = from[0] - to[0];
-  const dy = from[1] - to[1];
-  const length = Math.hypot(dx, dy) || 1;
-  return [dx / length, dy / length];
-}
-
-// Independent copy of the pinned Grok eX.corner/Ost math. This intentionally
-// does not call production helpers: it proves the emitted Q paths from the
-// exact vendor algorithm rather than only checking source vertices.
-function pinnedOstPath(points, radii) {
-  let path = "";
-  for (let index = 0; index < points.length; index += 1) {
-    const previous = points[(index - 1 + points.length) % points.length];
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    const incoming = normalizeVector(previous, current);
-    const outgoing = normalizeVector(next, current);
-    const from = [current[0] + incoming[0] * radii[index], current[1] + incoming[1] * radii[index]];
-    const to = [current[0] + outgoing[0] * radii[index], current[1] + outgoing[1] * radii[index]];
-    path += path.length === 0
-      ? `M${pathNumber(from[0])} ${pathNumber(from[1])}`
-      : `L${pathNumber(from[0])} ${pathNumber(from[1])}`;
-    path += `Q${pathNumber(current[0])} ${pathNumber(current[1])} ${pathNumber(to[0])} ${pathNumber(to[1])}`;
-  }
-  return `${path}Z`;
-}
-
-// Independent copy of the pinned Grok Mst helper, including its two-decimal
-// Lr rounding. dBt's exact 160 radial samples feed this cubic path builder.
-function pinnedMstPath(points) {
-  let path = `M${pathNumber(points[0][0])} ${pathNumber(points[0][1])}`;
-  for (let index = 0; index < points.length; index += 1) {
-    const previous = points[(index - 1 + points.length) % points.length];
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    const nextNext = points[(index + 2) % points.length];
-    path += `C${pathNumber(current[0] + (next[0] - previous[0]) / 6)} ${pathNumber(current[1] + (next[1] - previous[1]) / 6)} `;
-    path += `${pathNumber(next[0] - (nextNext[0] - current[0]) / 6)} ${pathNumber(next[1] - (nextNext[1] - current[1]) / 6)} `;
-    path += `${pathNumber(next[0])} ${pathNumber(next[1])}`;
-  }
-  return `${path}Z`;
-}
-
-function pinnedDBtPath(circles, sampleCount = 160) {
-  const points = [];
-  for (let index = 0; index < sampleCount; index += 1) {
-    const angle = index / sampleCount * Math.PI * 2;
-    const cosine = Math.cos(angle);
-    const sine = Math.sin(angle);
-    let radius = 0;
-    for (const [centerX, centerY, circleRadius] of circles) {
-      const projection = cosine * centerX + sine * centerY;
-      const discriminant = projection * projection - (centerX * centerX + centerY * centerY) + circleRadius * circleRadius;
-      if (discriminant <= 0) continue;
-      const hit = projection + Math.sqrt(discriminant);
-      if (hit > radius) radius = hit;
-    }
-    points.push([cosine * radius, sine * radius]);
-  }
-  return pinnedMstPath(points);
-}
 
 function parsePathCommands(path) {
   const commands = [];
@@ -758,6 +609,332 @@ function parsePathCommands(path) {
   }
   assert.ok(commands.length > 0, "path has no commands");
   return commands;
+}
+
+const AUTHORED_CONTOUR_NAMES = Object.freeze([
+  "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly",
+  "terminal", "robot", "microchip", "drone",
+]);
+const AUTHORED_CONTOUR_CENTER = 114.2705;
+const AUTHORED_CONTOUR_VIEWBOX = 228.44;
+const EXACT_STOCK_SHAPE_NAMES = Object.freeze([
+  "blob", "pebble", "squircle", "tablet", "wedge", "hex", "cloud", "teardrop",
+]);
+const STOCK_PAIR_FLOORS = Object.freeze({
+  blob: 0.08,
+  pebble: 0.08,
+  squircle: 0.08,
+  tablet: 0.08,
+  wedge: 0.08,
+  hex: 0.11,
+  cloud: 0.14,
+  teardrop: 0.08,
+});
+const DOG_STOCK_CLOUD_FLOOR = 0.12;
+const EXACT_VENDOR_ARCHIVE = "/Applications/Grok Bot original 20260811.app/Contents/Resources/app.asar";
+let exactSandRuntimeCache = null;
+let exactPatchedSandRuntimeCache = null;
+
+function exactSandRuntime() {
+  if (exactSandRuntimeCache !== null) return exactSandRuntimeCache;
+  const source = asar.extractFile(EXACT_VENDOR_ARCHIVE, "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
+  assert.equal(sha256Text(source), VENDOR_RENDERER_ASSET_SHA256, "pinned vendor asset hash drifted");
+  const start = source.indexOf("const Cst=");
+  const end = source.indexOf("const C9e=", start);
+  assert.ok(start >= 0 && end > start, "pinned Sand geometry/face section anchors are missing");
+  const context = { Math, Float64Array, Array };
+  vm.runInNewContext(
+    `${source.slice(start, end)};globalThis.__sand={Fo,qo,MBt,Oje,E9e,c3,Cst,Ist,Ast,_st};`,
+    context,
+    { filename: "pinned-sand-geometry.cjs" },
+  );
+  const entries = parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL);
+  const accents = new Map(parseAuthoredAccentEntries(OPENBOT_GEOMETRY_TAIL)
+    .map((entry) => [entry.name, entry.path]));
+  for (const entry of entries) {
+    const accentPath = accents.get(entry.name);
+    context.__sand.Fo[entry.name] = context.__sand.qo(
+      entry.name,
+      entry.path,
+      accentPath === undefined ? undefined : { accentPath },
+    );
+  }
+  exactSandRuntimeCache = context.__sand;
+  return exactSandRuntimeCache;
+}
+
+function exactPatchedSandRuntime() {
+  if (exactPatchedSandRuntimeCache !== null) return exactPatchedSandRuntimeCache;
+  const source = asar.extractFile(EXACT_VENDOR_ARCHIVE, "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
+  const patched = patchAvatarAccentSource(patchAvatarCatalogSource(source));
+  const start = patched.indexOf("const Cst=");
+  const end = patched.indexOf("const C9e=", start);
+  assert.ok(start >= 0 && end > start, "patched Sand geometry/face section anchors are missing");
+  const context = { Math, Float64Array, Array };
+  vm.runInNewContext(
+    `${patched.slice(start, end)};globalThis.__sand={Fo,MBt,Oje,OBt,E9e,c3,Cst,Ist,Ast,_st};`,
+    context,
+    { filename: "patched-sand-geometry.cjs" },
+  );
+  exactPatchedSandRuntimeCache = context.__sand;
+  return exactPatchedSandRuntimeCache;
+}
+
+function parseAuthoredContourEntries(source) {
+  const entries = [];
+  const pattern = /([a-z]+):qo\("[^\"]+","([MLCQZ0-9 .-]+)"(?:,\{[^)]*\})?\)/g;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    entries.push({ name: match[1], path: match[2] });
+  }
+  return entries;
+}
+
+function parseAuthoredAccentEntries(source) {
+  const entries = [];
+  const pattern = /([a-z]+):qo\("[^\"]+","[MLCQZ0-9 .-]+",\{accentPath:"([MLCQZ0-9 .-]+)"\}\)/g;
+  let match;
+  while ((match = pattern.exec(source)) !== null) {
+    entries.push({ name: match[1], path: match[2] });
+  }
+  return entries;
+}
+
+function authoredContourSamples(path, steps = 24) {
+  return pathSamples(path, steps);
+}
+
+function authoredQoPath(path) {
+  // Independent copy of Sand's qo normalization: PBt centers the exact
+  // quadratic/cubic extrema, clamps its scale to [.9, 1.35], and IBt rounds
+  // each coordinate to the same two decimals as the vendor renderer.
+  const bounds = pathExtrema(path);
+  const span = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY);
+  const scale = Math.min(1.35, Math.max(0.9, AUTHORED_CONTOUR_VIEWBOX / span));
+  const offsetX = AUTHORED_CONTOUR_CENTER - (bounds.minX + bounds.maxX) / 2;
+  const offsetY = AUTHORED_CONTOUR_CENTER - (bounds.minY + bounds.maxY) / 2;
+  const round = (value) => Math.round(value * 100) / 100;
+  return parsePathCommands(path).map(({ type, values }) => {
+    const transformed = [];
+    for (let index = 0; index < values.length; index += 2) {
+      transformed.push(round(AUTHORED_CONTOUR_CENTER + (values[index] + offsetX - AUTHORED_CONTOUR_CENTER) * scale));
+      transformed.push(round(AUTHORED_CONTOUR_CENTER + (values[index + 1] + offsetY - AUTHORED_CONTOUR_CENTER) * scale));
+    }
+    return { type, values: transformed };
+  }).map(({ type, values }) => `${type}${values.join(" ")}`).join("");
+}
+
+function rasterizeQoPath(qoPath, size) {
+  const samples = authoredContourSamples(qoPath);
+  const bounds = pathExtrema(qoPath);
+  const normalized = samples.map((point) => ({
+    x: (point.x - AUTHORED_CONTOUR_CENTER) / AUTHORED_CONTOUR_VIEWBOX,
+    y: (point.y - AUTHORED_CONTOUR_CENTER) / AUTHORED_CONTOUR_VIEWBOX,
+  }));
+  const contains = (x, y) => {
+    let inside = false;
+    for (let first = 0, second = normalized.length - 1; first < normalized.length; second = first++) {
+      const a = normalized[first];
+      const b = normalized[second];
+      const intersects = ((a.y > y) !== (b.y > y)) &&
+        (x < (b.x - a.x) * (y - a.y) / ((b.y - a.y) || Number.EPSILON) + a.x);
+      if (intersects) inside = !inside;
+    }
+    return inside;
+  };
+  const cells = [];
+  for (let row = 0; row < size; row += 1) {
+    for (let column = 0; column < size; column += 1) {
+      const x = (column + 0.5) / size - 0.5;
+      const y = (row + 0.5) / size - 0.5;
+      cells.push(contains(x, y));
+    }
+  }
+  return { cells, samples: normalized, bounds };
+}
+
+function authoredContourRaster(path, size) {
+  return rasterizeQoPath(authoredQoPath(path), size);
+}
+
+function exactSandFaceRaster(name, size, pose = { turn: 0, tilt: 0, roll: 0 }) {
+  const exactSand = exactSandRuntime();
+  const shape = exactSand.Fo[name];
+  const cells = [...rasterizeQoPath(shape.path, size).cells];
+  const transforms = exactSand.MBt(name, {
+    faceTune: exactSand.Cst,
+    eyeScale: exactSand._st(name),
+    pose,
+    poseHome: exactSand.Ast,
+  });
+  const holes = exactSand.c3[0].map((eye, index) => exactSand.Oje(eye, transforms[index]));
+  if (shape.accentPath) holes.unshift(shape.accentPath);
+  for (const hole of holes) {
+    const holeCells = rasterizeQoPath(hole, size).cells;
+    for (let index = 0; index < cells.length; index += 1) {
+      if (holeCells[index]) cells[index] = false;
+    }
+  }
+  return cells;
+}
+
+function continuousContourSpanAt(path, ratio) {
+  const bounds = pathExtrema(path);
+  const y = bounds.minY + (bounds.maxY - bounds.minY) * ratio;
+  const samples = pathSamples(path, 48);
+  const crossings = [];
+  for (let index = 1; index < samples.length; index += 1) {
+    const previous = samples[index - 1];
+    const current = samples[index];
+    if (!((previous.y <= y && current.y > y) || (current.y <= y && previous.y > y))) continue;
+    const t = (y - previous.y) / (current.y - previous.y);
+    crossings.push(previous.x + (current.x - previous.x) * t);
+  }
+  crossings.sort((left, right) => left - right);
+  return {
+    crossings,
+    width: crossings.length < 2 ? 0 : crossings.at(-1) - crossings[0],
+    y,
+  };
+}
+
+function authoredRasterDifference(first, second) {
+  let different = 0;
+  for (let index = 0; index < first.length; index += 1) {
+    if (first[index] !== second[index]) different += 1;
+  }
+  return different / first.length;
+}
+
+function authoredConnectedComponents(cells, size) {
+  const visited = new Set();
+  let components = 0;
+  for (let index = 0; index < cells.length; index += 1) {
+    if (!cells[index] || visited.has(index)) continue;
+    components += 1;
+    const queue = [index];
+    visited.add(index);
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const row = Math.floor(current / size);
+      const column = current % size;
+      for (const [nextRow, nextColumn] of [[row - 1, column], [row + 1, column], [row, column - 1], [row, column + 1]]) {
+        if (nextRow < 0 || nextRow >= size || nextColumn < 0 || nextColumn >= size) continue;
+        const next = nextRow * size + nextColumn;
+        if (cells[next] && !visited.has(next)) {
+          visited.add(next);
+          queue.push(next);
+        }
+      }
+    }
+  }
+  return components;
+}
+
+function pointInPolygon(points, x, y) {
+  let inside = false;
+  for (let first = 0, second = points.length - 1; first < points.length; second = first++) {
+    const a = points[first];
+    const b = points[second];
+    if (((a.y > y) !== (b.y > y)) &&
+      x < (b.x - a.x) * (y - a.y) / ((b.y - a.y) || Number.EPSILON) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+function authoredProfile(raster, size, row) {
+  const start = Math.max(0, Math.min(size - 1, Math.round(row * (size - 1)))) * size;
+  const filled = raster.slice(start, start + size);
+  const columns = filled.flatMap((value, index) => value ? [index] : []);
+  return {
+    width: columns.length,
+    min: columns[0] ?? size,
+    max: columns.at(-1) ?? -1,
+  };
+}
+
+function authoredRunsAtRow(raster, size, row) {
+  const index = Math.max(0, Math.min(size - 1, Math.round(row * (size - 1))));
+  const runs = [];
+  let start = null;
+  for (let column = 0; column <= size; column += 1) {
+    const filled = column < size && raster[index * size + column];
+    if (filled && start === null) start = column;
+    if (!filled && start !== null) {
+      runs.push({ min: start, max: column - 1, width: column - start });
+      start = null;
+    }
+  }
+  return runs;
+}
+
+function authoredTopPeakCount(raster, size) {
+  return authoredTopPeakPositions(raster, size).length;
+}
+
+function authoredTopPeakPositions(raster, size) {
+  const tops = [];
+  for (let column = 0; column < size; column += 1) {
+    let firstFilled = size;
+    for (let row = 0; row < size; row += 1) {
+      if (raster[row * size + column]) {
+        firstFilled = row;
+        break;
+      }
+    }
+    tops.push(firstFilled);
+  }
+  const peaks = [];
+  for (let column = 2; column < size - 2; column += 1) {
+    const local = tops[column];
+    if (local >= size || local > tops[column - 1] || local > tops[column + 1]) continue;
+    if (local <= tops[column - 2] && local <= tops[column + 2]) peaks.push(column);
+  }
+  return peaks;
+}
+
+function authoredBottomLobeCount(raster, size) {
+  const bottoms = [];
+  for (let column = 0; column < size; column += 1) {
+    let lastFilled = -1;
+    for (let row = size - 1; row >= 0; row -= 1) {
+      if (raster[row * size + column]) {
+        lastFilled = row;
+        break;
+      }
+    }
+    bottoms.push(lastFilled);
+  }
+  let lobes = 0;
+  for (let column = 2; column < size - 2; column += 1) {
+    const local = bottoms[column];
+    if (local < 0 || local < bottoms[column - 1] || local < bottoms[column + 1]) continue;
+    if (local >= bottoms[column - 2] && local >= bottoms[column + 2]) lobes += 1;
+  }
+  return lobes;
+}
+
+function assertAuthoredSimplePath(path, label) {
+  const normalizedPath = authoredQoPath(path);
+  const extrema = pathExtrema(normalizedPath);
+  const bounds = {
+    minX: extrema.minX - AUTHORED_CONTOUR_CENTER,
+    maxX: extrema.maxX - AUTHORED_CONTOUR_CENTER,
+    minY: extrema.minY - AUTHORED_CONTOUR_CENTER,
+    maxY: extrema.maxY - AUTHORED_CONTOUR_CENTER,
+  };
+  assert.ok(bounds.minX >= -IDENTITY_BOUND - PATH_EPSILON, `${label} exceeds -ze-${IDENTITY_BOUND}: ${bounds.minX}`);
+  assert.ok(bounds.maxX <= IDENTITY_BOUND + PATH_EPSILON, `${label} exceeds ze+${IDENTITY_BOUND}: ${bounds.maxX}`);
+  assert.ok(bounds.minY >= -IDENTITY_BOUND - PATH_EPSILON, `${label} exceeds -ze-${IDENTITY_BOUND}: ${bounds.minY}`);
+  assert.ok(bounds.maxY <= IDENTITY_BOUND + PATH_EPSILON, `${label} exceeds ze+${IDENTITY_BOUND}: ${bounds.maxY}`);
+  const segments = assertNoAdaptiveSelfCrossings(normalizedPath, label);
+  for (const [index, segment] of segments.entries()) {
+    for (let point = 1; point < segment.points.length; point += 1) {
+      assert.ok(distance(segment.points[point - 1], segment.points[point]) > PATH_EPSILON,
+        `${label} has a degenerate segment ${index}`);
+    }
+  }
+  return bounds;
 }
 
 function quadraticPoint(start, control, end, time) {
@@ -902,59 +1079,146 @@ function pathSamples(path, steps = 12) {
   return samples;
 }
 
+function curvePoint(points, time) {
+  const inverse = 1 - time;
+  if (points.length === 3) {
+    return {
+      x: inverse * inverse * points[0].x + 2 * inverse * time * points[1].x + time * time * points[2].x,
+      y: inverse * inverse * points[0].y + 2 * inverse * time * points[1].y + time * time * points[2].y,
+    };
+  }
+  return {
+    x: inverse ** 3 * points[0].x + 3 * inverse ** 2 * time * points[1].x +
+      3 * inverse * time ** 2 * points[2].x + time ** 3 * points[3].x,
+    y: inverse ** 3 * points[0].y + 3 * inverse ** 2 * time * points[1].y +
+      3 * inverse * time ** 2 * points[2].y + time ** 3 * points[3].y,
+  };
+}
+
+function adaptiveCurveSamples(points, tolerance = 0.15) {
+  const samples = [points[0]];
+  const recurse = (fromTime, fromPoint, toTime, toPoint, depth) => {
+    const middleTime = (fromTime + toTime) / 2;
+    const middlePoint = curvePoint(points, middleTime);
+    const chord = distance(fromPoint, toPoint);
+    const controlLength = points.slice(1, -1).reduce(
+      (total, control) => total + distance(fromPoint, control) + distance(control, toPoint),
+      0,
+    );
+    if (depth >= 9 || controlLength - chord <= tolerance) {
+      samples.push(toPoint);
+      return;
+    }
+    recurse(fromTime, fromPoint, middleTime, middlePoint, depth + 1);
+    recurse(middleTime, middlePoint, toTime, toPoint, depth + 1);
+  };
+  recurse(0, points[0], 1, points.at(-1), 0);
+  return samples;
+}
+
+function adaptivePathSegments(path) {
+  const segments = [];
+  let current = null;
+  let start = null;
+  for (const { type, values } of parsePathCommands(path)) {
+    if (type === "M") {
+      current = { x: values[0], y: values[1] };
+      start = current;
+      continue;
+    }
+    if (type === "Z") {
+      if (current && start && distance(current, start) > PATH_EPSILON) segments.push({ points: [current, start] });
+      current = start;
+      continue;
+    }
+    assert.ok(current, `path ${type} command precedes move`);
+    const from = current;
+    if (type === "L") {
+      current = { x: values[0], y: values[1] };
+      segments.push({ points: [from, current] });
+      continue;
+    }
+    const points = type === "Q"
+      ? [from, { x: values[0], y: values[1] }, { x: values[2], y: values[3] }]
+      : [from, { x: values[0], y: values[1] }, { x: values[2], y: values[3] }, { x: values[4], y: values[5] }];
+    current = points.at(-1);
+    segments.push({ points: adaptiveCurveSamples(points) });
+  }
+  return segments;
+}
+
+function endpointShared(first, second) {
+  return [
+    [first[0], second[0]], [first[0], second.at(-1)],
+    [first.at(-1), second[0]], [first.at(-1), second.at(-1)],
+  ].some(([left, right]) => distance(left, right) <= 1e-5);
+}
+
+function polylinesCross(first, second) {
+  for (let left = 1; left < first.length; left += 1) {
+    const firstEdge = [first[left - 1], first[left]];
+    for (let right = 1; right < second.length; right += 1) {
+      const secondEdge = [second[right - 1], second[right]];
+      if (segmentsIntersect(firstEdge, secondEdge) && !endpointShared(firstEdge, secondEdge)) return true;
+    }
+  }
+  return false;
+}
+
+function assertNoAdaptiveSelfCrossings(path, label) {
+  const segments = adaptivePathSegments(path);
+  assert.ok(segments.length >= 2, `${label} has too few path segments`);
+  for (let first = 0; first < segments.length; first += 1) {
+    for (let second = first + 1; second < segments.length; second += 1) {
+      const adjacent = second === first + 1 || (first === 0 && second === segments.length - 1);
+      assert.equal(polylinesCross(segments[first].points, segments[second].points), false,
+        `${label} self-intersects between segments ${first}/${second}${adjacent ? " at a non-endpoint" : ""}`);
+      if (!adjacent) {
+        const duplicateEndpoint = [
+          [segments[first].points[0], segments[second].points[0]],
+          [segments[first].points[0], segments[second].points.at(-1)],
+          [segments[first].points.at(-1), segments[second].points[0]],
+          [segments[first].points.at(-1), segments[second].points.at(-1)],
+        ].some(([left, right]) => distance(left, right) <= 1e-5);
+        assert.equal(duplicateEndpoint, false, `${label} has non-adjacent duplicate endpoints ${first}/${second}`);
+      }
+    }
+  }
+  return segments;
+}
+
 function assertSimplePath(path, label) {
   const bounds = pathExtrema(path);
   assert.ok(bounds.minX >= -IDENTITY_BOUND - PATH_EPSILON, `${label} exceeds -ze-${IDENTITY_BOUND}: ${bounds.minX}`);
   assert.ok(bounds.maxX <= IDENTITY_BOUND + PATH_EPSILON, `${label} exceeds ze+${IDENTITY_BOUND}: ${bounds.maxX}`);
   assert.ok(bounds.minY >= -IDENTITY_BOUND - PATH_EPSILON, `${label} exceeds -ze-${IDENTITY_BOUND}: ${bounds.minY}`);
   assert.ok(bounds.maxY <= IDENTITY_BOUND + PATH_EPSILON, `${label} exceeds ze+${IDENTITY_BOUND}: ${bounds.maxY}`);
-  const samples = pathSamples(path);
-  assert.ok(samples.length >= 4, `${label} is degenerate`);
-  const segments = samples.slice(1).map((point, index) => [samples[index], point]);
-  const closureWindow = segments.length > 24 ? 12 : 1;
-  for (let index = 0; index < segments.length; index += 1) {
-    const segmentLength = distance(...segments[index]);
-    const isZeroLengthClose = index === segments.length - 1 && segmentLength <= PATH_EPSILON;
-    if (!isZeroLengthClose) assert.ok(segmentLength > PATH_EPSILON, `${label} has a degenerate segment ${index}`);
-    for (let other = index + 1; other < segments.length; other += 1) {
-      if (other === index + 1 || (index === 0 && other === segments.length - 1)) continue;
-      if (index < closureWindow && other >= segments.length - closureWindow) continue;
-      assert.equal(segmentsIntersect(segments[index], segments[other]), false, `${label} self-intersects at ${index}/${other}`);
+  const segments = assertNoAdaptiveSelfCrossings(path, label);
+  for (const [index, segment] of segments.entries()) {
+    for (let point = 1; point < segment.points.length; point += 1) {
+      assert.ok(distance(segment.points[point - 1], segment.points[point]) > PATH_EPSILON,
+        `${label} has a degenerate segment ${index}`);
     }
   }
   return bounds;
 }
 
-function parseBearCircles(source) {
-  const match = /bear:qo\("Bear",dBt\(\[\[([\s\S]*?)\]\]\)\)/.exec(source);
-  assert.ok(match, "bear dBt geometry is missing");
-  return match[1].split("],[").map((tuple) => {
-    const [x, y, radius] = tuple.replace(/^\[|\]$/g, "").split(",");
-    return [parseRelativeCoordinate(x), parseRelativeCoordinate(y), Number(radius)];
-  });
-}
-
-test("pinned Sand helper paths stay inside ze plus or minus 116 with real extrema", () => {
-  const entries = parseRoundedGeometryEntries(OPENBOT_GEOMETRY_TAIL);
-  assert.equal(entries.length, 11);
+test("authored Sand contour paths stay inside ze plus or minus 116 with real sampled extrema", () => {
+  const entries = parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL);
+  assert.equal(entries.length, AUTHORED_CONTOUR_NAMES.length);
   for (const entry of entries) {
-    const path = pinnedOstPath(
-      entry.points.map(({ x, y }) => [x, y]),
-      entry.radii,
-    );
-    assert.match(path, /Q/, `${entry.name} must contain quadratic corners`);
-    const bounds = assertSimplePath(path, `${entry.name} Ost`);
+    const commands = parsePathCommands(entry.path);
+    assert.ok(commands.some(({ type }) => type === "Q" || type === "C"), `${entry.name} must contain a continuous curve`);
+    const bounds = assertAuthoredSimplePath(entry.path, `${entry.name} authored contour`);
     assert.ok(Number.isFinite(bounds.minX + bounds.maxX + bounds.minY + bounds.maxY));
   }
-  const bearPath = pinnedDBtPath(parseBearCircles(OPENBOT_GEOMETRY_TAIL));
-  assert.match(bearPath, /C/, "bear must contain the pinned Mst cubic path");
-  const bearBounds = assertSimplePath(bearPath, "bear dBt/Mst");
-  assert.ok(Number.isFinite(bearBounds.minX + bearBounds.maxX + bearBounds.minY + bearBounds.maxY));
 });
 
 test("the pinned path validator rejects degenerate and self-intersecting paths", () => {
   assert.throws(() => assertSimplePath("M0 0L0 0Z", "degenerate fixture"), /degenerate/);
   assert.throws(() => assertSimplePath("M-10 -10L10 10L-10 10L10 -10Z", "crossing fixture"), /self-intersects/);
+  assert.throws(() => assertSimplePath("M-30 -30C30 30 30 30 -30 30L30 -30Z", "crossing cubic fixture"), /self-intersects/);
+  assert.doesNotThrow(() => assertSimplePath("M-20 0Q0 -20 20 0Q0 20-20 0Z", "shared-endpoint curve fixture"));
 });
 
 function countExact(source, anchor) {
@@ -1004,15 +1268,435 @@ test("avatar registry exposes the exact full twenty-shape Sand choice list", () 
   assert.equal(visibleShapes.length, 20);
 });
 
-test("avatar rounded geometry has safe radii and no non-adjacent crossings", () => {
-  const entries = parseRoundedGeometryEntries(OPENBOT_GEOMETRY_TAIL);
-  assert.equal(entries.length, 11);
-  assert.notDeepEqual(
-    entries.find(({ name }) => name === "dog")?.points,
-    entries.find(({ name }) => name === "wolf")?.points,
+test("avatar contours use no weak Ost or dBt animal blockouts", () => {
+  assert.equal((OPENBOT_GEOMETRY_TAIL.match(/Ost\(|dBt\(/g) ?? []).length, 0);
+  for (const name of AUTHORED_CONTOUR_NAMES) {
+    assert.match(OPENBOT_GEOMETRY_TAIL, new RegExp(`${name}:qo\\("[^\\"]+","M`));
+  }
+});
+
+test("avatar accent transform patches four exact Sand anchors and reverses byte-for-byte", () => {
+  assert.equal(typeof patchAvatarAccentSource, "function");
+  assert.equal(typeof reverseAvatarAccentSource, "function");
+  const anchors = [
+    VENDOR_AVATAR_ACCENT_REF,
+    VENDOR_AVATAR_ACCENT_MORPH,
+    VENDOR_AVATAR_ACCENT_FACE,
+    VENDOR_AVATAR_ACCENT_STATIC,
+  ];
+  assert.ok(anchors.every((anchor) => typeof anchor === "string" && anchor.length > 20));
+  const source = `before;${anchors.join(";middle;")};after`;
+  const patched = patchAvatarAccentSource(source);
+  for (const anchor of anchors) assert.equal(patched.includes(anchor), false);
+  for (const anchor of [
+    OPENBOT_AVATAR_ACCENT_REF,
+    OPENBOT_AVATAR_ACCENT_MORPH,
+    OPENBOT_AVATAR_ACCENT_FACE,
+    OPENBOT_AVATAR_ACCENT_STATIC,
+  ]) assert.equal(patched.includes(anchor), true);
+  assert.equal(reverseAvatarAccentSource(patched), source);
+
+  for (const [index, anchor] of anchors.entries()) {
+    assert.throws(
+      () => patchAvatarAccentSource(source.replace(anchor, "missing")),
+      /accent.*missing|not found/i,
+      `missing anchor ${index}`,
+    );
+    assert.throws(
+      () => patchAvatarAccentSource(`${source};${anchor}`),
+      /accent.*ambiguous/i,
+      `duplicate anchor ${index}`,
+    );
+  }
+  assert.throws(() => patchAvatarAccentSource(patched), /already|mixed/i);
+  assert.throws(() => reverseAvatarAccentSource(source), /already|requires|not found/i);
+});
+
+test("pre-effect Sand render hides a target accent until the current body reaches that shape", () => {
+  const displayMatch = /display:([^}]+)},d:ae\.accentPath/.exec(OPENBOT_AVATAR_ACCENT_FACE);
+  assert.ok(displayMatch, "Sand accent initial display expression is missing");
+  const renderDisplay = vm.runInNewContext(
+    `(function({ accentPath, currentPath, targetPath, paused, reduced, mounted = true }) {
+      const ae = { accentPath, path: targetPath };
+      const K = { current: mounted ? { getAttribute(name) { return name === "d" ? currentPath : null; } } : null };
+      const d = paused;
+      const window = { matchMedia() { return { matches: reduced }; } };
+      return ${displayMatch[1]};
+    })`,
   );
-  const violations = entries.flatMap(roundedGeometryViolations);
-  assert.deepEqual(violations, []);
+  const target = "M0 0L10 0L10 10Z";
+  const previous = "M0 0L8 0L8 8Z";
+  const accentPath = "M3 6L7 6L5 9Z";
+  assert.equal(renderDisplay({ accentPath, currentPath: previous, targetPath: target, paused: false, reduced: false }), "none",
+    "target change must not flash the accent before the animation effect hides it");
+  assert.equal(renderDisplay({ accentPath, currentPath: target, targetPath: target, paused: false, reduced: false }), "",
+    "settled target must show its accent");
+  assert.equal(renderDisplay({ accentPath, currentPath: previous, targetPath: target, paused: true, reduced: false }), "",
+    "paused target must show immediately");
+  assert.equal(renderDisplay({ accentPath, currentPath: previous, targetPath: target, paused: false, reduced: true }), "",
+    "reduced-motion target must show immediately");
+  assert.equal(renderDisplay({ accentPath, currentPath: null, targetPath: target, paused: false, reduced: false, mounted: false }), "",
+    "first mount has no previous body to morph from");
+  assert.equal(renderDisplay({ accentPath: "", currentPath: target, targetPath: target, paused: false, reduced: false }), "none",
+    "accent-free identities stay hidden");
+});
+
+test("dog and owl accent metadata are bounded face-safe subpaths and stock shapes stay accent-free", () => {
+  assert.equal(typeof validateAvatarAccentPath, "function");
+  const accents = parseAuthoredAccentEntries(OPENBOT_GEOMETRY_TAIL);
+  assert.deepEqual(accents.map(({ name }) => name), ["dog", "owl"]);
+  const contours = new Map(parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL)
+    .map((entry) => [entry.name, entry.path]));
+  for (const accent of accents) {
+    assert.doesNotThrow(() => validateAvatarAccentPath(accent.path, accent.name));
+    const commands = parsePathCommands(accent.path);
+    assert.equal(commands.filter(({ type }) => type === "M").length, 1);
+    assert.equal(commands.filter(({ type }) => type === "Z").length, 1);
+    assert.equal(commands.at(-1).type, "Z");
+    const outerPoints = pathSamples(authoredQoPath(contours.get(accent.name)), 24);
+    for (const point of pathSamples(accent.path, 16)) {
+      assert.equal(pointInPolygon(outerPoints, point.x, point.y), true,
+        `${accent.name} accent must stay inside its silhouette`);
+    }
+  }
+  for (const invalid of [
+    "M90 100L110 100ZM120 100L140 100Z",
+    "M90 100L110 100L100 120",
+    "M0 0L20 0L20 20Z",
+    "M90 100A10 10 0 0 1 110 100Z",
+  ]) assert.throws(() => validateAvatarAccentPath(invalid, "fixture"), /accent/i);
+  for (const stock of EXACT_STOCK_SHAPE_NAMES) {
+    assert.equal(exactSandRuntime().Fo[stock].accentPath, undefined, `${stock} must remain accent-free`);
+  }
+});
+
+test("exact Sand accent patch covers dynamic morph reduced-motion and static parity without changing E9e masks", () => {
+  assert.equal(typeof patchAvatarAccentSource, "function");
+  const source = asar.extractFile(EXACT_VENDOR_ARCHIVE, "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
+  const catalogPatched = patchAvatarCatalogSource(source);
+  const patched = patchAvatarAccentSource(catalogPatched);
+  assert.equal((patched.match(/openbotAccentRef/g) ?? []).length >= 3, true);
+  assert.match(OPENBOT_AVATAR_ACCENT_MORPH, /Mn&&!oe/);
+  assert.match(OPENBOT_AVATAR_ACCENT_MORPH, /yn\.accentPath/);
+  assert.match(OPENBOT_AVATAR_ACCENT_FACE, /display:ae\.accentPath&&/);
+  assert.match(OPENBOT_AVATAR_ACCENT_FACE, /K\.current\.getAttribute\("d"\)===ae\.path/);
+  assert.match(OPENBOT_AVATAR_ACCENT_STATIC, /o\.accentPath\?\?""/);
+  assert.equal(patched.includes('function E9e(n){const{shape:e="blob",scale:t=1'), true);
+
+  const runMorph = vm.runInNewContext(`(function(Mn,oe,accentPath) {
+    const node = { attrs: {}, style: {}, setAttribute(name, value) { this.attrs[name] = value; } };
+    const openbotAccentRef = { current: node };
+    const yn = { accentPath };
+    ${OPENBOT_AVATAR_ACCENT_MORPH.slice(OPENBOT_AVATAR_ACCENT_MORPH.indexOf("openbotAccentRef.current"))}
+    return node;
+  })`);
+  assert.equal(runMorph(true, false, "M1 1L2 2Z").style.display, "none", "animated morph hides accent");
+  assert.equal(runMorph(false, false, "M1 1L2 2Z").style.display, "", "settled accent is visible");
+  assert.equal(runMorph(true, true, "M1 1L2 2Z").style.display, "", "reduced motion shows target accent immediately");
+  assert.equal(runMorph(false, false, "").style.display, "none", "accent-free shapes remain hidden");
+
+  const patchedSand = exactPatchedSandRuntime();
+  const authoredAccents = new Map(parseAuthoredAccentEntries(OPENBOT_GEOMETRY_TAIL)
+    .map((entry) => [entry.name, entry.path]));
+  for (const name of ["dog", "owl"]) {
+    assert.equal(patchedSand.Fo[name].accentPath, authoredAccents.get(name));
+    const staticAvatar = patchedSand.OBt({ shape: name, fill: "#111", size: 64 });
+    assert.equal(staticAvatar.includes(patchedSand.Fo[name].accentPath), true,
+      `static Sand ${name} must include the accent hole`);
+    const mask = patchedSand.E9e({ shape: name, sizePx: 64, inflatePx: 0, fill: "#111" });
+    assert.equal(mask.includes(patchedSand.Fo[name].accentPath), false, "E9e must stay a pure outer mask");
+  }
+  for (const stock of EXACT_STOCK_SHAPE_NAMES) {
+    assert.equal(patchedSand.OBt({ shape: stock, fill: "#111", size: 64 }).includes("undefined"), false);
+  }
+
+  for (const name of ["dog", "owl"]) {
+    const accentPoints = pathSamples(patchedSand.Fo[name].accentPath, 20);
+    for (const pose of [
+      { name: "home", value: { turn: 0, tilt: 0, roll: 0 } },
+      { name: "idle", value: patchedSand.Ist },
+      { name: "working", value: { turn: 4, tilt: 3, roll: 1.5 } },
+    ]) {
+      const eyeTransforms = patchedSand.MBt(name, {
+        faceTune: patchedSand.Cst,
+        eyeScale: patchedSand._st(name),
+        pose: pose.value,
+        poseHome: patchedSand.Ast,
+      });
+      for (let eye = 0; eye < eyeTransforms.length; eye += 1) {
+        const eyePoints = pathSamples(patchedSand.Oje(patchedSand.c3[0][eye], eyeTransforms[eye]), 8);
+        const clearance = Math.min(...accentPoints.flatMap((accent) => eyePoints.map((point) => distance(accent, point))));
+        assert.ok(clearance >= 1.5, `${name} accent collides with ${pose.name} eye ${eye} (${clearance.toFixed(2)})`);
+      }
+    }
+  }
+});
+
+test("exact patched static Sand renderer executes the complete twenty-identity order", () => {
+  const expected = [
+    "blob", "pebble", "squircle", "tablet", "wedge", "hex", "cloud", "teardrop",
+    "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly",
+    "terminal", "robot", "microchip", "drone",
+  ];
+  const identityIds = JSON.parse(OPENBOT_VISIBLE_SHAPES.slice("const Pq=".length));
+  assert.deepEqual(identityIds, expected);
+  const patchedSand = exactPatchedSandRuntime();
+  for (const identity of identityIds) {
+    assert.ok(patchedSand.Fo[identity], `${identity} is absent from the exact patched Fo catalog`);
+    const rendered = patchedSand.OBt({ shape: identity, fill: "#111", size: 64 });
+    assert.match(rendered, /^<svg/);
+    assert.equal(rendered.includes(patchedSand.Fo[identity].path), true,
+      `${identity} static renderer omitted its exact outer path`);
+  }
+  for (const identity of ["dog", "owl"]) {
+    assert.equal(patchedSand.OBt({ shape: identity, fill: "#111", size: 64 })
+      .includes(patchedSand.Fo[identity].accentPath), true,
+    `${identity} static renderer omitted its exact accent`);
+  }
+});
+
+test("native-size avatar contours are authored SVG paths with separated silhouettes and identifying features", () => {
+  const entries = parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL);
+  assert.deepEqual(entries.map(({ name }) => name), AUTHORED_CONTOUR_NAMES);
+  const byName = new Map(entries.map((entry) => [entry.name, entry]));
+  for (const name of AUTHORED_CONTOUR_NAMES) {
+    const entry = byName.get(name);
+    assert.ok(entry, `${name} contour is missing`);
+    const commands = parsePathCommands(entry.path);
+    assert.ok(commands.some(({ type }) => type === "Q" || type === "C"), `${name} needs continuous curves`);
+    assertAuthoredSimplePath(entry.path, `${name} authored contour`);
+  }
+
+  const rastersBySize = new Map();
+  for (const size of [22, 36]) {
+    const rasters = new Map();
+    for (const name of AUTHORED_CONTOUR_NAMES) {
+      const raster = authoredContourRaster(byName.get(name).path, size);
+      const filled = raster.cells.filter(Boolean).length;
+      assert.ok(raster.bounds.minX >= AUTHORED_CONTOUR_CENTER - IDENTITY_BOUND &&
+        raster.bounds.maxX <= AUTHORED_CONTOUR_CENTER + IDENTITY_BOUND &&
+        raster.bounds.minY >= AUTHORED_CONTOUR_CENTER - IDENTITY_BOUND &&
+        raster.bounds.maxY <= AUTHORED_CONTOUR_CENTER + IDENTITY_BOUND,
+      `${name} sampled qo bounds exceed the Sand face-safe viewbox`);
+      assert.ok(filled >= size * size * 0.26, `${name} has too little native-size fill at ${size}px`);
+      assert.ok(filled <= size * size * 0.94, `${name} has no negative space at ${size}px`);
+      assert.equal(authoredConnectedComponents(raster.cells, size), 1, `${name} must have one connected fill at ${size}px`);
+      rasters.set(name, raster);
+    }
+    const exactSand = exactSandRuntime();
+    const stockRasters = new Map(EXACT_STOCK_SHAPE_NAMES.map((name) => [
+      name,
+      rasterizeQoPath(exactSand.Fo[name].path, size),
+    ]));
+    for (const name of AUTHORED_CONTOUR_NAMES) {
+      for (const [stockName, stockRaster] of stockRasters) {
+        const difference = authoredRasterDifference(rasters.get(name).cells, stockRaster.cells);
+        const floor = name === "dog" && stockName === "cloud" ? DOG_STOCK_CLOUD_FLOOR : STOCK_PAIR_FLOORS[stockName];
+        assert.ok(difference >= floor, `${name}/${stockName} silhouettes merge at ${size}px (${difference.toFixed(3)} < ${floor})`);
+      }
+    }
+    for (let first = 0; first < AUTHORED_CONTOUR_NAMES.length; first += 1) {
+      for (let second = first + 1; second < AUTHORED_CONTOUR_NAMES.length; second += 1) {
+        const left = AUTHORED_CONTOUR_NAMES[first];
+        const right = AUTHORED_CONTOUR_NAMES[second];
+        const difference = authoredRasterDifference(rasters.get(left).cells, rasters.get(right).cells);
+        assert.ok(difference >= 0.1, `${left}/${right} silhouettes merge at ${size}px (${difference.toFixed(3)})`);
+      }
+    }
+    rastersBySize.set(size, rasters);
+  }
+
+  for (const size of [16, 28, 64, 72, 96]) {
+    for (const name of AUTHORED_CONTOUR_NAMES) {
+      const filled = authoredContourRaster(byName.get(name).path, size).cells.filter(Boolean).length;
+      assert.ok(filled >= size * size * 0.2, `${name} clips or collapses at ${size}px`);
+    }
+  }
+
+  const at22 = rastersBySize.get(22);
+  const catTop = authoredTopPeakCount(at22.get("cat").cells, 22);
+  const bunnyTop = authoredTopPeakCount(at22.get("bunny").cells, 22);
+  const wolfTop = authoredTopPeakCount(at22.get("wolf").cells, 22);
+  assert.ok(catTop >= 2, `cat needs two readable ear peaks, got ${catTop}`);
+  assert.ok(bunnyTop >= 2, `bunny needs two separated ear peaks, got ${bunnyTop}`);
+  assert.ok(wolfTop >= 2, `wolf needs two tall ear peaks, got ${wolfTop}`);
+  assert.ok(authoredProfile(at22.get("dog").cells, 22, 0.28).width >= 14, `dog needs a broad upper skull (${authoredProfile(at22.get("dog").cells, 22, 0.28).width})`);
+  assert.ok(authoredProfile(at22.get("wolf").cells, 22, 0.78).width <= 16, `wolf needs a tapered lower face (${authoredProfile(at22.get("wolf").cells, 22, 0.78).width})`);
+  assert.ok(authoredProfile(at22.get("fox").cells, 22, 0.78).width <= 14, `fox needs a pointed lower face (${authoredProfile(at22.get("fox").cells, 22, 0.78).width})`);
+  assert.ok(authoredProfile(at22.get("bear").cells, 22, 0.22).width >= 10, `bear needs a broad dome (${authoredProfile(at22.get("bear").cells, 22, 0.22).width})`);
+  assert.ok(authoredBottomLobeCount(at22.get("jelly").cells, 22) >= 3, `jelly needs four lower lobes (${authoredBottomLobeCount(at22.get("jelly").cells, 22)})`);
+  assert.ok(authoredProfile(at22.get("terminal").cells, 22, 0.82).width <= 13, `terminal needs a stable narrow base (${authoredProfile(at22.get("terminal").cells, 22, 0.82).width})`);
+  assert.ok(authoredProfile(at22.get("microchip").cells, 22, 0.15).width >= 13, `microchip needs deliberate top pins (${authoredProfile(at22.get("microchip").cells, 22, 0.15).width})`);
+  const droneUpper = authoredProfile(at22.get("drone").cells, 22, 0.3).width;
+  const droneLower = authoredProfile(at22.get("drone").cells, 22, 0.7).width;
+  assert.ok(droneUpper >= 17 && droneLower >= 17, `drone needs four readable outer terminals (${droneUpper}/${droneLower})`);
+});
+
+test("dog contour integrates lateral ear shoulders into one broad canine face", () => {
+  const dogEntry = parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL)
+    .find(({ name }) => name === "dog");
+  const dogPath = authoredQoPath(dogEntry.path);
+  const dogBounds = pathExtrema(dogPath);
+  const width = dogBounds.maxX - dogBounds.minX;
+  const height = dogBounds.maxY - dogBounds.minY;
+  const samples = pathSamples(dogPath, 48);
+  const leftmost = samples.reduce((result, point) => point.x < result.x ? point : result);
+  const rightmost = samples.reduce((result, point) => point.x > result.x ? point : result);
+  const leftEarHeight = (leftmost.y - dogBounds.minY) / height;
+  const rightEarHeight = (rightmost.y - dogBounds.minY) / height;
+  assert.ok(leftEarHeight > 0.25 && leftEarHeight < 0.7,
+    `dog left ear must sweep laterally from the skull shoulder (${leftEarHeight.toFixed(3)})`);
+  assert.ok(rightEarHeight > 0.25 && rightEarHeight < 0.7,
+    `dog right ear must sweep laterally from the skull shoulder (${rightEarHeight.toFixed(3)})`);
+
+  const skull = continuousContourSpanAt(dogPath, 0.14);
+  const earBand = continuousContourSpanAt(dogPath, 0.46);
+  const chin = continuousContourSpanAt(dogPath, 0.88);
+  assert.ok(earBand.width >= skull.width * 1.45,
+    `dog rooted ear sweep must extend beyond its broad skull (${earBand.width.toFixed(2)}/${skull.width.toFixed(2)})`);
+  assert.ok(chin.width >= width * 0.2,
+    `dog needs one short broad chin plane, not a dangling center lobe (${chin.width.toFixed(2)})`);
+  assert.ok(Math.abs(leftEarHeight - rightEarHeight) <= 0.03, "dog ear shoulders must remain balanced");
+  assert.ok(parsePathCommands(dogEntry.path).every(({ type }) => type !== "L"),
+    "dog outer contour must remain a continuous curved perimeter");
+
+  for (const size of [22, 36]) {
+    const dog = authoredContourRaster(dogEntry.path, size);
+    let mirrorDifferences = 0;
+    for (let row = 0; row < size; row += 1) {
+      for (let column = 0; column < Math.floor(size / 2); column += 1) {
+        if (dog.cells[row * size + column] !== dog.cells[row * size + size - 1 - column]) {
+          mirrorDifferences += 1;
+        }
+      }
+    }
+    assert.ok(mirrorDifferences / (size * size) <= 0.035,
+      `dog continuous contour loses bilateral integration at ${size}px`);
+    const jelly = authoredContourRaster(
+      parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL).find(({ name }) => name === "jelly").path,
+      size,
+    );
+    assert.ok(authoredRasterDifference(dog.cells, jelly.cells) >= 0.18,
+      `dog/jelly must remain structurally distinct at ${size}px`);
+  }
+});
+
+test("owl contour has an outward horned brow, broad facial disc, and compact feather base", () => {
+  const owlEntry = parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL)
+    .find(({ name }) => name === "owl");
+  const owlPath = authoredQoPath(owlEntry.path);
+  const bounds = pathExtrema(owlPath);
+  const width = bounds.maxX - bounds.minX;
+  const height = bounds.maxY - bounds.minY;
+  const commands = parsePathCommands(owlEntry.path);
+  const brow = commands[0].values;
+  assert.ok(Math.abs(brow[0] - AUTHORED_CONTOUR_CENTER) <= 1,
+    "owl concave brow must stay centered between the tufts");
+  assert.ok((brow[1] - pathExtrema(owlEntry.path).minY) / (pathExtrema(owlEntry.path).maxY - pathExtrema(owlEntry.path).minY) >= 0.25,
+    "owl brow must be visibly concave below its outward tufts");
+
+  const samples = pathSamples(owlPath, 48);
+  const tuftBand = samples.filter((point) => point.y <= bounds.minY + height * 0.16);
+  assert.ok(tuftBand.some((point) => point.x < AUTHORED_CONTOUR_CENTER - width * 0.22),
+    "owl needs a left outward horn tuft");
+  assert.ok(tuftBand.some((point) => point.x > AUTHORED_CONTOUR_CENTER + width * 0.22),
+    "owl needs a right outward horn tuft");
+  const disc = continuousContourSpanAt(owlPath, 0.53);
+  const base = continuousContourSpanAt(owlPath, 0.88);
+  assert.ok(disc.width >= width * 0.86, `owl facial disc is not broad enough (${disc.width.toFixed(2)})`);
+  assert.ok(base.width >= width * 0.36 && base.width <= width * 0.72,
+    `owl feather base must stay compact and shallow (${base.width.toFixed(2)})`);
+
+  for (const size of [22, 36]) {
+    const owl = authoredContourRaster(owlEntry.path, size);
+    const jelly = authoredContourRaster(
+      parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL).find(({ name }) => name === "jelly").path,
+      size,
+    );
+    assert.ok(authoredRasterDifference(owl.cells, jelly.cells) >= 0.18,
+      `owl/jelly must remain structurally distinct at ${size}px`);
+    const owlFace = exactSandFaceRaster("owl", size);
+    for (const comparison of ["cat", "bear", "jelly", "cloud"]) {
+      assert.ok(authoredRasterDifference(owlFace, exactSandFaceRaster(comparison, size)) >= 0.115,
+        `actual Sand owl face must remain distinct from ${comparison} at ${size}px`);
+    }
+  }
+});
+
+test("added silhouettes preserve species and machine landmarks at 22px and 36px", () => {
+  const entries = new Map(parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL).map((entry) => [entry.name, entry.path]));
+  const exactSand = exactSandRuntime();
+  for (const size of [22, 36]) {
+    const raster = (name) => authoredContourRaster(entries.get(name), size);
+    const dog = raster("dog");
+    const cloud = rasterizeQoPath(exactSand.Fo.cloud.path, size);
+    const bear = rasterizeQoPath(exactSand.Fo.bear.path, size);
+    assert.ok(authoredRasterDifference(dog.cells, cloud.cells) >= DOG_STOCK_CLOUD_FLOOR, `dog/cloud must remain separated at ${size}px`);
+    assert.ok(authoredRasterDifference(dog.cells, bear.cells) >= 0.12, `dog/bear must remain separated at ${size}px`);
+    const dogFace = exactSandFaceRaster("dog", size);
+    for (const comparison of ["cat", "bear", "cloud"]) {
+      assert.ok(authoredRasterDifference(dogFace, exactSandFaceRaster(comparison, size)) >= 0.115,
+        `actual Sand dog face must remain distinct from ${comparison} at ${size}px`);
+    }
+
+    const wolf = raster("wolf");
+    const wolfCheek = authoredProfile(wolf.cells, size, 0.45);
+    const wolfRuff = authoredProfile(wolf.cells, size, 0.6);
+    const wolfTaper = authoredProfile(wolf.cells, size, 0.82);
+    assert.ok(wolfRuff.width - wolfCheek.width >= 2, `wolf needs lateral cheek ruffs at ${size}px`);
+    assert.ok(wolfTaper.width <= Math.round(size * 0.7), `wolf needs a long tapered lower face at ${size}px`);
+
+    const fox = raster("fox");
+    const foxPeaks = authoredTopPeakPositions(fox.cells, size);
+    assert.ok(foxPeaks.length >= 2 && foxPeaks.at(-1) - foxPeaks[0] >= Math.round(size * 0.35), `fox needs wide diagonal ears at ${size}px`);
+    assert.ok(authoredProfile(fox.cells, size, 0.82).width <= Math.round(size * 0.65), `fox needs a narrow pointed lower face at ${size}px`);
+    assert.ok(authoredProfile(fox.cells, size, 0.58).width <= Math.round(size * 0.9), `fox must not grow wolf-like cheek ruffs at ${size}px`);
+
+    const owl = raster("owl");
+    assert.ok(authoredRasterDifference(owl.cells, wolf.cells) >= 0.14, `owl/wolf must remain separated at ${size}px`);
+
+    const robot = raster("robot");
+    const robotTop = authoredProfile(robot.cells, size, 0.05);
+    const robotHead = authoredProfile(robot.cells, size, 0.75);
+    const robotEarBand = authoredProfile(robot.cells, size, 0.45);
+    assert.ok(robotTop.width <= Math.max(3, Math.round(size * 0.24)), `robot needs one narrow antenna at ${size}px`);
+    assert.ok(robotEarBand.width - robotHead.width >= Math.max(2, Math.round(size * 0.08)), `robot needs paired ear blocks at ${size}px (${robotEarBand.width}/${robotHead.width})`);
+
+    const drone = raster("drone");
+    const droneUpper = authoredProfile(drone.cells, size, 0.3);
+    const droneMiddle = authoredProfile(drone.cells, size, 0.52);
+    const droneLower = authoredProfile(drone.cells, size, 0.7);
+    assert.ok(droneUpper.width - droneMiddle.width >= 3, `drone needs a negative gap below upper terminals at ${size}px`);
+    assert.ok(droneLower.width - droneMiddle.width >= 3, `drone needs a negative gap above lower terminals at ${size}px`);
+  }
+});
+
+test("exact pinned Sand MBt/E9e eye cutouts remain face-safe across home, idle, and working poses", () => {
+  const exactSand = exactSandRuntime();
+  const poses = [
+    { name: "home", pose: { turn: 0, tilt: 0, roll: 0 }, poseHome: exactSand.Ast },
+    { name: "idle", pose: exactSand.Ist, poseHome: exactSand.Ast },
+    { name: "working", pose: { turn: 4, tilt: 3, roll: 1.5 }, poseHome: exactSand.Ast },
+  ];
+  for (const name of AUTHORED_CONTOUR_NAMES) {
+    const silhouette = pathSamples(exactSand.Fo[name].path, 24);
+    const rendered = exactSand.E9e({ shape: name, sizePx: 36, inflatePx: 0, fill: "#000" });
+    assert.match(rendered, /<path d="/);
+    for (const pose of poses) {
+      const eyeTransforms = exactSand.MBt(name, {
+        faceTune: exactSand.Cst,
+        eyeScale: exactSand._st(name),
+        pose: pose.pose,
+        poseHome: pose.poseHome,
+      });
+      for (let eyeIndex = 0; eyeIndex < eyeTransforms.length; eyeIndex += 1) {
+        const eyePath = exactSand.Oje(exactSand.c3[0][eyeIndex], eyeTransforms[eyeIndex]);
+        for (const point of pathSamples(eyePath, 4)) {
+          assert.equal(pointInPolygon(silhouette, point.x, point.y), true, `${name} ${pose.name} exact eye cutout clips the silhouette`);
+        }
+      }
+    }
+  }
 });
 
 test("avatar patch and reverse reject mixed or duplicate replacement anchors", () => {
@@ -1304,14 +1988,14 @@ test("stock M4n keeps independent explicit shape and color pressed states", () =
     SYNTHETIC_VENDOR_RENDERER,
     sha256Text(SYNTHETIC_VENDOR_RENDERER),
   );
-  assert.match(patched, /shapeIsExplicit:a=i,colorIsExplicit:c=i/);
+  assert.match(patched, /shapeIsExplicit:a=i,colorIsExplicit:v=i/);
   assert.match(patched, /const O=a&&f===M/);
-  assert.equal((patched.match(/c&&d===M\.id/g) ?? []).length, 3);
+  assert.equal((patched.match(/v&&d===M\.id/g) ?? []).length, 3);
   assert.equal((patched.match(/i&&d===M\.id/g) ?? []).length, 0);
   assert.match(patched, /e\[11\]!==i\+"\|"\+a/);
   assert.match(patched, /e\[11\]=i\+"\|"\+a/);
-  assert.match(patched, /e\[23\]!==i\+"\|"\+c/);
-  assert.match(patched, /e\[23\]=i\+"\|"\+c/);
+  assert.match(patched, /e\[23\]!==i\+"\|"\+v/);
+  assert.match(patched, /e\[23\]=i\+"\|"\+v/);
   assert.match(patched, /shapeIsExplicit:staged\?\.avatarShape!=null/);
   assert.match(patched, /colorIsExplicit:staged\?\.avatarColor!=null/);
 });

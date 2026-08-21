@@ -31,13 +31,24 @@ const STOCK_LOCAL_IDENTITY_ANCHORS = [
 const rendererPatch = require(rendererPatchPath);
 const { ADDED_AVATAR_SHAPES } = require("../src/bots/avatar-catalog.cjs");
 const {
+  OPENBOT_AVATAR_ACCENT_FACE,
+  OPENBOT_AVATAR_ACCENT_MORPH,
+  OPENBOT_AVATAR_ACCENT_REF,
+  OPENBOT_AVATAR_ACCENT_STATIC,
   OPENBOT_GEOMETRY_TAIL,
   OPENBOT_VISIBLE_SHAPES,
+  VENDOR_AVATAR_ACCENT_FACE,
+  VENDOR_AVATAR_ACCENT_MORPH,
+  VENDOR_AVATAR_ACCENT_REF,
+  VENDOR_AVATAR_ACCENT_STATIC,
   VENDOR_GEOMETRY_TAIL,
   VENDOR_VISIBLE_SHAPES,
+  patchAvatarAccentSource,
   patchAvatarCatalogSource,
   patchVendorRendererSource,
+  reverseAvatarAccentSource,
   reverseAvatarCatalogSource,
+  validateAvatarAccentPath,
 } = rendererPatch;
 const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
 const SYNTHETIC_VENDOR_RENDERER_SHA256 = crypto
@@ -143,39 +154,6 @@ function loadPatcher() {
 
 const PATCH_GEOMETRY_EPSILON = 1e-6;
 
-function patchParseCoordinate(token) {
-  const match = /^ze(?:(?<sign>[+-])(?<magnitude>\d+))?$/.exec(token.trim());
-  assert.ok(match, `unexpected coordinate token: ${token}`);
-  return match.groups.sign === "-" ? -Number(match.groups.magnitude) : Number(match.groups.magnitude ?? 0);
-}
-
-function patchParseRoundedGeometry(source) {
-  const entries = [];
-  const pattern = /([a-z]+):qo\("[^"]+",Ost\(\[\[/g;
-  let match;
-  while ((match = pattern.exec(source)) !== null) {
-    const pointsEnd = source.indexOf("]],", pattern.lastIndex);
-    assert.ok(pointsEnd >= pattern.lastIndex, `missing points terminator for ${match[1]}`);
-    const points = source
-      .slice(pattern.lastIndex, pointsEnd)
-      .split("],[")
-      .map((pair) => {
-        const [x, y] = pair.replace(/\]$/, "").split(",");
-        return { x: patchParseCoordinate(x), y: patchParseCoordinate(y) };
-      });
-    const radiiStart = pointsEnd + 3;
-    const radiiEnd = source.indexOf("))", radiiStart);
-    assert.ok(radiiEnd >= pointsEnd, `missing radii terminator for ${match[1]}`);
-    const radiiSource = source.slice(radiiStart, radiiEnd);
-    const radii = radiiSource.startsWith("[")
-      ? radiiSource.slice(1, -1).split(",").map(Number)
-      : Array(points.length).fill(Number(radiiSource));
-    entries.push({ name: match[1], points, radii });
-    pattern.lastIndex = radiiEnd + 3;
-  }
-  return entries;
-}
-
 function patchDistance(a, b) {
   return Math.hypot(b.x - a.x, b.y - a.y);
 }
@@ -207,114 +185,7 @@ function patchSegmentsIntersect(first, second) {
     (Math.abs(cdB) <= PATCH_GEOMETRY_EPSILON && patchOnSegment(c, d, b));
 }
 
-function patchRoundedGeometryViolations({ name, points, radii }) {
-  const violations = [];
-  assert.equal(points.length, radii.length, `${name} point/radius count`);
-  for (let first = 0; first < points.length; first += 1) {
-    assert.ok(Math.abs(points[first].x) <= 116 && Math.abs(points[first].y) <= 116, `${name} point ${first} exceeds the identity view box`);
-    for (let second = first + 1; second < points.length; second += 1) {
-      assert.notDeepEqual(points[first], points[second], `${name} duplicate points ${first}/${second}`);
-    }
-  }
-  const segments = [];
-  const originalSegments = [];
-  for (let index = 0; index < points.length; index += 1) {
-    const next = (index + 1) % points.length;
-    const length = patchDistance(points[index], points[next]);
-    assert.ok(length > PATCH_GEOMETRY_EPSILON, `${name} edge ${index} is zero`);
-    assert.ok(Number.isFinite(radii[index]) && radii[index] >= 0, `${name} radius ${index} is invalid`);
-    if (radii[index] + radii[next] > length + PATCH_GEOMETRY_EPSILON) {
-      violations.push(`${name} edge ${index} radius overlap`);
-    }
-    const unit = {
-      x: (points[next].x - points[index].x) / length,
-      y: (points[next].y - points[index].y) / length,
-    };
-    segments.push([
-      { x: points[index].x + unit.x * radii[index], y: points[index].y + unit.y * radii[index] },
-      { x: points[next].x - unit.x * radii[next], y: points[next].y - unit.y * radii[next] },
-    ]);
-    originalSegments.push([points[index], points[next]]);
-  }
-  for (let first = 0; first < segments.length; first += 1) {
-    for (let second = first + 1; second < segments.length; second += 1) {
-      if (second === first + 1 || (first === 0 && second === segments.length - 1)) continue;
-      if (patchSegmentsIntersect(originalSegments[first], originalSegments[second])) {
-        violations.push(`${name} polygon edges ${first}/${second} cross`);
-      }
-      if (patchSegmentsIntersect(segments[first], segments[second])) {
-        violations.push(`${name} rounded segments ${first}/${second} cross`);
-      }
-    }
-  }
-  return violations;
-}
-
 const PATCH_IDENTITY_BOUND = 116;
-
-function patchPathNumber(value) {
-  return Math.round(value * 100) / 100;
-}
-
-function patchNormalizeVector(from, to) {
-  const dx = from[0] - to[0];
-  const dy = from[1] - to[1];
-  const length = Math.hypot(dx, dy) || 1;
-  return [dx / length, dy / length];
-}
-
-// Reproduce the pinned vendor helpers independently so patch-app validates the
-// actual Q/C path math, not only source vertices and trimmed straight edges.
-function patchPinnedOstPath(points, radii) {
-  let path = "";
-  for (let index = 0; index < points.length; index += 1) {
-    const previous = points[(index - 1 + points.length) % points.length];
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    const incoming = patchNormalizeVector(previous, current);
-    const outgoing = patchNormalizeVector(next, current);
-    const from = [current[0] + incoming[0] * radii[index], current[1] + incoming[1] * radii[index]];
-    const to = [current[0] + outgoing[0] * radii[index], current[1] + outgoing[1] * radii[index]];
-    path += path.length === 0
-      ? `M${patchPathNumber(from[0])} ${patchPathNumber(from[1])}`
-      : `L${patchPathNumber(from[0])} ${patchPathNumber(from[1])}`;
-    path += `Q${patchPathNumber(current[0])} ${patchPathNumber(current[1])} ${patchPathNumber(to[0])} ${patchPathNumber(to[1])}`;
-  }
-  return `${path}Z`;
-}
-
-function patchPinnedMstPath(points) {
-  let path = `M${patchPathNumber(points[0][0])} ${patchPathNumber(points[0][1])}`;
-  for (let index = 0; index < points.length; index += 1) {
-    const previous = points[(index - 1 + points.length) % points.length];
-    const current = points[index];
-    const next = points[(index + 1) % points.length];
-    const nextNext = points[(index + 2) % points.length];
-    path += `C${patchPathNumber(current[0] + (next[0] - previous[0]) / 6)} ${patchPathNumber(current[1] + (next[1] - previous[1]) / 6)} `;
-    path += `${patchPathNumber(next[0] - (nextNext[0] - current[0]) / 6)} ${patchPathNumber(next[1] - (nextNext[1] - current[1]) / 6)} `;
-    path += `${patchPathNumber(next[0])} ${patchPathNumber(next[1])}`;
-  }
-  return `${path}Z`;
-}
-
-function patchPinnedDBtPath(circles, sampleCount = 160) {
-  const points = [];
-  for (let index = 0; index < sampleCount; index += 1) {
-    const angle = index / sampleCount * Math.PI * 2;
-    const cosine = Math.cos(angle);
-    const sine = Math.sin(angle);
-    let radius = 0;
-    for (const [centerX, centerY, circleRadius] of circles) {
-      const projection = cosine * centerX + sine * centerY;
-      const discriminant = projection * projection - (centerX * centerX + centerY * centerY) + circleRadius * circleRadius;
-      if (discriminant <= 0) continue;
-      const hit = projection + Math.sqrt(discriminant);
-      if (hit > radius) radius = hit;
-    }
-    points.push([cosine * radius, sine * radius]);
-  }
-  return patchPinnedMstPath(points);
-}
 
 function patchParsePath(path) {
   const commands = [];
@@ -481,28 +352,18 @@ function patchAssertSimplePath(path, label) {
   return bounds;
 }
 
-function patchParseBearCircles(source) {
-  const match = /bear:qo\("Bear",dBt\(\[\[([\s\S]*?)\]\]\)\)/.exec(source);
-  assert.ok(match, "bear dBt geometry is missing");
-  return match[1].split("],[").map((tuple) => {
-    const [x, y, radius] = tuple.replace(/^\[|\]$/g, "").split(",");
-    return [patchParseCoordinate(x), patchParseCoordinate(y), Number(radius)];
-  });
-}
-
-test("patch-app validates pinned Ost Q and dBt/Mst C extrema inside ze plus or minus 116", () => {
-  const entries = patchParseRoundedGeometry(OPENBOT_GEOMETRY_TAIL);
-  assert.equal(entries.length, 11);
-  for (const entry of entries) {
-    const path = patchPinnedOstPath(entry.points.map(({ x, y }) => [x, y]), entry.radii);
-    assert.match(path, /Q/, `${entry.name} must contain quadratic corners`);
-    const bounds = patchAssertSimplePath(path, `${entry.name} Ost`);
-    assert.ok(Number.isFinite(bounds.minX + bounds.maxX + bounds.minY + bounds.maxY));
+test("patch-app validates authored contour grammar and rejects the old blockout helpers", () => {
+  const names = [
+    "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly",
+    "terminal", "robot", "microchip", "drone",
+  ];
+  assert.equal((OPENBOT_GEOMETRY_TAIL.match(/Ost\(|dBt\(/g) ?? []).length, 0);
+  for (const name of names) {
+    const match = new RegExp(`${name}:qo\\("[^\\"]+","([MLCQZ0-9 .-]+)"(?:,\\{[^)]*\\})?\\)`).exec(OPENBOT_GEOMETRY_TAIL);
+    assert.ok(match, `${name} authored path is missing`);
+    assert.match(match[1], /^M/);
+    assert.match(match[1], /[CQ]/, `${name} must contain a continuous curve`);
   }
-  const bearPath = patchPinnedDBtPath(patchParseBearCircles(OPENBOT_GEOMETRY_TAIL));
-  assert.match(bearPath, /C/, "bear must contain the pinned Mst cubic path");
-  const bearBounds = patchAssertSimplePath(bearPath, "bear dBt/Mst");
-  assert.ok(Number.isFinite(bearBounds.minX + bearBounds.maxX + bearBounds.minY + bearBounds.maxY));
 });
 
 test("patch-app path validator rejects degenerate and self-intersecting fixtures", () => {
@@ -527,14 +388,43 @@ test("patch-app renderer fixture carries the exact avatar registry contract", ()
   assert.equal(reverseAvatarCatalogSource(patched), SYNTHETIC_VENDOR_RENDERER);
 });
 
-test("patch-app rounded geometry has safe radii and no non-adjacent crossings", () => {
-  const entries = patchParseRoundedGeometry(OPENBOT_GEOMETRY_TAIL);
-  assert.equal(entries.length, 11);
-  assert.notDeepEqual(
-    entries.find(({ name }) => name === "dog")?.points,
-    entries.find(({ name }) => name === "wolf")?.points,
-  );
-  assert.deepEqual(entries.flatMap(patchRoundedGeometryViolations), []);
+test("patch-app carries one reversible face-safe Sand accent contract", () => {
+  const vendorAnchors = [
+    VENDOR_AVATAR_ACCENT_REF,
+    VENDOR_AVATAR_ACCENT_MORPH,
+    VENDOR_AVATAR_ACCENT_FACE,
+    VENDOR_AVATAR_ACCENT_STATIC,
+  ];
+  const source = `before;${vendorAnchors.join(";between;")};after`;
+  const patched = patchAvatarAccentSource(source);
+  for (const anchor of vendorAnchors) assert.equal(patched.includes(anchor), false);
+  for (const anchor of [
+    OPENBOT_AVATAR_ACCENT_REF,
+    OPENBOT_AVATAR_ACCENT_MORPH,
+    OPENBOT_AVATAR_ACCENT_FACE,
+    OPENBOT_AVATAR_ACCENT_STATIC,
+  ]) assert.equal(patched.includes(anchor), true);
+  assert.equal(reverseAvatarAccentSource(patched), source);
+
+  const match = /dog:qo\("Dog","[MLCQZ0-9 .-]+",\{accentPath:"([MLCQZ0-9 .-]+)"\}\)/.exec(OPENBOT_GEOMETRY_TAIL);
+  assert.ok(match, "dog Sand accent metadata is missing");
+  assert.doesNotThrow(() => validateAvatarAccentPath(match[1], "dog"));
+  for (const invalid of [
+    "M90 140L110 140ZM120 140L140 140Z",
+    "M90 140L110 140L100 160",
+    "M0 0L20 0L20 20Z",
+    "M90 140A10 10 0 0 1 110 140Z",
+  ]) assert.throws(() => validateAvatarAccentPath(invalid, "fixture"), /accent/i);
+});
+
+test("patch-app contour registry keeps every authored path unique", () => {
+  const names = [
+    "cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly",
+    "terminal", "robot", "microchip", "drone",
+  ];
+  for (const name of names) {
+    assert.equal((OPENBOT_GEOMETRY_TAIL.match(new RegExp(`${name}:qo\\(`, "g")) ?? []).length, 1);
+  }
 });
 
 test("patch-app avatar registry anchors fail closed when missing or ambiguous", () => {

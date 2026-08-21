@@ -21,23 +21,37 @@ const ASSETS = Object.freeze([
 const VENDOR_VISIBLE_SHAPES = 'const Pq=["blob","pebble","squircle","tablet","wedge","hex","cloud","teardrop"]';
 const OPENBOT_VISIBLE_SHAPES = `const Pq=${JSON.stringify(VISIBLE_AVATAR_SHAPES)}`;
 const VENDOR_GEOMETRY_TAIL = 'teardrop:qo("Teardrop",wBt(88,ze-114,ze+26,18)),leaf:qo("Leaf",vBt(88,113,1.5))};Fo.wedge.face.leftDX=-6;const Jst=Object.keys(Fo)';
+const DOG_AVATAR_ACCENT_PATH = "M104 156Q114 150 124 156Q123 166 114 171Q105 166 104 156Z";
+const OWL_AVATAR_ACCENT_PATH = "M106 164L122 164L114 180Z";
 const OPENBOT_ADDED_GEOMETRIES = `
-cat:qo("Cat",Ost([[ze-96,ze+72],[ze-94,ze-42],[ze-72,ze-104],[ze-38,ze-78],[ze,ze-92],[ze+38,ze-78],[ze+72,ze-104],[ze+94,ze-42],[ze+96,ze+72],[ze+58,ze+104],[ze-58,ze+104]],[18,10,8,18,22,18,8,10,18,24,24])),
-dog:qo("Dog",Ost([[ze-100,ze-70],[ze-66,ze-92],[ze-46,ze-62],[ze,ze-82],[ze+46,ze-62],[ze+66,ze-92],[ze+100,ze-70],[ze+88,ze+70],[ze+52,ze+104],[ze-52,ze+104],[ze-88,ze+70]],[16,18,18,24,18,18,16,24,24,24,24])),
-wolf:qo("Wolf",Ost([[ze-104,ze+52],[ze-88,ze-54],[ze-54,ze-112],[ze-24,ze-72],[ze,ze-98],[ze+24,ze-72],[ze+54,ze-112],[ze+88,ze-54],[ze+104,ze+52],[ze+66,ze+98],[ze+28,ze+82],[ze,ze+112],[ze-28,ze+82],[ze-66,ze+98]],[12,10,6,12,10,12,6,10,12,18,12,8,12,18])),
-bunny:qo("Bunny",Ost([[ze-78,ze+96],[ze-72,ze-22],[ze-58,ze-112],[ze-28,ze-108],[ze-16,ze-42],[ze+16,ze-42],[ze+28,ze-108],[ze+58,ze-112],[ze+72,ze-22],[ze+78,ze+96],[ze+42,ze+112],[ze-42,ze+112]],[20,14,12,12,15,15,12,12,14,19,19,19])),
-fox:qo("Fox",Ost([[ze-102,ze+56],[ze-88,ze-54],[ze-50,ze-108],[ze-30,ze-64],[ze,ze-88],[ze+30,ze-64],[ze+50,ze-108],[ze+88,ze-54],[ze+102,ze+56],[ze+48,ze+88],[ze,ze+114],[ze-48,ze+88]],[12,8,6,14,18,14,6,8,12,16,8,16])),
-bear:qo("Bear",dBt([[ze-70,ze-66,40],[ze+70,ze-66,40],[ze,ze+12,100],[ze,ze+44,72]])),
-owl:qo("Owl",Ost([[ze-92,ze+88],[ze-90,ze-42],[ze-62,ze-98],[ze-24,ze-72],[ze,ze-108],[ze+24,ze-72],[ze+62,ze-98],[ze+90,ze-42],[ze+92,ze+88],[ze+44,ze+108],[ze,ze+84],[ze-44,ze+108]],[18,14,8,16,8,16,8,14,18,16,12,16])),
-jelly:qo("Jelly",Ost([[ze-98,ze+54],[ze-92,ze-26],[ze-62,ze-82],[ze,ze-108],[ze+62,ze-82],[ze+92,ze-26],[ze+98,ze+54],[ze+76,ze+98],[ze+38,ze+72],[ze,ze+106],[ze-38,ze+72],[ze-76,ze+98]],[18,18,24,28,24,18,18,16,12,12,12,16])),
-terminal:qo("Terminal",Ost([[ze-104,ze-82],[ze+104,ze-82],[ze+104,ze+58],[ze+42,ze+58],[ze+58,ze+98],[ze+78,ze+98],[ze+78,ze+112],[ze-78,ze+112],[ze-78,ze+98],[ze-58,ze+98],[ze-42,ze+58],[ze-104,ze+58]],[14,14,14,10,8,6,6,6,6,8,10,14])),
-robot:qo("Robot",Ost([[ze-76,ze-96],[ze-18,ze-96],[ze-10,ze-116],[ze+10,ze-116],[ze+18,ze-96],[ze+76,ze-96],[ze+76,ze-72],[ze+104,ze-72],[ze+104,ze+78],[ze+76,ze+78],[ze+76,ze+104],[ze-76,ze+104],[ze-76,ze+78],[ze-104,ze+78],[ze-104,ze-72],[ze-76,ze-72]],[12,8,6,6,8,12,8,10,12,8,12,12,8,12,10,8])),
-microchip:qo("Microchip",Ost([[ze-62,ze-108],[ze-38,ze-108],[ze-38,ze-88],[ze-12,ze-88],[ze-12,ze-108],[ze+12,ze-108],[ze+12,ze-88],[ze+38,ze-88],[ze+38,ze-108],[ze+62,ze-108],[ze+62,ze-84],[ze+88,ze-84],[ze+88,ze-58],[ze+108,ze-58],[ze+108,ze-32],[ze+88,ze-32],[ze+88,ze+32],[ze+108,ze+32],[ze+108,ze+58],[ze+88,ze+58],[ze+88,ze+84],[ze+62,ze+84],[ze+62,ze+108],[ze+38,ze+108],[ze+38,ze+88],[ze+12,ze+88],[ze+12,ze+108],[ze-12,ze+108],[ze-12,ze+88],[ze-38,ze+88],[ze-38,ze+108],[ze-62,ze+108],[ze-62,ze+84],[ze-88,ze+84],[ze-88,ze+58],[ze-108,ze+58],[ze-108,ze+32],[ze-88,ze+32],[ze-88,ze-32],[ze-108,ze-32],[ze-108,ze-58],[ze-88,ze-58],[ze-88,ze-84],[ze-62,ze-84]],6)),
-drone:qo("Drone",Ost([[ze-112,ze-72],[ze-58,ze-72],[ze-42,ze-34],[ze-24,ze-22],[ze-18,ze-48],[ze+18,ze-48],[ze+24,ze-22],[ze+42,ze-34],[ze+58,ze-72],[ze+112,ze-72],[ze+112,ze-42],[ze+70,ze-42],[ze+54,ze-8],[ze+90,ze+42],[ze+90,ze+72],[ze+42,ze+72],[ze+18,ze+38],[ze-18,ze+38],[ze-42,ze+72],[ze-90,ze+72],[ze-90,ze+42],[ze-54,ze-8],[ze-70,ze-42],[ze-112,ze-42]],8))`;
+cat:qo("Cat","M40 130Q38 112 40 86L45 48Q46 42 51 47L76 71Q94 62 114 64Q134 62 152 71L177 47Q182 42 183 48L188 86Q190 112 188 130Q182 153 161 164Q139 175 114 176Q89 175 67 164Q46 153 40 130Z"),
+dog:qo("Dog","M114 28C88 26 72 42 68 64C52 52 36 54 24 68C12 84 14 112 28 134Q38 150 52 138Q62 128 66 110C62 140 72 168 92 184C100 192 128 192 136 184C156 168 166 140 162 110Q166 128 176 138Q190 150 200 134C214 112 216 84 204 68C192 54 176 52 160 64C156 42 140 26 114 28Z",{accentPath:"${DOG_AVATAR_ACCENT_PATH}"}),
+wolf:qo("Wolf","M48 126Q44 104 46 77L57 29Q59 22 64 29L79 65Q94 58 114 60Q134 58 149 65L164 29Q169 22 171 29L182 77Q184 104 180 126Q198 134 204 145Q205 154 194 158Q202 168 188 172Q184 174 158 170Q152 190 140 184Q130 212 114 220Q98 212 88 184Q76 190 70 170Q44 174 40 172Q26 168 34 158Q23 154 24 145Q30 134 48 126Z"),
+bunny:qo("Bunny","M56 127Q51 113 53 96L55 28Q56 18 63 26Q76 44 81 76Q96 70 114 70Q132 70 147 76Q152 44 165 26Q172 18 173 28L175 96Q177 113 172 127Q184 137 177 151Q166 171 145 178Q130 184 114 184Q98 184 83 178Q62 171 51 151Q44 137 56 127Z"),
+fox:qo("Fox","M44 125Q39 102 48 80L32 28Q30 20 38 24L84 64Q98 56 114 58Q130 56 144 64L190 24Q198 20 196 28L180 80Q189 102 184 125Q177 155 157 173L114 218L71 173Q51 155 44 125Z"),
+bear:qo("Bear","M54 92Q28 78 30 50Q34 18 58 18Q84 16 94 44Q103 36 114 36Q125 36 134 44Q144 16 170 18Q194 18 198 50Q200 78 174 92Q202 106 204 138Q206 168 182 184Q162 198 138 194Q126 214 114 220Q102 214 90 194Q66 198 46 184Q22 168 24 138Q26 106 54 92Z"),
+owl:qo("Owl","M114 64Q92 24 74 40L54 16Q44 4 44 24L52 50Q30 58 24 84Q10 112 28 140Q42 168 70 182Q88 190 102 182Q114 190 126 182Q140 190 158 182Q186 168 200 140Q218 112 204 84Q198 58 176 50L184 24Q184 4 174 16L154 40Q136 24 114 64Z",{accentPath:"${OWL_AVATAR_ACCENT_PATH}"}),
+jelly:qo("Jelly","M32 118Q32 82 56 56Q80 28 114 28Q148 28 172 56Q196 82 196 118Q196 132 186 140Q178 146 170 142Q166 158 166 176Q164 194 154 194Q144 194 142 176Q140 158 134 148Q128 166 128 188Q126 208 116 208Q106 204 106 184Q106 164 100 148Q94 158 92 176Q90 194 80 194Q70 194 68 176Q66 158 64 142Q56 146 48 140Q38 132 32 118Z"),
+terminal:qo("Terminal","M44 34Q34 34 34 44L34 148Q34 158 44 158L86 158L78 177Q76 184 84 184L144 184Q152 184 150 177L142 158L184 158Q194 158 194 148L194 44Q194 34 184 34Z"),
+robot:qo("Robot","M108 20Q114 14 120 20L120 38L156 38Q164 38 164 46L164 64L206 64Q214 64 214 74L214 96Q214 104 206 104L164 104L164 164Q164 174 154 174L74 174Q64 174 64 164L64 104L22 104Q14 104 14 96L14 74Q14 64 22 64L64 64L64 46Q64 38 72 38L108 38Z"),
+microchip:qo("Microchip","M58 34L78 34L78 22L88 22L88 34L102 34L102 22L112 22L112 34L126 34L126 22L136 22L136 34L150 34L150 22L160 22L160 34L170 34Q182 34 182 46L182 58L194 58L194 68L182 68L182 84L194 84L194 94L182 94L182 110L194 110L194 120L182 120L182 136L194 136L194 146L182 146L182 158Q182 170 170 170L158 170L158 182L148 182L148 170L132 170L132 182L122 182L122 170L106 170L106 182L96 182L96 170L80 170L80 182L70 182L70 170L58 170Q46 170 46 158L46 146L34 146L34 136L46 136L46 120L34 120L34 110L46 110L46 94L34 94L34 84L46 84L46 68L34 68L34 58L46 58L46 46Q46 34 58 34Z"),
+drone:qo("Drone","M82 58Q82 48 92 48L146 48Q158 48 158 58L158 70L188 70Q198 70 198 80L198 90Q198 100 188 100L158 100L158 124L188 124Q198 124 198 134L198 144Q198 154 188 154L158 154L158 166Q158 178 146 178L82 178Q70 178 70 166L70 154L40 154Q30 154 30 144L30 134Q30 124 40 124L70 124L70 100L40 100Q30 100 30 90L30 80Q30 70 40 70L70 70L70 58Q70 48 82 48Z")`;
 const OPENBOT_GEOMETRY_TAIL = VENDOR_GEOMETRY_TAIL.replace(
   'leaf:qo("Leaf",vBt(88,113,1.5))};',
   `leaf:qo("Leaf",vBt(88,113,1.5)),${OPENBOT_ADDED_GEOMETRIES}};`,
 );
+const VENDOR_AVATAR_ACCENT_REF = 'const K=x.useRef(null),G=x.useRef(null);';
+const OPENBOT_AVATAR_ACCENT_REF =
+  'const K=x.useRef(null),G=x.useRef(null),openbotAccentRef=x.useRef(null);';
+const VENDOR_AVATAR_ACCENT_MORPH = 'const Jn=e3(Wn(Ee.x,0,1)),Mn=Jn<.999;';
+const OPENBOT_AVATAR_ACCENT_MORPH =
+  'const Jn=e3(Wn(Ee.x,0,1));const Mn=Jn<.999;openbotAccentRef.current&&(openbotAccentRef.current.setAttribute("d",yn.accentPath??""),openbotAccentRef.current.style.display=Mn&&!oe||!yn.accentPath?"none":"");';
+const VENDOR_AVATAR_ACCENT_FACE =
+  'p.jsxs("g",{clipPath:`url(#${N})`,children:[p.jsx("path",{style:fze,ref:oe=>{Q.current[0]=oe}}),p.jsx("path",{style:fze,ref:oe=>{Q.current[1]=oe}})]})';
+const OPENBOT_AVATAR_ACCENT_FACE =
+  'p.jsx("path",{ref:openbotAccentRef,style:{...fze,display:ae.accentPath&&(d||window.matchMedia("(prefers-reduced-motion: reduce)").matches||K.current==null||K.current.getAttribute("d")===ae.path)?"":"none"},d:ae.accentPath??""}),p.jsxs("g",{children:[p.jsx("path",{style:fze,ref:oe=>{Q.current[0]=oe}}),p.jsx("path",{style:fze,ref:oe=>{Q.current[1]=oe}})],clipPath:`url(#${N})`})';
+const VENDOR_AVATAR_ACCENT_STATIC = 'm=`${o.path} ${Oje(l,u)} ${Oje(c,d)}`';
+const OPENBOT_AVATAR_ACCENT_STATIC = 'm=`${o.path} ${o.accentPath??""} ${Oje(l,u)} ${Oje(c,d)}`';
 const TITLE = "<title>Grok Bot</title>";
 const CODEX_TITLE = "<title>OpenBot</title>";
 const HEAD_END = "  </head>";
@@ -96,11 +110,11 @@ Eyn=openbotNewBotCreateOwnForm;
 const VENDOR_NEW_BOT_CHARACTER_EDITOR_PREFIX =
   'function M4n(n){const e=ye.c(32),{agent:t,character:s,staged:r,isCharacterActive:i}=n';
 const OPENBOT_NEW_BOT_CHARACTER_EDITOR_PREFIX =
-  'function M4n(n){const e=ye.c(32),{agent:t,character:s,staged:r,isCharacterActive:i,shapeIsExplicit:a=i,colorIsExplicit:c=i}=n';
+  'function M4n(n){const e=ye.c(32),{agent:t,character:s,staged:r,isCharacterActive:i,shapeIsExplicit:a=i,colorIsExplicit:v=i}=n';
 const VENDOR_NEW_BOT_CHARACTER_SHAPE_ACTIVE = 'const O=i&&f===M';
 const OPENBOT_NEW_BOT_CHARACTER_SHAPE_ACTIVE = 'const O=a&&f===M';
 const VENDOR_NEW_BOT_CHARACTER_COLOR_ACTIVE = 'i&&d===M.id';
-const OPENBOT_NEW_BOT_CHARACTER_COLOR_ACTIVE = 'c&&d===M.id';
+const OPENBOT_NEW_BOT_CHARACTER_COLOR_ACTIVE = 'v&&d===M.id';
 const VENDOR_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK =
   'e[9]!==o||e[10]!==l||e[11]!==i||e[12]!==d||e[13]!==f?';
 const OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_CHECK =
@@ -112,11 +126,11 @@ const OPENBOT_NEW_BOT_CHARACTER_SHAPE_CACHE_ASSIGN =
 const VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK =
   'e[21]!==o||e[22]!==l||e[23]!==i||e[24]!==d?';
 const OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_CHECK =
-  'e[21]!==o||e[22]!==l||e[23]!==i+"|"+c||e[24]!==d?';
+  'e[21]!==o||e[22]!==l||e[23]!==i+"|"+v||e[24]!==d?';
 const VENDOR_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN =
   'e[21]=o,e[22]=l,e[23]=i,e[24]=d,e[25]=C';
 const OPENBOT_NEW_BOT_CHARACTER_COLOR_CACHE_ASSIGN =
-  'e[21]=o,e[22]=l,e[23]=i+"|"+c,e[24]=d,e[25]=C';
+  'e[21]=o,e[22]=l,e[23]=i+"|"+v,e[24]=d,e[25]=C';
 const NEW_BOT_CHARACTER_EDITOR_END = 'class O4n';
 const VENDOR_NEW_BOT_CREATE_RESOLVE =
   'const Me=await Ee.resolveAvatar(),Ae=await re({name:Ee.name,description:Ee.description,avatarPngBase64:Me,...Ee.templateId!=null?{templateId:Ee.templateId}:{}});';
@@ -156,6 +170,187 @@ function countAnchorOccurrences(source, anchor) {
     count += 1;
     offset = index + anchor.length;
   }
+}
+
+function parseAvatarAccentPath(pathSource, label) {
+  if (typeof pathSource !== "string" || pathSource.length < 8 || pathSource.length > 512) {
+    throw new TypeError(`Avatar accent path is invalid for ${label}`);
+  }
+  const compact = pathSource.replace(/[\s,]+/g, "");
+  const tokens = pathSource.match(/[MLQCZ]|-?(?:\d+(?:\.\d+)?|\.\d+)/g) ?? [];
+  if (tokens.join("") !== compact) {
+    throw new Error(`Avatar accent path contains unsupported syntax for ${label}`);
+  }
+  const arity = { M: 2, L: 2, Q: 4, C: 6, Z: 0 };
+  const commands = [];
+  let index = 0;
+  while (index < tokens.length) {
+    const type = tokens[index++];
+    if (!(type in arity)) {
+      throw new Error(`Avatar accent path contains an unsupported command for ${label}`);
+    }
+    const values = [];
+    for (let valueIndex = 0; valueIndex < arity[type]; valueIndex += 1) {
+      const token = tokens[index++];
+      if (token === undefined || token in arity) {
+        throw new Error(`Avatar accent path has invalid command arity for ${label}`);
+      }
+      const value = Number(token);
+      if (!Number.isFinite(value)) {
+        throw new Error(`Avatar accent path has a non-finite coordinate for ${label}`);
+      }
+      values.push(value);
+    }
+    if (index < tokens.length && !(tokens[index] in arity)) {
+      throw new Error(`Avatar accent path uses implicit coordinates for ${label}`);
+    }
+    commands.push({ type, values });
+  }
+  return commands;
+}
+
+function avatarAccentSamples(commands, steps = 12) {
+  const samples = [];
+  let start = null;
+  let current = null;
+  for (const { type, values } of commands) {
+    if (type === "M") {
+      current = { x: values[0], y: values[1] };
+      start = { ...current };
+      samples.push({ ...current });
+      continue;
+    }
+    if (type === "Z") {
+      samples.push({ ...start });
+      current = { ...start };
+      continue;
+    }
+    const from = current;
+    for (let step = 1; step <= steps; step += 1) {
+      const t = step / steps;
+      const inverse = 1 - t;
+      if (type === "L") {
+        current = { x: from.x + (values[0] - from.x) * t, y: from.y + (values[1] - from.y) * t };
+      } else if (type === "Q") {
+        current = {
+          x: inverse * inverse * from.x + 2 * inverse * t * values[0] + t * t * values[2],
+          y: inverse * inverse * from.y + 2 * inverse * t * values[1] + t * t * values[3],
+        };
+      } else {
+        current = {
+          x: inverse ** 3 * from.x + 3 * inverse * inverse * t * values[0]
+            + 3 * inverse * t * t * values[2] + t ** 3 * values[4],
+          y: inverse ** 3 * from.y + 3 * inverse * inverse * t * values[1]
+            + 3 * inverse * t * t * values[3] + t ** 3 * values[5],
+        };
+      }
+      samples.push({ ...current });
+    }
+  }
+  return samples;
+}
+
+function avatarAccentSegmentsIntersect(firstStart, firstEnd, secondStart, secondEnd) {
+  const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  const a = cross(firstStart, firstEnd, secondStart);
+  const b = cross(firstStart, firstEnd, secondEnd);
+  const c = cross(secondStart, secondEnd, firstStart);
+  const d = cross(secondStart, secondEnd, firstEnd);
+  return ((a > 1e-7 && b < -1e-7) || (a < -1e-7 && b > 1e-7))
+    && ((c > 1e-7 && d < -1e-7) || (c < -1e-7 && d > 1e-7));
+}
+
+function validateAvatarAccentPath(pathSource, label = "avatar") {
+  const commands = parseAvatarAccentPath(pathSource, label);
+  if (commands[0]?.type !== "M" || commands.at(-1)?.type !== "Z"
+    || commands.filter(({ type }) => type === "M").length !== 1
+    || commands.filter(({ type }) => type === "Z").length !== 1) {
+    throw new Error(`Avatar accent must be one closed subpath for ${label}`);
+  }
+  const coordinates = commands.flatMap(({ values }) => values);
+  for (let index = 0; index < coordinates.length; index += 2) {
+    const x = coordinates[index];
+    const y = coordinates[index + 1];
+    if (x < 54 || x > 174 || y < 120 || y > 184) {
+      throw new Error(`Avatar accent exceeds the face-safe bounds for ${label}`);
+    }
+  }
+  const samples = avatarAccentSamples(commands);
+  const segments = samples.slice(1).map((point, index) => [samples[index], point]);
+  for (let first = 0; first < segments.length; first += 1) {
+    for (let second = first + 1; second < segments.length; second += 1) {
+      if (second === first + 1 || (first === 0 && second === segments.length - 1)) continue;
+      if (avatarAccentSegmentsIntersect(...segments[first], ...segments[second])) {
+        throw new Error(`Avatar accent self-intersects for ${label}`);
+      }
+    }
+  }
+  let area = 0;
+  for (let index = 0; index < samples.length - 1; index += 1) {
+    area += samples[index].x * samples[index + 1].y - samples[index + 1].x * samples[index].y;
+  }
+  if (Math.abs(area) / 2 < 20) {
+    throw new Error(`Avatar accent is degenerate for ${label}`);
+  }
+  return pathSource;
+}
+
+function assertAvatarAccentSourceState(source, direction, allowAbsent) {
+  if (typeof source !== "string") throw new TypeError("Avatar accent source must be a string");
+  const vendor = [
+    VENDOR_AVATAR_ACCENT_REF,
+    VENDOR_AVATAR_ACCENT_MORPH,
+    VENDOR_AVATAR_ACCENT_FACE,
+    VENDOR_AVATAR_ACCENT_STATIC,
+  ].map((anchor) => countAnchorOccurrences(source, anchor));
+  const open = [
+    OPENBOT_AVATAR_ACCENT_REF,
+    OPENBOT_AVATAR_ACCENT_MORPH,
+    OPENBOT_AVATAR_ACCENT_FACE,
+    OPENBOT_AVATAR_ACCENT_STATIC,
+  ].map((anchor) => countAnchorOccurrences(source, anchor));
+  if (vendor.some((count) => count > 1) || open.some((count) => count > 1)) {
+    throw new Error("Avatar accent anchor is ambiguous");
+  }
+  const vendorCount = vendor.reduce((sum, count) => sum + count, 0);
+  const openCount = open.reduce((sum, count) => sum + count, 0);
+  if (direction === "patch") {
+    if (vendorCount === 0 && openCount === 0 && allowAbsent) return false;
+    if (vendorCount === 4 && openCount === 0) return true;
+    if (vendorCount === 0 && openCount === 4) throw new Error("Avatar accent is already patched");
+    if (vendorCount === 0 && openCount === 0) throw new Error("Avatar accent anchors not found");
+    throw new Error("Avatar accent anchors are mixed or missing");
+  }
+  if (openCount === 4 && vendorCount === 0) return true;
+  if (vendorCount === 4 && openCount === 0) throw new Error("Avatar accent inverse requires patched anchors");
+  if (vendorCount === 0 && openCount === 0) throw new Error("Avatar accent inverse anchors not found");
+  throw new Error("Avatar accent inverse anchors are mixed or missing");
+}
+
+function patchAvatarAccentSource(source, allowAbsent = false) {
+  if (!assertAvatarAccentSourceState(source, "patch", allowAbsent)) return source;
+  validateAvatarAccentPath(DOG_AVATAR_ACCENT_PATH, "dog");
+  validateAvatarAccentPath(OWL_AVATAR_ACCENT_PATH, "owl");
+  let patched = source;
+  for (const [vendor, open, label] of [
+    [VENDOR_AVATAR_ACCENT_REF, OPENBOT_AVATAR_ACCENT_REF, "Sand accent ref"],
+    [VENDOR_AVATAR_ACCENT_MORPH, OPENBOT_AVATAR_ACCENT_MORPH, "Sand accent morph"],
+    [VENDOR_AVATAR_ACCENT_FACE, OPENBOT_AVATAR_ACCENT_FACE, "Sand accent face"],
+    [VENDOR_AVATAR_ACCENT_STATIC, OPENBOT_AVATAR_ACCENT_STATIC, "Sand accent static"],
+  ]) patched = replaceUnique(patched, vendor, open, label);
+  return patched;
+}
+
+function reverseAvatarAccentSource(source) {
+  assertAvatarAccentSourceState(source, "reverse", false);
+  let reversed = source;
+  for (const [open, vendor, label] of [
+    [OPENBOT_AVATAR_ACCENT_STATIC, VENDOR_AVATAR_ACCENT_STATIC, "OpenBot Sand accent static"],
+    [OPENBOT_AVATAR_ACCENT_FACE, VENDOR_AVATAR_ACCENT_FACE, "OpenBot Sand accent face"],
+    [OPENBOT_AVATAR_ACCENT_MORPH, VENDOR_AVATAR_ACCENT_MORPH, "OpenBot Sand accent morph"],
+    [OPENBOT_AVATAR_ACCENT_REF, VENDOR_AVATAR_ACCENT_REF, "OpenBot Sand accent ref"],
+  ]) reversed = replaceUnique(reversed, open, vendor, label);
+  return reversed;
 }
 
 function assertAvatarCatalogSourceState(source, direction) {
@@ -552,6 +747,10 @@ function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSE
     throw new Error(`Unsupported Grok renderer asset hash: ${actualSha256}`);
   }
   let patched = patchAvatarCatalogSource(source);
+  patched = patchAvatarAccentSource(
+    patched,
+    expectedSha256 !== VENDOR_RENDERER_ASSET_SHA256,
+  );
   patched = replaceUnique(
     patched,
     VENDOR_NATIVE_SHELL_GATE,
@@ -757,18 +956,29 @@ function patchRenderer(extractedRoot, options = {}) {
 
 module.exports = {
   ASSETS,
+  DOG_AVATAR_ACCENT_PATH,
+  OPENBOT_AVATAR_ACCENT_FACE,
+  OPENBOT_AVATAR_ACCENT_MORPH,
+  OPENBOT_AVATAR_ACCENT_REF,
+  OPENBOT_AVATAR_ACCENT_STATIC,
   OPENBOT_GEOMETRY_TAIL,
   OPENBOT_NEW_BOT_COMMIT,
   OPENBOT_NEW_BOT_AVATAR_PICKER,
   OPENBOT_NEW_BOT_CREATE_DISPATCH,
   OPENBOT_NEW_BOT_CREATE_RESOLVE,
   OPENBOT_VISIBLE_SHAPES,
+  OWL_AVATAR_ACCENT_PATH,
+  VENDOR_AVATAR_ACCENT_FACE,
+  VENDOR_AVATAR_ACCENT_MORPH,
+  VENDOR_AVATAR_ACCENT_REF,
+  VENDOR_AVATAR_ACCENT_STATIC,
   VENDOR_GEOMETRY_TAIL,
   VENDOR_RENDERER_ASSET,
   VENDOR_RENDERER_ASSET_SHA256,
   VENDOR_SETTINGS_ASSET,
   VENDOR_SETTINGS_ASSET_SHA256,
   VENDOR_VISIBLE_SHAPES,
+  patchAvatarAccentSource,
   patchAvatarCatalogSource,
   patchNewBotCharacterEditorSource,
   patchNewBotAvatarPickerSource,
@@ -777,9 +987,11 @@ module.exports = {
   patchRendererIndexSource,
   patchVendorRendererSource,
   patchVendorSettingsSource,
+  reverseAvatarAccentSource,
   reverseAvatarCatalogSource,
   reverseNewBotCharacterEditorSource,
   reverseNewBotCreatePayloadSource,
   reverseNewBotAvatarPickerSource,
+  validateAvatarAccentPath,
   mergeNewBotAvatarSelection,
 };
