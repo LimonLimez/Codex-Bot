@@ -634,20 +634,41 @@ const STOCK_PAIR_FLOORS = Object.freeze({
   teardrop: 0.08,
 });
 const DOG_STOCK_CLOUD_FLOOR = 0.12;
-const EXACT_VENDOR_ARCHIVE = "/Applications/Grok Bot original 20260811.app/Contents/Resources/app.asar";
+// Pinned Grok Bot 0.20 DQ picker values, in source order. Black is retained
+// for contract coverage but avoided by the visible contact-sheet samples.
+const DQ_PICKER_PALETTE = Object.freeze([
+  "#000", "#936439", "#FF263C", "#FF6700", "#FF9800", "#00C972",
+  "#00BCA6", "#1084FE", "#9159FE", "#FF309B", "#777777",
+]);
+const EXACT_VENDOR_ARCHIVE_CANDIDATES = Object.freeze([
+  process.env.OPENBOT_EXACT_VENDOR_ARCHIVE,
+  "/Applications/Grok Bot original 20260811.app/Contents/Resources/app.asar",
+  "/Volumes/Grok Bot Installer 1/Grok Bot.app/Contents/Resources/app.asar",
+].filter(Boolean));
+function exactVendorArchive() {
+  const archive = EXACT_VENDOR_ARCHIVE_CANDIDATES.find((candidate) => {
+    try {
+      const source = asar.extractFile(candidate, "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
+      return sha256Text(source) === VENDOR_RENDERER_ASSET_SHA256;
+    } catch {
+      return false;
+    }
+  });
+  return archive ?? EXACT_VENDOR_ARCHIVE_CANDIDATES[0];
+}
 let exactSandRuntimeCache = null;
 let exactPatchedSandRuntimeCache = null;
 
 function exactSandRuntime() {
   if (exactSandRuntimeCache !== null) return exactSandRuntimeCache;
-  const source = asar.extractFile(EXACT_VENDOR_ARCHIVE, "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
+  const source = asar.extractFile(exactVendorArchive(), "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
   assert.equal(sha256Text(source), VENDOR_RENDERER_ASSET_SHA256, "pinned vendor asset hash drifted");
   const start = source.indexOf("const Cst=");
   const end = source.indexOf("const C9e=", start);
   assert.ok(start >= 0 && end > start, "pinned Sand geometry/face section anchors are missing");
   const context = { Math, Float64Array, Array };
   vm.runInNewContext(
-    `${source.slice(start, end)};globalThis.__sand={Fo,qo,MBt,Oje,E9e,c3,Cst,Ist,Ast,_st};`,
+    `${source.slice(start, end)};globalThis.__sand={Fo,qo,MBt,Oje,OBt,E9e,c3,Cst,Ist,Ast,_st};`,
     context,
     { filename: "pinned-sand-geometry.cjs" },
   );
@@ -668,7 +689,7 @@ function exactSandRuntime() {
 
 function exactPatchedSandRuntime() {
   if (exactPatchedSandRuntimeCache !== null) return exactPatchedSandRuntimeCache;
-  const source = asar.extractFile(EXACT_VENDOR_ARCHIVE, "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
+  const source = asar.extractFile(exactVendorArchive(), "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
   const patched = patchAvatarAccentSource(patchAvatarCatalogSource(source));
   const start = patched.indexOf("const Cst=");
   const end = patched.indexOf("const C9e=", start);
@@ -761,7 +782,7 @@ function authoredContourRaster(path, size) {
 }
 
 function exactSandFaceRaster(name, size, pose = { turn: 0, tilt: 0, roll: 0 }) {
-  const exactSand = exactSandRuntime();
+  const exactSand = exactPatchedSandRuntime();
   const shape = exactSand.Fo[name];
   const cells = [...rasterizeQoPath(shape.path, size).cells];
   const transforms = exactSand.MBt(name, {
@@ -779,6 +800,41 @@ function exactSandFaceRaster(name, size, pose = { turn: 0, tilt: 0, roll: 0 }) {
     }
   }
   return cells;
+}
+
+function exactSandColoredEyedRender(name, size, pose = { turn: 0, tilt: 0, roll: 0 }, fill = "#ef4052") {
+  const exactSand = exactPatchedSandRuntime();
+  const shape = exactSand.Fo[name];
+  const renderOptions = {
+    shape: name,
+    fill,
+    size,
+    faceTune: exactSand.Cst,
+    eyeScale: exactSand._st(name),
+    pose,
+    poseHome: exactSand.Ast,
+  };
+  const transforms = exactSand.MBt(name, renderOptions);
+  const eyes = transforms.map((transform, index) => exactSand.Oje(exactSand.c3[0][index], transform));
+  const svg = exactSand.OBt(renderOptions);
+  const body = rasterizeQoPath(shape.path, size).cells;
+  const face = [...body];
+  const holes = [...eyes, ...(shape.accentPath ? [shape.accentPath] : [])];
+  for (const hole of holes) {
+    const holeCells = rasterizeQoPath(hole, size).cells;
+    for (let index = 0; index < face.length; index += 1) {
+      if (holeCells[index]) face[index] = false;
+    }
+  }
+  return {
+    svg,
+    fill,
+    shapePath: shape.path,
+    accentPath: shape.accentPath,
+    eyePaths: eyes,
+    body,
+    face,
+  };
 }
 
 function continuousContourSpanAt(path, ratio) {
@@ -1375,7 +1431,7 @@ test("dog and owl accent metadata are bounded face-safe subpaths and stock shape
 
 test("exact Sand accent patch covers dynamic morph reduced-motion and static parity without changing E9e masks", () => {
   assert.equal(typeof patchAvatarAccentSource, "function");
-  const source = asar.extractFile(EXACT_VENDOR_ARCHIVE, "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
+  const source = asar.extractFile(exactVendorArchive(), "dist/renderer/assets/index-CphCyQnY.js").toString("utf8");
   const catalogPatched = patchAvatarCatalogSource(source);
   const patched = patchAvatarAccentSource(catalogPatched);
   assert.equal((patched.match(/openbotAccentRef/g) ?? []).length >= 3, true);
@@ -1494,7 +1550,9 @@ test("native-size avatar contours are authored SVG paths with separated silhouet
     for (const name of AUTHORED_CONTOUR_NAMES) {
       for (const [stockName, stockRaster] of stockRasters) {
         const difference = authoredRasterDifference(rasters.get(name).cells, stockRaster.cells);
-        const floor = name === "dog" && stockName === "cloud" ? DOG_STOCK_CLOUD_FLOOR : STOCK_PAIR_FLOORS[stockName];
+        const floor = name === "dog" && stockName === "cloud"
+          ? DOG_STOCK_CLOUD_FLOOR
+          : STOCK_PAIR_FLOORS[stockName];
         assert.ok(difference >= floor, `${name}/${stockName} silhouettes merge at ${size}px (${difference.toFixed(3)} < ${floor})`);
       }
     }
@@ -1584,26 +1642,21 @@ test("dog contour integrates lateral ear shoulders into one broad canine face", 
   }
 });
 
-test("owl contour has an outward horned brow, broad facial disc, and compact feather base", () => {
+test("owl contour has a rounded facial disc, small tufts, wings, and a compact feather base", () => {
   const owlEntry = parseAuthoredContourEntries(OPENBOT_GEOMETRY_TAIL)
     .find(({ name }) => name === "owl");
   const owlPath = authoredQoPath(owlEntry.path);
+  const authoredBounds = pathExtrema(owlEntry.path);
   const bounds = pathExtrema(owlPath);
   const width = bounds.maxX - bounds.minX;
   const height = bounds.maxY - bounds.minY;
-  const commands = parsePathCommands(owlEntry.path);
-  const brow = commands[0].values;
-  assert.ok(Math.abs(brow[0] - AUTHORED_CONTOUR_CENTER) <= 1,
-    "owl concave brow must stay centered between the tufts");
-  assert.ok((brow[1] - pathExtrema(owlEntry.path).minY) / (pathExtrema(owlEntry.path).maxY - pathExtrema(owlEntry.path).minY) >= 0.25,
-    "owl brow must be visibly concave below its outward tufts");
-
   const samples = pathSamples(owlPath, 48);
-  const tuftBand = samples.filter((point) => point.y <= bounds.minY + height * 0.16);
-  assert.ok(tuftBand.some((point) => point.x < AUTHORED_CONTOUR_CENTER - width * 0.22),
-    "owl needs a left outward horn tuft");
-  assert.ok(tuftBand.some((point) => point.x > AUTHORED_CONTOUR_CENTER + width * 0.22),
-    "owl needs a right outward horn tuft");
+  assert.ok(authoredBounds.minY >= 24, "owl tufts must stay small and rounded, not horn-like");
+  const tuftBand = samples.filter((point) => point.y <= bounds.minY + height * 0.18);
+  assert.ok(tuftBand.some((point) => point.x < AUTHORED_CONTOUR_CENTER - width * 0.20),
+    "owl needs a readable left feather tuft");
+  assert.ok(tuftBand.some((point) => point.x > AUTHORED_CONTOUR_CENTER + width * 0.20),
+    "owl needs a readable right feather tuft");
   const disc = continuousContourSpanAt(owlPath, 0.53);
   const base = continuousContourSpanAt(owlPath, 0.88);
   assert.ok(disc.width >= width * 0.86, `owl facial disc is not broad enough (${disc.width.toFixed(2)})`);
@@ -1646,12 +1699,13 @@ test("added silhouettes preserve species and machine landmarks at 22px and 36px"
     const wolfCheek = authoredProfile(wolf.cells, size, 0.45);
     const wolfRuff = authoredProfile(wolf.cells, size, 0.6);
     const wolfTaper = authoredProfile(wolf.cells, size, 0.82);
-    assert.ok(wolfRuff.width - wolfCheek.width >= 2, `wolf needs lateral cheek ruffs at ${size}px`);
+    assert.ok(wolfRuff.width - wolfCheek.width >= 2, `wolf needs restrained readable side planes at ${size}px`);
+    assert.ok(wolfRuff.width <= wolfCheek.width * 1.35, `wolf side planes must not become crab ruffs at ${size}px`);
     assert.ok(wolfTaper.width <= Math.round(size * 0.7), `wolf needs a long tapered lower face at ${size}px`);
 
     const fox = raster("fox");
     const foxPeaks = authoredTopPeakPositions(fox.cells, size);
-    assert.ok(foxPeaks.length >= 2 && foxPeaks.at(-1) - foxPeaks[0] >= Math.round(size * 0.35), `fox needs wide diagonal ears at ${size}px`);
+    assert.ok(foxPeaks.length >= 2 && foxPeaks.at(-1) - foxPeaks[0] >= Math.round(size * 0.35), `fox needs separated upright ears at ${size}px`);
     assert.ok(authoredProfile(fox.cells, size, 0.82).width <= Math.round(size * 0.65), `fox needs a narrow pointed lower face at ${size}px`);
     assert.ok(authoredProfile(fox.cells, size, 0.58).width <= Math.round(size * 0.9), `fox must not grow wolf-like cheek ruffs at ${size}px`);
 
@@ -1671,6 +1725,78 @@ test("added silhouettes preserve species and machine landmarks at 22px and 36px"
     const droneLower = authoredProfile(drone.cells, size, 0.7);
     assert.ok(droneUpper.width - droneMiddle.width >= 3, `drone needs a negative gap below upper terminals at ${size}px`);
     assert.ok(droneLower.width - droneMiddle.width >= 3, `drone needs a negative gap above lower terminals at ${size}px`);
+  }
+});
+
+test("colored and eyed picker renders keep weak identity pairs out of the Sand catalog", () => {
+  const renderers = new Map();
+  for (const size of [22, 36]) {
+    for (const [index, name] of ["cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly", "terminal", "robot", "microchip", "drone"].entries()) {
+      const fill = DQ_PICKER_PALETTE[(index + 2) % DQ_PICKER_PALETTE.length];
+      const rendered = exactSandColoredEyedRender(name, size, undefined, fill);
+      assert.ok(DQ_PICKER_PALETTE.includes(rendered.fill), `${name} must use the pinned DQ picker palette`);
+      assert.equal(rendered.svg.includes(`fill="${rendered.fill}"`), true, `${name} lost its DQ fill in static Sand output`);
+      assert.match(rendered.svg, new RegExp(`width="${size}" height="${size}"`),
+        `${name} must render at the real ${size}x${size} target size`);
+      assert.equal(rendered.face.length, size * size, `${name} native raster must contain exactly ${size * size} pixels`);
+      assert.equal((rendered.svg.match(/<path[^>]*d=/g) ?? []).length, 1,
+        `${name} must use one authoritative compound Sand path at ${size}px`);
+      assert.equal(rendered.svg.split(rendered.shapePath).length - 1, 1,
+        `${name} static Sand body path must appear exactly once`);
+      assert.equal(rendered.eyePaths.length, 2, `${name} must have two Sand eye paths`);
+      for (const eyePath of rendered.eyePaths) {
+        assert.equal(rendered.svg.split(eyePath).length - 1, 1,
+          `${name} static Sand composition must contain each eye path exactly once`);
+      }
+      if (rendered.accentPath !== undefined) {
+        assert.equal(rendered.svg.split(rendered.accentPath).length - 1, 1,
+          `${name} static composition must contain its accent path exactly once`);
+      }
+      renderers.set(`${name}:${size}`, rendered.body);
+      renderers.set(`${name}:face:${size}`, rendered.face);
+      renderers.set(`${name}:native-hash:${size}`, sha256Text(rendered.face.map((filled) => filled ? "1" : "0").join("")));
+    }
+
+    const width = (name, row) => authoredProfile(renderers.get(`${name}:${size}`), size, row).width;
+    const difference = (left, right) => authoredRasterDifference(
+      renderers.get(`${left}:face:${size}`),
+      renderers.get(`${right}:face:${size}`),
+    );
+    const stockMasses = ["blob", "pebble", "squircle", "tablet", "wedge", "hex", "cloud", "teardrop"]
+      .map((name) => rasterizeQoPath(exactSandRuntime().Fo[name].path, size).cells.filter(Boolean).length)
+      .sort((left, right) => left - right);
+    const stockMedianMass = stockMasses[Math.floor(stockMasses.length / 2)];
+    for (const name of ["cat", "wolf", "bunny", "fox", "bear", "owl", "terminal", "robot", "microchip", "drone"]) {
+      const mass = renderers.get(`${name}:${size}`).filter(Boolean).length;
+      const ratio = mass / stockMedianMass;
+      assert.ok(ratio >= 0.75 && ratio <= 1.25,
+        `${name} optical mass must stay within 0.75-1.25x stock median at ${size}px (${ratio.toFixed(2)}x)`);
+    }
+
+    assert.ok(difference("cat", "bunny") >= 0.15,
+      `cat/bunny must read as separate species at ${size}px`);
+    assert.ok(difference("cat", "fox") >= 0.10,
+      `cat/fox must read as separate species at ${size}px`);
+    assert.ok(width("wolf", 0.62) - width("wolf", 0.48) >= 2,
+      `wolf side planes must remain readable in the colored+eyed render at ${size}px`);
+    assert.ok(width("wolf", 0.62) <= width("wolf", 0.48) * 1.35,
+      `wolf side planes must stay restrained in the colored+eyed render at ${size}px`);
+    assert.ok(width("fox", 0.82) >= Math.round(size * 0.38),
+      `fox muzzle must close as a rounded wedge rather than a heart tip at ${size}px`);
+    assert.ok(width("owl", 0.05) <= Math.round(size * 0.55),
+      `owl brow must use small feather tufts rather than devil horns at ${size}px`);
+    assert.ok(width("robot", 0.78) >= Math.round(size * 0.34),
+      `robot needs a readable lower chassis at ${size}px`);
+    assert.ok(width("drone", 0.52) >= Math.round(size * 0.42),
+      `drone needs a central fuselage between its four pods at ${size}px`);
+    for (const [left, right] of [["terminal", "robot"], ["microchip", "robot"], ["drone", "robot"]]) {
+      assert.ok(difference(left, right) >= 0.20,
+        `${left}/${right} must remain a distinct machine pair at ${size}px`);
+    }
+  }
+  for (const name of ["cat", "dog", "wolf", "bunny", "fox", "bear", "owl", "jelly", "terminal", "robot", "microchip", "drone"]) {
+    assert.notEqual(renderers.get(`${name}:native-hash:22`), renderers.get(`${name}:native-hash:36`),
+      `${name} 22px and 36px native rasters must not be cosmetic copies`);
   }
 });
 

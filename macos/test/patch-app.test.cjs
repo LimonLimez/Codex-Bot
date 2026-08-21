@@ -390,6 +390,23 @@ test("patch-app renderer fixture carries the exact avatar registry contract", ()
   assert.equal(reverseAvatarCatalogSource(patched), SYNTHETIC_VENDOR_RENDERER);
 });
 
+test("patch-app avatar registry keeps the reviewed identity topology anchors", () => {
+  for (const [name, label] of [
+    ["wolf", "Wolf"], ["bunny", "Bunny"], ["fox", "Fox"], ["bear", "Bear"],
+    ["owl", "Owl"], ["terminal", "Terminal"], ["robot", "Robot"],
+    ["microchip", "Microchip"], ["drone", "Drone"],
+  ]) {
+    assert.match(OPENBOT_GEOMETRY_TAIL, new RegExp(`${name}:qo\\("${label}","M`));
+  }
+  assert.match(OPENBOT_GEOMETRY_TAIL, /owl:qo\("Owl","[MLCQZ0-9 .-]+",\{accentPath:/);
+  for (const weakLegacyPath of [
+    "Q198 134Q204 145",
+    "L114 218L71 173",
+    "Q103 36 114 36Q125 36 134 44",
+    "L54 16Q44 4 44 24",
+  ]) assert.doesNotMatch(OPENBOT_GEOMETRY_TAIL, new RegExp(weakLegacyPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
 test("patch-app native View Bot overview keeps the stock branch and adds one local host", () => {
   const patched = rendererPatch.patchBotOverviewSource(`before;${STOCK_BOT_OVERVIEW_COMPUTER};after`);
   assert.equal((patched.match(/data-openbot-bot-overview-computer-host/g) ?? []).length, 1);
