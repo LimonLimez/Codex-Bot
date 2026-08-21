@@ -12,11 +12,23 @@ const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_DISPLAY_FRAME_BYTES = 1_048_576;
 const MAX_DISPLAY_FRAME_WIDTH = 640;
 const MAX_DISPLAY_FRAME_HEIGHT = 400;
+const SURFACE_CSS_WIDTH = 1280;
+const SURFACE_CSS_HEIGHT = 800;
+const PREVIEW_FRAME_WIDTH = 640;
+const PREVIEW_FRAME_HEIGHT = 400;
+const PREVIEW_FRAME_INTERVAL_MS = 1_000;
+const INTERACTIVE_FRAME_WIDTH = 960;
+const INTERACTIVE_FRAME_HEIGHT = 600;
 const DISPLAY_FRAME_BOUNDS = Object.freeze([
-  Object.freeze({ width: 640, height: 400 }),
+  Object.freeze({ width: PREVIEW_FRAME_WIDTH, height: PREVIEW_FRAME_HEIGHT }),
   Object.freeze({ width: 512, height: 320 }),
   Object.freeze({ width: 400, height: 250 }),
   Object.freeze({ width: 320, height: 200 }),
+]);
+const INTERACTIVE_FRAME_BOUNDS = Object.freeze([
+  Object.freeze({ width: INTERACTIVE_FRAME_WIDTH, height: INTERACTIVE_FRAME_HEIGHT }),
+  Object.freeze({ width: 768, height: 480 }),
+  Object.freeze({ width: 640, height: 400 }),
 ]);
 const MAX_URL_BYTES = 4096;
 const LOCAL_DESKTOP_START_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\"><title>OpenBot Free Local Desktop</title></head><body><main><h1>Free Local Desktop</h1><p>Ready for this bot.</p></main></body></html>";
@@ -38,10 +50,86 @@ const ACTION_FIELDS = new Set([
   "reason",
 ]);
 const IDENTITY_FIELDS = new Set(["botId", "targetId", "targetGeneration"]);
-const NAVIGATION_FIELDS = new Set([...IDENTITY_FIELDS, "url"]);
+const NAVIGATION_FIELDS = new Set([...IDENTITY_FIELDS, "sessionGeneration", "url"]);
 const DISPOSE_TASK_FIELDS = new Set(["botId", "taskId"]);
 const DELETE_BOT_FIELDS = new Set(["botId", "localProfileId"]);
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const INPUT_CURRENTNESS_FIELDS = new Set([
+  "botId",
+  "targetId",
+  "targetGeneration",
+  "sessionGeneration",
+  "pageGeneration",
+  "frameId",
+  "frameSequence",
+  "inputSequence",
+]);
+const MOUSE_INPUT_FIELDS = new Set([
+  ...INPUT_CURRENTNESS_FIELDS,
+  "type",
+  "x",
+  "y",
+  "button",
+  "buttons",
+  "clickCount",
+  "deltaX",
+  "deltaY",
+  "modifiers",
+  "coordinate",
+  "coordinateSpace",
+  "deviceScaleFactor",
+]);
+const KEY_INPUT_FIELDS = new Set([
+  ...INPUT_CURRENTNESS_FIELDS,
+  "type",
+  "modifiers",
+  "text",
+  "unmodifiedText",
+  "key",
+  "code",
+  "windowsVirtualKeyCode",
+  "nativeVirtualKeyCode",
+  "autoRepeat",
+  "isKeypad",
+  "isSystemKey",
+  "location",
+]);
+const INSERT_TEXT_FIELDS = new Set([...INPUT_CURRENTNESS_FIELDS, "text"]);
+const IME_COMPOSITION_FIELDS = new Set([
+  ...INPUT_CURRENTNESS_FIELDS,
+  "text",
+  "selectionStart",
+  "selectionEnd",
+  "replacementStart",
+  "replacementEnd",
+]);
+const NAVIGATION_HISTORY_FIELDS = new Set([...IDENTITY_FIELDS, "sessionGeneration", "pageGeneration"]);
+const PRESENTATION_REQUEST_FIELDS = new Set([...IDENTITY_FIELDS, "presentation"]);
+const CDP_INPUT_METHODS = new Set([
+  "Input.dispatchMouseEvent",
+  "Input.dispatchKeyEvent",
+  "Input.insertText",
+  "Input.imeSetComposition",
+]);
+const CDP_PARAMETER_FIELDS = Object.freeze({
+  "Input.dispatchMouseEvent": Object.freeze([
+    "type", "x", "y", "button", "buttons", "clickCount", "deltaX", "deltaY", "modifiers",
+  ]),
+  "Input.dispatchKeyEvent": Object.freeze([
+    "type", "modifiers", "text", "unmodifiedText", "key", "code",
+    "windowsVirtualKeyCode", "nativeVirtualKeyCode", "autoRepeat", "isKeypad", "isSystemKey", "location",
+  ]),
+  "Input.insertText": Object.freeze(["text"]),
+  "Input.imeSetComposition": Object.freeze([
+    "text", "selectionStart", "selectionEnd", "replacementStart", "replacementEnd",
+  ]),
+});
+const MOUSE_EVENT_TYPES = new Set(["mousePressed", "mouseReleased", "mouseMoved", "mouseWheel"]);
+const MOUSE_BUTTONS = new Set(["none", "left", "middle", "right", "back", "forward"]);
+const KEY_EVENT_TYPES = new Set(["keyDown", "keyUp", "rawKeyDown", "char"]);
+const CDP_DEBUGGER_VERSION = "1.3";
+const DEFAULT_NAVIGATION_TIMEOUT_MS = 10_000;
+const MAX_IME_REPLACEMENT_OFFSET = 1_000_000;
 const EXTERNAL_RESOURCE_CAPABILITIES = new Set([
   "filesystem.read",
   "filesystem.write",
@@ -169,6 +257,266 @@ function normalizeGeneration(value) {
   return value;
 }
 
+function normalizePositiveSequence(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1) throw new Error(`Local Desktop ${label} is invalid.`);
+  return value;
+}
+
+function normalizeFrameId(value) {
+  if (typeof value !== "string" || !/^frame-[A-Za-z0-9._:-]{1,128}$/.test(value)) {
+    throw new Error("Local Desktop frame ID is invalid.");
+  }
+  return value;
+}
+
+function inputError(message, code = "OPENBOT_LOCAL_INPUT_INVALID") {
+  return desktopError(message, code);
+}
+
+function debuggerIsAttached(client) {
+  try {
+    const member = client?.isAttached;
+    const value = typeof member === "function" ? member.call(client) : member;
+    return value === true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeInputCurrentness(value, fields, label = "Local Desktop input") {
+  let input;
+  try {
+    input = assertPlainObject(cloneInput(value, label), label);
+    for (const key of Object.keys(input)) {
+      if (!fields.has(key)) throw new Error(`${label} contains an unsupported field.`);
+    }
+    for (const key of INPUT_CURRENTNESS_FIELDS) {
+      if (!hasOwn(input, key)) throw new Error(`${label} is missing ${key}.`);
+    }
+    const identity = normalizeIdentity({
+      botId: input.botId,
+      targetId: input.targetId,
+      targetGeneration: input.targetGeneration,
+    });
+    return {
+      ...identity,
+      sessionGeneration: normalizePositiveSequence(input.sessionGeneration, "session generation"),
+      pageGeneration: normalizePositiveSequence(input.pageGeneration, "page generation"),
+      frameId: normalizeFrameId(input.frameId),
+      frameSequence: normalizePositiveSequence(input.frameSequence, "frame sequence"),
+      inputSequence: normalizePositiveSequence(input.inputSequence, "input sequence"),
+    };
+  } catch (error) {
+    if (error?.code === "OPENBOT_LOCAL_INPUT_INVALID") throw error;
+    throw inputError(error?.message || `${label} is invalid.`);
+  }
+}
+
+function finiteCoordinate(value, label, maximum) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > maximum) {
+    throw inputError(`Local Desktop ${label} is invalid.`);
+  }
+  return value;
+}
+
+function optionalFinite(value, label, maximum = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) > maximum) {
+    throw inputError(`Local Desktop ${label} is invalid.`);
+  }
+  return value;
+}
+
+function optionalSafeInteger(value, label, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw inputError(`Local Desktop ${label} is invalid.`);
+  }
+  return value;
+}
+
+function optionalBoolean(value, label) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw inputError(`Local Desktop ${label} is invalid.`);
+  return value;
+}
+
+function optionalString(value, label, maxBytes = 512) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.includes("\0") || Buffer.byteLength(value, "utf8") > maxBytes) {
+    throw inputError(`Local Desktop ${label} is invalid.`);
+  }
+  return value;
+}
+
+function normalizeNavigationHistory(value) {
+  try {
+    const input = assertPlainObject(cloneInput(value, "Local navigation"), "Local navigation");
+    assertExactKeys(input, NAVIGATION_HISTORY_FIELDS, "Local navigation");
+    return {
+      ...normalizeIdentity({
+        botId: input.botId,
+        targetId: input.targetId,
+        targetGeneration: input.targetGeneration,
+      }),
+      sessionGeneration: normalizePositiveSequence(input.sessionGeneration, "session generation"),
+      pageGeneration: normalizePositiveSequence(input.pageGeneration, "page generation"),
+    };
+  } catch (error) {
+    if (error?.code === "OPENBOT_LOCAL_NAVIGATION_INVALID") throw error;
+    throw desktopError(error?.message || "Local navigation is invalid.", "OPENBOT_LOCAL_NAVIGATION_INVALID");
+  }
+}
+
+function normalizePresentationRequest(value) {
+  try {
+    const input = assertPlainObject(cloneInput(value, "Local Desktop presentation"), "Local Desktop presentation");
+    assertExactKeys(input, PRESENTATION_REQUEST_FIELDS, "Local Desktop presentation");
+    if (input.presentation !== "preview" && input.presentation !== "interactive") {
+      throw new Error("Local Desktop presentation is invalid.");
+    }
+    const identity = normalizeIdentity({
+      botId: input.botId,
+      targetId: input.targetId,
+      targetGeneration: input.targetGeneration,
+    });
+    return {
+      botId: identity.botId,
+      targetId: identity.targetId,
+      targetGeneration: identity.targetGeneration,
+      presentation: input.presentation,
+    };
+  } catch (error) {
+    throw inputError(error?.message || "Local Desktop presentation is invalid.");
+  }
+}
+
+function normalizeMouseInput(value) {
+  const currentness = normalizeInputCurrentness(value, MOUSE_INPUT_FIELDS);
+  let input;
+  try { input = cloneInput(value, "Local Desktop mouse input"); } catch { throw inputError("Local Desktop mouse input is invalid."); }
+  if (!MOUSE_EVENT_TYPES.has(input.type)) throw inputError("Local Desktop mouse event type is invalid.");
+  const normalized = {
+    ...currentness,
+    type: input.type,
+  };
+  let point = input;
+  if (input.coordinate !== undefined) {
+    if (!input.coordinate || typeof input.coordinate !== "object" || Array.isArray(input.coordinate)) {
+      throw inputError("Local Desktop mouse coordinate is invalid.");
+    }
+    const coordinateKeys = Object.keys(input.coordinate);
+    if (coordinateKeys.some((key) => key !== "x" && key !== "y")
+      || !hasOwn(input.coordinate, "x") || !hasOwn(input.coordinate, "y")) {
+      throw inputError("Local Desktop mouse coordinate is invalid.");
+    }
+    point = input.coordinate;
+  }
+  if (input.coordinateSpace !== undefined
+    && (typeof input.coordinateSpace !== "string" || !["css-dip", "dip"].includes(input.coordinateSpace))) {
+    throw inputError("Local Desktop coordinate space is invalid.");
+  }
+  if (input.deviceScaleFactor !== undefined
+    && (typeof input.deviceScaleFactor !== "number" || !Number.isFinite(input.deviceScaleFactor)
+      || input.deviceScaleFactor !== 1)) {
+    throw inputError("Local Desktop device scale factor is invalid.");
+  }
+  normalized.x = finiteCoordinate(point.x, "mouse X coordinate", SURFACE_CSS_WIDTH);
+  normalized.y = finiteCoordinate(point.y, "mouse Y coordinate", SURFACE_CSS_HEIGHT);
+  if (input.button !== undefined) {
+    if (typeof input.button !== "string" || !MOUSE_BUTTONS.has(input.button)) {
+      throw inputError("Local Desktop mouse button is invalid.");
+    }
+    normalized.button = input.button;
+  } else if (input.type === "mousePressed" || input.type === "mouseReleased") {
+    throw inputError("Local Desktop mouse button is required.");
+  }
+  const buttons = optionalSafeInteger(input.buttons, "mouse buttons", 0, 31);
+  const clickCount = optionalSafeInteger(input.clickCount, "mouse click count", 0, 32);
+  const modifiers = optionalSafeInteger(input.modifiers, "mouse modifiers", 0, 15);
+  const deltaX = optionalFinite(input.deltaX, "mouse delta X", 1_000_000);
+  const deltaY = optionalFinite(input.deltaY, "mouse delta Y", 1_000_000);
+  for (const [key, fieldValue] of Object.entries({ buttons, clickCount, modifiers, deltaX, deltaY })) {
+    if (fieldValue !== undefined) normalized[key] = fieldValue;
+  }
+  return normalized;
+}
+
+function normalizeKeyInput(value) {
+  const currentness = normalizeInputCurrentness(value, KEY_INPUT_FIELDS);
+  let input;
+  try { input = cloneInput(value, "Local Desktop key input"); } catch { throw inputError("Local Desktop key input is invalid."); }
+  if (!KEY_EVENT_TYPES.has(input.type)) throw inputError("Local Desktop key event type is invalid.");
+  const key = optionalString(input.key, "key", 128);
+  const code = optionalString(input.code, "code", 128);
+  if (key === undefined && code === undefined) throw inputError("Local Desktop key or code is required.");
+  const normalized = { ...currentness, type: input.type };
+  for (const [name, fieldValue] of Object.entries({
+    key,
+    code,
+    text: optionalString(input.text, "key text", 4096),
+    unmodifiedText: optionalString(input.unmodifiedText, "unmodified key text", 4096),
+    modifiers: optionalSafeInteger(input.modifiers, "key modifiers", 0, 15),
+    windowsVirtualKeyCode: optionalSafeInteger(input.windowsVirtualKeyCode, "Windows virtual key code", 0, 0xffff),
+    nativeVirtualKeyCode: optionalSafeInteger(input.nativeVirtualKeyCode, "native virtual key code", 0, 0xffff),
+    autoRepeat: optionalBoolean(input.autoRepeat, "key auto-repeat"),
+    isKeypad: optionalBoolean(input.isKeypad, "keypad flag"),
+    isSystemKey: optionalBoolean(input.isSystemKey, "system-key flag"),
+    location: optionalSafeInteger(input.location, "key location", 0, 3),
+  })) {
+    if (fieldValue !== undefined) normalized[name] = fieldValue;
+  }
+  return normalized;
+}
+
+function normalizeInsertText(value) {
+  const currentness = normalizeInputCurrentness(value, INSERT_TEXT_FIELDS);
+  let input;
+  try { input = cloneInput(value, "Local Desktop text input"); } catch { throw inputError("Local Desktop text input is invalid."); }
+  const text = optionalString(input.text, "text", 64 * 1024);
+  if (text === undefined) throw inputError("Local Desktop text is required.");
+  return { ...currentness, text };
+}
+
+function normalizeImeComposition(value) {
+  const currentness = normalizeInputCurrentness(value, IME_COMPOSITION_FIELDS);
+  let input;
+  try { input = cloneInput(value, "Local Desktop IME input"); } catch { throw inputError("Local Desktop IME input is invalid."); }
+  const text = optionalString(input.text, "composition text", 64 * 1024);
+  if (text === undefined) throw inputError("Local Desktop composition text is required.");
+  const selectionStart = optionalSafeInteger(input.selectionStart, "composition selection start", 0, text.length);
+  const selectionEnd = optionalSafeInteger(input.selectionEnd, "composition selection end", 0, text.length);
+  if (selectionStart === undefined || selectionEnd === undefined || selectionEnd < selectionStart) {
+    throw inputError("Local Desktop composition selection is invalid.");
+  }
+  const replacementStart = optionalSafeInteger(
+    input.replacementStart,
+    "composition replacement start",
+    -1,
+    MAX_IME_REPLACEMENT_OFFSET,
+  );
+  const replacementEnd = optionalSafeInteger(
+    input.replacementEnd,
+    "composition replacement end",
+    -1,
+    MAX_IME_REPLACEMENT_OFFSET,
+  );
+  if ((replacementStart === undefined) !== (replacementEnd === undefined)) {
+    throw inputError("Local Desktop composition replacement is invalid.");
+  }
+  if (replacementStart !== undefined && replacementEnd !== undefined && replacementEnd < replacementStart) {
+    throw inputError("Local Desktop composition replacement is invalid.");
+  }
+  return {
+    ...currentness,
+    text,
+    selectionStart,
+    selectionEnd,
+    ...(replacementStart === undefined ? {} : { replacementStart }),
+    ...(replacementEnd === undefined ? {} : { replacementEnd }),
+  };
+}
+
 function normalizeComputer(value, { allowStarting = false } = {}) {
   const input = assertPlainObject(cloneInput(value, "Local Computer"), "Local Computer");
   const botId = normalizeBotId(input.botId);
@@ -228,14 +576,23 @@ function normalizeAction(value) {
 }
 
 function normalizeNavigation(value) {
-  const input = assertPlainObject(cloneInput(value, "Local navigation"), "Local navigation");
-  assertExactKeys(input, NAVIGATION_FIELDS, "Local navigation");
-  const identity = normalizeIdentity({
-    botId: input.botId,
-    targetId: input.targetId,
-    targetGeneration: input.targetGeneration,
-  });
-  return { ...identity, url: safeHttpsUrl(input.url) };
+  try {
+    const input = assertPlainObject(cloneInput(value, "Local navigation"), "Local navigation");
+    assertExactKeys(input, NAVIGATION_FIELDS, "Local navigation");
+    const identity = normalizeIdentity({
+      botId: input.botId,
+      targetId: input.targetId,
+      targetGeneration: input.targetGeneration,
+    });
+    return {
+      ...identity,
+      sessionGeneration: normalizePositiveSequence(input.sessionGeneration, "session generation"),
+      url: safeHttpsUrl(input.url),
+    };
+  } catch (error) {
+    if (error?.code === "OPENBOT_LOCAL_NAVIGATION_INVALID") throw error;
+    throw desktopError("Local navigation is invalid.", "OPENBOT_LOCAL_NAVIGATION_INVALID");
+  }
 }
 
 function normalizeDisposeTask(value) {
@@ -347,8 +704,10 @@ function safeHttpsUrl(value) {
     throw desktopError("Local navigation URL is invalid.", "OPENBOT_LOCAL_NAVIGATION_INVALID");
   }
   const hostname = url.hostname.toLowerCase();
+  const comparableHostname = hostname.replace(/\.+$/, "");
   if (url.protocol !== "https:" || url.username || url.password || !hostname
-    || hostname === "localhost" || hostname.endsWith(".localhost") || privateIp(hostname)) {
+    || comparableHostname === "localhost" || comparableHostname.endsWith(".localhost")
+    || privateIp(comparableHostname)) {
     throw desktopError("Local navigation requires a public HTTPS URL.", "OPENBOT_LOCAL_NAVIGATION_INVALID");
   }
   return url.href;
@@ -370,6 +729,15 @@ function privateIp(hostname) {
       || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
   }
   if (version === 6) {
+    const mapped = /^::ffff:(?:([0-9]{1,3}(?:\.[0-9]{1,3}){3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/i.exec(address);
+    if (mapped) {
+      const ipv4 = mapped[1] || (() => {
+        const high = Number.parseInt(mapped[2], 16);
+        const low = Number.parseInt(mapped[3], 16);
+        return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
+      })();
+      return privateIp(ipv4);
+    }
     return address === "::1" || address === "::" || /^f[cd]/i.test(address) || /^fe[89ab]/i.test(address);
   }
   return false;
@@ -386,8 +754,25 @@ function publicSession(entry) {
     botId: entry.botId,
     targetId: entry.targetId,
     targetGeneration: entry.targetGeneration,
+    sessionGeneration: entry.sessionGeneration,
+    pageGeneration: entry.pageGeneration,
     partition: entry.partition,
     workspaceId: entry.workspaceId,
+    surface: Object.freeze({
+      cssWidth: SURFACE_CSS_WIDTH,
+      cssHeight: SURFACE_CSS_HEIGHT,
+    }),
+    presentations: Object.freeze({
+      preview: Object.freeze({
+        width: PREVIEW_FRAME_WIDTH,
+        height: PREVIEW_FRAME_HEIGHT,
+        fps: PREVIEW_FRAME_INTERVAL_MS / 1_000,
+      }),
+      interactive: Object.freeze({
+        width: INTERACTIVE_FRAME_WIDTH,
+        height: INTERACTIVE_FRAME_HEIGHT,
+      }),
+    }),
     state: "ready",
   });
 }
@@ -410,12 +795,16 @@ class LocalDesktopManager extends EventEmitter {
   #permissionBroker;
   #readCurrentComputer;
   #helperFactory;
+  #debuggerFactory;
   #randomUUID;
   #helperTimeoutMs;
+  #navigationTimeoutMs;
+  #sessionGenerations = new Map();
   #entries = new Map();
   #profiles = new Map();
   #profileOwners = new Map();
   #queues = new Map();
+  #cleanupByBot = new Map();
   #deletions = new Map();
   #windows = new WeakSet();
   #disposePromise = null;
@@ -427,8 +816,10 @@ class LocalDesktopManager extends EventEmitter {
     permissionBroker,
     readCurrentComputer,
     helperFactory,
+    debuggerFactory = null,
     randomUUID = crypto.randomUUID,
     helperTimeoutMs = 30_000,
+    navigationTimeoutMs = DEFAULT_NAVIGATION_TIMEOUT_MS,
   } = {}) {
     super();
     if (!electron?.BrowserWindow || typeof electron?.session?.fromPartition !== "function") {
@@ -446,8 +837,10 @@ class LocalDesktopManager extends EventEmitter {
     if (typeof readCurrentComputer !== "function") {
       throw new TypeError("Local Desktop manager requires an authoritative current Computer reader.");
     }
-    if (typeof helperFactory !== "function" || typeof randomUUID !== "function"
-      || !Number.isSafeInteger(helperTimeoutMs) || helperTimeoutMs < 1 || helperTimeoutMs > 120_000) {
+    if (typeof helperFactory !== "function" || (debuggerFactory !== null && typeof debuggerFactory !== "function")
+      || typeof randomUUID !== "function"
+      || !Number.isSafeInteger(helperTimeoutMs) || helperTimeoutMs < 1 || helperTimeoutMs > 120_000
+      || !Number.isSafeInteger(navigationTimeoutMs) || navigationTimeoutMs < 1 || navigationTimeoutMs > 30_000) {
       throw new TypeError("Local Desktop helper configuration is invalid.");
     }
     this.#electron = electron;
@@ -455,8 +848,10 @@ class LocalDesktopManager extends EventEmitter {
     this.#permissionBroker = permissionBroker;
     this.#readCurrentComputer = readCurrentComputer;
     this.#helperFactory = helperFactory;
+    this.#debuggerFactory = debuggerFactory;
     this.#randomUUID = randomUUID;
     this.#helperTimeoutMs = helperTimeoutMs;
+    this.#navigationTimeoutMs = navigationTimeoutMs;
   }
 
   emit(eventName, ...args) {
@@ -481,6 +876,8 @@ class LocalDesktopManager extends EventEmitter {
     this.#assertBotAvailable(computer.botId);
     this.#claimProfile(computer.botId, computer.targetId);
     return this.#enqueue(computer.botId, async () => {
+      const pendingCleanup = this.#cleanupByBot.get(computer.botId);
+      if (pendingCleanup) await Promise.allSettled([pendingCleanup]);
       this.#assertBotAvailable(computer.botId);
       const existing = this.#entries.get(computer.botId);
       if (existing && this.#sameIdentity(existing, computer)) {
@@ -512,8 +909,9 @@ class LocalDesktopManager extends EventEmitter {
       this.#secureSession(browserSession);
       const window = new this.#electron.BrowserWindow({
         show: false,
-        width: 1280,
-        height: 800,
+        width: SURFACE_CSS_WIDTH,
+        height: SURFACE_CSS_HEIGHT,
+        useContentSize: true,
         webPreferences: {
           session: browserSession,
           contextIsolation: true,
@@ -529,6 +927,7 @@ class LocalDesktopManager extends EventEmitter {
       let unsubscribeHelperExit;
       let helperExited = false;
       let publishedEntry = null;
+      let entry = null;
       let helperIsUnavailable = () => true;
       try {
         this.#secureWindow(window);
@@ -575,8 +974,30 @@ class LocalDesktopManager extends EventEmitter {
         if (window.webContents.getURL() !== LOCAL_DESKTOP_START_URL) {
           throw desktopError("Local Desktop start document is invalid.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
         }
-        const entry = {
+        const previousSessionGeneration = this.#sessionGenerations.get(computer.targetId) || 0;
+        const sessionGeneration = previousSessionGeneration + 1;
+        if (!Number.isSafeInteger(sessionGeneration)) {
+          throw desktopError("Local Desktop session generation is exhausted.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
+        this.#sessionGenerations.set(computer.targetId, sessionGeneration);
+        entry = {
           ...computer,
+          sessionGeneration,
+          pageGeneration: 1,
+          frameSequence: 0,
+          lastFrameId: null,
+          inputSequence: 0,
+          heldButtons: new Set(),
+          heldKeys: new Map(),
+          releasePromise: null,
+          releaseFailed: false,
+          lastPointer: { x: 0, y: 0 },
+          debuggerClient: null,
+          debuggerDetachListener: null,
+          debuggerAttachPromise: null,
+          debuggerDetached: false,
+          navigationListeners: [],
+          navigationPending: false,
           partition,
           workspaceId: `workspace-${computer.profileUuid}`,
           profilePath: profilePath.profilePath,
@@ -616,9 +1037,20 @@ class LocalDesktopManager extends EventEmitter {
           if (this.#entries.get(computer.botId) !== entry) return;
           void this.#closeEntry(entry, true);
         });
+        this.#bindNavigation(entry);
+        await this.#attachDebugger(entry);
+        this.#requiredEntry(computer, entry);
+        if (helperIsUnavailable()) {
+          throw desktopError("Local Desktop could not start.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
         return publicSession(entry);
       } catch (error) {
         publishedEntry = null;
+        if (entry && this.#entries.get(entry.botId) === entry) {
+          try { await this.#closeEntry(entry, true); } catch {}
+        } else if (entry?.closePromise) {
+          try { await entry.closePromise; } catch {}
+        }
         try { unsubscribeHelperExit?.(); } catch {}
         unsubscribeHelperExit = null;
         try { await protocol?.dispose(); } catch {}
@@ -636,17 +1068,115 @@ class LocalDesktopManager extends EventEmitter {
   async navigate(value) {
     this.#assertActive();
     const input = normalizeNavigation(value);
-    const entry = this.#requiredEntry(input);
-    try {
-      await entry.window.webContents.loadURL(input.url);
-    } catch {
-      throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+    const admittedEntry = this.#requiredEntry(input);
+    if (admittedEntry.sessionGeneration !== input.sessionGeneration) {
+      throw desktopError("Local navigation is stale.", "OPENBOT_LOCAL_NAVIGATION_STALE");
     }
-    this.#requiredEntry(input, entry);
-    try { safeHttpsUrl(entry.window.webContents.getURL()); } catch {
-      throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+    return this.#enqueue(input.botId, async () => {
+      const entry = this.#requiredEntry(input, admittedEntry);
+      if (entry.sessionGeneration !== input.sessionGeneration) {
+        throw desktopError("Local navigation is stale.", "OPENBOT_LOCAL_NAVIGATION_STALE");
+      }
+      return this.#runNavigationWithDeadline(entry, async (deadline) => {
+        await this.#beginNavigation(entry, deadline);
+        try {
+          await deadline.race(entry.window.webContents.loadURL(input.url));
+        } catch {
+          throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+        } finally {
+          entry.navigationPending = false;
+        }
+        this.#requiredEntry(input, entry);
+        try { safeHttpsUrl(entry.window.webContents.getURL()); } catch {
+          throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+        }
+        return publicSession(entry);
+      });
+    });
+  }
+
+  async goBack(value) {
+    return this.#historyNavigation(value, "goBack");
+  }
+
+  async goForward(value) {
+    return this.#historyNavigation(value, "goForward");
+  }
+
+  async reload(value) {
+    return this.#historyNavigation(value, "reload");
+  }
+
+  async retry(value) {
+    this.#assertActive();
+    const computer = normalizeComputer(value);
+    this.#assertBotAvailable(computer.botId);
+    const previous = this.#entries.get(computer.botId);
+    const previousPageGeneration = previous?.pageGeneration || 0;
+    if (previous) await this.close(computer.botId);
+    const session = await this.open(value);
+    const reopened = this.#entries.get(computer.botId);
+    if (reopened && previousPageGeneration > 0) {
+      reopened.pageGeneration = previousPageGeneration + 1;
+      reopened.lastFrameId = null;
     }
-    return publicSession(entry);
+    return reopened ? publicSession(reopened) : session;
+  }
+
+  async #historyNavigation(value, method) {
+    this.#assertActive();
+    const input = normalizeNavigationHistory(value);
+    const admittedEntry = this.#requiredEntry(input);
+    if (admittedEntry.sessionGeneration !== input.sessionGeneration
+      || admittedEntry.pageGeneration !== input.pageGeneration) {
+      throw desktopError("Local navigation is stale.", "OPENBOT_LOCAL_NAVIGATION_STALE");
+    }
+    return this.#enqueue(input.botId, async () => {
+      const entry = this.#requiredEntry(input, admittedEntry);
+      if (entry.sessionGeneration !== input.sessionGeneration
+        || entry.pageGeneration !== input.pageGeneration) {
+        throw desktopError("Local navigation is stale.", "OPENBOT_LOCAL_NAVIGATION_STALE");
+      }
+      const navigation = entry.window.webContents?.[method];
+      if (typeof navigation !== "function") {
+        throw desktopError("Local navigation is unavailable.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+      }
+      if (typeof entry.window.webContents.canGoBack === "function" && method === "goBack"
+        && !entry.window.webContents.canGoBack()) {
+        throw desktopError("Local navigation is unavailable.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+      }
+      if (typeof entry.window.webContents.canGoForward === "function" && method === "goForward"
+        && !entry.window.webContents.canGoForward()) {
+        throw desktopError("Local navigation is unavailable.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+      }
+      return this.#runNavigationWithDeadline(entry, async (deadline) => {
+        await this.#beginNavigation(entry, deadline);
+        const expectedPageGeneration = entry.pageGeneration;
+        try {
+          await this.#awaitHistoryNavigation(entry, navigation, expectedPageGeneration, deadline);
+          this.#requiredEntry(input, entry);
+          if (entry.pageGeneration !== expectedPageGeneration) {
+            throw desktopError("Local navigation is stale.", "OPENBOT_LOCAL_NAVIGATION_STALE");
+          }
+          safeDisplayUrl(entry.window.webContents.getURL());
+        } catch (error) {
+          if (error instanceof LocalDesktopError
+            && [
+              "OPENBOT_LOCAL_DESKTOP_STALE",
+              "OPENBOT_LOCAL_NAVIGATION_STALE",
+              "OPENBOT_LOCAL_BOT_DELETING",
+              "OPENBOT_LOCAL_DESKTOP_DISPOSED",
+            ].includes(error.code)) throw error;
+          if (error?.code === "OPENBOT_LOCAL_NAVIGATION_INVALID") {
+            throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+          }
+          throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+        } finally {
+          entry.navigationPending = false;
+        }
+        return publicSession(entry);
+      });
+    });
   }
 
   async capture(value) {
@@ -667,6 +1197,7 @@ class LocalDesktopManager extends EventEmitter {
       || !Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_FRAME_BYTES) {
       throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
     }
+    this.#recordFrame(entry, bytes);
     const frame = Object.freeze({
       botId: entry.botId,
       targetId: entry.targetId,
@@ -681,6 +1212,32 @@ class LocalDesktopManager extends EventEmitter {
   }
 
   async captureDisplayFrame(value) {
+    let hasPresentation = false;
+    try {
+      hasPresentation = Boolean(value && typeof value === "object" && hasOwn(value, "presentation"));
+    } catch {
+      throw inputError("Local Desktop presentation is invalid.");
+    }
+    if (hasPresentation) {
+      const request = normalizePresentationRequest(value);
+      return this.#capturePresentationFrame({
+        botId: request.botId,
+        targetId: request.targetId,
+        targetGeneration: request.targetGeneration,
+      }, request.presentation, true);
+    }
+    return this.#capturePresentationFrame(value, "preview", false);
+  }
+
+  async capturePreviewFrame(value) {
+    return this.#capturePresentationFrame(value, "preview", true);
+  }
+
+  async captureInteractiveFrame(value) {
+    return this.#capturePresentationFrame(value, "interactive", true);
+  }
+
+  async #capturePresentationFrame(value, presentation, rich) {
     this.#assertActive();
     const input = normalizeIdentity(value);
     const entry = this.#requiredEntry(input);
@@ -692,7 +1249,11 @@ class LocalDesktopManager extends EventEmitter {
     if (!this.#validFrameSize(sourceSize, 8192, 8192) || typeof image.resize !== "function") {
       throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
     }
-    for (const bounds of DISPLAY_FRAME_BOUNDS) {
+    const boundsList = presentation === "interactive" ? INTERACTIVE_FRAME_BOUNDS : DISPLAY_FRAME_BOUNDS;
+    const maximumWidth = presentation === "interactive" ? INTERACTIVE_FRAME_WIDTH : MAX_DISPLAY_FRAME_WIDTH;
+    const maximumHeight = presentation === "interactive" ? INTERACTIVE_FRAME_HEIGHT : MAX_DISPLAY_FRAME_HEIGHT;
+    const maximumBytes = MAX_DISPLAY_FRAME_BYTES;
+    for (const bounds of boundsList) {
       const scale = Math.min(1, bounds.width / sourceSize.width, bounds.height / sourceSize.height);
       const width = Math.max(1, Math.floor(sourceSize.width * scale));
       const height = Math.max(1, Math.floor(sourceSize.height * scale));
@@ -706,9 +1267,10 @@ class LocalDesktopManager extends EventEmitter {
         size = rendered.getSize();
         bytes = rendered.toPNG();
       } catch { continue; }
-      if (!this.#validFrameSize(size, MAX_DISPLAY_FRAME_WIDTH, MAX_DISPLAY_FRAME_HEIGHT)
-        || !Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > MAX_DISPLAY_FRAME_BYTES) continue;
-      const frame = Object.freeze({
+      if (!this.#validFrameSize(size, maximumWidth, maximumHeight)
+        || !Buffer.isBuffer(bytes) || bytes.length === 0 || bytes.length > maximumBytes) continue;
+      const frameSequence = this.#recordFrame(entry, bytes);
+      const frame = {
         botId: entry.botId,
         targetId: entry.targetId,
         targetGeneration: entry.targetGeneration,
@@ -717,7 +1279,13 @@ class LocalDesktopManager extends EventEmitter {
         height: size.height,
         mimeType: "image/png",
         bytes: Uint8Array.from(bytes),
-      });
+        ...(rich ? {
+          presentation,
+          sessionGeneration: entry.sessionGeneration,
+          pageGeneration: entry.pageGeneration,
+          frameSequence,
+        } : {}),
+      };
       try {
         await this.#assertCurrentComputer(input);
       } catch (error) {
@@ -727,9 +1295,85 @@ class LocalDesktopManager extends EventEmitter {
         throw error;
       }
       this.#requiredEntry(input, entry);
-      return frame;
+      if (rich && entry.pageGeneration !== frame.pageGeneration) {
+        throw desktopError("Local Desktop frame is stale.", "OPENBOT_LOCAL_DESKTOP_STALE");
+      }
+      return Object.freeze(frame);
     }
     throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
+  }
+
+  async dispatchMouseEvent(value) {
+    return this.#dispatchInput(value, normalizeMouseInput, "Input.dispatchMouseEvent", {
+      preclaim: (entry, input) => {
+        entry.lastPointer = { x: input.x, y: input.y };
+        if (input.type === "mousePressed" && input.button !== "none") entry.heldButtons.add(input.button);
+      },
+      commit: (entry, input) => {
+        if (input.type === "mouseReleased" && input.button !== "none") entry.heldButtons.delete(input.button);
+      },
+    });
+  }
+
+  async dispatchKeyEvent(value) {
+    return this.#dispatchInput(value, normalizeKeyInput, "Input.dispatchKeyEvent", {
+      preclaim: (entry, input) => {
+        if (input.type !== "keyDown" && input.type !== "rawKeyDown") return;
+        const id = `${input.key || ""}\0${input.code || ""}`;
+        entry.heldKeys.set(id, Object.freeze({
+          ...(input.key === undefined ? {} : { key: input.key }),
+          ...(input.code === undefined ? {} : { code: input.code }),
+        }));
+      },
+      commit: (entry, input) => {
+        if (input.type !== "keyUp") return;
+        entry.heldKeys.delete(`${input.key || ""}\0${input.code || ""}`);
+      },
+    });
+  }
+
+  async insertText(value) {
+    return this.#dispatchInput(value, normalizeInsertText, "Input.insertText");
+  }
+
+  async imeSetComposition(value) {
+    return this.#dispatchInput(value, normalizeImeComposition, "Input.imeSetComposition");
+  }
+
+  async #dispatchInput(value, normalize, method, lifecycle = null) {
+    this.#assertActive();
+    const input = normalize(value);
+    const entry = this.#requiredInputEntry(input);
+    return this.#enqueue(entry.botId, async () => {
+      this.#requiredInputEntry(input, entry);
+      await this.#ensureDebugger(entry);
+      this.#requiredInputEntry(input, entry);
+      const params = {};
+      for (const key of CDP_PARAMETER_FIELDS[method]) {
+        if (hasOwn(input, key)) params[key] = input[key];
+      }
+      lifecycle?.preclaim?.(entry, input);
+      try {
+        await this.#sendCdpCommand(entry, method, params);
+        this.#requiredInputEntry(input, entry);
+        entry.inputSequence = input.inputSequence;
+        lifecycle?.commit?.(entry, input);
+      } catch (error) {
+        if (entry.closePromise) await Promise.allSettled([entry.closePromise]);
+        else await this.#releaseHeldInputs(entry);
+        throw error;
+      }
+      return Object.freeze({
+        botId: entry.botId,
+        targetId: entry.targetId,
+        targetGeneration: entry.targetGeneration,
+        sessionGeneration: entry.sessionGeneration,
+        pageGeneration: entry.pageGeneration,
+        frameId: entry.lastFrameId,
+        frameSequence: entry.frameSequence,
+        inputSequence: entry.inputSequence,
+      });
+    });
   }
 
   async run(value) {
@@ -808,9 +1452,13 @@ class LocalDesktopManager extends EventEmitter {
   async close(botId) {
     const normalizedBotId = normalizeBotId(botId);
     this.#assertBotAvailable(normalizedBotId);
+    const cleanupSnapshot = this.#cleanupByBot.get(normalizedBotId) || null;
     const current = this.#entries.get(normalizedBotId);
     if (current) current.closeRequested = true;
     return this.#enqueue(normalizedBotId, async () => {
+      if (cleanupSnapshot) await cleanupSnapshot;
+      const currentCleanup = this.#cleanupByBot.get(normalizedBotId);
+      if (currentCleanup && currentCleanup !== cleanupSnapshot) await currentCleanup;
       this.#assertBotAvailable(normalizedBotId);
       const entry = this.#entries.get(normalizedBotId);
       if (entry) await this.#closeEntry(entry, true);
@@ -862,7 +1510,8 @@ class LocalDesktopManager extends EventEmitter {
     }
 
     const olderQueue = this.#queues.get(request.botId) || null;
-    const attempt = this.#deleteBotAttempt(state, olderQueue);
+    const cleanupSnapshot = this.#cleanupByBot.get(request.botId) || null;
+    const attempt = this.#deleteBotAttempt(state, olderQueue, cleanupSnapshot);
     let shared;
     shared = attempt.then((result) => {
       state.completed = true;
@@ -875,9 +1524,14 @@ class LocalDesktopManager extends EventEmitter {
     return shared;
   }
 
-  async #deleteBotAttempt(state, olderQueue) {
+  async #deleteBotAttempt(state, olderQueue, cleanupSnapshot) {
     try {
       if (olderQueue) await Promise.allSettled([olderQueue]);
+      if (cleanupSnapshot) await Promise.allSettled([cleanupSnapshot]);
+      const currentCleanup = this.#cleanupByBot.get(state.botId);
+      if (currentCleanup && currentCleanup !== cleanupSnapshot) {
+        await Promise.allSettled([currentCleanup]);
+      }
       this.#assertDeletionActive(state);
       const cleanup = this.#deletionCleanupIdentity(state);
       if (cleanup) await this.#inspectDeletionPath(cleanup.profilePath);
@@ -1006,6 +1660,7 @@ class LocalDesktopManager extends EventEmitter {
       .map((state) => state.inFlight)
       .filter((operation) => operation && typeof operation.then === "function");
     const queues = [...this.#queues.values()];
+    const cleanups = [...this.#cleanupByBot.values()];
     this.#disposed = true;
     const entries = [...this.#entries.values()];
     this.#disposePromise = (async () => {
@@ -1013,12 +1668,15 @@ class LocalDesktopManager extends EventEmitter {
         ...entries.map((entry) => this.#closeEntry(entry, true)),
         ...deletions,
         ...queues,
+        ...cleanups,
       ]);
       await Promise.allSettled(
         [...this.#entries.values()].map((entry) => this.#closeEntry(entry, true)),
       );
+      await Promise.allSettled([...this.#cleanupByBot.values()]);
       this.#entries.clear();
       this.#queues.clear();
+      this.#cleanupByBot.clear();
       this.#profileOwners.clear();
       this.removeAllListeners();
     })();
@@ -1034,11 +1692,361 @@ class LocalDesktopManager extends EventEmitter {
   #requiredEntry(identity, expected = null) {
     this.#assertBotAvailable(identity.botId);
     const entry = this.#entries.get(identity.botId);
-    if (!entry || (expected && entry !== expected) || entry.fenced || !this.#sameIdentity(entry, identity)
+    if (!entry || (expected && entry !== expected) || entry.fenced || entry.closeRequested
+      || !this.#sameIdentity(entry, identity)
       || entry.window.isDestroyed?.()) {
       throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
     }
     return entry;
+  }
+
+  #requiredInputEntry(input, expected = null) {
+    let entry;
+    try {
+      entry = this.#requiredEntry(input, expected);
+    } catch (error) {
+      if (error?.code === "OPENBOT_LOCAL_BOT_DELETING"
+        || error?.code === "OPENBOT_LOCAL_DESKTOP_DISPOSED") throw error;
+      throw inputError("Local Desktop input is stale.", "OPENBOT_LOCAL_INPUT_STALE");
+    }
+    if (entry.sessionGeneration !== input.sessionGeneration
+      || entry.pageGeneration !== input.pageGeneration
+      || entry.frameSequence !== input.frameSequence
+      || entry.lastFrameId !== input.frameId
+      || input.inputSequence <= entry.inputSequence) {
+      throw inputError("Local Desktop input is stale.", "OPENBOT_LOCAL_INPUT_STALE");
+    }
+    return entry;
+  }
+
+  #recordFrame(entry, bytes) {
+    const frameId = `frame-${crypto.createHash("sha256").update(bytes).digest("hex")}`;
+    const frameSequence = entry.frameSequence + 1;
+    if (!Number.isSafeInteger(frameSequence)) {
+      throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
+    }
+    entry.frameSequence = frameSequence;
+    entry.lastFrameId = frameId;
+    return frameSequence;
+  }
+
+  async #runNavigationWithDeadline(entry, operation) {
+    let timer = null;
+    let timedOut = false;
+    let rejectTimeout;
+    const timeoutError = desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+    const timeoutPromise = new Promise((_resolve, reject) => { rejectTimeout = reject; });
+    const deadline = Object.freeze({
+      promise: timeoutPromise,
+      race: (value) => Promise.race([Promise.resolve(value), timeoutPromise]),
+    });
+    timer = setTimeout(() => {
+      timedOut = true;
+      rejectTimeout(timeoutError);
+    }, this.#navigationTimeoutMs);
+    timer.unref?.();
+    try {
+      return await deadline.race(Promise.resolve().then(() => operation(deadline)));
+    } catch (error) {
+      if (timedOut) {
+        entry.fenced = true;
+        entry.closeRequested = true;
+        await Promise.allSettled([this.#closeEntry(entry, true)]);
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  async #beginNavigation(entry, deadline = null) {
+    this.#requiredEntry({
+      botId: entry.botId,
+      targetId: entry.targetId,
+      targetGeneration: entry.targetGeneration,
+    }, entry);
+    if (entry.navigationPending) return;
+    entry.navigationPending = true;
+    const nextPageGeneration = entry.pageGeneration + 1;
+    if (!Number.isSafeInteger(nextPageGeneration)) {
+      throw desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED");
+    }
+    entry.pageGeneration = nextPageGeneration;
+    entry.lastFrameId = null;
+    try {
+      const release = this.#releaseHeldInputs(entry, deadline);
+      await (deadline ? deadline.race(release) : release);
+    } catch (error) {
+      entry.fenced = true;
+      entry.closeRequested = true;
+      await Promise.allSettled([this.#closeEntry(entry, true)]);
+      throw error;
+    }
+    this.#requiredEntry({
+      botId: entry.botId,
+      targetId: entry.targetId,
+      targetGeneration: entry.targetGeneration,
+    }, entry);
+  }
+
+  #bindNavigation(entry) {
+    const webContents = entry.window.webContents;
+    if (!webContents || typeof webContents.on !== "function") return;
+    const onStart = (...args) => {
+      let isMainFrame = true;
+      if (typeof args[3] === "boolean") isMainFrame = args[3];
+      else if (typeof args[0]?.isMainFrame === "boolean") isMainFrame = args[0].isMainFrame;
+      if (!isMainFrame || entry.closePromise || entry.fenced) return;
+      if (entry.navigationPending) {
+        entry.navigationPending = false;
+        return;
+      }
+      void this.#runNavigationWithDeadline(entry, (deadline) => this.#beginNavigation(entry, deadline))
+        .catch(() => {})
+        .finally(() => {
+          if (!entry.closePromise) entry.navigationPending = false;
+        });
+    };
+    webContents.on("did-start-navigation", onStart);
+    entry.navigationListeners.push(["did-start-navigation", onStart]);
+  }
+
+  #awaitHistoryNavigation(entry, navigation, expectedPageGeneration, deadline) {
+    const webContents = entry.window.webContents;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let started = false;
+      const finish = (error = null) => {
+        if (settled) return;
+        settled = true;
+        try { webContents.off?.("did-start-navigation", onStart); } catch {}
+        try { webContents.off?.("did-navigate", onNavigate); } catch {}
+        try { webContents.off?.("did-navigate-in-page", onNavigateInPage); } catch {}
+        try { webContents.off?.("did-fail-load", onFail); } catch {}
+        try { webContents.off?.("destroyed", onDestroyed); } catch {}
+        if (error) reject(error);
+        else resolve();
+      };
+      const onStart = (...args) => {
+        const isMainFrame = typeof args[3] === "boolean"
+          ? args[3]
+          : typeof args[0]?.isMainFrame === "boolean" ? args[0].isMainFrame : true;
+        if (isMainFrame) started = true;
+      };
+      const completeNavigation = () => {
+        if (!started) return;
+        queueMicrotask(() => {
+          try {
+            this.#requiredEntry({
+              botId: entry.botId,
+              targetId: entry.targetId,
+              targetGeneration: entry.targetGeneration,
+            }, entry);
+            if (entry.pageGeneration !== expectedPageGeneration) {
+              finish(desktopError("Local navigation is stale.", "OPENBOT_LOCAL_NAVIGATION_STALE"));
+              return;
+            }
+            finish();
+          } catch (error) {
+            finish(error instanceof LocalDesktopError
+              ? error
+              : desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED"));
+          }
+        });
+      };
+      const onNavigate = () => completeNavigation();
+      const onNavigateInPage = (...args) => {
+        const isMainFrame = typeof args[2] === "boolean" ? args[2] : false;
+        if (isMainFrame) completeNavigation();
+      };
+      const onFail = (...args) => {
+        const isMainFrame = typeof args[4] === "boolean" ? args[4] : true;
+        if (isMainFrame) finish(desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED"));
+      };
+      const onDestroyed = () => finish(desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED"));
+      webContents.on("did-start-navigation", onStart);
+      webContents.on("did-navigate", onNavigate);
+      webContents.on("did-navigate-in-page", onNavigateInPage);
+      webContents.on("did-fail-load", onFail);
+      webContents.on("destroyed", onDestroyed);
+      void deadline.promise.catch((error) => finish(error));
+      try {
+        const result = navigation.call(webContents);
+        if (result && typeof result.then === "function") {
+          void Promise.resolve(result).catch(() => {
+            finish(desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED"));
+          });
+        }
+      } catch {
+        finish(desktopError("Local navigation failed.", "OPENBOT_LOCAL_NAVIGATION_FAILED"));
+      }
+    });
+  }
+
+  #unbindNavigation(entry) {
+    const webContents = entry.window?.webContents;
+    for (const [eventName, listener] of entry.navigationListeners || []) {
+      try { webContents?.off?.(eventName, listener); } catch {}
+    }
+    entry.navigationListeners = [];
+  }
+
+  async #attachDebugger(entry) {
+    if (entry.debuggerAttachPromise) return entry.debuggerAttachPromise;
+    if (entry.debuggerClient) return entry.debuggerClient;
+    let attachPromise;
+    attachPromise = (async () => {
+      let client;
+      try {
+        client = this.#debuggerFactory
+          ? await this.#debuggerFactory(entry.window.webContents, Object.freeze({
+            botId: entry.botId,
+            targetId: entry.targetId,
+            targetGeneration: entry.targetGeneration,
+          }))
+          : entry.window.webContents.debugger;
+      } catch {
+        throw desktopError("Local Desktop debugger is unavailable.", "OPENBOT_LOCAL_DEBUGGER_UNAVAILABLE");
+      }
+      if (client === undefined || client === null) {
+        if (this.#debuggerFactory) {
+          throw desktopError("Local Desktop debugger is unavailable.", "OPENBOT_LOCAL_DEBUGGER_UNAVAILABLE");
+        }
+        return null;
+      }
+      if (typeof client.attach !== "function" || typeof client.sendCommand !== "function"
+        || typeof client.on !== "function" || typeof client.off !== "function") {
+        throw desktopError("Local Desktop debugger is unavailable.", "OPENBOT_LOCAL_DEBUGGER_UNAVAILABLE");
+      }
+      const onDetach = () => {
+        entry.debuggerDetached = true;
+        entry.fenced = true;
+        entry.closeRequested = true;
+        try { void Promise.resolve(this.#closeEntry(entry, true)).catch(() => {}); } catch {}
+      };
+      entry.debuggerClient = client;
+      entry.debuggerDetachListener = onDetach;
+      try { client.on?.("detach", onDetach); } catch {
+        entry.debuggerClient = null;
+        entry.debuggerDetachListener = null;
+        throw desktopError("Local Desktop debugger is unavailable.", "OPENBOT_LOCAL_DEBUGGER_UNAVAILABLE");
+      }
+      if (entry.closeRequested || entry.closePromise || this.#entries.get(entry.botId) !== entry) {
+        throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
+      }
+      try {
+        if (!debuggerIsAttached(client)) await client.attach(CDP_DEBUGGER_VERSION);
+      } catch (error) {
+        if (error instanceof LocalDesktopError) throw error;
+        throw desktopError("Local Desktop debugger is unavailable.", "OPENBOT_LOCAL_DEBUGGER_UNAVAILABLE");
+      }
+      if (entry.debuggerDetached) {
+        throw desktopError("Local Desktop debugger is detached.", "OPENBOT_LOCAL_DEBUGGER_DETACHED");
+      }
+      if (entry.closeRequested || entry.closePromise || this.#entries.get(entry.botId) !== entry) {
+        throw desktopError("Local Desktop session is stale or unavailable.", "OPENBOT_LOCAL_DESKTOP_STALE");
+      }
+      return client;
+    })();
+    entry.debuggerAttachPromise = attachPromise;
+    try {
+      return await attachPromise;
+    } finally {
+      if (entry.debuggerAttachPromise === attachPromise) entry.debuggerAttachPromise = null;
+    }
+  }
+
+  async #ensureDebugger(entry) {
+    const client = await this.#attachDebugger(entry);
+    if (!client || typeof client.sendCommand !== "function") {
+      throw desktopError("Local Desktop debugger is unavailable.", "OPENBOT_LOCAL_DEBUGGER_UNAVAILABLE");
+    }
+    if (!debuggerIsAttached(client)) {
+      throw desktopError("Local Desktop debugger is detached.", "OPENBOT_LOCAL_DEBUGGER_DETACHED");
+    }
+    return client;
+  }
+
+  async #sendCdpCommand(entry, method, params) {
+    if (!CDP_INPUT_METHODS.has(method)) {
+      throw desktopError("Local Desktop input command is not allowed.", "OPENBOT_LOCAL_INPUT_INVALID");
+    }
+    const client = await this.#ensureDebugger(entry);
+    if (entry.fenced || entry.closeRequested || entry.closePromise
+      || this.#entries.get(entry.botId) !== entry || entry.window.isDestroyed?.()) {
+      throw desktopError(
+        "Local Desktop debugger is detached.",
+        entry.debuggerDetached ? "OPENBOT_LOCAL_DEBUGGER_DETACHED" : "OPENBOT_LOCAL_DESKTOP_STALE",
+      );
+    }
+    try {
+      return await client.sendCommand(method, params);
+    } catch {
+      entry.fenced = true;
+      entry.closeRequested = true;
+      try { await this.#closeEntry(entry, true); } catch {}
+      throw desktopError("Local Desktop debugger is detached.", "OPENBOT_LOCAL_DEBUGGER_DETACHED");
+    }
+  }
+
+  async #releaseHeldInputs(entry, deadline = null) {
+    if (entry.releasePromise) return entry.releasePromise;
+    const releasePromise = Promise.resolve().then(async () => {
+      const buttons = [...(entry.heldButtons || [])];
+      const keys = [...(entry.heldKeys?.entries?.() || [])];
+      if (buttons.length === 0 && keys.length === 0) return;
+      const client = entry.debuggerClient;
+      if (!client || !debuggerIsAttached(client) || typeof client.sendCommand !== "function") {
+        entry.releaseFailed = true;
+        throw desktopError("Local Desktop held input could not be released.", "OPENBOT_LOCAL_INPUT_RELEASE_FAILED");
+      }
+      let failed = false;
+      const pointer = entry.lastPointer || { x: 0, y: 0 };
+      for (const button of buttons) {
+        try {
+          const release = client.sendCommand("Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            x: pointer.x,
+            y: pointer.y,
+            button,
+            buttons: 0,
+          });
+          await (deadline ? deadline.race(release) : release);
+          entry.heldButtons?.delete(button);
+        } catch { failed = true; }
+      }
+      for (const [id, key] of keys) {
+        try {
+          const release = client.sendCommand("Input.dispatchKeyEvent", {
+            type: "keyUp",
+            ...key,
+          });
+          await (deadline ? deadline.race(release) : release);
+          entry.heldKeys?.delete(id);
+        } catch { failed = true; }
+      }
+      if (failed) {
+        entry.releaseFailed = true;
+        throw desktopError("Local Desktop held input could not be released.", "OPENBOT_LOCAL_INPUT_RELEASE_FAILED");
+      }
+    });
+    entry.releasePromise = releasePromise;
+    try {
+      return await releasePromise;
+    } finally {
+      if (entry.releasePromise === releasePromise) entry.releasePromise = null;
+    }
+  }
+
+  async #detachDebugger(entry) {
+    const client = entry.debuggerClient;
+    const listener = entry.debuggerDetachListener;
+    entry.debuggerDetachListener = null;
+    entry.debuggerClient = null;
+    try { client?.off?.("detach", listener); } catch {}
+    if (!client || typeof client.detach !== "function" || !debuggerIsAttached(client)) return;
+    try { await client.detach(); } catch {}
   }
 
   #assertOperationActive(entry, identity, operation) {
@@ -1112,16 +2120,42 @@ class LocalDesktopManager extends EventEmitter {
     entry.fenced = true;
     entry.closeRequested = true;
     if (this.#entries.get(entry.botId) === entry) this.#entries.delete(entry.botId);
+    this.#unbindNavigation(entry);
     try { entry.unsubscribeHelperExit?.(); } catch {}
     entry.unsubscribeHelperExit = null;
     for (const operation of entry.operations.values()) operation.cancelled = true;
-    if (cancelPermissions) this.#permissionBroker.cancelBot(entry.botId);
-    entry.closePromise = (async () => {
+    let resolveClose;
+    let rejectClose;
+    const closePromise = new Promise((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
+    entry.closePromise = closePromise;
+    this.#cleanupByBot.set(entry.botId, closePromise);
+    void closePromise.then(() => {
+      if (this.#cleanupByBot.get(entry.botId) === closePromise) this.#cleanupByBot.delete(entry.botId);
+    }, () => {
+      if (this.#cleanupByBot.get(entry.botId) === closePromise) this.#cleanupByBot.delete(entry.botId);
+    });
+    if (cancelPermissions) {
+      try { this.#permissionBroker.cancelBot(entry.botId); } catch {}
+    }
+    void (async () => {
+      let releaseError = null;
+      const attachPromise = entry.debuggerAttachPromise;
+      if (attachPromise) await Promise.allSettled([attachPromise]);
+      if (!entry.releaseFailed) {
+        try { await this.#releaseHeldInputs(entry); } catch (error) { releaseError = error; }
+      }
+      await this.#detachDebugger(entry);
       try { await entry.protocol.dispose(); } catch {}
       await Promise.all([...entry.operations.values()].map((operation) => operation.done));
       try { if (!entry.window.isDestroyed?.()) entry.window.destroy(); } catch {}
-    })();
-    return entry.closePromise;
+      entry.heldButtons?.clear();
+      entry.heldKeys?.clear();
+      if (releaseError) throw releaseError;
+    })().then(resolveClose, rejectClose);
+    return closePromise;
   }
 
   async #ensureProfile(uuid) {
@@ -1169,12 +2203,16 @@ class LocalDesktopManager extends EventEmitter {
 
   async #captureCurrentImage(identity, expected) {
     this.#requiredEntry(identity, expected);
+    const pageGeneration = expected.pageGeneration;
     this.#assertCaptureUrl(expected);
     let image;
     try { image = await expected.window.webContents.capturePage(); } catch {
       throw desktopError("Local frame capture failed.", "OPENBOT_LOCAL_CAPTURE_FAILED");
     }
     this.#requiredEntry(identity, expected);
+    if (expected.pageGeneration !== pageGeneration) {
+      throw desktopError("Local Desktop frame is stale.", "OPENBOT_LOCAL_DESKTOP_STALE");
+    }
     this.#assertCaptureUrl(expected);
     return image;
   }
@@ -1212,6 +2250,14 @@ class LocalDesktopManager extends EventEmitter {
 module.exports = {
   LOCAL_DESKTOP_START_HTML,
   LOCAL_DESKTOP_START_URL,
+  SURFACE_CSS_WIDTH,
+  SURFACE_CSS_HEIGHT,
+  PREVIEW_FRAME_WIDTH,
+  PREVIEW_FRAME_HEIGHT,
+  PREVIEW_FRAME_INTERVAL_MS,
+  INTERACTIVE_FRAME_WIDTH,
+  INTERACTIVE_FRAME_HEIGHT,
+  CDP_DEBUGGER_VERSION,
   LocalDesktopError,
   LocalDesktopManager,
   safeDisplayUrl,

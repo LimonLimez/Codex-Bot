@@ -56,6 +56,20 @@ function action(session, overrides = {}) {
   };
 }
 
+function inputIdentity(session, frame, inputSequence = 1, overrides = {}) {
+  return {
+    botId: session.botId,
+    targetId: session.targetId,
+    targetGeneration: session.targetGeneration,
+    sessionGeneration: frame.sessionGeneration ?? session.sessionGeneration,
+    pageGeneration: frame.pageGeneration,
+    frameId: frame.frameId,
+    frameSequence: frame.frameSequence,
+    inputSequence,
+    ...overrides,
+  };
+}
+
 function sequence(values) {
   let index = 0;
   return () => {
@@ -137,6 +151,42 @@ class FakeHelperTransport {
     for (const listener of [...this.#exits]) listener();
     this.#messages.clear();
     this.#exits.clear();
+  }
+}
+
+class FakeDebugger extends EventEmitter {
+  constructor() {
+    super();
+    this.attached = false;
+    this.attachVersions = [];
+    this.commands = [];
+    this.detachCalls = 0;
+    this.failCommands = new Set();
+    this.attachImpl = null;
+    this.sendCommandImpl = null;
+    this.detachImpl = null;
+  }
+
+  get isAttached() { return this.attached; }
+
+  async attach(version) {
+    this.attachVersions.push(version);
+    this.attached = true;
+    if (this.attachImpl) return this.attachImpl(version);
+  }
+
+  async sendCommand(method, params) {
+    this.commands.push({ method, params });
+    if (this.sendCommandImpl) return this.sendCommandImpl(method, params);
+    if (this.failCommands.has(method)) throw new Error(`blocked ${method}`);
+    return {};
+  }
+
+  async detach() {
+    this.detachCalls += 1;
+    this.attached = false;
+    if (this.detachImpl) return this.detachImpl();
+    this.emit("detach", {}, "test detach");
   }
 }
 
@@ -285,6 +335,8 @@ async function fixture(t, overrides = {}) {
       helpers.push(helper);
       return helper;
     }),
+    debuggerFactory: overrides.debuggerFactory,
+    navigationTimeoutMs: overrides.navigationTimeoutMs,
     randomUUID: overrides.randomUUID || sequence([REQUEST_A, REQUEST_B]),
     helperTimeoutMs: 100,
   });
@@ -458,6 +510,11 @@ test("safeDisplayUrl accepts only the exact built-in document or public HTTPS", 
     `${LOCAL_DESKTOP_START_URL}x`,
     "data:text/html,<script>token=secret</script>",
     "file:///Users/private/index.html",
+    "https://localhost./",
+    "https://worker.localhost./",
+    "https://[::ffff:127.0.0.1]/",
+    "https://[::ffff:7f00:1]/",
+    "https://[::ffff:10.0.0.1]/",
   ]) {
     assert.throws(() => safeDisplayUrl(value), (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_INVALID");
   }
@@ -494,7 +551,7 @@ test("two bots receive distinct partitions workspaces and current frames", async
     assert.equal(session.devicePermissionHandler(), false);
   }
 
-  await manager.navigate({ ...identity(a), url: "https://www.youtube.com/" });
+  await manager.navigate({ ...identity(a), sessionGeneration: a.sessionGeneration, url: "https://www.youtube.com/" });
   assert.deepEqual(windows[0].webContents.urls, [LOCAL_DESKTOP_START_URL, "https://www.youtube.com/"]);
   const frame = await manager.capture(identity(a));
   assert.equal(frame.botId, BOT_A);
@@ -508,7 +565,7 @@ test("two bots receive distinct partitions workspaces and current frames", async
 test("display capture returns bounded private PNG bytes while tool capture remains metadata only", async (t) => {
   const { manager, windows } = await fixture(t);
   const session = await manager.open(localComputer());
-  await manager.navigate({ ...identity(session), url: "https://www.youtube.com/" });
+  await manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://www.youtube.com/" });
   windows[0].webContents.capturePageImpl = async () => nativeImage({
     width: 1280,
     height: 800,
@@ -540,7 +597,7 @@ test("display capture returns bounded private PNG bytes while tool capture remai
 test("display capture rejects oversized PNGs and stale in-flight generations without private output", async (t) => {
   const { manager, windows } = await fixture(t);
   const first = await manager.open(localComputer());
-  await manager.navigate({ ...identity(first), url: "https://www.youtube.com/" });
+  await manager.navigate({ ...identity(first), sessionGeneration: first.sessionGeneration, url: "https://www.youtube.com/" });
   windows[0].webContents.capturePageImpl = async () => nativeImage({
     width: 1280,
     height: 800,
@@ -789,7 +846,7 @@ test("close delete and disposal remove only exact bot resources and reject hosti
   const a = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
   const b = await manager.open(localComputer(BOT_B, LOCAL_B, 1));
   await assert.rejects(
-    manager.navigate({ ...identity(a), url: "http://127.0.0.1/private" }),
+    manager.navigate({ ...identity(a), sessionGeneration: a.sessionGeneration, url: "http://127.0.0.1/private" }),
     /HTTPS|navigation|invalid/i,
   );
   let redirectPrevented = false;
@@ -798,7 +855,7 @@ test("close delete and disposal remove only exact bot resources and reject hosti
   }, "https://127.0.0.1/private?token=secret");
   assert.equal(redirectPrevented, true);
   await assert.rejects(
-    manager.navigate({ ...identity(a), url: "https://[::1]/private" }),
+    manager.navigate({ ...identity(a), sessionGeneration: a.sessionGeneration, url: "https://[::1]/private" }),
     /HTTPS|navigation|invalid/i,
   );
   await assert.rejects(manager.open(new Proxy({}, {
@@ -859,8 +916,8 @@ test("deleteBot synchronously fences and coalesces while draining live work with
   const { helpers, manager, root, sessions, windows } = await fixture(t, { permissionBroker });
   const a = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
   const b = await manager.open(localComputer(BOT_B, LOCAL_B, 1));
-  await manager.navigate({ ...identity(a), url: "https://example.com/a" });
-  await manager.navigate({ ...identity(b), url: "https://example.com/b" });
+  await manager.navigate({ ...identity(a), sessionGeneration: a.sessionGeneration, url: "https://example.com/a" });
+  await manager.navigate({ ...identity(b), sessionGeneration: b.sessionGeneration, url: "https://example.com/b" });
   const captureGate = deferred();
   windows[0].webContents.capturePageImpl = () => captureGate.promise;
   const lateCapture = manager.capture(identity(a)).catch((error) => error);
@@ -1410,4 +1467,847 @@ test("helper exit after publication promptly fences and closes its exact session
   assert.equal(windows[1].destroyed, false);
   assert.equal(helpers[0].exitListenerCount(), 0);
   assert.equal(helpers[1].exitListenerCount(), 2);
+});
+
+test("interactive presentations use the fixed surface and an injected CDP debugger without hidden focus", async (t) => {
+  const debuggers = new Map();
+  const { manager, windows } = await fixture(t, {
+    debuggerFactory: (_webContents, identityValue) => {
+      const debuggerClient = new FakeDebugger();
+      debuggers.set(identityValue.botId, debuggerClient);
+      return debuggerClient;
+    },
+  });
+  const session = await manager.open(localComputer());
+  const debuggerClient = debuggers.get(BOT_A);
+
+  assert.deepEqual(debuggerClient.attachVersions, ["1.3"]);
+  assert.equal(session.pageGeneration, 1);
+  assert.deepEqual(session.surface, { cssWidth: 1280, cssHeight: 800 });
+  assert.deepEqual(session.presentations, {
+    preview: { width: 640, height: 400, fps: 1 },
+    interactive: { width: 960, height: 600 },
+  });
+  assert.equal(windows[0].options.show, false);
+  assert.equal(typeof windows[0].focus, "undefined");
+  assert.equal(typeof windows[0].show, "undefined");
+
+  const preview = await manager.capturePreviewFrame(identity(session));
+  assert.deepEqual(
+    Object.keys(preview).sort(),
+    ["botId", "bytes", "frameId", "frameSequence", "height", "mimeType", "pageGeneration", "presentation", "sessionGeneration", "targetGeneration", "targetId", "width"],
+  );
+  assert.equal(preview.width, 602);
+  assert.equal(preview.height, 400);
+  assert.equal(preview.pageGeneration, 1);
+  assert.equal(preview.frameSequence, 1);
+
+  const interactive = await manager.captureInteractiveFrame(identity(session));
+  assert.equal(interactive.width, 903);
+  assert.equal(interactive.height, 600);
+  assert.equal(interactive.frameSequence, 2);
+  const current = inputIdentity(session, interactive, 1);
+  await manager.dispatchMouseEvent({ ...current, type: "mouseMoved", x: 320, y: 200 });
+  await manager.dispatchKeyEvent({ ...current, inputSequence: 2, type: "keyDown", key: "a", code: "KeyA" });
+  await manager.insertText({ ...current, inputSequence: 3, text: "hello" });
+  await manager.imeSetComposition({
+    ...current,
+    inputSequence: 4,
+    text: "hello",
+    selectionStart: 5,
+    selectionEnd: 5,
+  });
+
+  assert.deepEqual(debuggerClient.commands.map(({ method }) => method), [
+    "Input.dispatchMouseEvent",
+    "Input.dispatchKeyEvent",
+    "Input.insertText",
+    "Input.imeSetComposition",
+  ]);
+  assert.equal(debuggerClient.commands[0].params.x, 320);
+  assert.equal(debuggerClient.commands[0].params.y, 200);
+  assert.equal(debuggerClient.commands.some(({ method }) => method === "Runtime.evaluate"), false);
+  assert.equal(debuggerClient.commands.some(({ method }) => method === "Page.bringToFront"), false);
+  assert.equal(debuggerClient.commands.some(({ method }) => method === "Input.dispatchMouseEvent" && method === "sendInputEvent"), false);
+});
+
+test("interactive input requires the current page and frame and strictly increasing input sequences", async (t) => {
+  const { manager } = await fixture(t, { debuggerFactory: () => new FakeDebugger() });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  const current = inputIdentity(session, frame, 1);
+
+  await manager.dispatchMouseEvent({ ...current, type: "mouseMoved", x: 4, y: 5 });
+  await assert.rejects(
+    manager.dispatchMouseEvent({ ...current, type: "mouseMoved", x: 4, y: 5 }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_STALE",
+  );
+  await assert.rejects(
+    manager.dispatchMouseEvent({ ...current, type: "mouseMoved", x: 4, y: 5, inputSequence: 2, frameSequence: frame.frameSequence + 1 }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_STALE",
+  );
+  await assert.rejects(
+    manager.dispatchMouseEvent({ ...current, type: "mouseMoved", x: 4, y: 5, inputSequence: 3, pageGeneration: frame.pageGeneration + 1 }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_STALE",
+  );
+  await assert.rejects(
+    manager.dispatchMouseEvent({ ...current, type: "mouseMoved", inputSequence: 4, x: 1280.01, y: 5 }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_INVALID",
+  );
+  await assert.rejects(
+    manager.dispatchMouseEvent({ ...current, type: "mouseMoved", inputSequence: 5, x: Number.NaN, y: 5 }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_INVALID",
+  );
+});
+
+test("navigation releases held input, advances page generation, and keeps history controls HTTPS-only", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  const { manager, windows } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  const webContents = windows[0].webContents;
+  const finishHistory = () => queueMicrotask(() => {
+    webContents.emit("did-start-navigation", {}, webContents.getURL(), false, true);
+    webContents.emit("did-navigate", {}, webContents.getURL());
+  });
+  webContents.goBack = mock.fn(finishHistory);
+  webContents.goForward = mock.fn(finishHistory);
+  webContents.reload = mock.fn(finishHistory);
+
+  await manager.dispatchMouseEvent({ ...inputIdentity(session, frame, 1), type: "mousePressed", x: 10, y: 20, button: "left" });
+  await manager.dispatchKeyEvent({ ...inputIdentity(session, frame, 2), type: "keyDown", key: "Shift", code: "ShiftLeft" });
+  await manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/next" });
+  assert.equal(session.pageGeneration, 1);
+  const nextFrame = await manager.captureInteractiveFrame(identity(session));
+  assert.equal(nextFrame.pageGeneration, 2);
+  assert.equal(debuggerClient.commands.filter(({ method, params }) => method === "Input.dispatchMouseEvent" && params.type === "mouseReleased").length, 1);
+  assert.equal(debuggerClient.commands.filter(({ method, params }) => method === "Input.dispatchKeyEvent" && params.type === "keyUp").length, 1);
+
+  await manager.goBack({ ...identity(session), sessionGeneration: session.sessionGeneration, pageGeneration: nextFrame.pageGeneration });
+  await manager.goForward({ ...identity(session), sessionGeneration: session.sessionGeneration, pageGeneration: nextFrame.pageGeneration + 1 });
+  await manager.reload({ ...identity(session), sessionGeneration: session.sessionGeneration, pageGeneration: nextFrame.pageGeneration + 2 });
+  assert.equal(webContents.goBack.mock.callCount(), 1);
+  assert.equal(webContents.goForward.mock.callCount(), 1);
+  assert.equal(webContents.reload.mock.callCount(), 1);
+  await assert.rejects(
+    manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "http://example.com/nope" }),
+    (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_INVALID",
+  );
+});
+
+test("debugger detach releases held input and fences only its bot", async (t) => {
+  const debuggers = new Map();
+  const { manager } = await fixture(t, {
+    debuggerFactory: (_webContents, identityValue) => {
+      const debuggerClient = new FakeDebugger();
+      debuggers.set(identityValue.botId, debuggerClient);
+      return debuggerClient;
+    },
+  });
+  const a = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  const b = await manager.open(localComputer(BOT_B, LOCAL_B, 1));
+  const frameA = await manager.captureInteractiveFrame(identity(a));
+  const frameB = await manager.captureInteractiveFrame(identity(b));
+  await manager.dispatchMouseEvent({ ...inputIdentity(a, frameA, 1), type: "mousePressed", x: 1, y: 2, button: "left" });
+  await manager.dispatchKeyEvent({ ...inputIdentity(a, frameA, 2), type: "keyDown", key: "a", code: "KeyA" });
+  await manager.dispatchMouseEvent({ ...inputIdentity(b, frameB, 1), type: "mouseMoved", x: 3, y: 4 });
+
+  debuggers.get(BOT_A).emit("detach", {}, "lost debugger");
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(manager.captureInteractiveFrame(identity(a)), (error) => error?.code === "OPENBOT_LOCAL_DESKTOP_STALE");
+  assert.equal((await manager.captureInteractiveFrame(identity(b))).botId, BOT_B);
+  const aMethods = debuggers.get(BOT_A).commands.map(({ method, params }) => `${method}:${params.type || ""}`);
+  assert.ok(aMethods.includes("Input.dispatchMouseEvent:mouseReleased"));
+  assert.ok(aMethods.includes("Input.dispatchKeyEvent:keyUp"));
+  assert.equal(debuggers.get(BOT_B).commands.some(({ params }) => params.type === "mouseReleased" || params.type === "keyUp"), false);
+});
+
+test("retry tears down held input before reopening the exact bot", async (t) => {
+  const debuggerClients = [];
+  const { manager } = await fixture(t, {
+    debuggerFactory: () => {
+      const client = new FakeDebugger();
+      debuggerClients.push(client);
+      return client;
+    },
+  });
+  const first = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  const frame = await manager.captureInteractiveFrame(identity(first));
+  await manager.dispatchMouseEvent({ ...inputIdentity(first, frame, 1), type: "mousePressed", x: 1, y: 2, button: "left" });
+  const second = await manager.retry(localComputer(BOT_A, LOCAL_A, 1));
+  assert.equal(second.botId, BOT_A);
+  assert.equal(second.pageGeneration, 2);
+  assert.equal(debuggerClients.length, 2);
+  assert.equal(debuggerClients[0].commands.some(({ method, params }) => method === "Input.dispatchMouseEvent" && params.type === "mouseReleased"), true);
+  await assert.rejects(
+    manager.dispatchMouseEvent({ ...inputIdentity(first, frame, 2), type: "mouseMoved", x: 1, y: 2 }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_STALE",
+  );
+});
+
+test("a closed and reopened profile rejects a byte-identical old frame and input token", async (t) => {
+  const debuggers = [];
+  const { manager, windows } = await fixture(t, {
+    debuggerFactory: () => {
+      const client = new FakeDebugger();
+      debuggers.push(client);
+      return client;
+    },
+  });
+  const first = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  windows[0].webContents.capturePageImpl = async () => nativeImage({ bytes: Buffer.from("identical-frame") });
+  const oldFrame = await manager.captureInteractiveFrame(identity(first));
+  const oldInput = inputIdentity(first, oldFrame, 1);
+
+  debuggers[0].emit("detach", {}, "lost debugger");
+  await new Promise((resolve) => setImmediate(resolve));
+  const second = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  windows[1].webContents.capturePageImpl = async () => nativeImage({ bytes: Buffer.from("identical-frame") });
+  const newFrame = await manager.captureInteractiveFrame(identity(second));
+
+  assert.notEqual(second.sessionGeneration, first.sessionGeneration);
+  assert.equal(newFrame.frameId, oldFrame.frameId);
+  assert.equal(newFrame.frameSequence, oldFrame.frameSequence);
+  assert.equal(newFrame.pageGeneration, oldFrame.pageGeneration);
+  await assert.rejects(
+    manager.dispatchMouseEvent({ ...oldInput, type: "mouseMoved", x: 12, y: 13 }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_STALE",
+  );
+  assert.equal(debuggers[1].commands.length, 0);
+});
+
+test("a rejected browser-applied key down is preclaimed and explicitly compensated with its key-code tuple", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  debuggerClient.sendCommandImpl = async (method) => {
+    if (method === "Input.dispatchKeyEvent" && debuggerClient.commands.at(-1)?.params.type === "keyDown") {
+      throw new Error("browser applied then transport rejected");
+    }
+    return {};
+  };
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+
+  await assert.rejects(
+    manager.dispatchKeyEvent({
+      ...inputIdentity(session, frame, 1),
+      type: "keyDown",
+      key: "Shift",
+      code: "ShiftLeft",
+    }),
+    (error) => error?.code === "OPENBOT_LOCAL_DEBUGGER_DETACHED",
+  );
+  assert.deepEqual(debuggerClient.commands.map(({ method, params }) => ({ method, params })), [
+    {
+      method: "Input.dispatchKeyEvent",
+      params: { type: "keyDown", key: "Shift", code: "ShiftLeft" },
+    },
+    {
+      method: "Input.dispatchKeyEvent",
+      params: { type: "keyUp", key: "Shift", code: "ShiftLeft" },
+    },
+  ]);
+});
+
+test("synchronous detach during the final debugger check cannot queue key down after cleanup key up", async (t) => {
+  class DetachOnFinalCheckDebugger extends FakeDebugger {
+    checks = 0;
+    get isAttached() {
+      this.checks += 1;
+      if (this.checks === 3) this.emit("detach", {}, "detach before command");
+      return this.attached;
+    }
+  }
+  const debuggerClient = new DetachOnFinalCheckDebugger();
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await assert.rejects(
+    manager.dispatchKeyEvent({
+      ...inputIdentity(session, frame, 1),
+      type: "keyDown",
+      key: "a",
+      code: "KeyA",
+    }),
+    (error) => /STALE|DETACHED/.test(error?.code || ""),
+  );
+  assert.deepEqual(debuggerClient.commands, [
+    { method: "Input.dispatchKeyEvent", params: { type: "keyUp", key: "a", code: "KeyA" } },
+  ]);
+});
+
+test("CDP receives only the exact public mouse and keyboard parameter whitelist", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.dispatchMouseEvent({
+    ...inputIdentity(session, frame, 1),
+    type: "mouseMoved",
+    coordinate: { x: 10, y: 11 },
+    coordinateSpace: "css-dip",
+    deviceScaleFactor: 1,
+    modifiers: 2,
+  });
+  await manager.dispatchKeyEvent({
+    ...inputIdentity(session, frame, 2),
+    type: "keyDown",
+    key: "a",
+    code: "KeyA",
+    modifiers: 2,
+  });
+  assert.deepEqual(debuggerClient.commands, [
+    { method: "Input.dispatchMouseEvent", params: { type: "mouseMoved", x: 10, y: 11, modifiers: 2 } },
+    { method: "Input.dispatchKeyEvent", params: { type: "keyDown", key: "a", code: "KeyA", modifiers: 2 } },
+  ]);
+});
+
+test("history navigation waits for authoritative main-frame start and completion events", async (t) => {
+  const { manager, windows } = await fixture(t, { navigationTimeoutMs: 50 });
+  const session = await manager.open(localComputer());
+  windows[0].webContents.goBack = () => {};
+  let settled = false;
+  const navigating = manager.goBack({ ...identity(session), sessionGeneration: session.sessionGeneration, pageGeneration: session.pageGeneration })
+    .then((value) => {
+      settled = true;
+      return value;
+    });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  windows[0].webContents.emit("did-start-navigation", {}, "https://example.com/", false, true);
+  windows[0].webContents.emit("did-navigate", {}, "https://example.com/");
+  const result = await navigating;
+  assert.equal(result.pageGeneration, session.pageGeneration + 1);
+});
+
+test("history navigation fails within its bound when no authoritative navigation event arrives", async (t) => {
+  const { manager, windows } = await fixture(t, { navigationTimeoutMs: 10 });
+  const session = await manager.open(localComputer());
+  windows[0].webContents.reload = () => {};
+  await assert.rejects(
+    manager.reload({ ...identity(session), sessionGeneration: session.sessionGeneration, pageGeneration: session.pageGeneration }),
+    (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_FAILED",
+  );
+});
+
+test("history navigation preserves an explicit stale code when a second main-frame start advances the page", async (t) => {
+  const { manager, windows } = await fixture(t, { navigationTimeoutMs: 50 });
+  const session = await manager.open(localComputer());
+  const webContents = windows[0].webContents;
+  webContents.goForward = () => queueMicrotask(() => {
+    webContents.emit("did-start-navigation", {}, "https://example.com/one", false, true);
+    webContents.emit("did-start-navigation", {}, "https://example.com/two", false, true);
+    webContents.emit("did-navigate", {}, "https://example.com/two");
+  });
+  await assert.rejects(
+    manager.goForward({
+      ...identity(session),
+      sessionGeneration: session.sessionGeneration,
+      pageGeneration: session.pageGeneration,
+    }),
+    (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_STALE",
+  );
+});
+
+test("synchronous debugger detach during attach cannot publish a live session", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  debuggerClient.attachImpl = async () => {
+    debuggerClient.emit("detach", {}, "detach inside attach");
+  };
+  const { manager, windows } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const result = await manager.open(localComputer()).catch((error) => error);
+  assert.match(result?.code || "", /DEBUGGER|STALE|START_FAILED/);
+  assert.equal(windows[0].destroyed, true);
+});
+
+test("close during debugger attach drains ownership and cannot publish the late debugger", async (t) => {
+  const attachEntered = deferred();
+  const releaseAttach = deferred();
+  const debuggerClient = new FakeDebugger();
+  debuggerClient.attachImpl = async () => {
+    attachEntered.resolve();
+    await releaseAttach.promise;
+  };
+  const { manager, windows } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const opening = manager.open(localComputer()).catch((error) => error);
+  await attachEntered.promise;
+  windows[0].destroy();
+  releaseAttach.resolve();
+  const result = await opening;
+  assert.match(result?.code || "", /STALE|START_FAILED/);
+  assert.equal(debuggerClient.detachCalls, 1);
+});
+
+test("debugger attachment requires a detachable event ownership surface", async (t) => {
+  const { manager, windows } = await fixture(t, {
+    debuggerFactory: () => ({
+      isAttached: false,
+      async attach() { this.isAttached = true; },
+      async sendCommand() {},
+    }),
+  });
+  const result = await manager.open(localComputer()).catch((error) => error);
+  assert.equal(result?.code, "OPENBOT_LOCAL_DEBUGGER_UNAVAILABLE");
+  assert.equal(windows[0].destroyed, true);
+});
+
+test("close during debugger factory await adopts and detaches an already-attached late client", async (t) => {
+  const factoryEntered = deferred();
+  const releaseFactory = deferred();
+  const debuggerClient = new FakeDebugger();
+  debuggerClient.attached = true;
+  const { manager, windows } = await fixture(t, {
+    debuggerFactory: async () => {
+      factoryEntered.resolve();
+      await releaseFactory.promise;
+      return debuggerClient;
+    },
+  });
+  const opening = manager.open(localComputer()).catch((error) => error);
+  await factoryEntered.promise;
+  windows[0].destroy();
+  releaseFactory.resolve();
+  const result = await opening;
+  assert.match(result?.code || "", /STALE|START_FAILED/);
+  assert.equal(debuggerClient.detachCalls, 1);
+});
+
+test("detach cleanup is drained before the same bot can attach a replacement debugger", async (t) => {
+  const cleanupEntered = deferred();
+  const releaseCleanup = deferred();
+  const clients = [];
+  const { manager } = await fixture(t, {
+    debuggerFactory: () => {
+      const client = new FakeDebugger();
+      clients.push(client);
+      return client;
+    },
+  });
+  const first = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(first));
+  await manager.dispatchKeyEvent({ ...inputIdentity(first, frame, 1), type: "keyDown", key: "a", code: "KeyA" });
+  clients[0].sendCommandImpl = async (method, params) => {
+    if (method === "Input.dispatchKeyEvent" && params.type === "keyUp") {
+      cleanupEntered.resolve();
+      await releaseCleanup.promise;
+    }
+    return {};
+  };
+  clients[0].emit("detach", {}, "lost debugger");
+  await cleanupEntered.promise;
+  const reopening = manager.open(localComputer());
+  for (let attempt = 0; attempt < 100 && clients.length === 1; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(clients.length, 1);
+  releaseCleanup.resolve();
+  await reopening;
+  assert.equal(clients.length, 2);
+});
+
+test("synchronous detach during compensating release cannot reenter close ownership", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  const { manager, permissionBroker } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.dispatchKeyEvent({ ...inputIdentity(session, frame, 1), type: "keyDown", key: "a", code: "KeyA" });
+  let emitted = false;
+  debuggerClient.sendCommandImpl = async (method, params) => {
+    if (!emitted && method === "Input.dispatchKeyEvent" && params.type === "keyUp") {
+      emitted = true;
+      debuggerClient.emit("detach", {}, "detach during release");
+    }
+    return {};
+  };
+  await manager.close(BOT_A);
+  assert.equal(permissionBroker.cancelBot.mock.callCount(), 1);
+  assert.equal(debuggerClient.commands.filter(({ method, params }) => (
+    method === "Input.dispatchKeyEvent" && params.type === "keyUp"
+  )).length, 1);
+});
+
+test("capture presentation probing sanitizes hostile proxy traps", async (t) => {
+  const { manager } = await fixture(t);
+  const hostile = new Proxy({}, {
+    getOwnPropertyDescriptor() {
+      throw new Error("private-presentation-trap");
+    },
+  });
+  let pending;
+  assert.doesNotThrow(() => { pending = manager.captureDisplayFrame(hostile); });
+  await assert.rejects(
+    pending,
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_INVALID"
+      && !/private-presentation-trap/.test(String(error)),
+  );
+});
+
+test("IME replacement range is both present or both absent before any CDP command", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await assert.rejects(
+    manager.imeSetComposition({
+      ...inputIdentity(session, frame, 1),
+      text: "hello",
+      selectionStart: 0,
+      selectionEnd: 5,
+      replacementStart: 0,
+    }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_INVALID",
+  );
+  assert.equal(debuggerClient.commands.length, 0);
+});
+
+test("close snapshots and drains an already-running exact-bot detach cleanup", async (t) => {
+  const cleanupEntered = deferred();
+  const releaseCleanup = deferred();
+  const debuggerClient = new FakeDebugger();
+  t.after(() => releaseCleanup.resolve());
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.dispatchKeyEvent({ ...inputIdentity(session, frame, 1), type: "keyDown", key: "a", code: "KeyA" });
+  debuggerClient.sendCommandImpl = async (method, params) => {
+    if (method === "Input.dispatchKeyEvent" && params.type === "keyUp") {
+      cleanupEntered.resolve();
+      await releaseCleanup.promise;
+    }
+    return {};
+  };
+  debuggerClient.emit("detach", {}, "lost debugger");
+  await cleanupEntered.promise;
+  let settled = false;
+  const closing = manager.close(BOT_A).then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  releaseCleanup.resolve();
+  await closing;
+});
+
+test("deleteBot drains exact-bot detach cleanup before permission and profile deletion", async (t) => {
+  const cleanupEntered = deferred();
+  const releaseCleanup = deferred();
+  const debuggerClient = new FakeDebugger();
+  t.after(() => releaseCleanup.resolve());
+  const { manager, permissionBroker, root } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.dispatchKeyEvent({ ...inputIdentity(session, frame, 1), type: "keyDown", key: "a", code: "KeyA" });
+  debuggerClient.sendCommandImpl = async (method, params) => {
+    if (method === "Input.dispatchKeyEvent" && params.type === "keyUp") {
+      cleanupEntered.resolve();
+      await releaseCleanup.promise;
+    }
+    return {};
+  };
+  debuggerClient.emit("detach", {}, "lost debugger");
+  await cleanupEntered.promise;
+  const profilePath = path.join(root, "openbot-local", LOCAL_A.slice("local-".length));
+  const deleting = manager.deleteBot({ botId: BOT_A, localProfileId: LOCAL_A });
+  for (let attempt = 0; attempt < 100 && permissionBroker.deleteBot.mock.callCount() === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 0);
+  assert.equal((await fs.lstat(profilePath)).isDirectory(), true);
+  releaseCleanup.resolve();
+  await deleting;
+  assert.equal(permissionBroker.deleteBot.mock.callCount(), 1);
+  await assert.rejects(fs.lstat(profilePath), /ENOENT/);
+});
+
+test("production debugger isAttached method is authoritative without redundant attach", async (t) => {
+  class MethodDebugger extends EventEmitter {
+    attached = true;
+    attachCalls = 0;
+    detachCalls = 0;
+    isAttached() { return this.attached; }
+    async attach() { this.attachCalls += 1; this.attached = true; }
+    async sendCommand() { return {}; }
+    async detach() { this.detachCalls += 1; this.attached = false; }
+  }
+  const debuggerClient = new MethodDebugger();
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  await manager.open(localComputer());
+  assert.equal(debuggerClient.attachCalls, 0);
+  await manager.close(BOT_A);
+  assert.equal(debuggerClient.detachCalls, 1);
+});
+
+test("same-document history accepts only a current main-frame in-page completion", async (t) => {
+  const { manager, windows } = await fixture(t, { navigationTimeoutMs: 50 });
+  const session = await manager.open(localComputer());
+  const webContents = windows[0].webContents;
+  let settled = false;
+  webContents.goBack = () => queueMicrotask(() => {
+    webContents.emit("did-start-navigation", {}, "https://example.com/#one", true, true);
+    webContents.emit("did-navigate-in-page", {}, "https://example.com/#one", false);
+  });
+  const navigating = manager.goBack({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    pageGeneration: session.pageGeneration,
+  }).then((value) => { settled = true; return value; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  webContents.emit("did-navigate-in-page", {}, "https://example.com/#one", true);
+  assert.equal((await navigating).pageGeneration, session.pageGeneration + 1);
+});
+
+test("failed held-input release fences navigation and closes its exact entry", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  const { manager, windows } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.dispatchKeyEvent({ ...inputIdentity(session, frame, 1), type: "keyDown", key: "a", code: "KeyA" });
+  debuggerClient.sendCommandImpl = async (method, params) => {
+    if (method === "Input.dispatchKeyEvent" && params.type === "keyUp") throw new Error("release failed");
+    return {};
+  };
+  await assert.rejects(
+    manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/after-release" }),
+    (error) => error?.code === "OPENBOT_LOCAL_INPUT_RELEASE_FAILED",
+  );
+  assert.equal(windows[0].destroyed, true);
+  assert.deepEqual(windows[0].webContents.urls, [LOCAL_DESKTOP_START_URL]);
+});
+
+test("detach navigation and close share one held-input release flight", async (t) => {
+  const releaseEntered = deferred();
+  const releaseGate = deferred();
+  const debuggerClient = new FakeDebugger();
+  t.after(() => releaseGate.resolve());
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.dispatchKeyEvent({ ...inputIdentity(session, frame, 1), type: "keyDown", key: "a", code: "KeyA" });
+  debuggerClient.sendCommandImpl = async (method, params) => {
+    if (method === "Input.dispatchKeyEvent" && params.type === "keyUp") {
+      releaseEntered.resolve();
+      await releaseGate.promise;
+    }
+    return {};
+  };
+  const navigating = manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/next" }).catch((error) => error);
+  await releaseEntered.promise;
+  debuggerClient.emit("detach", {}, "detach during navigation cleanup");
+  const closing = manager.close(BOT_A);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(debuggerClient.commands.filter(({ method, params }) => (
+    method === "Input.dispatchKeyEvent" && params.type === "keyUp"
+  )).length, 1);
+  releaseGate.resolve();
+  await Promise.allSettled([navigating, closing]);
+  assert.equal(debuggerClient.commands.filter(({ method, params }) => (
+    method === "Input.dispatchKeyEvent" && params.type === "keyUp"
+  )).length, 1);
+});
+
+test("navigation timeout bounds a held-input release before loadURL", async (t) => {
+  const never = deferred();
+  const debuggerClient = new FakeDebugger();
+  const { manager, windows } = await fixture(t, { debuggerFactory: () => debuggerClient, navigationTimeoutMs: 10 });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.dispatchKeyEvent({ ...inputIdentity(session, frame, 1), type: "keyDown", key: "a", code: "KeyA" });
+  debuggerClient.sendCommandImpl = async (method, params) => {
+    if (method === "Input.dispatchKeyEvent" && params.type === "keyUp") return never.promise;
+    return {};
+  };
+  const outcome = await Promise.race([
+    manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/never" }).then(() => "resolved", (error) => error?.code),
+    new Promise((resolve) => setTimeout(() => resolve("test-timeout"), 80)),
+  ]);
+  assert.equal(outcome, "OPENBOT_LOCAL_NAVIGATION_FAILED");
+  assert.equal(windows[0].destroyed, true);
+});
+
+test("navigation timeout bounds a pending direct loadURL and suppresses late publication", async (t) => {
+  const loadGate = deferred();
+  const { manager, windows } = await fixture(t, { navigationTimeoutMs: 10 });
+  const session = await manager.open(localComputer());
+  windows[0].webContents.loadURL = () => loadGate.promise;
+  const outcome = await Promise.race([
+    manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/never" }).then(() => "resolved", (error) => error?.code),
+    new Promise((resolve) => setTimeout(() => resolve("test-timeout"), 80)),
+  ]);
+  assert.equal(outcome, "OPENBOT_LOCAL_NAVIGATION_FAILED");
+  assert.equal(windows[0].destroyed, true);
+  loadGate.resolve();
+});
+
+test("direct navigation requires the current session generation after reopen", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const first = await manager.open(localComputer());
+  await manager.close(BOT_A);
+  const second = await manager.open(localComputer());
+  await assert.rejects(
+    manager.navigate({ ...identity(second), url: "https://example.com/missing-session" }),
+    (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_INVALID",
+  );
+  await assert.rejects(
+    manager.navigate({
+      ...identity(second),
+      sessionGeneration: first.sessionGeneration,
+      url: "https://example.com/stale-session",
+    }),
+    (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_STALE",
+  );
+  assert.deepEqual(windows[1].webContents.urls, [LOCAL_DESKTOP_START_URL]);
+});
+
+test("IME replacement offsets use an independent bounded existing-document range", async (t) => {
+  const debuggerClient = new FakeDebugger();
+  const { manager } = await fixture(t, { debuggerFactory: () => debuggerClient });
+  const session = await manager.open(localComputer());
+  const frame = await manager.captureInteractiveFrame(identity(session));
+  await manager.imeSetComposition({
+    ...inputIdentity(session, frame, 1),
+    text: "x",
+    selectionStart: 0,
+    selectionEnd: 1,
+    replacementStart: 10_000,
+    replacementEnd: 10_005,
+  });
+  assert.deepEqual(debuggerClient.commands.at(-1), {
+    method: "Input.imeSetComposition",
+    params: {
+      text: "x",
+      selectionStart: 0,
+      selectionEnd: 1,
+      replacementStart: 10_000,
+      replacementEnd: 10_005,
+    },
+  });
+});
+
+test("close intent immediately rejects new exact-bot work while its navigation queue is held", async (t) => {
+  const loadEntered = deferred();
+  const releaseLoad = deferred();
+  t.after(() => releaseLoad.resolve());
+  const { manager, windows, helpers } = await fixture(t);
+  const first = await manager.open(localComputer());
+  const sibling = await manager.open(localComputer(BOT_B, LOCAL_B));
+  windows[0].webContents.loadURL = async () => {
+    loadEntered.resolve();
+    await releaseLoad.promise;
+  };
+
+  const navigating = manager.navigate({
+    ...identity(first),
+    sessionGeneration: first.sessionGeneration,
+    url: "https://example.com/held",
+  }).catch((error) => error);
+  await loadEntered.promise;
+
+  const closing = manager.close(BOT_A);
+  const duplicateClose = manager.close(BOT_A);
+  const runOutcome = Promise.race([
+    manager.run(action(first)).then(() => "resolved", (error) => error?.code),
+    new Promise((resolve) => setImmediate(() => resolve("still-pending"))),
+  ]);
+  const captureOutcome = Promise.race([
+    manager.captureDisplayFrame(identity(first)).then(() => "resolved", (error) => error?.code),
+    new Promise((resolve) => setImmediate(() => resolve("still-pending"))),
+  ]);
+
+  assert.deepEqual(await Promise.all([runOutcome, captureOutcome]), [
+    "OPENBOT_LOCAL_DESKTOP_STALE",
+    "OPENBOT_LOCAL_DESKTOP_STALE",
+  ]);
+  assert.equal(helpers[0].messages.length, 0);
+  assert.equal((await manager.captureDisplayFrame(identity(sibling))).botId, BOT_B);
+
+  releaseLoad.resolve();
+  await Promise.allSettled([navigating, closing, duplicateClose]);
+  assert.equal(windows[0].destroyed, true);
+  assert.equal(windows[1].destroyed, false);
+});
+
+test("close intent rejects navigation and history admission before the held queue releases", async (t) => {
+  const loadEntered = deferred();
+  const releaseLoad = deferred();
+  t.after(() => releaseLoad.resolve());
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  windows[0].webContents.loadURL = async () => {
+    loadEntered.resolve();
+    await releaseLoad.promise;
+  };
+
+  const navigating = manager.navigate({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    url: "https://example.com/held",
+  }).catch((error) => error);
+  await loadEntered.promise;
+  const closing = manager.close(BOT_A);
+  const newNavigation = Promise.race([
+    manager.navigate({
+      ...identity(session),
+      sessionGeneration: session.sessionGeneration,
+      url: "https://example.com/rejected",
+    }).then(() => "resolved", (error) => error?.code),
+    new Promise((resolve) => setImmediate(() => resolve("still-pending"))),
+  ]);
+  const newHistory = Promise.race([
+    manager.reload({
+      ...identity(session),
+      sessionGeneration: session.sessionGeneration,
+      pageGeneration: session.pageGeneration + 1,
+    }).then(() => "resolved", (error) => error?.code),
+    new Promise((resolve) => setImmediate(() => resolve("still-pending"))),
+  ]);
+
+  assert.deepEqual(await Promise.all([newNavigation, newHistory]), [
+    "OPENBOT_LOCAL_DESKTOP_STALE",
+    "OPENBOT_LOCAL_DESKTOP_STALE",
+  ]);
+  releaseLoad.resolve();
+  await Promise.allSettled([navigating, closing]);
+});
+
+test("close intent rejects a pending permission authorization before helper send", async (t) => {
+  const authorize = deferred();
+  const loadEntered = deferred();
+  const releaseLoad = deferred();
+  t.after(() => {
+    authorize.resolve();
+    releaseLoad.resolve();
+  });
+  const permissionBroker = {
+    request: mock.fn(async (_request, effect) => {
+      await authorize.promise;
+      return effect(Buffer.from("private-bookmark"));
+    }),
+    cancelTask: mock.fn(),
+    cancelBot: mock.fn(),
+    deleteBot: mock.fn(async () => {}),
+  };
+  const { manager, windows, helpers } = await fixture(t, { permissionBroker });
+  const session = await manager.open(localComputer());
+  const running = manager.run(action(session));
+  windows[0].webContents.loadURL = async () => {
+    loadEntered.resolve();
+    await releaseLoad.promise;
+  };
+  const navigating = manager.navigate({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    url: "https://example.com/held",
+  }).catch((error) => error);
+  await loadEntered.promise;
+  const closing = manager.close(BOT_A);
+
+  authorize.resolve();
+  const runOutcome = await Promise.race([
+    running.then(() => "resolved", (error) => error?.code),
+    new Promise((resolve) => setImmediate(() => resolve("still-pending"))),
+  ]);
+  assert.equal(runOutcome, "OPENBOT_LOCAL_DESKTOP_STALE");
+  assert.equal(helpers[0].messages.length, 0);
+
+  releaseLoad.resolve();
+  await Promise.allSettled([navigating, closing, running]);
 });
