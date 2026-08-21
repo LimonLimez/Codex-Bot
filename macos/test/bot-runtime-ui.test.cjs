@@ -96,6 +96,26 @@ test("provider picker uses a stronger selected text role and scopes overflow awa
   assert.match(cssRuleBody(css, ".codex-provider-picker-scroll"), /overflow-x:\s*hidden/);
 });
 
+test("View Bot Local Desktop keeps shared Sand tokens and a stable frame height outside Settings", () => {
+  const css = fs.readFileSync(cssPath, "utf8");
+  const host = cssRuleBody(
+    css,
+    ".codex-native-bot-settings .openbot-local-desktop-host,\n.codex-bot-desktop-host.openbot-local-desktop-host",
+  );
+  assert.match(host, /--openbot-shell-line:\s*var\(--codex-border\)/);
+  assert.match(host, /--openbot-shell-panel:\s*var\(--codex-input\)/);
+  assert.match(host, /--openbot-shell-muted:\s*var\(--codex-muted\)/);
+  assert.match(host, /--openbot-shell-text:\s*var\(--codex-text\)/);
+  assert.match(host, /width:\s*100%/);
+  assert.match(host, /min-height:\s*220px/);
+  assert.match(host, /padding:\s*0/);
+  const view = cssRuleBody(
+    css,
+    ".codex-native-bot-settings .openbot-local-desktop-view,\n.codex-bot-desktop-host .openbot-local-desktop-view",
+  );
+  assert.match(view, /height:\s*220px/);
+});
+
 test("provider picker preserves 160-character labels errors and actions within both surfaces", async (context) => {
   const longLabel = "L".repeat(160);
   const harness = connectedNativeProviderHarness({
@@ -3823,6 +3843,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
   const explicitSidebar = { id: "sidebar" };
   const explicitComposer = { id: "composer" };
   const explicitNativeComposer = { id: "native-composer" };
+  const explicitNativeOverview = { id: "native-overview" };
   const explicitBotSettings = { id: "bot-settings" };
   const explicitConnections = { id: "connections" };
   const explicitDocument = {
@@ -3830,6 +3851,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
       if (selector === "[data-codex-bot-sidebar-host]") return explicitSidebar;
       if (selector === "[data-codex-bot-composer-host]") return explicitComposer;
       if (selector === "[data-openbot-model-picker-host]") return explicitNativeComposer;
+      if (selector === "[data-openbot-bot-overview-computer-host]") return explicitNativeOverview;
       if (selector === "[data-openbot-bot-settings-host]") return explicitBotSettings;
       if (selector === "[data-openbot-connections-host]") return explicitConnections;
       return null;
@@ -3840,6 +3862,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
     sidebarHost: explicitSidebar,
     composerHost: explicitComposer,
     nativeComposerHost: explicitNativeComposer,
+    nativeBotOverviewHost: explicitNativeOverview,
     nativeBotSettingsHost: explicitBotSettings,
     nativeConnectionsHost: explicitConnections,
   });
@@ -3865,6 +3888,7 @@ test("UI mount discovery selects explicit or semantic sidebar and composer hosts
     sidebarHost: semanticSidebar,
     composerHost: composerForm,
     nativeComposerHost: null,
+    nativeBotOverviewHost: null,
     nativeBotSettingsHost: null,
     nativeConnectionsHost: null,
   });
@@ -4044,6 +4068,7 @@ function createMountedUiHarness({
   localStorage = null,
   nativeProtocol = false,
   nativeHost = nativeProtocol,
+  nativeOverviewHost = nativeHost,
   nativeActiveBotId = nativeProtocol ? BOT_A : undefined,
   reducedMotion = false,
   viewMetrics = Object.freeze({}),
@@ -4124,6 +4149,7 @@ function createMountedUiHarness({
     sidebar: null,
     composer: null,
     nativeModelHost: null,
+    nativeBotOverviewHost: null,
     nativeBotSettingsHost: null,
     nativeConnectionsHost: null,
     listeners: new Map(),
@@ -4133,6 +4159,7 @@ function createMountedUiHarness({
       if (selector === "[data-codex-bot-sidebar-host]") return this.sidebar;
       if (selector === "[data-codex-bot-composer-host]") return this.composer;
       if (selector === "[data-openbot-model-picker-host]") return this.nativeModelHost;
+      if (selector === "[data-openbot-bot-overview-computer-host]") return this.nativeBotOverviewHost;
       if (selector === "[data-openbot-bot-settings-host]") return this.nativeBotSettingsHost;
       if (selector === "[data-openbot-connections-host]") return this.nativeConnectionsHost;
       return null;
@@ -4146,9 +4173,11 @@ function createMountedUiHarness({
   documentRef.composer = documentRef.createElement("form");
   if (nativeHost) {
     documentRef.nativeModelHost = documentRef.createElement("div");
+    if (nativeOverviewHost) documentRef.nativeBotOverviewHost = documentRef.createElement("div");
     documentRef.nativeBotSettingsHost = documentRef.createElement("div");
     documentRef.nativeConnectionsHost = documentRef.createElement("div");
     documentRef.composer.append(documentRef.nativeModelHost);
+    if (documentRef.nativeBotOverviewHost) documentRef.body.append(documentRef.nativeBotOverviewHost);
     documentRef.body.append(documentRef.nativeBotSettingsHost, documentRef.nativeConnectionsHost);
   }
   let mountObserver = null;
@@ -4907,7 +4936,7 @@ test("same-provider authority labels refresh selected detail metadata without lo
   assert.equal(apiKey.value, "safe-local-secret");
 });
 
-test("native View Bot owns Computer controls and selects the active Free Local Desktop", async (context) => {
+test("native View Bot overview owns the local Computer surface while Settings stays status-only", async (context) => {
   const catalog = Object.freeze({
     generation: 12,
     status: "ready",
@@ -4947,12 +4976,14 @@ test("native View Bot owns Computer controls and selects the active Free Local D
   });
   let computerListener;
   const desktopSelections = [];
+  let desktopCreated = 0;
   let desktopDisposed = 0;
   const harness = createMountedUiHarness({
     catalog,
     initialSelection: selection,
     nativeProtocol: true,
     nativeHost: true,
+    nativeOverviewHost: false,
     botsFacade: {
       async list() { return [botWithComputer(BOT_A, "A", "ready", local)]; },
       onChanged() { return () => {}; },
@@ -4966,6 +4997,7 @@ test("native View Bot owns Computer controls and selects the active Free Local D
     },
     localDesktopViewApi: {
       createLocalDesktopView({ container }) {
+        desktopCreated += 1;
         assert.equal(container.className.split(/\s+/).includes("codex-bot-desktop-host"), true);
         return Object.freeze({
           selectBot(value) { desktopSelections.push(value); },
@@ -4980,15 +5012,35 @@ test("native View Bot owns Computer controls and selects the active Free Local D
 
   const settings = harness.findPanel("codex-native-bot-settings");
   assert.equal(settings.parentElement, harness.documentRef.nativeBotSettingsHost);
+  assert.equal(desktopCreated, 0);
+  assert.deepEqual(desktopSelections, []);
+
+  harness.documentRef.nativeBotOverviewHost = harness.documentRef.createElement("div");
+  harness.documentRef.body.append(harness.documentRef.nativeBotOverviewHost);
+  harness.mountObserver.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const desktopHost = harness.findPanel("codex-bot-desktop-host");
+  assert.equal(desktopHost.parentElement, harness.documentRef.nativeBotOverviewHost);
+  assert.equal(settings.children.includes(desktopHost), false);
   assert.equal(harness.find("codex-runtime-row"), null);
   assert.equal(harness.find("codex-computer-row"), null);
   assert.equal(harness.find("codex-computer-grants"), null);
   assert.equal(harness.findPanel("codex-computer-row").parentElement, settings);
+  assert.equal(desktopCreated, 1);
+  assert.deepEqual(desktopSelections, [BOT_A]);
+
+  harness.mountObserver.callback();
+  harness.mountObserver.callback();
+  assert.equal(desktopCreated, 1);
   assert.deepEqual(desktopSelections, [BOT_A]);
 
   computerListener({ botId: BOT_A, computer: notNow });
   assert.equal(harness.findPanel("codex-computer-status").textContent, "Computer not configured");
   assert.deepEqual(desktopSelections, [BOT_A, null]);
+  harness.documentRef.nativeBotOverviewHost = null;
+  harness.mountObserver.callback();
+  assert.equal(desktopDisposed, 1);
   harness.mounted.dispose();
   assert.equal(desktopDisposed, 1);
 });

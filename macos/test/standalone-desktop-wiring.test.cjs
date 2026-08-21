@@ -39,6 +39,7 @@ const STOCK_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardin
 const STOCK_PROMPT_TRAILING = 'se=p.jsx("div",{className:ne,ref:d,style:X.style,children:Q})';
 const STOCK_NEW_BOT_RECIPIENT = 'function q2e(n){return n.kind==="agent"?{kind:"agent",id:n.agent.id,name:n.agent.name,avatarDataUrl:n.agent.avatarDataUrl}:{kind:"new",name:n.kind==="create"?n.name:Jut}}';
 const STOCK_NEW_BOT_COMMIT = 'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,Ne,Te,xe,ve,t]';
+const STOCK_BOT_OVERVIEW_COMPUTER = 'children:[l,S?p.jsx(b4n,{agent:t,onOpenAgentChat:f}):null';
 const STOCK_BOT_SETTINGS_ROOT = 'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
 const STOCK_SETTINGS_ROOT = 'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const STOCK_LOCAL_IDENTITY_ANCHORS = [
@@ -51,7 +52,7 @@ const STOCK_LOCAL_IDENTITY_ANCHORS = [
   'Ve!=null&&(B.loadPinnedAgentsFromBox(),q.loadFromBox(),ke.reconcileWithHost())',
   'onIdentityRestoreComplete:({accountSlot:n})=>Whe.completeIdentityChange({acceptPort:n!=null})',
 ].join(";");
-const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_OVERVIEW_COMPUTER}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
 
 function countExact(source, anchor) {
   return source.split(anchor).length - 1;
@@ -152,6 +153,7 @@ test("patching keeps the native Grok shell and does not stage the replacement st
   assert.equal(countExact(SYNTHETIC_VENDOR_RENDERER, VENDOR_VISIBLE_SHAPES), 1);
   assert.equal(countExact(patchedRenderer, OPENBOT_GEOMETRY_TAIL), 1);
   assert.equal(countExact(patchedRenderer, OPENBOT_VISIBLE_SHAPES), 1);
+  assert.equal(countExact(patchedRenderer, "data-openbot-bot-overview-computer-host"), 1);
   for (const shape of ADDED_AVATAR_SHAPES) assert.equal(countExact(patchedRenderer, `${shape}:qo(`), 1);
   const staged = path.join(root, "dist", "renderer", "codex");
   assert.deepEqual(fs.readdirSync(staged).sort(), ASSETS);

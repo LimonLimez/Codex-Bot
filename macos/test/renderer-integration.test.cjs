@@ -75,6 +75,8 @@ const STOCK_NEW_BOT_CREATE_RESOLVE = 'const Me=await Ee.resolveAvatar(),Ae=await
 const STOCK_NEW_BOT_CREATE_DISPATCH = 'ee=x.useCallback(Ee=>{ae({name:Ee.name,description:Ee.description,resolveAvatar:()=>Promise.resolve(Ee.avatarPngBase64)})},[ae])';
 const STOCK_M4N_FRAGMENT = 'function M4n(n){const e=ye.c(32),{agent:t,character:s,staged:r,isCharacterActive:i}=n,{commitCharacter:l}=s,f=r?.avatarShape??t.avatarShape??null,d=r?.avatarColor??t.avatarColor??null,o=()=>"";let b;e[9]!==o||e[10]!==l||e[11]!==i||e[12]!==d||e[13]!==f?(b=Pq.map(M=>{const O=i&&f===M;return p.jsx("button",{"aria-pressed":O,onClick:()=>l({avatarShape:M})},M)}),e[9]=o,e[10]=l,e[11]=i,e[12]=d,e[13]=f,e[14]=b):b=e[14];let C;e[21]!==o||e[22]!==l||e[23]!==i||e[24]!==d?(C=DQ.map(M=>{const R=i&&d===M.id,S=i&&d===M.id,T=i&&d===M.id;return p.jsx("button",{"aria-pressed":R,onClick:()=>l({avatarColor:M.id}),className:S?"selected":"",title:T?"selected":""},M.id)}),e[21]=o,e[22]=l,e[23]=i,e[24]=d,e[25]=C):C=e[25];return p.jsxs("div",{children:[b,C]})}class O4n{}';
 const STOCK_BOT_SETTINGS_ROOT = 'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
+const STOCK_BOT_OVERVIEW_COMPUTER = 'children:[l,S?p.jsx(b4n,{agent:t,onOpenAgentChat:f}):null';
+const OPENBOT_BOT_OVERVIEW_COMPUTER = 'children:[window.openbotProtocol?.schemaVersion===1&&window.openbotProtocol?.mode==="local-protocol"?p.jsx("div",{"data-openbot-bot-overview-computer-host":!0}):l,S?p.jsx(b4n,{agent:t,onOpenAgentChat:f}):null';
 const STOCK_SETTINGS_ROOT = 'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const STOCK_ROSTER_CONNECT_GATE = 'Ve!=null&&F.connect()';
 const STOCK_ACCOUNT_SCOPED_CONNECT_GATE = 'for(const it of Ee)(Ve!=null||!Me.has(it))&&it.connect?.()';
@@ -104,6 +106,7 @@ const SYNTHETIC_VENDOR_RENDERER = [
   STOCK_NEW_BOT_COMMIT,
   STOCK_NEW_BOT_CREATE_RESOLVE,
   STOCK_NEW_BOT_CREATE_DISPATCH,
+  STOCK_BOT_OVERVIEW_COMPUTER,
   STOCK_M4N_FRAGMENT,
   STOCK_BOT_SETTINGS_ROOT,
   STOCK_CLIENT_RESTORE,
@@ -1747,7 +1750,7 @@ test("the explicit local protocol bypasses only the native onboarding child", ()
       preserved,
     );
   }
-  assert.equal((patched.match(/mode==="local-protocol"/g) ?? []).length, 3);
+  assert.equal((patched.match(/mode==="local-protocol"/g) ?? []).length, 4);
   assert.doesNotMatch(patched, /window\.openbotProtocol[^}]+Upe|window\.openbotProtocol[^}]+checking/);
 });
 
@@ -2536,6 +2539,33 @@ test("M4n transform has an exact inverse and fails closed on every segment ancho
   );
 });
 
+test("native View Bot overview mounts one local Computer host and round-trips its exact anchor", () => {
+  const rendererPatch = require(patchPath);
+  assert.equal(typeof rendererPatch.patchBotOverviewSource, "function");
+  assert.equal(typeof rendererPatch.reverseBotOverviewSource, "function");
+  const stock = `before;${STOCK_BOT_OVERVIEW_COMPUTER};after`;
+  const patched = rendererPatch.patchBotOverviewSource(stock);
+  assert.equal((patched.match(/data-openbot-bot-overview-computer-host/g) ?? []).length, 1);
+  assert.match(patched, /window\.openbotProtocol\?\.schemaVersion===1&&window\.openbotProtocol\?\.mode==="local-protocol"/);
+  assert.equal(rendererPatch.reverseBotOverviewSource(patched), stock);
+  assert.throws(() => rendererPatch.patchBotOverviewSource(patched), /already|patched|anchor/i);
+  assert.throws(() => rendererPatch.reverseBotOverviewSource(stock), /already|stock|anchor/i);
+  for (const invalid of [
+    "before;missing;after",
+    `before;${STOCK_BOT_OVERVIEW_COMPUTER}${STOCK_BOT_OVERVIEW_COMPUTER};after`,
+    `before;${STOCK_BOT_OVERVIEW_COMPUTER};${OPENBOT_BOT_OVERVIEW_COMPUTER};after`,
+  ]) {
+    assert.throws(
+      () => rendererPatch.patchBotOverviewSource(invalid),
+      /missing|not found|ambiguous|mixed|already|patched/i,
+    );
+  }
+  assert.throws(
+    () => rendererPatch.reverseBotOverviewSource(`${patched}${OPENBOT_BOT_OVERVIEW_COMPUTER}`),
+    /ambiguous|duplicate|mixed/i,
+  );
+});
+
 test("renderer onboarding has no local storage authority and the native Power subtree has no Computer controls", () => {
   const source = fs.readFileSync(botUiPath, "utf8");
   const patchSource = fs.readFileSync(patchPath, "utf8");
@@ -2591,6 +2621,7 @@ test("the pinned native renderer patch fails closed on hash drift and every ambi
     ["composer model picker host", STOCK_PROMPT_TRAILING],
     ["new bot recipient", STOCK_NEW_BOT_RECIPIENT],
     ["new bot commit", STOCK_NEW_BOT_COMMIT],
+    ["View Bot overview Computer host", STOCK_BOT_OVERVIEW_COMPUTER],
     ["bot settings host", STOCK_BOT_SETTINGS_ROOT],
     ["client restore", STOCK_CLIENT_RESTORE],
     ["roster connect", STOCK_ROSTER_CONNECT_GATE],

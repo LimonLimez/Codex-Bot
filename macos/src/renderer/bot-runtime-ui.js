@@ -2621,6 +2621,7 @@
         sidebarHost: null,
         composerHost: null,
         nativeComposerHost: null,
+        nativeBotOverviewHost: null,
         nativeBotSettingsHost: null,
         nativeConnectionsHost: null,
       });
@@ -2660,12 +2661,14 @@
       }
     }
     const nativeComposerHost = documentRef.querySelector("[data-openbot-model-picker-host]");
+    const nativeBotOverviewHost = documentRef.querySelector("[data-openbot-bot-overview-computer-host]");
     const nativeBotSettingsHost = documentRef.querySelector("[data-openbot-bot-settings-host]");
     const nativeConnectionsHost = documentRef.querySelector("[data-openbot-connections-host]");
     return Object.freeze({
       sidebarHost,
       composerHost,
       nativeComposerHost,
+      nativeBotOverviewHost,
       nativeBotSettingsHost,
       nativeConnectionsHost,
     });
@@ -3153,7 +3156,6 @@
         statusRow,
         computerRow,
         computerGrants,
-        desktopHost,
       );
     }
     const connectionsSettings = element(documentRef, "section", "codex-ai-connections");
@@ -3360,6 +3362,7 @@
       resolveProviderRefreshDisposed = resolve;
     });
     let localDesktopView = null;
+    let localDesktopViewHost = null;
     let localDesktopSelection = undefined;
     let lastSnapshot = null;
     let advancedViewExpanded = false;
@@ -3476,6 +3479,7 @@
         sidebarHost,
         composerHost,
         nativeComposerHost,
+        nativeBotOverviewHost,
         nativeBotSettingsHost,
         nativeConnectionsHost,
       } = findUiMounts(documentRef);
@@ -3502,6 +3506,19 @@
         if (nativeBotSettings.parentElement !== nativeBotSettingsHost) {
           nativeBotSettingsHost.append?.(nativeBotSettings);
         }
+      } else if (nativeProtocolMode) {
+        nativeBotSettings.remove?.();
+      }
+      if (nativeProtocolMode && nativeBotOverviewHost) {
+        if (localDesktopViewHost !== null && localDesktopViewHost !== nativeBotOverviewHost) {
+          localDesktopView?.dispose?.();
+          localDesktopView = null;
+          localDesktopViewHost = null;
+          localDesktopSelection = undefined;
+        }
+        if (desktopHost.parentElement !== nativeBotOverviewHost) {
+          nativeBotOverviewHost.append?.(desktopHost);
+        }
         if (!localDesktopView
           && typeof windowRef.OpenBotLocalDesktopView?.createLocalDesktopView === "function") {
           try {
@@ -3510,14 +3527,16 @@
               windowRef,
               container: desktopHost,
             });
+            localDesktopViewHost = nativeBotOverviewHost;
             localDesktopSelection = null;
           } catch {}
         }
         synchronizeLocalDesktop(lastSnapshot);
       } else if (nativeProtocolMode) {
-        nativeBotSettings.remove?.();
+        desktopHost.remove?.();
         localDesktopView?.dispose?.();
         localDesktopView = null;
+        localDesktopViewHost = null;
         localDesktopSelection = undefined;
       }
       if (nativeProtocolMode && nativeConnectionsHost) {
@@ -5198,6 +5217,7 @@
         providerLoginPromptUnsubscribe = null;
         localDesktopView?.dispose?.();
         localDesktopView = null;
+        localDesktopViewHost = null;
         reasoningView.dispose();
         controller.dispose();
         newBotSetup.remove?.();

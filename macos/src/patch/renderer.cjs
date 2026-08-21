@@ -144,6 +144,10 @@ const VENDOR_BOT_SETTINGS_ROOT =
   'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
 const OPENBOT_BOT_SETTINGS_ROOT =
   'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B,p.jsx("div",{"data-openbot-bot-settings-host":!0})]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
+const VENDOR_BOT_OVERVIEW_COMPUTER =
+  'children:[l,S?p.jsx(b4n,{agent:t,onOpenAgentChat:f}):null';
+const OPENBOT_BOT_OVERVIEW_COMPUTER =
+  'children:[window.openbotProtocol?.schemaVersion===1&&window.openbotProtocol?.mode==="local-protocol"?p.jsx("div",{"data-openbot-bot-overview-computer-host":!0}):l,S?p.jsx(b4n,{agent:t,onOpenAgentChat:f}):null';
 const VENDOR_SETTINGS_ROOT =
   'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const OPENBOT_SETTINGS_ROOT =
@@ -735,6 +739,55 @@ function reverseNewBotCreatePayloadSource(source) {
   throw new Error("New Bot create payload inverse anchors are mixed or missing");
 }
 
+function patchBotOverviewSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("Bot overview source must be a string");
+  }
+  const stock = countAnchorOccurrences(source, VENDOR_BOT_OVERVIEW_COMPUTER);
+  const openbot = countAnchorOccurrences(source, OPENBOT_BOT_OVERVIEW_COMPUTER);
+  if (stock > 1 || openbot > 1) {
+    throw new Error("Bot overview anchor is ambiguous");
+  }
+  if (openbot > 0) {
+    throw new Error("Bot overview is already patched or mixed");
+  }
+  if (stock !== 1) {
+    throw new Error("Bot overview anchor not found");
+  }
+  return replaceUnique(
+    source,
+    VENDOR_BOT_OVERVIEW_COMPUTER,
+    OPENBOT_BOT_OVERVIEW_COMPUTER,
+    "Grok native View Bot overview Computer host",
+  );
+}
+
+function reverseBotOverviewSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("Bot overview source must be a string");
+  }
+  const stock = countAnchorOccurrences(source, VENDOR_BOT_OVERVIEW_COMPUTER);
+  const openbot = countAnchorOccurrences(source, OPENBOT_BOT_OVERVIEW_COMPUTER);
+  if (stock > 1 || openbot > 1) {
+    throw new Error("Bot overview inverse anchor is ambiguous");
+  }
+  if (stock > 0 && openbot > 0) {
+    throw new Error("Bot overview inverse anchors are mixed");
+  }
+  if (stock === 1) {
+    throw new Error("Bot overview is already reversed");
+  }
+  if (openbot !== 1) {
+    throw new Error("Bot overview inverse anchor not found");
+  }
+  return replaceUnique(
+    source,
+    OPENBOT_BOT_OVERVIEW_COMPUTER,
+    VENDOR_BOT_OVERVIEW_COMPUTER,
+    "OpenBot native View Bot overview Computer host",
+  );
+}
+
 function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSET_SHA256) {
   if (typeof source !== "string" || source.length < 1) {
     throw new Error("Grok renderer asset is invalid");
@@ -832,6 +885,7 @@ function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSE
     patched,
     expectedSha256 !== VENDOR_RENDERER_ASSET_SHA256,
   );
+  patched = patchBotOverviewSource(patched);
   return replaceUnique(
     patched,
     VENDOR_BOT_SETTINGS_ROOT,
@@ -983,6 +1037,7 @@ module.exports = {
   patchNewBotCharacterEditorSource,
   patchNewBotAvatarPickerSource,
   patchNewBotCreatePayloadSource,
+  patchBotOverviewSource,
   patchRenderer,
   patchRendererIndexSource,
   patchVendorRendererSource,
@@ -992,6 +1047,7 @@ module.exports = {
   reverseNewBotCharacterEditorSource,
   reverseNewBotCreatePayloadSource,
   reverseNewBotAvatarPickerSource,
+  reverseBotOverviewSource,
   validateAvatarAccentPath,
   mergeNewBotAvatarSelection,
 };

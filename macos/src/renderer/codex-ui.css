@@ -203,15 +203,19 @@ body.light {
   padding: 0;
 }
 
-.codex-native-bot-settings .openbot-local-desktop-host {
+.codex-native-bot-settings .openbot-local-desktop-host,
+.codex-bot-desktop-host.openbot-local-desktop-host {
   --openbot-shell-line: var(--codex-border);
   --openbot-shell-panel: var(--codex-input);
   --openbot-shell-muted: var(--codex-muted);
+  --openbot-shell-text: var(--codex-text);
+  width: 100%;
   min-height: 220px;
   padding: 0;
 }
 
-.codex-native-bot-settings .openbot-local-desktop-view {
+.codex-native-bot-settings .openbot-local-desktop-view,
+.codex-bot-desktop-host .openbot-local-desktop-view {
   height: 220px;
   border-radius: 10px;
   box-shadow: none;

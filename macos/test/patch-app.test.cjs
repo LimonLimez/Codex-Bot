@@ -17,6 +17,8 @@ const STOCK_PROMPT_TRAILING = 'se=p.jsx("div",{className:ne,ref:d,style:X.style,
 const STOCK_NEW_BOT_RECIPIENT = 'function q2e(n){return n.kind==="agent"?{kind:"agent",id:n.agent.id,name:n.agent.name,avatarDataUrl:n.agent.avatarDataUrl}:{kind:"new",name:n.kind==="create"?n.name:Jut}}';
 const STOCK_NEW_BOT_COMMIT = 'he=x.useCallback(Ee=>{if(Ee.type==="noop")return;const Me=Ie(),Ae=Me.prompt.trim().length>0||Me.attachmentPaths.length>0;if(S(),r(),Ee.type==="single"){if(Ee.recipient.kind==="new"){Ae?Ne(Ee.recipient.name,Me):Te(Ee.recipient,"");return}Ae&&ve(Ee.recipient.id,Me),t(Ee.recipient.id);return}xe(Ee.recipients,"",[],Ae?Me:void 0)},[Ie,S,r,Ne,Te,xe,ve,t]';
 const STOCK_BOT_SETTINGS_ROOT = 'let q;return e[43]!==j||e[44]!==B?(q=p.jsxs("div",{className:m,children:[j,B]}),e[43]=j,e[44]=B,e[45]=q):q=e[45],q}';
+const STOCK_BOT_OVERVIEW_COMPUTER = 'children:[l,S?p.jsx(b4n,{agent:t,onOpenAgentChat:f}):null';
+const OPENBOT_BOT_OVERVIEW_COMPUTER = 'children:[window.openbotProtocol?.schemaVersion===1&&window.openbotProtocol?.mode==="local-protocol"?p.jsx("div",{"data-openbot-bot-overview-computer-host":!0}):l,S?p.jsx(b4n,{agent:t,onOpenAgentChat:f}):null';
 const STOCK_SETTINGS_ROOT = 'let h;return e[13]!==o?(h=t.jsxs("div",{className:d,children:[o,f,m,r,u,c]}),e[13]=o,e[14]=h):h=e[14],h}';
 const STOCK_LOCAL_IDENTITY_ANCHORS = [
   'const Bgt={slice:"send-journal",schemaVersion:2,scope:"client-persisted",accountSensitive:!0}',
@@ -50,7 +52,7 @@ const {
   reverseAvatarCatalogSource,
   validateAvatarAccentPath,
 } = rendererPatch;
-const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_OVERVIEW_COMPUTER}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
 const SYNTHETIC_VENDOR_RENDERER_SHA256 = crypto
   .createHash("sha256")
   .update(SYNTHETIC_VENDOR_RENDERER, "utf8")
@@ -386,6 +388,25 @@ test("patch-app renderer fixture carries the exact avatar registry contract", ()
     new RegExp(OPENBOT_VISIBLE_SHAPES.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
   assert.equal(reverseAvatarCatalogSource(patched), SYNTHETIC_VENDOR_RENDERER);
+});
+
+test("patch-app native View Bot overview keeps the stock branch and adds one local host", () => {
+  const patched = rendererPatch.patchBotOverviewSource(`before;${STOCK_BOT_OVERVIEW_COMPUTER};after`);
+  assert.equal((patched.match(/data-openbot-bot-overview-computer-host/g) ?? []).length, 1);
+  assert.match(patched, /window\.openbotProtocol\?\.schemaVersion===1&&window\.openbotProtocol\?\.mode==="local-protocol"/);
+  assert.equal(rendererPatch.reverseBotOverviewSource(patched), `before;${STOCK_BOT_OVERVIEW_COMPUTER};after`);
+  assert.throws(
+    () => rendererPatch.patchBotOverviewSource(`before;${STOCK_BOT_OVERVIEW_COMPUTER}${STOCK_BOT_OVERVIEW_COMPUTER};after`),
+    /ambiguous|duplicate/i,
+  );
+  assert.throws(
+    () => rendererPatch.patchBotOverviewSource(`before;${OPENBOT_BOT_OVERVIEW_COMPUTER};after`),
+    /already|patched/i,
+  );
+  assert.throws(
+    () => rendererPatch.reverseBotOverviewSource(`before;${STOCK_BOT_OVERVIEW_COMPUTER};after`),
+    /already|stock|anchor/i,
+  );
 });
 
 test("patch-app carries one reversible face-safe Sand accent contract", () => {
