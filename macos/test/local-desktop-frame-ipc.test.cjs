@@ -22,6 +22,11 @@ async function tick() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+function handled(promise) {
+  void promise.catch(() => {});
+  return promise;
+}
+
 function computer(botId, targetId, generation = 1, state = "ready", mode = "local") {
   return Object.freeze({
     botId,
@@ -137,6 +142,243 @@ function fixture({ captureDisplayFrame, read } = {}) {
     timers,
     setIntervalFn,
     clearIntervalFn,
+  };
+}
+
+function publicSession(record, sessionGeneration = 4, pageGeneration = 2) {
+  return Object.freeze({
+    botId: record.botId,
+    targetId: record.computer.localProfileId,
+    targetGeneration: record.computer.generation,
+    sessionGeneration,
+    pageGeneration,
+    partition: `persist:openbot-local-${record.computer.localProfileId.slice(6)}`,
+    workspaceId: `workspace-${record.computer.localProfileId.slice(6)}`,
+    surface: Object.freeze({ cssWidth: 1280, cssHeight: 800 }),
+    presentations: Object.freeze({
+      preview: Object.freeze({ width: 640, height: 400, fps: 1 }),
+      interactive: Object.freeze({ width: 960, height: 600 }),
+    }),
+    state: "ready",
+  });
+}
+
+function richFrame(identity, {
+  frameId = "frame-rich",
+  frameSequence = 1,
+  sessionGeneration = 4,
+  pageGeneration = 2,
+  presentation = "preview",
+  byte = 1,
+} = {}) {
+  return Object.freeze({
+    botId: identity.botId,
+    targetId: identity.targetId,
+    targetGeneration: identity.targetGeneration,
+    sessionGeneration,
+    pageGeneration,
+    frameId,
+    frameSequence,
+    presentation,
+    width: presentation === "interactive" ? 960 : 640,
+    height: presentation === "interactive" ? 600 : 400,
+    mimeType: "image/png",
+    bytes: Uint8Array.from([byte, byte + 1, byte + 2]),
+  });
+}
+
+function enableInteractive(value, overrides = {}) {
+  const state = {
+    closeCalls: [],
+    dispatchCalls: [],
+    frameSequences: new Map(),
+    interactiveCalls: 0,
+    pages: new Map([[BOT_A, 2], [BOT_B, 2]]),
+    previewCalls: 0,
+  };
+  const nextSequence = (botId) => {
+    const next = (state.frameSequences.get(botId) || 0) + 1;
+    state.frameSequences.set(botId, next);
+    return next;
+  };
+  value.manager.open = async (record) => overrides.open?.(record, state)
+    ?? publicSession(record, 4, state.pages.get(record.botId) || 2);
+  value.manager.retry = async (record) => overrides.retry?.(record, state)
+    ?? publicSession(record, 5, state.pages.get(record.botId) || 2);
+  value.manager.capturePreviewFrame = async (identity) => {
+    state.previewCalls += 1;
+    if (overrides.capturePreviewFrame) return overrides.capturePreviewFrame(identity, state.previewCalls, state);
+    const sequence = nextSequence(identity.botId);
+    return richFrame(identity, {
+      frameId: `frame-preview-${sequence}`,
+      frameSequence: sequence,
+      pageGeneration: state.pages.get(identity.botId) || 2,
+      presentation: "preview",
+      byte: sequence,
+    });
+  };
+  value.manager.captureInteractiveFrame = async (identity) => {
+    state.interactiveCalls += 1;
+    if (overrides.captureInteractiveFrame) {
+      return overrides.captureInteractiveFrame(identity, state.interactiveCalls, state);
+    }
+    const sequence = nextSequence(identity.botId);
+    return richFrame(identity, {
+      frameId: `frame-interactive-${sequence}`,
+      frameSequence: sequence,
+      pageGeneration: state.pages.get(identity.botId) || 2,
+      presentation: "interactive",
+      byte: sequence,
+    });
+  };
+  value.manager.dispatchMouseEvent = async (input) => {
+    state.dispatchCalls.push(input);
+    if (overrides.dispatchMouseEvent) return overrides.dispatchMouseEvent(input, state);
+    return Object.freeze({
+      botId: input.botId,
+      targetId: input.targetId,
+      targetGeneration: input.targetGeneration,
+      sessionGeneration: input.sessionGeneration,
+      pageGeneration: input.pageGeneration,
+      frameId: input.frameId,
+      frameSequence: input.frameSequence,
+      inputSequence: input.inputSequence,
+    });
+  };
+  value.manager.dispatchKeyEvent = async (input) => {
+    state.dispatchCalls.push(input);
+    if (overrides.dispatchKeyEvent) return overrides.dispatchKeyEvent(input, state);
+    return value.manager.dispatchMouseEvent(input);
+  };
+  value.manager.insertText = async (input) => {
+    state.dispatchCalls.push(input);
+    if (overrides.insertText) return overrides.insertText(input, state);
+    return value.manager.dispatchMouseEvent(input);
+  };
+  value.manager.imeSetComposition = async (input) => {
+    state.dispatchCalls.push(input);
+    if (overrides.imeSetComposition) return overrides.imeSetComposition(input, state);
+    return value.manager.dispatchMouseEvent(input);
+  };
+  value.manager.close = async (botId) => {
+    state.closeCalls.push(botId);
+    return overrides.close?.(botId, state);
+  };
+  return state;
+}
+
+async function prepareInteractive(value, sender = value.first.sender, botId = BOT_A, viewGeneration = 1) {
+  const { LOCAL_DESKTOP_FRAME_CHANNELS } = require(frameIpcPath);
+  const record = value.states.get(botId);
+  const event = ipcEvent(sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId, viewGeneration });
+  const request = Object.freeze({
+    botId,
+    targetId: record.computer.localProfileId,
+    targetGeneration: record.computer.generation,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    viewGeneration,
+  });
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(event, {
+    ...request,
+    presentation: "interactive",
+  });
+  const frameValue = sender === value.first.sender
+    ? frameEvents(value).at(-1).value
+    : value.second.sent.filter((entry) => entry.channel === "openbot-local-frame:frame").at(-1).value;
+  const lease = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(event, request);
+  return { event, frame: frameValue, lease, request };
+}
+
+function holdFirstManagerOpen(value, { reject = false } = {}) {
+  const entered = deferred();
+  const release = deferred();
+  const firstSettled = deferred();
+  const active = new Set();
+  const openCalls = [];
+  const sessionGenerations = new Map();
+  let count = 0;
+  const interactiveState = enableInteractive(value, {
+    async open(record) {
+      count += 1;
+      const call = count;
+      const token = `${record.botId}:${record.computer.generation}`;
+      openCalls.push(token);
+      if (call === 1) {
+        entered.resolve();
+        await release.promise;
+        if (reject) {
+          firstSettled.resolve();
+          throw Object.assign(new Error("held open rejected"), { code: "OPENBOT_LOCAL_BROWSER_UNAVAILABLE" });
+        }
+      }
+      const sessionGeneration = (sessionGenerations.get(record.botId) || 3) + 1;
+      sessionGenerations.set(record.botId, sessionGeneration);
+      active.add(token);
+      if (call === 1) firstSettled.resolve();
+      return publicSession(record, sessionGeneration, 2);
+    },
+    async close(botId) {
+      await firstSettled.promise;
+      for (const token of [...active]) {
+        if (token.startsWith(`${botId}:`)) active.delete(token);
+      }
+    },
+    capturePreviewFrame(identity, call) {
+      return richFrame(identity, {
+        frameId: `frame-held-open-${call}`,
+        frameSequence: call,
+        sessionGeneration: sessionGenerations.get(identity.botId) || 4,
+      });
+    },
+  });
+  return { active, entered, interactiveState, openCalls, release };
+}
+
+function holdManagerOpenCalls(value, { heldCalls = [1, 2], rejectedCalls = [] } = {}) {
+  const gates = new Map();
+  const active = new Map();
+  const openCalls = [];
+  let count = 0;
+  const gate = (call) => {
+    if (!gates.has(call)) gates.set(call, { entered: deferred(), release: deferred() });
+    return gates.get(call);
+  };
+  const interactiveState = enableInteractive(value, {
+    async open(record) {
+      count += 1;
+      const call = count;
+      openCalls.push(`${record.botId}:${record.computer.generation}:${call}`);
+      if (heldCalls.includes(call)) {
+        gate(call).entered.resolve();
+        await gate(call).release.promise;
+      }
+      if (rejectedCalls.includes(call)) {
+        throw Object.assign(new Error("held sibling open rejected"), { code: "OPENBOT_LOCAL_BROWSER_UNAVAILABLE" });
+      }
+      active.set(call, record.botId);
+      return publicSession(record, 4, 2);
+    },
+    close(botId) {
+      for (const [call, activeBotId] of active) {
+        if (activeBotId === botId) active.delete(call);
+      }
+    },
+    capturePreviewFrame(identity, call) {
+      return richFrame(identity, {
+        frameId: `frame-sibling-open-${call}`,
+        frameSequence: call,
+        sessionGeneration: 4,
+      });
+    },
+  });
+  return {
+    activeBots: () => [...active.values()].sort(),
+    entered: (call) => gate(call).entered.promise,
+    interactiveState,
+    openCalls,
+    release: (call) => gate(call).release.resolve(),
   };
 }
 
@@ -642,4 +884,1032 @@ test("computer generation changes and renderer destruction invalidate in-flight 
   installed.dispose();
   assert.equal(value.handlers.size, 0);
   assert.equal(value.computerBoundary.listenerCount("changed"), 0);
+});
+
+test("interactive frame IPC exposes rich generations, owns one control lease, and coalesces input capture", async () => {
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, LOCAL_DESKTOP_FRAME_EVENT_CHANNEL, LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const handlers = new Map();
+  const sent = [];
+  const sender = new EventEmitter();
+  const senderFrame = { processId: 31, routingId: 47, isDestroyed: () => false };
+  sender.mainFrame = senderFrame;
+  sender.isDestroyed = () => false;
+  sender.send = (channel, value) => sent.push({ channel, value });
+  const window = { isDestroyed: () => false, webContents: sender };
+  const computerRecord = computer(BOT_A, LOCAL_A, 7);
+  let captureCalls = 0;
+  let currentPageGeneration = 2;
+  const manager = {
+    ownsWindow() { return false; },
+    async open() {
+      return {
+        botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+        sessionGeneration: 4, pageGeneration: currentPageGeneration,
+        partition: "persist:openbot-local-private", workspaceId: "workspace-private",
+        surface: { cssWidth: 1280, cssHeight: 800 },
+        presentations: {
+          preview: { width: 640, height: 400, fps: 1 },
+          interactive: { width: 960, height: 600 },
+        },
+      };
+    },
+    async captureInteractiveFrame() {
+      captureCalls += 1;
+      return {
+        botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+        sessionGeneration: 4, pageGeneration: currentPageGeneration,
+        frameId: `frame-rich-${captureCalls}`, frameSequence: 9 + captureCalls,
+        presentation: "interactive", width: 960, height: 600,
+        mimeType: "image/png", bytes: Uint8Array.from([captureCalls]),
+      };
+    },
+    async capturePreviewFrame() {
+      return {
+        botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+        sessionGeneration: 4, pageGeneration: currentPageGeneration,
+        frameId: "frame-preview", frameSequence: 9,
+        presentation: "preview", width: 640, height: 400,
+        mimeType: "image/png", bytes: Uint8Array.from([9]),
+      };
+    },
+    async dispatchMouseEvent(value) {
+      return { ...value, sessionGeneration: 4, pageGeneration: 2, frameId: value.frameId,
+        frameSequence: value.frameSequence, inputSequence: value.inputSequence };
+    },
+    async navigate(value) {
+      assert.equal(value.sessionGeneration, 4);
+      currentPageGeneration = 3;
+      return {
+        botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+        sessionGeneration: 4, pageGeneration: currentPageGeneration,
+      };
+    },
+    async goBack(value) {
+      assert.equal(value.sessionGeneration, 4);
+      assert.equal(value.pageGeneration, 3);
+      currentPageGeneration = 4;
+      return { ...value, pageGeneration: 4 };
+    },
+  };
+  const boundary = new EventEmitter();
+  boundary.read = async () => computerRecord;
+  const electron = {
+    ipcMain: {
+      handle(channel, handler) { handlers.set(channel, handler); },
+      removeHandler(channel) { handlers.delete(channel); },
+    },
+    BrowserWindow: { fromWebContents(value) { return value === sender ? window : null; } },
+  };
+  const installed = installLocalDesktopFrameIpc({ electron, manager, computerBoundary: boundary });
+  const event = { sender, senderFrame };
+
+  await handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  const frame = sent.find((entry) => entry.channel === LOCAL_DESKTOP_FRAME_EVENT_CHANNEL).value;
+  assert.deepEqual(Object.keys(frame).sort(), [
+    "botId", "bytes", "height", "mimeType", "sequence", "targetGeneration", "targetId", "viewGeneration", "width",
+  ]);
+  assert.equal(frame.sequence, 1);
+
+  await handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(event, {
+    botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+    sessionGeneration: 4, pageGeneration: 2, viewGeneration: 1, presentation: "interactive",
+  });
+  const interactive = sent.filter((entry) => entry.channel === LOCAL_DESKTOP_FRAME_EVENT_CHANNEL).at(-1).value;
+  let lease;
+  try {
+    lease = await handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(event, {
+      botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+      sessionGeneration: 4, pageGeneration: 2, viewGeneration: 1,
+    });
+  } catch (error) {
+    throw error;
+  }
+  assert.equal(lease.controlGeneration, 1);
+  const input = {
+    botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+    sessionGeneration: 4, pageGeneration: 2, viewGeneration: 1,
+    frameId: interactive.frameId, frameSequence: interactive.frameSequence,
+    inputSequence: 1, controlGeneration: lease.controlGeneration,
+    type: "mouseMoved", x: 10, y: 20,
+  };
+  await handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(event, input);
+  assert.equal(captureCalls >= 2, true);
+  assert.equal(sent.filter((entry) => entry.channel === LOCAL_DESKTOP_STATUS_EVENT_CHANNEL).at(-1).value.inputSequence, 1);
+  await handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.releaseControl)(event, {
+    botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+    sessionGeneration: 4, pageGeneration: 2, viewGeneration: 1,
+    controlGeneration: lease.controlGeneration,
+  });
+
+  const navigation = await handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.navigate)(event, {
+    botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+    sessionGeneration: 4, pageGeneration: 2, viewGeneration: 1,
+    url: "https://example.com/next",
+  });
+  assert.equal(navigation.pageGeneration, 3);
+  assert.equal(sent.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), true);
+  await handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.goBack)(event, {
+    botId: BOT_A, targetId: LOCAL_A, targetGeneration: 7,
+    sessionGeneration: 4, pageGeneration: 3, viewGeneration: 1,
+  });
+
+  installed.dispose();
+});
+
+test("retry uses the manager retry lifecycle when the interactive core provides it", async () => {
+  const value = fixture();
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  let retryCalls = 0;
+  value.manager.retry = async (record) => {
+    retryCalls += 1;
+    assert.equal(record.botId, BOT_A);
+  };
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry)(event, { botId: BOT_A, viewGeneration: 2 });
+  assert.equal(retryCalls, 1);
+  installed.dispose();
+});
+
+test("real-manager rich preview is projected to the exact legacy DTO consumed by the shipping renderer", async () => {
+  const value = fixture();
+  enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_CHANNELS,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  let frameListener = null;
+  let statusListener = null;
+  const draws = [];
+  const context = {
+    clearRect() {},
+    drawImage(...args) { draws.push(args); },
+  };
+  function element(tagName) {
+    return {
+      tagName: tagName.toUpperCase(),
+      children: [],
+      attributes: {},
+      className: "",
+      hidden: false,
+      width: 0,
+      height: 0,
+      append(...children) { this.children.push(...children); },
+      setAttribute(name, fieldValue) { this.attributes[name] = String(fieldValue); },
+      addEventListener() {},
+      getContext(kind) { return tagName === "canvas" && kind === "2d" ? context : null; },
+      remove() { this.removed = true; },
+    };
+  }
+  const facade = {
+    select: (request) => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), request),
+    retry: (request) => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.retry)(ipcEvent(value.first.sender), request),
+    clear: (request) => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(ipcEvent(value.first.sender), request),
+    onFrame(callback) { frameListener = callback; return () => { frameListener = null; }; },
+    onStatus(callback) { statusListener = callback; return () => { statusListener = null; }; },
+  };
+  value.first.sender.send = (channel, payload) => {
+    value.first.sent.push({ channel, value: payload });
+    if (channel === LOCAL_DESKTOP_FRAME_EVENT_CHANNEL) void frameListener?.(payload);
+    if (channel === LOCAL_DESKTOP_STATUS_EVENT_CHANNEL) statusListener?.(payload);
+  };
+  const documentRef = { createElement: element };
+  const container = element("div");
+  const windowRef = {
+    Blob,
+    openbotLocalDesktop: facade,
+    async createImageBitmap() { return { close() {} }; },
+  };
+  const { createLocalDesktopView } = require("../src/renderer/openbot-local-desktop-view.js");
+  const mounted = createLocalDesktopView({ documentRef, windowRef, container });
+  mounted.selectBot(BOT_A);
+  await tick();
+
+  const publishedFrame = frameEvents(value).at(-1).value;
+  const publishedStatus = statusEvents(value).at(-1).value;
+  assert.deepEqual(Object.keys(publishedFrame).sort(), [
+    "botId", "bytes", "height", "mimeType", "sequence", "targetGeneration", "targetId", "viewGeneration", "width",
+  ]);
+  assert.deepEqual(Object.keys(publishedStatus).sort(), [
+    "botId", "code", "state", "targetGeneration", "targetId", "viewGeneration",
+  ]);
+  assert.equal(draws.length, 1, "the exact production preview must be accepted by the current renderer validator");
+  mounted.dispose();
+  await tick();
+  installed.dispose();
+});
+
+test("an interactive presentation request cannot be satisfied by a held preview capture", async () => {
+  const preview = deferred();
+  const value = fixture();
+  const interactiveState = enableInteractive(value, {
+    capturePreviewFrame() { return preview.promise; },
+    captureInteractiveFrame(identity) {
+      return richFrame(identity, {
+        frameId: "frame-interactive-current",
+        frameSequence: 2,
+        presentation: "interactive",
+        byte: 9,
+      });
+    },
+  });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const selected = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  await tick();
+  const switched = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(event, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    viewGeneration: 1,
+    presentation: "interactive",
+  });
+  preview.resolve(richFrame({ botId: BOT_A, targetId: LOCAL_A, targetGeneration: 1 }, {
+    frameId: "frame-preview-late",
+    frameSequence: 1,
+    presentation: "preview",
+  }));
+  await Promise.allSettled([selected, switched]);
+  assert.equal(interactiveState.interactiveCalls, 1);
+  assert.equal(frameEvents(value).at(-1)?.value.presentation, "interactive");
+  assert.equal(frameEvents(value).some((entry) => entry.value.frameId === "frame-preview-late"), false);
+  installed.dispose();
+});
+
+test("one exact target session grants control to only one renderer sender", async () => {
+  const value = fixture();
+  enableInteractive(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, { botId: BOT_A, viewGeneration: 1 });
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, { botId: BOT_A, viewGeneration: 1 });
+  const request = {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    viewGeneration: 1,
+  };
+  const firstLease = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(firstEvent, request);
+  let secondLease = null;
+  const firstAttempt = await Promise.resolve()
+    .then(() => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(secondEvent, request))
+    .then((lease) => { secondLease = lease; return "resolved"; }, () => "rejected");
+  if (secondLease) {
+    await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.releaseControl)(secondEvent, {
+      ...request,
+      controlGeneration: secondLease.controlGeneration,
+    });
+  }
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.releaseControl)(firstEvent, {
+    ...request,
+    controlGeneration: firstLease.controlGeneration,
+  });
+  const transferred = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(secondEvent, request);
+  assert.equal(firstAttempt, "rejected");
+  assert.notEqual(transferred.controlGeneration, firstLease.controlGeneration);
+  installed.dispose();
+});
+
+test("coordinate-only mouse input reaches the manager through the exact supported form", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const result = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+    ...current.request,
+    frameId: current.frame.frameId,
+    frameSequence: current.frame.frameSequence,
+    inputSequence: 1,
+    controlGeneration: current.lease.controlGeneration,
+    type: "mouseMoved",
+    coordinate: { x: 12, y: 34 },
+    coordinateSpace: "css-dip",
+    deviceScaleFactor: 1,
+  });
+  assert.equal(result.inputSequence, 1);
+  assert.equal(interactiveState.dispatchCalls.length, 1);
+  assert.deepEqual(interactiveState.dispatchCalls[0].coordinate, { x: 12, y: 34 });
+  installed.dispose();
+});
+
+test("clear and bot switch fence a held input at the manager session before it can take effect", async (t) => {
+  for (const scenario of ["clear", "switch"]) {
+    await t.test(scenario, async () => {
+      const entered = deferred();
+      const release = deferred();
+      let closed = false;
+      let effects = 0;
+      const value = fixture();
+      const interactiveState = enableInteractive(value, {
+        async dispatchMouseEvent(input) {
+          entered.resolve();
+          await release.promise;
+          if (closed) throw Object.assign(new Error("closed"), { code: "OPENBOT_LOCAL_INPUT_STALE" });
+          effects += 1;
+          return input;
+        },
+        close() { closed = true; },
+      });
+      const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+      const installed = installLocalDesktopFrameIpc(value);
+      const current = await prepareInteractive(value);
+      const pending = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+        ...current.request,
+        frameId: current.frame.frameId,
+        frameSequence: current.frame.frameSequence,
+        inputSequence: 1,
+        controlGeneration: current.lease.controlGeneration,
+        type: "mousePressed",
+        x: 12,
+        y: 34,
+        button: "left",
+      }).then(() => "resolved", () => "rejected");
+      await entered.promise;
+      if (scenario === "clear") {
+        await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(current.event, { viewGeneration: 2 });
+      } else {
+        await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(current.event, {
+          botId: BOT_B,
+          viewGeneration: 2,
+        });
+      }
+      const closedBeforeRelease = interactiveState.closeCalls.includes(BOT_A) && closed;
+      release.resolve();
+      const outcome = await pending;
+      assert.equal(closedBeforeRelease, true);
+      assert.equal(effects, 0);
+      assert.equal(outcome, "rejected");
+      installed.dispose();
+    });
+  }
+});
+
+test("a frame page-generation advance releases the old control lease before publication", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value, {
+    captureInteractiveFrame(identity, call) {
+      return richFrame(identity, {
+        frameId: `frame-page-${call + 1}`,
+        frameSequence: call + 1,
+        pageGeneration: call === 1 ? 2 : 3,
+        presentation: "interactive",
+        byte: call + 1,
+      });
+    },
+  });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  value.timers[0].callback();
+  await tick();
+  const advanced = frameEvents(value).at(-1).value;
+  assert.equal(advanced.pageGeneration, 3);
+  const outcome = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+    ...current.request,
+    pageGeneration: 3,
+    frameId: advanced.frameId,
+    frameSequence: advanced.frameSequence,
+    inputSequence: 1,
+    controlGeneration: current.lease.controlGeneration,
+    type: "mouseMoved",
+    x: 4,
+    y: 5,
+  }).then(() => "resolved", () => "rejected");
+  const replacement = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(current.event, {
+    ...current.request,
+    pageGeneration: 3,
+  });
+  assert.equal(outcome, "rejected");
+  assert.equal(interactiveState.dispatchCalls.length, 0);
+  assert.notEqual(replacement.controlGeneration, current.lease.controlGeneration);
+  installed.dispose();
+});
+
+test("sender destruction removes every exact navigation and lifecycle listener immediately", async () => {
+  const value = fixture();
+  enableInteractive(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  const names = [
+    "did-start-loading", "did-start-navigation", "did-navigate", "did-frame-navigate", "will-navigate",
+    "destroyed", "render-process-gone",
+  ];
+  assert.equal(names.every((name) => value.first.sender.listenerCount(name) === 1), true);
+  value.first.sender.destroyed = true;
+  value.first.sender.emit("destroyed");
+  assert.deepEqual(names.map((name) => value.first.sender.listenerCount(name)), [0, 0, 0, 0, 0, 0, 0]);
+  installed.dispose();
+});
+
+test("a distinct rich frame must strictly increase manager frameSequence", async () => {
+  const value = fixture();
+  enableInteractive(value, {
+    capturePreviewFrame(identity, call) {
+      return richFrame(identity, {
+        frameId: call === 1 ? "frame-sequence-one" : "frame-sequence-conflict",
+        frameSequence: 1,
+        presentation: "preview",
+        byte: call,
+      });
+    },
+  });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  value.timers[0].callback();
+  await tick();
+  assert.equal(frameEvents(value).length, 1);
+  assert.equal(frameEvents(value)[0].value.sequence, 1);
+  installed.dispose();
+});
+
+test("all optional input fields are validated locally before any manager effect", async (t) => {
+  const cases = [
+    ["mouse buttons", (base) => ({ ...base, type: "mouseMoved", x: 1, y: 2, buttons: 32 })],
+    ["mouse click count", (base) => ({ ...base, type: "mouseMoved", x: 1, y: 2, clickCount: 33 })],
+    ["mouse modifiers", (base) => ({ ...base, type: "mouseMoved", x: 1, y: 2, modifiers: 16 })],
+    ["mouse delta", (base) => ({ ...base, type: "mouseWheel", x: 1, y: 2, deltaX: 1_000_001 })],
+    ["coordinate space", (base) => ({ ...base, type: "mouseMoved", coordinate: { x: 1, y: 2 }, coordinateSpace: "physical" })],
+    ["device scale", (base) => ({ ...base, type: "mouseMoved", coordinate: { x: 1, y: 2 }, deviceScaleFactor: 2 })],
+    ["route field smuggling", (base) => ({ ...base, type: "mouseMoved", x: 1, y: 2, key: "a" })],
+    ["key bytes", (base) => ({ ...base, type: "keyDown", key: "a".repeat(129), code: "KeyA" })],
+    ["key boolean", (base) => ({ ...base, type: "keyDown", key: "a", code: "KeyA", autoRepeat: "yes" })],
+    ["virtual key code", (base) => ({ ...base, type: "keyDown", key: "a", code: "KeyA", windowsVirtualKeyCode: 65_536 })],
+    ["key location", (base) => ({ ...base, type: "keyDown", key: "a", code: "KeyA", location: 4 })],
+    ["IME replacement pair", (base) => ({
+      ...base,
+      type: "imeSetComposition",
+      text: "a",
+      selectionStart: 0,
+      selectionEnd: 1,
+      replacementStart: 0,
+    })],
+  ];
+  for (const [label, makeInput] of cases) {
+    await t.test(label, async () => {
+      const value = fixture();
+      const interactiveState = enableInteractive(value);
+      const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+      const installed = installLocalDesktopFrameIpc(value);
+      const current = await prepareInteractive(value);
+      const base = {
+        ...current.request,
+        frameId: current.frame.frameId,
+        frameSequence: current.frame.frameSequence,
+        inputSequence: 1,
+        controlGeneration: current.lease.controlGeneration,
+      };
+      const outcome = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, makeInput(base))
+        .then(() => "resolved", () => "rejected");
+      assert.equal(outcome, "rejected");
+      assert.equal(interactiveState.dispatchCalls.length, 0);
+      installed.dispose();
+    });
+  }
+});
+
+test("input accessors and proxies fail before the manager boundary", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const base = {
+    ...current.request,
+    frameId: current.frame.frameId,
+    frameSequence: current.frame.frameSequence,
+    inputSequence: 1,
+    controlGeneration: current.lease.controlGeneration,
+    type: "mouseMoved",
+    x: 1,
+    y: 2,
+  };
+  const accessor = { ...base };
+  Object.defineProperty(accessor, "modifiers", { enumerable: true, get() { throw new Error("private accessor"); } });
+  for (const hostile of [new Proxy(base, {}), accessor]) {
+    await assert.rejects(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, hostile), {
+      code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED",
+    });
+  }
+  assert.equal(interactiveState.dispatchCalls.length, 0);
+  installed.dispose();
+});
+
+test("switch owns and drains a held pre-publication open without closing the replacement bot", async () => {
+  const value = fixture();
+  const held = holdFirstManagerOpen(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const firstSelection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  await held.entered.promise;
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_B,
+    viewGeneration: 2,
+  });
+  const eventCount = value.first.sent.length;
+  held.release.resolve();
+  await firstSelection;
+  await tick();
+  const activeBeforeDispose = [...held.active].sort();
+  const noLatePublication = value.first.sent.length === eventCount;
+  const closeCalls = [...held.interactiveState.closeCalls];
+  await installed.dispose();
+
+  assert.deepEqual(closeCalls, [BOT_A]);
+  assert.deepEqual(activeBeforeDispose, [`${BOT_B}:1`]);
+  assert.equal(noLatePublication, true);
+});
+
+test("clear disposal and sender destruction own a held pre-publication open", async (t) => {
+  for (const scenario of ["clear", "dispose", "sender destruction"]) {
+    await t.test(scenario, async () => {
+      const value = fixture();
+      const held = holdFirstManagerOpen(value);
+      const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+      const installed = installLocalDesktopFrameIpc(value);
+      const event = ipcEvent(value.first.sender);
+      const selection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+        botId: BOT_A,
+        viewGeneration: 1,
+      });
+      await held.entered.promise;
+      const eventCount = value.first.sent.length;
+      let cleanup;
+      if (scenario === "clear") {
+        cleanup = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(event, { viewGeneration: 2 });
+      } else if (scenario === "dispose") {
+        cleanup = installed.dispose();
+      } else {
+        value.first.sender.destroyed = true;
+        value.first.sender.emit("destroyed");
+        cleanup = null;
+      }
+      let cleanupSettled = false;
+      void Promise.resolve(cleanup).then(() => { cleanupSettled = true; }, () => { cleanupSettled = true; });
+      await tick();
+      const drainedCleanupStayedPending = scenario === "sender destruction" || !cleanupSettled;
+      held.release.resolve();
+      await Promise.allSettled([selection, cleanup]);
+      await tick();
+      if (scenario === "sender destruction") await installed.dispose();
+      const activeAfterCleanup = [...held.active];
+      const closeCalls = [...held.interactiveState.closeCalls];
+      const noLatePublication = value.first.sent.length === eventCount;
+
+      assert.equal(drainedCleanupStayedPending, true);
+      assert.deepEqual(closeCalls, [BOT_A]);
+      assert.deepEqual(activeAfterCleanup, []);
+      assert.equal(noLatePublication, true);
+    });
+  }
+});
+
+test("same-bot generation replacement waits for held-open cleanup before reopening", async () => {
+  const value = fixture();
+  const held = holdFirstManagerOpen(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const firstSelection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  await held.entered.promise;
+  value.states.set(BOT_A, computer(BOT_A, LOCAL_A, 2));
+  const replacement = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 2,
+  });
+  await tick();
+  const openCallsBeforeRelease = [...held.openCalls];
+  held.release.resolve();
+  await Promise.all([firstSelection, replacement]);
+  const activeBeforeDispose = [...held.active].sort();
+  const closeCalls = [...held.interactiveState.closeCalls];
+  const publishedGenerations = frameEvents(value).map((entry) => entry.value.targetGeneration);
+  await installed.dispose();
+
+  assert.deepEqual(openCallsBeforeRelease, [`${BOT_A}:1`]);
+  assert.deepEqual(closeCalls, [BOT_A]);
+  assert.deepEqual(activeBeforeDispose, [`${BOT_A}:2`]);
+  assert.deepEqual(publishedGenerations, [2]);
+});
+
+test("rejected held open drains its cleanup owner before same-bot replacement", async () => {
+  const value = fixture();
+  const held = holdFirstManagerOpen(value, { reject: true });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  const firstSelection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  await held.entered.promise;
+  value.states.set(BOT_A, computer(BOT_A, LOCAL_A, 2));
+  const replacement = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 2,
+  });
+  await tick();
+  const openCallsBeforeRelease = [...held.openCalls];
+  held.release.resolve();
+  await Promise.all([firstSelection, replacement]);
+  const activeBeforeDispose = [...held.active].sort();
+  const closeCalls = [...held.interactiveState.closeCalls];
+  await installed.dispose();
+
+  assert.deepEqual(openCallsBeforeRelease, [`${BOT_A}:1`]);
+  assert.deepEqual(closeCalls, []);
+  assert.deepEqual(activeBeforeDispose, [`${BOT_A}:2`]);
+});
+
+test("clearing one sender adopts every same-bot sibling open and blocks late control", async () => {
+  const value = fixture();
+  const held = holdManagerOpenCalls(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+  const firstSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  const secondSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await Promise.all([held.entered(1), held.entered(2)]);
+  const firstEventCount = value.first.sent.length;
+  const secondEventCount = value.second.sent.length;
+  const cleared = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(firstEvent, { viewGeneration: 2 }));
+  held.release(1);
+  await tick();
+  held.release(2);
+  await Promise.allSettled([firstSelection, secondSelection, cleared]);
+  await tick();
+  const activeBeforeDispose = held.activeBots();
+  const closeCalls = [...held.interactiveState.closeCalls];
+  const noLatePublication = value.first.sent.length === firstEventCount
+    && value.second.sent.length === secondEventCount;
+  const controlOutcome = await Promise.resolve().then(() => (
+    value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(secondEvent, {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 4,
+      pageGeneration: 2,
+      viewGeneration: 1,
+    })
+  )).then(() => "resolved", () => "rejected");
+  await installed.dispose();
+
+  assert.deepEqual(closeCalls, [BOT_A]);
+  assert.deepEqual(activeBeforeDispose, []);
+  assert.equal(noLatePublication, true);
+  assert.equal(controlOutcome, "rejected");
+});
+
+test("same-bot sibling cleanup leaves a different-bot replacement active", async () => {
+  const value = fixture();
+  const held = holdManagerOpenCalls(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+  const firstSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  const secondSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await Promise.all([held.entered(1), held.entered(2)]);
+  const cleared = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(firstEvent, { viewGeneration: 2 });
+  const botBSelection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_B,
+    viewGeneration: 3,
+  });
+  await botBSelection;
+  held.release(1);
+  await tick();
+  held.release(2);
+  await Promise.allSettled([firstSelection, secondSelection, cleared]);
+  await tick();
+  const activeBeforeDispose = held.activeBots();
+  const closeCalls = [...held.interactiveState.closeCalls];
+  const firstFrames = frameEvents(value).map((entry) => entry.value.botId);
+  const secondFrames = value.second.sent
+    .filter((entry) => entry.channel === "openbot-local-frame:frame")
+    .map((entry) => entry.value.botId);
+  await installed.dispose();
+
+  assert.deepEqual(closeCalls, [BOT_A]);
+  assert.deepEqual(activeBeforeDispose, [BOT_B]);
+  assert.deepEqual(firstFrames, [BOT_B]);
+  assert.deepEqual(secondFrames, []);
+});
+
+test("simultaneous clear sender destruction and disposal converge on one sibling cleanup", async () => {
+  const value = fixture();
+  const held = holdManagerOpenCalls(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+  const firstSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  const secondSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await Promise.all([held.entered(1), held.entered(2)]);
+  const cleared = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(firstEvent, { viewGeneration: 2 }));
+  value.second.sender.destroyed = true;
+  value.second.sender.emit("destroyed");
+  const disposed = installed.dispose();
+  held.release(1);
+  await tick();
+  held.release(2);
+  await Promise.allSettled([firstSelection, secondSelection, cleared, disposed]);
+
+  assert.deepEqual(held.interactiveState.closeCalls, [BOT_A]);
+  assert.deepEqual(held.activeBots(), []);
+  assert.equal(value.first.sent.filter((entry) => entry.channel === "openbot-local-frame:frame").length, 0);
+  assert.equal(value.second.sent.filter((entry) => entry.channel === "openbot-local-frame:frame").length, 0);
+});
+
+test("one rejected sibling and one successful sibling still close exactly once without publication", async () => {
+  const value = fixture();
+  const held = holdManagerOpenCalls(value, { rejectedCalls: [1] });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+  const firstSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  const secondSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await Promise.all([held.entered(1), held.entered(2)]);
+  const secondEventCount = value.second.sent.length;
+  const cleared = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(firstEvent, { viewGeneration: 2 });
+  held.release(1);
+  await tick();
+  held.release(2);
+  await Promise.allSettled([firstSelection, secondSelection, cleared]);
+  await tick();
+  const activeBeforeDispose = held.activeBots();
+  const noSiblingPublication = value.second.sent.length === secondEventCount;
+  const closeCalls = [...held.interactiveState.closeCalls];
+  await installed.dispose();
+
+  assert.deepEqual(closeCalls, [BOT_A]);
+  assert.deepEqual(activeBeforeDispose, []);
+  assert.equal(noSiblingPublication, true);
+});
+
+test("established-session cleanup adopts a same-bot pending sibling before closing", async () => {
+  const value = fixture();
+  const held = holdManagerOpenCalls(value, { heldCalls: [2] });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  const secondSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await held.entered(2);
+  const secondEventCount = value.second.sent.length;
+  const cleared = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(firstEvent, { viewGeneration: 2 });
+  await tick();
+  const closeCallsBeforeRelease = [...held.interactiveState.closeCalls];
+  held.release(2);
+  await Promise.allSettled([secondSelection, cleared]);
+  await tick();
+  const activeBeforeDispose = held.activeBots();
+  const closeCalls = [...held.interactiveState.closeCalls];
+  const noSiblingPublication = value.second.sent.length === secondEventCount;
+  await installed.dispose();
+
+  assert.deepEqual(closeCallsBeforeRelease, []);
+  assert.deepEqual(closeCalls, [BOT_A]);
+  assert.deepEqual(activeBeforeDispose, []);
+  assert.equal(noSiblingPublication, true);
+});
+
+test("an established sibling forces close when a rejected pending sibling starts cleanup", async () => {
+  const value = fixture();
+  const held = holdManagerOpenCalls(value, { heldCalls: [2], rejectedCalls: [2] });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  const secondSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await held.entered(2);
+  const firstEventCount = value.first.sent.length;
+  const secondEventCount = value.second.sent.length;
+  const pendingClear = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(secondEvent, {
+    viewGeneration: 2,
+  }));
+  await tick();
+  const establishedClear = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(firstEvent, {
+    viewGeneration: 2,
+  }));
+  held.release(2);
+  await Promise.allSettled([secondSelection, pendingClear, establishedClear]);
+  await tick();
+
+  assert.deepEqual(held.openCalls, [`${BOT_A}:1:1`, `${BOT_A}:1:2`]);
+  assert.deepEqual(held.interactiveState.closeCalls, [BOT_A]);
+  assert.deepEqual(held.activeBots(), []);
+  assert.equal(value.first.sent.length, firstEventCount);
+  assert.equal(value.second.sent.length, secondEventCount);
+  await installed.dispose();
+});
+
+test("an established cleanup fences a same-bot sibling held before manager open", async () => {
+  const readEntered = deferred();
+  const readGate = deferred();
+  let holdSecondRead = false;
+  let value;
+  value = fixture({
+    read(botId, call) {
+      if (holdSecondRead && botId === BOT_A) {
+        readEntered.resolve();
+        return readGate.promise;
+      }
+      return value.states.get(botId);
+    },
+  });
+  const held = holdManagerOpenCalls(value, { heldCalls: [] });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const firstEvent = ipcEvent(value.first.sender);
+  const secondEvent = ipcEvent(value.second.sender);
+
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  holdSecondRead = true;
+  const secondSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await readEntered.promise;
+  assert.equal(held.openCalls.length, 1);
+
+  const secondEventCount = value.second.sent.length;
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(firstEvent, { viewGeneration: 2 });
+  readGate.resolve(value.states.get(BOT_A));
+  await Promise.allSettled([secondSelection]);
+  await tick();
+
+  assert.deepEqual(held.openCalls, [`${BOT_A}:1:1`]);
+  assert.deepEqual(held.interactiveState.closeCalls, [BOT_A]);
+  assert.equal(value.second.sent.length, secondEventCount);
+  await assert.rejects(Promise.resolve().then(() => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(secondEvent, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    viewGeneration: 1,
+  })), { code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED" });
+
+  holdSecondRead = false;
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(secondEvent, {
+    botId: BOT_A,
+    viewGeneration: 2,
+  });
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(firstEvent, {
+    botId: BOT_B,
+    viewGeneration: 3,
+  });
+  assert.deepEqual(held.openCalls, [
+    `${BOT_A}:1:1`, `${BOT_A}:1:2`, `${BOT_B}:1:3`,
+  ]);
+  assert.deepEqual(held.interactiveState.closeCalls, [BOT_A]);
+  await installed.dispose();
+});
+
+test("readiness-held same-bot admissions are fenced while a post-cleanup generation may replace them", async () => {
+  const readiness = deferred();
+  const value = fixture();
+  let openCalls = 0;
+  const interactiveState = enableInteractive(value, {
+    open(record) {
+      openCalls += 1;
+      return publicSession(record, 4, 2);
+    },
+  });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc({ ...value, ready: readiness.promise });
+  const event = ipcEvent(value.first.sender);
+  const firstSelection = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  }));
+  await tick();
+  const cleared = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(event, {
+    viewGeneration: 2,
+  }));
+  const replacement = handled(value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 3,
+  }));
+  assert.equal(openCalls, 0);
+  readiness.resolve();
+  await Promise.allSettled([firstSelection, cleared, replacement]);
+  await tick();
+
+  assert.equal(openCalls, 1);
+  assert.deepEqual(interactiveState.closeCalls, []);
+  assert.deepEqual(frameEvents(value).map((entry) => entry.value.viewGeneration), [3]);
+  assert.deepEqual(statusEvents(value).map((entry) => entry.value.viewGeneration), [3, 3]);
+  await installed.dispose();
+});
+
+test("synchronous manager-close reentrancy queues a same-bot replacement behind one cleanup", async () => {
+  const value = fixture();
+  let openCalls = 0;
+  let installed;
+  let reentrantSelection = null;
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const interactiveState = enableInteractive(value, {
+    open(record) {
+      openCalls += 1;
+      return publicSession(record, 4, 2);
+    },
+    close(botId) {
+      reentrantSelection = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(ipcEvent(value.first.sender), {
+        botId,
+        viewGeneration: 3,
+      });
+      void reentrantSelection.catch(() => {});
+    },
+  });
+  installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, {
+    botId: BOT_A,
+    viewGeneration: 1,
+  });
+  const framesBeforeClear = frameEvents(value).length;
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.clear)(event, { viewGeneration: 2 });
+  await reentrantSelection;
+  await tick();
+
+  assert.deepEqual(interactiveState.closeCalls, [BOT_A]);
+  assert.equal(openCalls, 2);
+  assert.equal(frameEvents(value).length, framesBeforeClear + 1);
+  assert.equal(frameEvents(value).at(-1).value.viewGeneration, 3);
+  await installed.dispose();
 });

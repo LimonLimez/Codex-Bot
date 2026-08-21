@@ -284,8 +284,17 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   assert.match(preload, /select:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:select",value\)/);
   assert.match(preload, /retry:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:retry",value\)/);
   assert.match(preload, /clear:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:clear",value\)/);
+  assert.match(preload, /presentation:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:presentation",value\)/);
+  assert.match(preload, /navigate:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:navigate",value\)/);
+  assert.match(preload, /goBack:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:go-back",value\)/);
+  assert.match(preload, /goForward:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:go-forward",value\)/);
+  assert.match(preload, /reload:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:reload",value\)/);
+  assert.match(preload, /acquireControl:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:acquire-control",value\)/);
+  assert.match(preload, /releaseControl:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:release-control",value\)/);
+  assert.match(preload, /sendInput:value=>s\.ipcRenderer\.invoke\("openbot-local-frame:send-input",value\)/);
   assert.match(preload, /openbot-local-frame:frame/);
   assert.match(preload, /openbot-local-frame:status/);
+  assert.match(preload, /openbot-local-frame:navigation/);
   assert.match(preload, /codex-bot:changed/);
   assert.match(preload, /codex-runtime:event/);
   assert.match(preload, /onEvent:callback/);
@@ -318,35 +327,60 @@ test("local desktop preload facade exposes exact frame and status channels with 
   assert.ok(localDesktop, "the renderer must discover the local desktop facade");
   assert.equal(Object.isFrozen(localDesktop), true);
   assert.deepEqual(Object.keys(localDesktop).sort(), [
-    "clear", "onFrame", "onStatus", "retry", "select",
+    "acquireControl", "clear", "goBack", "goForward", "navigate", "onFrame", "onNavigation", "onStatus",
+    "presentation", "releaseControl", "reload", "retry", "select", "sendInput",
   ]);
 
   await localDesktop.select({ botId: "bot-a", viewGeneration: 1 });
   await localDesktop.retry({ botId: "bot-a", viewGeneration: 1 });
   await localDesktop.clear({ viewGeneration: 1 });
+  await localDesktop.presentation({ botId: "bot-a", presentation: "interactive" });
+  await localDesktop.navigate({ botId: "bot-a", url: "https://example.com" });
+  await localDesktop.goBack({ botId: "bot-a" });
+  await localDesktop.goForward({ botId: "bot-a" });
+  await localDesktop.reload({ botId: "bot-a" });
+  await localDesktop.acquireControl({ botId: "bot-a" });
+  await localDesktop.releaseControl({ botId: "bot-a" });
+  await localDesktop.sendInput({ botId: "bot-a" });
   assert.deepEqual(harness.calls.map(({ channel, args }) => ({ channel, args })), [
     { channel: "openbot-local-frame:select", args: [{ botId: "bot-a", viewGeneration: 1 }] },
     { channel: "openbot-local-frame:retry", args: [{ botId: "bot-a", viewGeneration: 1 }] },
     { channel: "openbot-local-frame:clear", args: [{ viewGeneration: 1 }] },
+    { channel: "openbot-local-frame:presentation", args: [{ botId: "bot-a", presentation: "interactive" }] },
+    { channel: "openbot-local-frame:navigate", args: [{ botId: "bot-a", url: "https://example.com" }] },
+    { channel: "openbot-local-frame:go-back", args: [{ botId: "bot-a" }] },
+    { channel: "openbot-local-frame:go-forward", args: [{ botId: "bot-a" }] },
+    { channel: "openbot-local-frame:reload", args: [{ botId: "bot-a" }] },
+    { channel: "openbot-local-frame:acquire-control", args: [{ botId: "bot-a" }] },
+    { channel: "openbot-local-frame:release-control", args: [{ botId: "bot-a" }] },
+    { channel: "openbot-local-frame:send-input", args: [{ botId: "bot-a" }] },
   ]);
 
   const frames = [];
   const statuses = [];
+  const navigations = [];
   assert.throws(() => localDesktop.onFrame(null), (error) => error?.name === "TypeError");
   assert.throws(() => localDesktop.onStatus("not-a-function"), (error) => error?.name === "TypeError");
+  assert.throws(() => localDesktop.onNavigation("not-a-function"), (error) => error?.name === "TypeError");
   const removeFrame = localDesktop.onFrame((value) => frames.push(value));
   const removeStatus = localDesktop.onStatus((value) => statuses.push(value));
+  const removeNavigation = localDesktop.onNavigation((value) => navigations.push(value));
   const frameListener = harness.listeners.get("openbot-local-frame:frame")[0];
   const statusListener = harness.listeners.get("openbot-local-frame:status")[0];
+  const navigationListener = harness.listeners.get("openbot-local-frame:navigation")[0];
   harness.ipcRenderer.emit("openbot-local-frame:frame", { frameId: "frame-1" });
   harness.ipcRenderer.emit("openbot-local-frame:status", { state: "live" });
+  harness.ipcRenderer.emit("openbot-local-frame:navigation", { pageGeneration: 2 });
   assert.deepEqual(frames, [{ frameId: "frame-1" }]);
   assert.deepEqual(statuses, [{ state: "live" }]);
+  assert.deepEqual(navigations, [{ pageGeneration: 2 }]);
   removeFrame();
   removeStatus();
+  removeNavigation();
   assert.deepEqual(harness.removals, [
     { channel: "openbot-local-frame:frame", listener: frameListener },
     { channel: "openbot-local-frame:status", listener: statusListener },
+    { channel: "openbot-local-frame:navigation", listener: navigationListener },
   ]);
 });
 
