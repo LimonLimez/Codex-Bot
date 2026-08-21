@@ -8,6 +8,7 @@ const test = require("node:test");
 
 const uiPath = path.join(__dirname, "..", "src", "renderer", "bot-runtime-ui.js");
 const cssPath = path.join(__dirname, "..", "src", "renderer", "codex-ui.css");
+const desktopCssPath = path.join(__dirname, "..", "src", "renderer", "openbot-local-desktop-view.css");
 const { PROVIDER_IDS, providerDescriptor } = require("../src/provider-descriptors.cjs");
 
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
@@ -114,6 +115,31 @@ test("View Bot Local Desktop keeps shared Sand tokens and a stable frame height 
     ".codex-native-bot-settings .openbot-local-desktop-view,\n.codex-bot-desktop-host .openbot-local-desktop-view",
   );
   assert.match(view, /height:\s*220px/);
+});
+
+test("Desktop stage preserves Grok overlay anatomy, fixed surface ratio, focus semantics, and reduced-motion feedback", () => {
+  const css = fs.readFileSync(desktopCssPath, "utf8");
+  const stageStart = css.indexOf(".openbot-local-desktop-stage {\n  position");
+  assert.ok(stageStart >= 0, "missing fixed Desktop stage rule");
+  const stage = css.slice(stageStart, css.indexOf("}", stageStart));
+  assert.match(stage, /position:\s*fixed/);
+  assert.match(stage, /z-index:\s*40/);
+  assert.match(stage, /inset:\s*88px 0 0/);
+  assert.match(stage, /grid-template-rows:\s*44px minmax\(0, 1fr\)/);
+  const topbar = cssRuleBody(css, ".openbot-local-desktop-stage-topbar");
+  assert.match(topbar, /height:\s*44px/);
+  assert.match(topbar, /padding:\s*0 8px/);
+  const viewport = cssRuleBody(css, ".openbot-local-desktop-stage-viewport");
+  assert.match(viewport, /container-type:\s*size/);
+  assert.match(viewport, /place-items:\s*center/);
+  const canvasStart = css.indexOf(".openbot-local-desktop-stage-canvas {\n  display");
+  assert.ok(canvasStart >= 0, "missing Desktop stage canvas rule");
+  const canvas = css.slice(canvasStart, css.indexOf("}", canvasStart));
+  assert.match(canvas, /max-width:\s*100%/);
+  assert.match(canvas, /max-height:\s*100%/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
+  assert.match(css, /transition:\s*none\s*!important/);
+  assert.doesNotMatch(fs.readFileSync(uiPath, "utf8"), /Free Local Desktop/);
 });
 
 test("provider picker preserves 160-character labels errors and actions within both surfaces", async (context) => {
@@ -1621,7 +1647,7 @@ test("New Bot setup asks for an explicit Computer mode with no default", async (
   assert.throws(() => controller.dismissComputerSetup(), /cannot be dismissed/i);
   assert.equal(controller.snapshot().computerSetup.dismissible, false);
   assert.deepEqual(controller.snapshot().computerChoices, [
-    { value: "local", label: "Free Local Desktop" },
+    { value: "local", label: "Desktop" },
     { value: "cursor", label: "Cursor Remote Computer" },
     { value: "not-now", label: "Not Now" },
   ]);
@@ -6578,7 +6604,7 @@ test("mounted New Bot requires profile and model confirmation before unselected 
     label.children[0].value,
     label.children[1].children[0].textContent,
   ]), [
-    ["local", "Free Local Desktop"],
+    ["local", "Desktop"],
     ["cursor", "Cursor Remote Computer"],
     ["not-now", "Not Now"],
   ]);

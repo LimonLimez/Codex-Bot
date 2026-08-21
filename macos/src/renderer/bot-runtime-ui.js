@@ -75,7 +75,7 @@
     "ultra-code": "Ultra Code",
   });
   const COMPUTER_CHOICES = Object.freeze([
-    Object.freeze({ value: "local", label: "Free Local Desktop" }),
+    Object.freeze({ value: "local", label: "Desktop" }),
     Object.freeze({ value: "cursor", label: "Cursor Remote Computer" }),
     Object.freeze({ value: "not-now", label: "Not Now" }),
   ]);
