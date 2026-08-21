@@ -1,7 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
+const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
@@ -13,6 +15,7 @@ const childPath = path.join(__dirname, "..", "src", "local", "local-helper-child
 const BOT_A = "bot-11111111-1111-4111-8111-111111111111";
 const TARGET_A = "local-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const REQUEST_A = "request-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const electronSmokeApp = path.join(__dirname, "fixtures", "electron-utility-process-smoke");
 
 function request(operation, args) {
   return {
@@ -34,11 +37,305 @@ class FakeChild extends EventEmitter {
   kill() { this.killed = true; }
 }
 
+function takeStartupChallenge(child) {
+  const challenge = child.messages.shift();
+  assert.equal(challenge?.type, "startup-challenge");
+  assert.match(challenge?.nonce || "", /^[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(challenge).sort(), ["nonce", "type"]);
+  return challenge;
+}
+
+function acknowledgeStartup(child) {
+  child.emit("message", { type: "ready" });
+  const challenge = takeStartupChallenge(child);
+  child.emit("message", { type: "startup-ack", nonce: challenge.nonce });
+  return challenge;
+}
+
+function electronExecutable() {
+  const candidates = [
+    process.env.OPENBOT_ELECTRON_PATH,
+    path.resolve(__dirname, "../../../codex-bot/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"),
+  ].filter((value) => typeof value === "string" && path.isAbsolute(value));
+  return candidates.find((value) => {
+    try {
+      if (!fsSync.statSync(value).isFile()) return false;
+      fsSync.accessSync(value, fsSync.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }) || null;
+}
+
+async function runElectronTransportSmoke(t, electron, helperPath) {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-electron-smoke-"));
+  t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+  const child = spawn(electron, [
+    "--no-sandbox",
+    electronSmokeApp,
+    transportPath,
+    helperPath,
+    workspace,
+  ], {
+    env: (() => {
+      const value = { ...process.env };
+      delete value.ELECTRON_RUN_AS_NODE;
+      return value;
+    })(),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (value) => { stdout += value; });
+  child.stderr.on("data", (value) => { stderr += value; });
+  let timeout;
+  const outcome = await Promise.race([
+    new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal }))),
+    new Promise((resolve) => { timeout = setTimeout(() => resolve({ timeout: true }), 8_000); }),
+  ]);
+  clearTimeout(timeout);
+  if (outcome.timeout) {
+    child.kill("SIGKILL");
+    assert.fail(`Electron utilityProcess smoke timed out: ${stderr.slice(0, 512)}`);
+  }
+  assert.equal(outcome.code, 0, stderr.slice(0, 512));
+  const marker = stdout.split("\n").find((line) => line.startsWith("OPENBOT_ELECTRON_SMOKE:"));
+  assert.ok(marker, stdout.slice(0, 512));
+  return JSON.parse(marker.slice("OPENBOT_ELECTRON_SMOKE:".length));
+}
+
+test("packaged Electron utilityProcess requires an acknowledged live startup", async (t) => {
+  if (process.platform !== "darwin") {
+    t.skip("macOS Electron utilityProcess is unavailable on this platform");
+    return;
+  }
+  const electron = electronExecutable();
+  if (!electron) {
+    t.skip("No deterministic local Electron executable is available for the smoke test");
+    return;
+  }
+  await t.test("production helper acknowledges the parent challenge", async (subtest) => {
+    assert.deepEqual(await runElectronTransportSmoke(subtest, electron, childPath), {
+      outcome: "resolved",
+      closed: false,
+    });
+  });
+  await t.test("a real helper exiting on its next timer never becomes ready", async (subtest) => {
+    const exitingChild = path.join(electronSmokeApp, "exit-after-ready.js");
+    assert.deepEqual(await runElectronTransportSmoke(subtest, electron, exitingChild), {
+      outcome: "rejected",
+      code: "OPENBOT_LOCAL_HELPER_START_FAILED",
+    });
+  });
+});
+
+test("transport awaits an exact startup ready frame and does not run Electron as Node", async () => {
+  const child = new FakeChild();
+  const spawnHelper = mock.fn(() => child);
+  const { createLocalHelperTransport } = require(transportPath);
+  const pending = createLocalHelperTransport({
+    spawnHelper,
+    childPath,
+    botId: BOT_A,
+    targetId: TARGET_A,
+    targetGeneration: 1,
+    workspacePath: "/private/tmp/openbot-workspace",
+    startupTimeoutMs: 25,
+  });
+  assert.equal(typeof pending?.then, "function");
+  let settled = false;
+  pending.then(() => { settled = true; }, () => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  const options = spawnHelper.mock.calls[0].arguments[2];
+  assert.deepEqual(options.env, Object.freeze({
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+  }));
+  acknowledgeStartup(child);
+  const transport = await pending;
+  assert.equal(typeof transport.send, "function");
+  assert.equal(transport.isClosed(), false);
+  transport.dispose();
+  assert.equal(transport.isClosed(), true);
+});
+
+test("transport rejects when a ready child exits before acknowledging its challenge", async (t) => {
+  for (const scenario of ["synchronous", "queued"]) {
+    await t.test(scenario, async () => {
+      const child = new FakeChild();
+      const { createLocalHelperTransport } = require(transportPath);
+      const pending = createLocalHelperTransport({
+        spawnHelper: mock.fn(() => child),
+        childPath,
+        botId: BOT_A,
+        targetId: TARGET_A,
+        targetGeneration: 1,
+        workspacePath: "/private/tmp/openbot-workspace",
+        startupTimeoutMs: 25,
+      });
+      child.emit("message", { type: "ready" });
+      takeStartupChallenge(child);
+      if (scenario === "synchronous") child.emit("exit", 1, null);
+      else queueMicrotask(() => child.emit("exit", 1, null));
+      await assert.rejects(pending, { code: "OPENBOT_LOCAL_HELPER_START_FAILED" });
+      assert.equal(child.killed, true);
+      assert.equal(child.listenerCount("message"), 0);
+      assert.equal(child.listenerCount("exit"), 0);
+    });
+  }
+});
+
+test("transport rejects startup on fatal, malformed, or early-exit child frames", async (t) => {
+  for (const scenario of ["fatal", "malformed", "exit"]) {
+    await t.test(scenario, async () => {
+      const child = new FakeChild();
+      const spawnHelper = mock.fn(() => child);
+      const { createLocalHelperTransport } = require(transportPath);
+      const pending = createLocalHelperTransport({
+        spawnHelper,
+        childPath,
+        botId: BOT_A,
+        targetId: TARGET_A,
+        targetGeneration: 1,
+        workspacePath: "/private/tmp/openbot-workspace",
+        startupTimeoutMs: 25,
+      });
+      if (scenario === "fatal") child.emit("message", { type: "fatal" });
+      else if (scenario === "malformed") child.emit("message", { type: "ready", extra: true });
+      else child.emit("exit", 1, null);
+      await assert.rejects(
+        pending,
+        (error) => error?.code === "OPENBOT_LOCAL_HELPER_START_FAILED",
+      );
+      assert.equal(child.killed, true);
+    });
+  }
+});
+
+test("startup acknowledgement must be current, matching, and single-use", async (t) => {
+  const start = (child, timeout = 25) => {
+    const { createLocalHelperTransport } = require(transportPath);
+    return createLocalHelperTransport({
+      spawnHelper: mock.fn(() => child),
+      childPath,
+      botId: BOT_A,
+      targetId: TARGET_A,
+      targetGeneration: 1,
+      workspacePath: "/private/tmp/openbot-workspace",
+      startupTimeoutMs: timeout,
+    });
+  };
+
+  await t.test("ack before ready", async () => {
+    const child = new FakeChild();
+    const pending = start(child);
+    child.emit("message", { type: "startup-ack", nonce: "0".repeat(64) });
+    await assert.rejects(pending, { code: "OPENBOT_LOCAL_HELPER_START_FAILED" });
+  });
+
+  await t.test("mismatched ack", async () => {
+    const child = new FakeChild();
+    const pending = start(child);
+    child.emit("message", { type: "ready" });
+    const challenge = takeStartupChallenge(child);
+    const mismatch = `${challenge.nonce[0] === "0" ? "1" : "0"}${challenge.nonce.slice(1)}`;
+    child.emit("message", { type: "startup-ack", nonce: mismatch });
+    await assert.rejects(pending, { code: "OPENBOT_LOCAL_HELPER_START_FAILED" });
+  });
+
+  await t.test("late ack", async () => {
+    const child = new FakeChild();
+    const pending = start(child, 5);
+    child.emit("message", { type: "ready" });
+    const challenge = takeStartupChallenge(child);
+    await assert.rejects(pending, { code: "OPENBOT_LOCAL_HELPER_START_FAILED" });
+    child.emit("message", { type: "startup-ack", nonce: challenge.nonce });
+    assert.equal(child.listenerCount("message"), 0);
+  });
+
+  await t.test("duplicate ack", async () => {
+    const child = new FakeChild();
+    const pending = start(child);
+    const challenge = acknowledgeStartup(child);
+    const transport = await pending;
+    let exits = 0;
+    transport.onExit(() => { exits += 1; });
+    child.emit("message", { type: "startup-ack", nonce: challenge.nonce });
+    assert.equal(transport.isClosed(), true);
+    assert.equal(exits, 1);
+  });
+});
+
+test("transport times out startup, cleans listeners, and ignores a late ready frame", async () => {
+  const child = new FakeChild();
+  const { createLocalHelperTransport } = require(transportPath);
+  const pending = createLocalHelperTransport({
+    spawnHelper: mock.fn(() => child),
+    childPath,
+    botId: BOT_A,
+    targetId: TARGET_A,
+    targetGeneration: 1,
+    workspacePath: "/private/tmp/openbot-workspace",
+    startupTimeoutMs: 5,
+  });
+  await assert.rejects(pending, { code: "OPENBOT_LOCAL_HELPER_START_FAILED" });
+  assert.equal(child.listenerCount("message"), 0);
+  assert.equal(child.listenerCount("exit"), 0);
+  child.emit("message", { type: "ready" });
+  assert.equal(child.killed, true);
+});
+
+test("transport accepts Electron's event-plus-payload message shape and closes once on post failure", async () => {
+  const child = new FakeChild();
+  const exits = [];
+  const { createLocalHelperTransport } = require(transportPath);
+  const pending = createLocalHelperTransport({
+    spawnHelper: mock.fn(() => child),
+    childPath,
+    botId: BOT_A,
+    targetId: TARGET_A,
+    targetGeneration: 1,
+    workspacePath: "/private/tmp/openbot-workspace",
+  });
+  child.emit("message", { sender: "utility-process-event" }, { type: "ready" });
+  const challenge = takeStartupChallenge(child);
+  child.emit("message", { sender: "utility-process-event" }, {
+    type: "startup-ack",
+    nonce: challenge.nonce,
+  });
+  const transport = await pending;
+  transport.onExit(() => exits.push(true));
+  child.emit("message", { sender: "utility-process-event" }, {
+    type: "reply",
+    reply: { requestId: REQUEST_A, ok: true, value: "ok" },
+  });
+  const received = [];
+  transport.onMessage((value) => received.push(value));
+  child.emit("message", { sender: "utility-process-event" }, {
+    type: "reply",
+    reply: { requestId: REQUEST_A, ok: true, value: "second" },
+  });
+  assert.deepEqual(received, [{ requestId: REQUEST_A, ok: true, value: "second" }]);
+  child.postMessage = () => { throw new Error("/Users/private token"); };
+  await assert.rejects(
+    transport.send(request("shell.execute", { command: "echo late" })),
+    (error) => error?.code === "OPENBOT_LOCAL_HELPER_UNAVAILABLE" && !/Users|private|token/i.test(error.message),
+  );
+  transport.dispose();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(exits, [true]);
+  assert.equal(child.listenerCount("message"), 0);
+  assert.equal(child.listenerCount("exit"), 0);
+});
+
 test("transport uses one exact utility process and closes on malformed or stale child data", async () => {
   const child = new FakeChild();
   const spawnHelper = mock.fn(() => child);
   const { createLocalHelperTransport } = require(transportPath);
-  const transport = createLocalHelperTransport({
+  const pending = createLocalHelperTransport({
     spawnHelper,
     childPath,
     botId: BOT_A,
@@ -46,10 +343,11 @@ test("transport uses one exact utility process and closes on malformed or stale 
     targetGeneration: 1,
     workspacePath: "/private/tmp/openbot-workspace",
   });
+  acknowledgeStartup(child);
+  const transport = await pending;
   assert.equal(spawnHelper.mock.callCount(), 1);
   const options = spawnHelper.mock.calls[0].arguments[2];
   assert.deepEqual(options.env, Object.freeze({
-    ELECTRON_RUN_AS_NODE: "1",
     PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
   }));
   assert.equal(options.serviceName, "OpenBot Local Helper");
@@ -246,6 +544,36 @@ test("concurrent approved shells receive distinct private HOME and TMPDIR task p
   }
 });
 
+test("helper child accepts one exact startup challenge before any operation", async (t) => {
+  const { installParentPort } = require(childPath);
+  const nonce = "a".repeat(64);
+  class FakePort extends EventEmitter {
+    replies = [];
+    postMessage(value) { this.replies.push(value); }
+  }
+
+  await t.test("matching challenge", async () => {
+    const port = new FakePort();
+    installParentPort(port, "/private/tmp/openbot-workspace");
+    const listener = port.listeners("message")[0];
+    await listener({ data: { type: "startup-challenge", nonce } });
+    assert.deepEqual(port.replies, [
+      { type: "ready" },
+      { type: "startup-ack", nonce },
+    ]);
+    await listener({ data: { type: "startup-challenge", nonce } });
+    assert.deepEqual(port.replies.at(-1), { type: "fatal" });
+  });
+
+  await t.test("operation before challenge", async () => {
+    const port = new FakePort();
+    installParentPort(port, "/private/tmp/openbot-workspace");
+    const listener = port.listeners("message")[0];
+    await listener({ data: { type: "run", request: request("shell.execute", { command: "true" }) } });
+    assert.deepEqual(port.replies, [{ type: "ready" }, { type: "fatal" }]);
+  });
+});
+
 test("helper cancel kills an in-flight shell process group before descendants can write", async (t) => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "openbot-helper-cancel-"));
   t.after(() => fs.rm(workspace, { recursive: true, force: true }));
@@ -256,6 +584,12 @@ test("helper cancel kills an in-flight shell process group before descendants ca
   }
   const port = new FakePort();
   installParentPort(port, workspace);
+  assert.deepEqual(port.replies.shift(), { type: "ready" });
+  const startupNonce = "b".repeat(64);
+  await port.listeners("message")[0]({
+    data: { type: "startup-challenge", nonce: startupNonce },
+  });
+  assert.deepEqual(port.replies.shift(), { type: "startup-ack", nonce: startupNonce });
   const started = path.join(workspace, "tasks", "task-a", "started.txt");
   const late = path.join(workspace, "tasks", "task-a", "late.txt");
   const completion = new Promise((resolve) => port.on("posted", (message) => {
@@ -278,4 +612,43 @@ test("helper cancel kills an in-flight shell process group before descendants ca
   await new Promise((resolve) => setTimeout(resolve, 450));
   assert.equal(await fs.access(late).then(() => true, () => false), false);
   assert.equal(port.replies.some(({ type }) => type === "fatal"), false);
+});
+
+test("broken parent-port reply delivery cannot escape as an unhandled rejection", async (t) => {
+  const { installParentPort } = require(childPath);
+  for (const scenario of ["success", "error"]) {
+    await t.test(scenario, async (subtest) => {
+      const workspace = await fs.mkdtemp(path.join(os.tmpdir(), `openbot-helper-broken-port-${scenario}-`));
+      subtest.after(() => fs.rm(workspace, { recursive: true, force: true }));
+      class BrokenPort extends EventEmitter {
+        attempts = [];
+        postMessage(value) {
+          this.attempts.push(value);
+          if (value?.type === "ready" || value?.type === "startup-ack") return;
+          throw new Error("/Users/private token");
+        }
+      }
+      const port = new BrokenPort();
+      installParentPort(port, workspace);
+      const listener = port.listeners("message")[0];
+      const startupNonce = "c".repeat(64);
+      await listener({ data: { type: "startup-challenge", nonce: startupNonce } });
+      const operation = scenario === "success"
+        ? request("shell.execute", { command: "true" })
+        : request("filesystem.read", { relativePath: "missing.txt" });
+      await assert.doesNotReject(Promise.resolve(listener({ data: { type: "run", request: operation } })));
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(port.attempts.map((value) => value.type), [
+        "ready", "startup-ack", "reply", "fatal",
+      ]);
+    });
+  }
+
+  class StartupBrokenPort extends EventEmitter {
+    attempts = [];
+    postMessage(value) { this.attempts.push(value); throw new Error("private startup failure"); }
+  }
+  const startupPort = new StartupBrokenPort();
+  assert.doesNotThrow(() => installParentPort(startupPort, "/private/tmp/openbot-workspace"));
+  assert.deepEqual(startupPort.attempts.map((value) => value.type), ["ready", "fatal"]);
 });

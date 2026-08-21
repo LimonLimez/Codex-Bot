@@ -1,0 +1,5 @@
+{
+  "name": "openbot-electron-utility-process-smoke",
+  "private": true,
+  "main": "main.js"
+}

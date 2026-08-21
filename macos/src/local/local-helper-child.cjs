@@ -10,6 +10,7 @@ const MAX_COMMAND_BYTES = 8192;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_PATH_BYTES = 1024;
 const BUNDLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9.-]{1,254}$/;
+const STARTUP_NONCE_PATTERN = /^[0-9a-f]{64}$/;
 const LOCAL_SHELL_PATH = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 class LocalHelperChildError extends Error {
@@ -334,12 +335,43 @@ function installParentPort(port, workspacePath) {
     throw new TypeError("Local helper parent port is unavailable.");
   }
   const active = new Map();
-  const fatal = () => {
-    for (const controller of active.values()) controller.abort();
-    try { port.postMessage({ type: "fatal" }); } catch {}
+  let started = false;
+  let failed = false;
+  const post = (value) => {
+    try {
+      port.postMessage(value);
+      return true;
+    } catch {
+      return false;
+    }
   };
-  port.on("message", async (event) => {
+  const fatal = () => {
+    if (failed) return;
+    failed = true;
+    for (const controller of active.values()) {
+      try { controller.abort(); } catch {}
+    }
+    post({ type: "fatal" });
+  };
+  const handleMessage = async (event) => {
+    if (failed) return;
     const message = event?.data ?? event;
+    if (!started) {
+      let input;
+      try {
+        input = exactObject(message, ["type", "nonce"], "Startup challenge");
+        if (input.type !== "startup-challenge" || typeof input.nonce !== "string"
+          || !STARTUP_NONCE_PATTERN.test(input.nonce)) {
+          throw childError("Startup challenge is invalid.", "OPENBOT_LOCAL_ARGUMENTS_INVALID");
+        }
+      } catch {
+        fatal();
+        return;
+      }
+      started = true;
+      if (!post({ type: "startup-ack", nonce: input.nonce })) fatal();
+      return;
+    }
     if (message?.type === "authorize") return;
     if (message?.type === "cancel") {
       let input;
@@ -374,12 +406,12 @@ function installParentPort(port, workspacePath) {
       }
       controller = new AbortController();
       active.set(requestId, controller);
-      port.postMessage({
+      if (!post({
         type: "reply",
         reply: await executeRequest(request, { workspacePath, signal: controller.signal }),
-      });
+      })) fatal();
     } catch (error) {
-      port.postMessage({
+      if (!post({
         type: "reply",
         reply: {
           requestId,
@@ -388,11 +420,13 @@ function installParentPort(port, workspacePath) {
             ? error.code
             : "OPENBOT_LOCAL_OPERATION_FAILED",
         },
-      });
+      })) fatal();
     } finally {
       if (requestId !== "" && active.get(requestId) === controller) active.delete(requestId);
     }
-  });
+  };
+  port.on("message", (event) => handleMessage(event).catch(fatal));
+  if (!post({ type: "ready" })) fatal();
 }
 
 if (require.main === module) {

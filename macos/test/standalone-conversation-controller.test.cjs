@@ -2271,9 +2271,13 @@ test("real helper path and secret output reaches inference only as deterministic
   t.after(() => fs.rm(workspacePath, { recursive: true, force: true }));
   const messageListeners = new Set();
   const exitListeners = new Set();
+  const childFrames = [];
+  const parentFrames = [];
   class Port extends EventEmitter {
     postMessage(message) {
-      if (message?.type === "fatal") {
+      if (message?.type === "ready" || message?.type === "startup-ack") {
+        childFrames.push(structuredClone(message));
+      } else if (message?.type === "fatal") {
         for (const listener of [...exitListeners]) listener();
       } else if (message?.type === "reply") {
         for (const listener of [...messageListeners]) listener(message.reply);
@@ -2282,9 +2286,25 @@ test("real helper path and secret output reaches inference only as deterministic
   }
   const port = new Port();
   installParentPort(port, workspacePath);
+  const sendToChild = async (message) => {
+    parentFrames.push(structuredClone(message));
+    return port.listeners("message")[0]({ data: message });
+  };
+  assert.deepEqual(childFrames, [{ type: "ready" }]);
+  assert.deepEqual(parentFrames, []);
+  const startupNonce = "e".repeat(64);
+  await sendToChild({ type: "startup-challenge", nonce: startupNonce });
+  assert.deepEqual(childFrames, [
+    { type: "ready" },
+    { type: "startup-ack", nonce: startupNonce },
+  ]);
+  assert.match(childFrames[1].nonce, /^[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(childFrames[1]).sort(), ["nonce", "type"]);
+  assert.deepEqual(parentFrames.map(({ type }) => type), ["startup-challenge"]);
+  assert.equal(parentFrames.some(({ type }) => type === "run" || type === "cancel"), false);
   const transport = {
-    async send(request) { port.emit("message", { data: { type: "run", request } }); },
-    async cancel(requestId) { port.emit("message", { data: { type: "cancel", requestId } }); },
+    async send(request) { await sendToChild({ type: "run", request }); },
+    async cancel(requestId) { await sendToChild({ type: "cancel", requestId }); },
     onMessage(listener) { messageListeners.add(listener); return () => messageListeners.delete(listener); },
     onExit(listener) { exitListeners.add(listener); return () => exitListeners.delete(listener); },
     dispose() { messageListeners.clear(); exitListeners.clear(); },

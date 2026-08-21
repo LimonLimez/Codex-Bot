@@ -526,6 +526,10 @@ class LocalDesktopManager extends EventEmitter {
       this.#windows.add(window);
       let helperTransport;
       let protocol;
+      let unsubscribeHelperExit;
+      let helperExited = false;
+      let publishedEntry = null;
+      let helperIsUnavailable = () => true;
       try {
         this.#secureWindow(window);
         await window.webContents.loadURL(LOCAL_DESKTOP_START_URL);
@@ -539,11 +543,39 @@ class LocalDesktopManager extends EventEmitter {
           targetGeneration: computer.targetGeneration,
           workspacePath: profilePath.workspacePath,
         }));
+        if (!helperTransport || typeof helperTransport.onExit !== "function"
+          || typeof helperTransport.isClosed !== "function") {
+          throw desktopError("Local Desktop could not start.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
+        const onHelperExit = () => {
+          helperExited = true;
+          const entry = publishedEntry;
+          if (!entry) return;
+          entry.fenced = true;
+          entry.closeRequested = true;
+          try {
+            void Promise.resolve(this.#closeEntry(entry, true)).catch(() => {});
+          } catch {}
+        };
+        unsubscribeHelperExit = helperTransport.onExit(onHelperExit);
+        if (typeof unsubscribeHelperExit !== "function") {
+          throw desktopError("Local Desktop could not start.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
+        helperIsUnavailable = () => {
+          if (helperExited) return true;
+          try { return helperTransport.isClosed() !== false; } catch { return true; }
+        };
+        if (helperIsUnavailable()) {
+          throw desktopError("Local Desktop could not start.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
         await this.#assertCurrentComputer(computer);
+        if (helperIsUnavailable()) {
+          throw desktopError("Local Desktop could not start.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
         if (window.webContents.getURL() !== LOCAL_DESKTOP_START_URL) {
           throw desktopError("Local Desktop start document is invalid.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
         }
-      const entry = {
+        const entry = {
           ...computer,
           partition,
           workspaceId: `workspace-${computer.profileUuid}`,
@@ -553,6 +585,7 @@ class LocalDesktopManager extends EventEmitter {
           window,
           helperTransport,
           protocol: null,
+          unsubscribeHelperExit,
           operations: new Map(),
           closePromise: null,
           fenced: false,
@@ -567,6 +600,10 @@ class LocalDesktopManager extends EventEmitter {
           timeoutMs: this.#helperTimeoutMs,
         });
         entry.protocol = protocol;
+        publishedEntry = entry;
+        if (helperIsUnavailable()) {
+          throw desktopError("Local Desktop could not start.", "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+        }
         this.#entries.set(computer.botId, entry);
         this.#profiles.set(computer.botId, {
           ...computer,
@@ -581,6 +618,9 @@ class LocalDesktopManager extends EventEmitter {
         });
         return publicSession(entry);
       } catch (error) {
+        publishedEntry = null;
+        try { unsubscribeHelperExit?.(); } catch {}
+        unsubscribeHelperExit = null;
         try { await protocol?.dispose(); } catch {}
         if (!protocol) {
           try { await helperTransport?.dispose?.(); } catch {}
@@ -965,13 +1005,18 @@ class LocalDesktopManager extends EventEmitter {
     const deletions = [...this.#deletions.values()]
       .map((state) => state.inFlight)
       .filter((operation) => operation && typeof operation.then === "function");
+    const queues = [...this.#queues.values()];
     this.#disposed = true;
     const entries = [...this.#entries.values()];
     this.#disposePromise = (async () => {
       await Promise.allSettled([
         ...entries.map((entry) => this.#closeEntry(entry, true)),
         ...deletions,
+        ...queues,
       ]);
+      await Promise.allSettled(
+        [...this.#entries.values()].map((entry) => this.#closeEntry(entry, true)),
+      );
       this.#entries.clear();
       this.#queues.clear();
       this.#profileOwners.clear();
@@ -1067,6 +1112,8 @@ class LocalDesktopManager extends EventEmitter {
     entry.fenced = true;
     entry.closeRequested = true;
     if (this.#entries.get(entry.botId) === entry) this.#entries.delete(entry.botId);
+    try { entry.unsubscribeHelperExit?.(); } catch {}
+    entry.unsubscribeHelperExit = null;
     for (const operation of entry.operations.values()) operation.cancelled = true;
     if (cancelPermissions) this.#permissionBroker.cancelBot(entry.botId);
     entry.closePromise = (async () => {

@@ -91,6 +91,7 @@ class FakeHelperTransport {
   messages = [];
   cancellations = [];
   disposed = false;
+  closed = false;
   #messages = new Set();
   #exits = new Set();
 
@@ -108,20 +109,34 @@ class FakeHelperTransport {
   }
 
   onExit(listener) {
+    if (this.closed) {
+      queueMicrotask(listener);
+      return () => {};
+    }
     this.#exits.add(listener);
     return () => this.#exits.delete(listener);
   }
+
+  isClosed() { return this.closed; }
+
+  exitListenerCount() { return this.#exits.size; }
 
   reply(value) {
     for (const listener of [...this.#messages]) listener(value);
   }
 
   exit() {
+    if (this.closed) return;
+    this.closed = true;
     for (const listener of [...this.#exits]) listener();
   }
 
   dispose() {
     this.disposed = true;
+    this.closed = true;
+    for (const listener of [...this.#exits]) listener();
+    this.#messages.clear();
+    this.#exits.clear();
   }
 }
 
@@ -142,8 +157,11 @@ function inProcessHelperFactory(records) {
       }
     }
     const port = new InProcessPort();
-    const record = { cancellations: [], disposed: false, workspacePath };
+    const record = { cancellations: [], disposed: false, closed: false, workspacePath };
     installParentPort(port, workspacePath);
+    port.emit("message", {
+      data: { type: "startup-challenge", nonce: "d".repeat(64) },
+    });
     records.push(record);
     return {
       async send(request) { port.emit("message", { data: { type: "run", request } }); },
@@ -157,11 +175,17 @@ function inProcessHelperFactory(records) {
         return () => messageListeners.delete(listener);
       },
       onExit(listener) {
+        if (record.closed) {
+          queueMicrotask(listener);
+          return () => {};
+        }
         exitListeners.add(listener);
         return () => exitListeners.delete(listener);
       },
+      isClosed() { return record.closed; },
       dispose() {
         record.disposed = true;
+        record.closed = true;
         messageListeners.clear();
         exitListeners.clear();
       },
@@ -1296,4 +1320,94 @@ test("manager disposal awaits an already-started exact bot deletion and its prof
   assert.equal(settledBeforeDeletion, false);
   await assert.rejects(fs.lstat(profilePath), /ENOENT/);
   assert.equal(permissionBroker.deleteBot.mock.callCount(), 1);
+});
+
+test("manager disposal owns a helper startup already admitted by open", async (t) => {
+  const helperEntered = deferred();
+  const releaseHelper = deferred();
+  const helper = new FakeHelperTransport();
+  t.after(() => releaseHelper.resolve());
+  const { manager, windows } = await fixture(t, {
+    helperFactory: async () => {
+      helperEntered.resolve();
+      await releaseHelper.promise;
+      return helper;
+    },
+  });
+  const opening = manager.open(localComputer()).then(
+    (session) => session,
+    (error) => error,
+  );
+  await helperEntered.promise;
+
+  let disposeSettled = false;
+  const firstDispose = manager.dispose();
+  const secondDispose = manager.dispose();
+  assert.equal(secondDispose, firstDispose);
+  firstDispose.then(() => { disposeSettled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  const settledBeforeHelper = disposeSettled;
+
+  releaseHelper.resolve();
+  const openingResult = await opening;
+  await firstDispose;
+  assert.equal(settledBeforeHelper, false);
+  assert.equal(openingResult?.code, "OPENBOT_LOCAL_DESKTOP_DISPOSED");
+  assert.equal(helper.disposed, true);
+  assert.equal(windows.length, 1);
+  assert.equal(windows[0].destroyed, true);
+});
+
+test("open rejects a helper that exits before manager startup ownership", async (t) => {
+  for (const scenario of ["before return", "during listener attachment"]) {
+    await t.test(scenario, async (subtest) => {
+      class ExitOnOwnershipHelper extends FakeHelperTransport {
+        armed = false;
+        onExit(listener) {
+          const unsubscribe = super.onExit(listener);
+          if (!this.armed) {
+            this.armed = true;
+            queueMicrotask(() => this.exit());
+          }
+          return unsubscribe;
+        }
+      }
+      const helper = scenario === "before return"
+        ? new FakeHelperTransport()
+        : new ExitOnOwnershipHelper();
+      const { manager, windows } = await fixture(subtest, {
+        helperFactory: async () => {
+          if (scenario === "before return") helper.exit();
+          return helper;
+        },
+      });
+      const result = await manager.open(localComputer()).then(
+        (session) => session,
+        (error) => error,
+      );
+      assert.equal(result?.code, "OPENBOT_LOCAL_DESKTOP_START_FAILED");
+      assert.equal(helper.disposed, true);
+      assert.equal(helper.exitListenerCount(), 0);
+      assert.equal(windows.length, 1);
+      assert.equal(windows[0].destroyed, true);
+    });
+  }
+});
+
+test("helper exit after publication promptly fences and closes its exact session", async (t) => {
+  const { helpers, manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer(BOT_A, LOCAL_A, 1));
+  const sibling = await manager.open(localComputer(BOT_B, LOCAL_B, 1));
+  assert.equal(helpers[0].exitListenerCount(), 2);
+  helpers[0].exit();
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    manager.captureDisplayFrame(identity(session)),
+    (error) => error?.code === "OPENBOT_LOCAL_DESKTOP_STALE",
+  );
+  assert.equal((await manager.captureDisplayFrame(identity(sibling))).bytes.byteLength > 0, true);
+  assert.equal(windows[0].destroyed, true);
+  assert.equal(windows[1].destroyed, false);
+  assert.equal(helpers[0].exitListenerCount(), 0);
+  assert.equal(helpers[1].exitListenerCount(), 2);
 });
