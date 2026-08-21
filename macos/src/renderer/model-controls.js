@@ -20,8 +20,8 @@
   const COMPACT_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max", "ultra", "ultra-code"]);
   const COMPACT_LABELS = Object.freeze({
     low: "Light",
-    medium: "Standard",
-    high: "Extended",
+    medium: "Medium",
+    high: "High",
     xhigh: "Extra High",
     max: "Max",
     ultra: "Ultra",

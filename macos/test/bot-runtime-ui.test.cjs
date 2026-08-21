@@ -7838,7 +7838,7 @@ test("closed Power trigger uses compact labels while Advanced summary keeps raw 
   const advancedToggle = harness.find("codex-power-advanced-toggle");
   const advancedEffort = harness.findAll("codex-power-advanced-row")
     .find((row) => row.dataset.kind === "effort");
-  assert.equal(triggerEffort.textContent, "Standard");
+  assert.equal(triggerEffort.textContent, "Medium");
   advancedToggle.listeners.get("click")();
   assert.equal(advancedEffort.children[1].textContent, "Medium");
   assert.equal(advancedEffort.dataset.value, "medium");

@@ -171,14 +171,57 @@ test("native Power stops are immutable exact live-catalog tuples with approved l
   assert.deepEqual(stops, [
     { provider: "openai-codex", model: "gpt-5.6-terra", effort: "low", serviceTier: null, catalogGeneration: 17, label: "Light", effect: "ordinary" },
     { provider: "openai-codex", model: "gpt-5.6-sol", effort: "low", serviceTier: "priority", catalogGeneration: 17, label: "Light", effect: "fast" },
-    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "medium", serviceTier: "priority", catalogGeneration: 17, label: "Standard", effect: "fast" },
-    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "high", serviceTier: "priority", catalogGeneration: 17, label: "Extended", effect: "fast" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "medium", serviceTier: "priority", catalogGeneration: 17, label: "Medium", effect: "fast" },
+    { provider: "openai-codex", model: "gpt-5.6-sol", effort: "high", serviceTier: "priority", catalogGeneration: 17, label: "High", effect: "fast" },
     { provider: "openai-codex", model: "gpt-5.6-sol", effort: "xhigh", serviceTier: "priority", catalogGeneration: 17, label: "Extra High", effect: "fast" },
     { provider: "openai-codex", model: "gpt-5.6-sol", effort: "max", serviceTier: "priority", catalogGeneration: 17, label: "Max", effect: "max" },
     { provider: "openai-codex", model: "gpt-5.6-sol", effort: "ultra", serviceTier: "priority", catalogGeneration: 17, label: "Ultra", effect: "ultra" },
   ]);
   assert.equal(Object.isFrozen(stops), true);
   assert.equal(stops.every(Object.isFrozen), true);
+});
+
+test("Power stop labels never borrow Standard or Extended from speed vocabulary", () => {
+  const catalog = [
+    {
+      model: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol",
+      provider: "openai-codex",
+      efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      defaultServiceTier: "priority",
+      serviceTiers: [{ id: "priority", name: "Fast" }],
+      catalogGeneration: 18,
+      isDefault: true,
+    },
+    {
+      model: "gpt-5.5",
+      label: "GPT-5.5",
+      provider: "openai-codex",
+      efforts: ["low", "medium", "high", "xhigh"],
+      defaultServiceTier: null,
+      serviceTiers: [{ id: "standard", name: "Standard" }],
+      catalogGeneration: 18,
+    },
+    {
+      model: "claude-fable-5",
+      label: "Claude Fable 5",
+      provider: "anthropic-claude",
+      efforts: ["low", "medium", "high", "max", "ultra-code"],
+      defaultServiceTier: null,
+      serviceTiers: [],
+      catalogGeneration: 18,
+    },
+  ];
+
+  const stops = catalog.flatMap((model) => controls.buildPowerStops(catalog, {
+    provider: model.provider,
+    model: model.model,
+  }));
+  assert.equal(stops.some(({ label }) => label === "Standard" || label === "Extended"), false);
+  assert.deepEqual(
+    stops.filter(({ effort }) => ["medium", "high"].includes(effort)).map(({ effort, label }) => [effort, label]),
+    [["medium", "Medium"], ["high", "High"], ["medium", "Medium"], ["high", "High"], ["medium", "Medium"], ["high", "High"]],
+  );
 });
 
 test("Power preserves the selected advertised speed across compatible effort stops", () => {
@@ -242,7 +285,7 @@ test("Power stop fallback never invents a missing preferred model or unsupported
     controls.buildPowerStops(catalog).map(({ model, effort, label }) => ({ model, effort, label })),
     [
       { model: "gpt-live-luna", effort: "low", label: "Light" },
-      { model: "gpt-live-luna", effort: "medium", label: "Standard" },
+      { model: "gpt-live-luna", effort: "medium", label: "Medium" },
       { model: "gpt-live-luna", effort: "max", label: "Max" },
     ],
   );
@@ -262,8 +305,8 @@ test("canonical Claude Power keeps Ultra Code identity while reusing the Ultra e
   const stops = controls.buildPowerStops(catalog, { model: "claude-fable-5" });
   assert.deepEqual(stops.map(({ effort, label, effect }) => [effort, label, effect]), [
     ["low", "Light", "ordinary"],
-    ["medium", "Standard", "ordinary"],
-    ["high", "Extended", "ordinary"],
+    ["medium", "Medium", "ordinary"],
+    ["high", "High", "ordinary"],
     ["xhigh", "Extra High", "ordinary"],
     ["max", "Max", "max"],
     ["ultra-code", "Ultra Code", "ultra"],
