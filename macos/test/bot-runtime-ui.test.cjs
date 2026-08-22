@@ -66,11 +66,11 @@ test("provider picker card anatomy is isolated from Settings action-button casca
   const cardIndex = css.indexOf(".codex-provider-choice-button {");
   const actionIndex = css.indexOf(".codex-ai-connections > button");
   assert.ok(cardIndex >= 0 && actionIndex > cardIndex, "card rules must precede the narrowed Settings action rule");
-  assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /min-height:\s*76px/);
-  assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /padding:\s*12px/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /min-height:\s*64px/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /padding:\s*9px 10px/);
   assert.match(cssRuleBody(css, ".codex-provider-choice-button"), /background:\s*var\(--codex-sand-fill-secondary\)/);
   assert.match(cssRuleBody(css, ".codex-provider-choice-button:hover"), /background:\s*var\(--codex-sand-fill-secondary-hover\)/);
-  assert.match(cssRuleBody(css, ".codex-provider-choice-button[aria-pressed=\"true\"]"), /box-shadow:\s*inset 0 0 0 1px/);
+  assert.match(cssRuleBody(css, ".codex-provider-choice-button[aria-pressed=\"true\"]"), /box-shadow:\s*inset 2px 0 0/);
   assert.match(cssRuleBody(css, ".codex-provider-choice-button:focus-visible"), /outline:\s*2px solid var\(--codex-sand-border-focus\)/);
 });
 
@@ -223,7 +223,7 @@ test("provider picker uses Sand aliases two-column cards narrow reflow and reduc
     "--codex-sand-fill-secondary", "--codex-sand-fill-secondary-hover",
     "--codex-sand-border-subtle", "--codex-sand-border-default", "--codex-sand-border-focus",
   ]) assert.match(css, new RegExp(token));
-  assert.match(css, /\.codex-provider-choice-list\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*gap:\s*12px/s);
+  assert.match(css, /\.codex-provider-choice-list\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*gap:\s*0[^}]*overflow:\s*hidden/s);
   assert.match(css, /@media\s*\(max-width:\s*619px\)[\s\S]*\.codex-provider-choice-list\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
   assert.match(css, /\.codex-provider-choice-button:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--codex-sand-border-focus\)/s);
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*\.codex-provider-choice-button[^}]*transition:\s*none/s);

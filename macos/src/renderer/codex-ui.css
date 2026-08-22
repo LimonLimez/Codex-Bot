@@ -242,35 +242,49 @@ body.light {
 .codex-provider-choice-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 0;
   min-width: 0;
   max-width: 100%;
   margin: 0;
   padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--codex-sand-border-subtle);
+  border-radius: 10px;
+  background: var(--codex-sand-fill-secondary);
   list-style: none;
 }
 
 .codex-provider-choice {
   min-width: 0;
   max-width: 100%;
+  border-bottom: 1px solid var(--codex-sand-border-subtle);
+}
+
+.codex-provider-choice:nth-child(odd) {
+  border-right: 1px solid var(--codex-sand-border-subtle);
+}
+
+.codex-provider-choice:nth-last-child(-n + 2) {
+  border-bottom: 0;
 }
 
 .codex-provider-choice-button {
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 10px;
   width: 100%;
   min-width: 0;
   max-width: 100%;
-  min-height: 76px;
-  padding: 12px;
+  min-height: 64px;
+  height: 100%;
+  padding: 9px 10px;
   box-sizing: border-box;
   color: var(--codex-sand-text-primary);
   text-align: left;
-  border: 1px solid var(--codex-sand-border-subtle);
-  border-radius: 10px;
+  border: 0;
+  border-radius: 0;
   background: var(--codex-sand-fill-secondary);
-  transition: background-color 120ms ease, border-color 120ms ease;
+  transition: background-color 120ms ease, box-shadow 120ms ease;
 }
 
 .codex-provider-choice-button:hover {
@@ -278,8 +292,8 @@ body.light {
 }
 
 .codex-provider-choice-button[aria-pressed="true"] {
-  border-color: var(--codex-sand-border-default);
-  box-shadow: inset 0 0 0 1px var(--codex-sand-border-default);
+  background: color-mix(in srgb, var(--codex-sand-fill-secondary) 86%, var(--codex-blue-strong));
+  box-shadow: inset 2px 0 0 var(--codex-sand-border-focus);
 }
 
 .codex-provider-choice-button:focus-visible {
@@ -290,17 +304,20 @@ body.light {
 .codex-provider-choice-mark {
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   color: var(--codex-sand-text-secondary);
   border: 1px solid var(--codex-sand-border-subtle);
-  border-radius: 9px;
+  border-radius: 8px;
   font: 650 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 .codex-provider-choice-copy {
   display: grid;
-  gap: 4px;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-rows: repeat(3, auto);
+  column-gap: 10px;
+  row-gap: 2px;
   min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -308,6 +325,8 @@ body.light {
 
 .codex-provider-choice-label {
   display: block;
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
   max-width: 100%;
   font-size: 13px;
@@ -328,8 +347,21 @@ body.light {
   white-space: normal;
 }
 
+.codex-provider-choice-description {
+  grid-column: 1;
+  grid-row: 2 / span 2;
+}
+
+.codex-provider-choice-state {
+  grid-column: 2;
+  grid-row: 1;
+  text-align: right;
+}
+
 .codex-provider-choice-selected {
   display: block;
+  grid-column: 2;
+  grid-row: 2;
   min-width: 0;
   max-width: 100%;
   color: var(--codex-sand-text-primary);
@@ -345,21 +377,24 @@ body.light {
 }
 
 .codex-provider-recommended {
+  grid-column: 2;
+  grid-row: 3;
   color: var(--codex-blue-strong);
   font-size: 10px;
   line-height: 12px;
+  text-align: right;
 }
 
 .codex-provider-details {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
   max-width: 100%;
-  padding: 16px;
+  padding: 12px;
   box-sizing: border-box;
   color: var(--codex-sand-text-primary);
   border: 1px solid var(--codex-sand-border-subtle);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--codex-sand-fill-secondary);
 }
 
@@ -1668,12 +1703,19 @@ body.light {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .codex-provider-choice-button {
-    min-height: 68px;
+  .codex-provider-choice,
+  .codex-provider-choice:nth-child(odd),
+  .codex-provider-choice:nth-last-child(-n + 2) {
+    border-right: 0;
+    border-bottom: 1px solid var(--codex-sand-border-subtle);
   }
 
-  .codex-provider-details {
-    padding: 12px;
+  .codex-provider-choice:last-child {
+    border-bottom: 0;
+  }
+
+  .codex-provider-choice-button {
+    min-height: 62px;
   }
 
   .codex-provider-picker-scroll {
