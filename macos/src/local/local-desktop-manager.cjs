@@ -31,7 +31,7 @@ const INTERACTIVE_FRAME_BOUNDS = Object.freeze([
   Object.freeze({ width: 640, height: 400 }),
 ]);
 const MAX_URL_BYTES = 4096;
-const LOCAL_DESKTOP_START_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\"><title>OpenBot Free Local Desktop</title></head><body><main><h1>Free Local Desktop</h1><p>Ready for this bot.</p></main></body></html>";
+const LOCAL_DESKTOP_START_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\"><title>OpenBot Desktop</title></head><body><main><h1>Desktop</h1><p>Ready for this bot.</p></main></body></html>";
 const LOCAL_DESKTOP_START_URL = `data:text/html;base64,${Buffer.from(LOCAL_DESKTOP_START_HTML, "utf8").toString("base64")}`;
 const BOT_ID_PATTERN = /^bot-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TARGET_ID_PATTERN = /^local-([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;

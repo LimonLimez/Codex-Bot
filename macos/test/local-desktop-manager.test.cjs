@@ -19,6 +19,18 @@ const LOCAL_B = "local-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const REQUEST_A = "11111111-1111-4111-8111-111111111111";
 const REQUEST_B = "22222222-2222-4222-8222-222222222222";
 
+test("local desktop start document uses plain OpenBot Desktop naming", () => {
+  const encoded = LOCAL_DESKTOP_START_URL.slice("data:text/html;base64,".length);
+  const decoded = Buffer.from(encoded, "base64").toString("utf8");
+  assert.equal(decoded, LOCAL_DESKTOP_START_HTML);
+  assert.match(decoded, /<title>OpenBot Desktop<\/title>/);
+  assert.match(decoded, /<h1>Desktop<\/h1>/);
+  assert.match(decoded, /Content-Security-Policy/);
+  assert.match(decoded, /default-src 'none'/);
+  assert.match(decoded, /Ready for this bot\./);
+  assert.doesNotMatch(decoded, /Free Local Desktop/);
+});
+
 function localComputer(botId = BOT_A, targetId = LOCAL_A, generation = 1) {
   return {
     botId,
