@@ -100,6 +100,8 @@ test("macOS documentation and ignores preserve the distribution boundary", () =>
   assert.match(readme, /Windows.*unchanged/is);
   assert.match(readme, /Grok Bot 0\.20\.0/);
   assert.match(readme, /does not contain.*Grok Bot/is);
+  assert.match(readme, /explicitly choose.*pinned official\s+vendor download/is);
+  assert.match(readme, /SHA-256 verified before a read-only mount/is);
   assert.match(readme, /Free Local Desktop.*dedicated Electron Chromium/is);
   assert.match(readme, /never silently substitutes\s+Free\s+Local Desktop/is);
   assert.match(readme, /Codex 0\.147\.0/);

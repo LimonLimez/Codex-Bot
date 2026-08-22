@@ -75,6 +75,33 @@ test("installer builder requires the authorized Developer ID even for DEVELOPMEN
   }
 });
 
+test("installer offers an explicit pinned vendor download without bundling vendor bytes", () => {
+  const installer = fs.readFileSync(path.join(
+    __dirname, "..", "installer", "Sources", "InstallCodexBot", "main.swift",
+  ), "utf8");
+  const acquisition = fs.readFileSync(path.join(
+    __dirname, "..", "installer", "Sources", "InstallerCore", "GrokBotAcquisition.swift",
+  ), "utf8");
+  assert.match(installer, /Download official 0\.20\.0/);
+  assert.match(installer, /GrokBotAcquisition\(runner: runner\)/);
+  assert.match(installer, /withOfficialApp/);
+  assert.match(installer, /sourceChoice != \.none/);
+  assert.match(installer, /failedWithCleanupWarning/);
+  assert.match(installer, /temporary source could not be fully cleaned up/);
+  assert.match(acquisition, /https:\/\/downloads\.cursor\.com\/grokbot\/stable\/darwin-arm64\/0\.20\.0\/Grok_Bot_0\.20\.0\.dmg/);
+  assert.match(acquisition, /151_151_794/);
+  assert.match(acquisition, /73dfc1656a0e122a9a98bdcf1f49da5ec5475e156977c8730d207bfe01281a42/);
+  assert.match(acquisition, /"--proto", "=https"/);
+  assert.match(acquisition, /"--max-filesize", String\(spec\.expectedBytes\)/);
+  assert.match(acquisition, /"attach", "-readonly", "-nobrowse", "-noautoopen"/);
+  assert.match(acquisition, /"-mountpoint", mountPoint\.path/);
+  assert.doesNotMatch(acquisition, /\/bin\/(?:ba)?sh|--location/);
+
+  const builder = fs.readFileSync(scriptPath, "utf8");
+  assert.doesNotMatch(builder, /copyFile\([^\n]*Grok_Bot_0\.20\.0\.dmg/);
+  assert.doesNotMatch(builder, /copyTree\([^\n]*Grok Bot\.app/);
+});
+
 function relativeFiles(root) {
   const files = [];
   const walk = (directory) => {

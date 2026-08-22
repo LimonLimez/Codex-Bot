@@ -3,11 +3,14 @@
 OpenBot for macOS is an independent community project. It is not affiliated
 with, endorsed by, or supported by Anysphere, xAI, or OpenAI.
 
-The installer verifies a user-owned Grok Bot 0.20.0 application and creates a
-separate OpenBot copy. Neither the repository nor the DMG redistributes the
-Grok Bot application, its `app.asar`, proprietary vendor assets, user profiles,
-conversations, cookies, credentials, or patched application archives. Grok Bot
-remains governed by the vendor's terms and privacy policy.
+The installer verifies an exact Grok Bot 0.20.0 application and creates a
+separate OpenBot copy. A user may select an existing exact app or explicitly
+authorize the pinned official vendor download, which is verified before a
+read-only temporary mount and removed afterward. Neither the repository nor the
+DMG redistributes the Grok Bot application, its `app.asar`, proprietary vendor
+assets, user profiles, conversations, cookies, credentials, or patched
+application archives. Grok Bot remains governed by the vendor's terms and
+privacy policy.
 
 The installer bundles the unmodified official Codex 0.147.0 macOS arm64
 executable from the OpenAI Codex project, preserving OpenAI's Developer ID

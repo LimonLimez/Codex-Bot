@@ -14,11 +14,12 @@ the Grok interface.
 The OpenBot DMG does not contain Grok Bot, its `app.asar`, an
 extracted frontend, or any other proprietary vendor binary or asset. The
 repository keeps the same boundary.
-The installer uses an already installed or mounted, user-owned exact Grok Bot
-0.20.0 application selected by the user. It verifies the complete input before
-creating a separate OpenBot application. The original Grok Bot app is never
-modified, and the installer does not download vendor software on the user's
-behalf.
+The installer can use an already installed or mounted, user-owned exact Grok
+Bot 0.20.0 application, or the user can explicitly choose the pinned official
+vendor download. A download is bounded to the exact published byte count,
+SHA-256 verified before a read-only mount, fully verified by the same application
+manifest and signature checks, and removed after installation. The original
+Grok Bot app is never modified.
 
 ## Runtime boundary
 

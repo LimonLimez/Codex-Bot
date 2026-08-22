@@ -1,6 +1,6 @@
 import Foundation
 import CryptoKit
-import InstallerCore
+@testable import InstallerCore
 
 private final class RecordingRunner: CommandRunning, @unchecked Sendable {
     private(set) var calls: [CommandCall] = []
@@ -25,6 +25,15 @@ private final class ExactIntegrationRunner: CommandRunning, @unchecked Sendable 
         let result = try base.run(call)
         FileHandle.standardError.write(Data("EXACT \(phase) status=\(result.status)\n".utf8))
         return result
+    }
+}
+
+private final class CleanupFailingFileManager: FileManager, @unchecked Sendable {
+    override func removeItem(at URL: URL) throws {
+        if URL.lastPathComponent.hasPrefix("openbot-grok-bot-") {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        try super.removeItem(at: URL)
     }
 }
 
@@ -219,6 +228,30 @@ private func expectInstallerFailure(_ operation: () throws -> Void) throws {
     } catch is InstallerFailure {
         return
     }
+}
+
+private func expectAcquisitionFailure(
+    _ expected: GrokBotAcquisitionFailure,
+    _ operation: () throws -> Void
+) throws {
+    do {
+        try operation()
+        throw TestFailure.assertion("expected \(expected)")
+    } catch let failure as GrokBotAcquisitionFailure {
+        try expect(failure == expected, "expected \(expected), got \(failure)")
+    }
+}
+
+private func plistData(_ object: Any) throws -> Data {
+    try PropertyListSerialization.data(fromPropertyList: object, format: .xml, options: 0)
+}
+
+private func acquisitionSpec(bytes: Data, hash: String? = nil) -> GrokBotDownloadSpec {
+    GrokBotDownloadSpec(
+        sourceURL: GrokBotDownloadSpec.officialSourceURL,
+        expectedBytes: bytes.count,
+        expectedSHA256: hash ?? SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    )
 }
 
 @main
@@ -591,6 +624,272 @@ struct InstallerCoreTestMain {
         print("PASS exact Grok Bot 0.20.0 integration installs an isolated verified OpenBot app")
     }
 
+    static func testOfficialDownloadUsesPinnedCurlArgumentsAndNoShell() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = RecordingRunner()
+        runner.handler = { call in
+            if call.executable.path == "/usr/bin/curl" {
+                if let outputIndex = call.arguments.firstIndex(of: "--output") {
+                    try Data().write(to: URL(fileURLWithPath: call.arguments[outputIndex + 1]))
+                }
+                return CommandResult(status: 0, stdout: Data(), stderr: Data())
+            }
+            return CommandResult(status: 0, stdout: Data(), stderr: Data())
+        }
+        let acquisition = GrokBotAcquisition(
+            testingSpec: .exact020,
+            runner: runner,
+            temporaryDirectory: root
+        )
+        try expectAcquisitionFailure(.sizeMismatch) {
+            try acquisition.withOfficialApp { _ in
+                throw TestFailure.assertion("download unexpectedly reached mount")
+            }
+        }
+        guard let curl = runner.calls.first(where: { $0.executable.path == "/usr/bin/curl" }) else {
+            throw TestFailure.assertion("curl was not invoked")
+        }
+        try expect(curl.executable.path == "/usr/bin/curl", "download did not use system curl")
+        try expect(curl.arguments.contains("--fail"), "curl fail-closed flag missing")
+        try expect(curl.arguments.contains("--silent") && curl.arguments.contains("--show-error"), "curl output was not bounded")
+        try expect(curl.arguments.contains("--proto") && curl.arguments.contains("=https"), "curl HTTPS-only policy missing")
+        try expect(!curl.arguments.contains("--location") && !curl.arguments.contains("--proto-redir"),
+                   "curl must not follow a substituted download location")
+        try expect(curl.arguments.contains("--max-filesize") && curl.arguments.contains("151151794"), "curl max size was not pinned")
+        try expect(curl.arguments.contains("--max-time"), "curl time bound missing")
+        try expect(curl.arguments.contains(GrokBotDownloadSpec.officialSourceURL.absoluteString), "official source URL changed")
+        try expect(!curl.arguments.contains("sh") && !curl.arguments.contains("-c"), "download attempted to use a shell")
+        try expect(!runner.calls.contains { $0.executable.path == "/bin/sh" }, "download was routed through a shell")
+    }
+
+    static func testOfficialDownloadRejectsSizeAndHashBeforeMount() throws {
+        let payload = Data("dmg".utf8)
+        for spec in [
+            acquisitionSpec(bytes: payload, hash: nil),
+            GrokBotDownloadSpec(
+                sourceURL: GrokBotDownloadSpec.officialSourceURL,
+                expectedBytes: payload.count,
+                expectedSHA256: String(repeating: "0", count: 64)
+            )
+        ] {
+            let root = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let runner = RecordingRunner()
+            runner.handler = { call in
+                if call.executable.path == "/usr/bin/curl",
+                   let outputIndex = call.arguments.firstIndex(of: "--output") {
+                    try payload.write(to: URL(fileURLWithPath: call.arguments[outputIndex + 1]))
+                }
+                return CommandResult(status: 0, stdout: Data(), stderr: Data())
+            }
+            let testedSpec: GrokBotDownloadSpec
+            if spec.expectedSHA256 == String(repeating: "0", count: 64) {
+                testedSpec = spec
+            } else {
+                testedSpec = GrokBotDownloadSpec(
+                    sourceURL: GrokBotDownloadSpec.officialSourceURL,
+                    expectedBytes: payload.count + 1,
+                    expectedSHA256: SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                )
+            }
+            let acquisition = GrokBotAcquisition(testingSpec: testedSpec, runner: runner, temporaryDirectory: root)
+            let expectedFailure: GrokBotAcquisitionFailure = testedSpec.expectedBytes == payload.count
+                ? .hashMismatch
+                : .sizeMismatch
+            try expectAcquisitionFailure(expectedFailure) {
+                try acquisition.withOfficialApp { _ in
+                    throw TestFailure.assertion("integrity failure reached mount")
+                }
+            }
+            try expect(!runner.calls.contains { $0.executable.path == "/usr/bin/hdiutil" && $0.arguments.first == "attach" },
+                       "DMG was mounted before integrity verification")
+        }
+    }
+
+    static func testOfficialDownloadRejectsHostileOrAmbiguousMountPlist() throws {
+        let payload = Data("dmg".utf8)
+        let cases: [(Any, GrokBotAcquisitionFailure)] = [
+            (["system-entities": [["mount-point": 42]]], .invalidMount),
+            (["system-entities": [["mount-point": "/tmp/one"], ["mount-point": "/tmp/two"]]], .ambiguousMount),
+            (["system-entities": [["mount-point": "/tmp/one"], ["mount-point": "/tmp/one"]]], .ambiguousMount),
+        ]
+        for (plist, expectedFailure) in cases {
+            let root = try temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let runner = RecordingRunner()
+            runner.handler = { call in
+                if call.executable.path == "/usr/bin/curl",
+                   let outputIndex = call.arguments.firstIndex(of: "--output") {
+                    try payload.write(to: URL(fileURLWithPath: call.arguments[outputIndex + 1]))
+                }
+                if call.executable.path == "/usr/bin/hdiutil", call.arguments.first == "attach" {
+                    return CommandResult(status: 0, stdout: try plistData(plist), stderr: Data())
+                }
+                return CommandResult(status: 0, stdout: Data(), stderr: Data())
+            }
+            let acquisition = GrokBotAcquisition(
+                testingSpec: acquisitionSpec(bytes: payload),
+                runner: runner,
+                temporaryDirectory: root
+            )
+            try expectAcquisitionFailure(expectedFailure) {
+                try acquisition.withOfficialApp { _ in
+                    throw TestFailure.assertion("ambiguous mount unexpectedly resolved")
+                }
+            }
+        }
+    }
+
+    static func testOfficialDownloadDetachesAndCleansPrivateWorkDirectory() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let payload = Data("dmg".utf8)
+        let runner = RecordingRunner()
+        var expectedMount: URL?
+        runner.handler = { call in
+            if call.executable.path == "/usr/bin/curl",
+               let outputIndex = call.arguments.firstIndex(of: "--output") {
+                try payload.write(to: URL(fileURLWithPath: call.arguments[outputIndex + 1]))
+            }
+            if call.executable.path == "/usr/bin/hdiutil", call.arguments.first == "attach" {
+                guard let mountIndex = call.arguments.firstIndex(of: "-mountpoint") else {
+                    throw TestFailure.assertion("owned mountpoint was not requested")
+                }
+                let mount = URL(fileURLWithPath: call.arguments[mountIndex + 1], isDirectory: true)
+                expectedMount = mount
+                try FileManager.default.createDirectory(
+                    at: mount.appendingPathComponent("Grok Bot.app", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+                return CommandResult(
+                    status: 0,
+                    stdout: try plistData(["system-entities": [[
+                        "mount-point": mount.path.hasPrefix("/var/")
+                            ? "/private\(mount.path)"
+                            : mount.path,
+                    ]]]),
+                    stderr: Data()
+                )
+            }
+            return CommandResult(status: 0, stdout: Data(), stderr: Data())
+        }
+        let acquisition = GrokBotAcquisition(
+            testingSpec: acquisitionSpec(bytes: payload),
+            runner: runner,
+            temporaryDirectory: root
+        )
+        let returned = try acquisition.withOfficialApp { app in
+            try expect(app.lastPathComponent == "Grok Bot.app", "mounted app identity mismatch")
+            return app
+        }
+        guard let mount = expectedMount else {
+            throw TestFailure.assertion("owned mountpoint was not captured")
+        }
+        try expect(returned.path == mount.appendingPathComponent("Grok Bot.app").path, "mounted app path mismatch")
+        guard let detach = runner.calls.first(where: { $0.executable.path == "/usr/bin/hdiutil" && $0.arguments.first == "detach" }) else {
+            throw TestFailure.assertion("mounted volume was not detached")
+        }
+        guard let verify = runner.calls.first(where: { $0.executable.path == "/usr/bin/hdiutil" && $0.arguments.first == "verify" }),
+              let attach = runner.calls.first(where: { $0.executable.path == "/usr/bin/hdiutil" && $0.arguments.first == "attach" }) else {
+            throw TestFailure.assertion("DMG verify or attach was not invoked")
+        }
+        try expect(runner.calls.firstIndex(of: verify)! < runner.calls.firstIndex(of: attach)!,
+                   "DMG was attached before hdiutil verification")
+        for flag in ["-readonly", "-nobrowse", "-noautoopen", "-mountpoint", "-plist"] {
+            try expect(attach.arguments.contains(flag), "safe attach flag \(flag) missing")
+        }
+        try expect(detach.arguments.contains(mount.path), "detach targeted a different volume")
+        try expect(!FileManager.default.contentsOfDirectory(atPath: root.path).contains { $0.hasPrefix("openbot-grok-bot-") },
+                   "private download directory leaked")
+    }
+
+    static func testOfficialDownloadSurfacesDetachFailure() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let payload = Data("dmg".utf8)
+        let runner = RecordingRunner()
+        runner.handler = { call in
+            if call.executable.path == "/usr/bin/curl",
+               let outputIndex = call.arguments.firstIndex(of: "--output") {
+                try payload.write(to: URL(fileURLWithPath: call.arguments[outputIndex + 1]))
+            }
+            if call.executable.path == "/usr/bin/hdiutil", call.arguments.first == "attach",
+               let mountIndex = call.arguments.firstIndex(of: "-mountpoint") {
+                let mount = URL(fileURLWithPath: call.arguments[mountIndex + 1], isDirectory: true)
+                try FileManager.default.createDirectory(
+                    at: mount.appendingPathComponent("Grok Bot.app", isDirectory: true),
+                    withIntermediateDirectories: true
+                )
+                return CommandResult(
+                    status: 0,
+                    stdout: try plistData(["system-entities": [["mount-point": mount.path]]]),
+                    stderr: Data()
+                )
+            }
+            if call.executable.path == "/usr/bin/hdiutil", call.arguments.first == "detach" {
+                return CommandResult(status: 1, stdout: Data(), stderr: Data("busy".utf8))
+            }
+            return CommandResult(status: 0, stdout: Data(), stderr: Data())
+        }
+        let acquisition = GrokBotAcquisition(
+            testingSpec: acquisitionSpec(bytes: payload),
+            runner: runner,
+            temporaryDirectory: root
+        )
+        try expectAcquisitionFailure(.cleanupFailed) {
+            let _: Bool = try acquisition.withOfficialApp { _ in true }
+        }
+        try expect(runner.calls.filter { $0.executable.path == "/usr/bin/hdiutil" && $0.arguments.first == "detach" }.count == 2,
+                   "detach did not retry with force after normal detach failed")
+        try expect(!FileManager.default.contentsOfDirectory(atPath: root.path).contains { $0.hasPrefix("openbot-grok-bot-") },
+                   "cleanup failure left the private download directory behind")
+    }
+
+    static func testOfficialDownloadSurfacesPreMountCleanupFailure() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = RecordingRunner()
+        runner.handler = { call in
+            if call.executable.path == "/usr/bin/curl",
+               let outputIndex = call.arguments.firstIndex(of: "--output") {
+                try Data().write(to: URL(fileURLWithPath: call.arguments[outputIndex + 1]))
+            }
+            return CommandResult(status: 0, stdout: Data(), stderr: Data())
+        }
+        let acquisition = GrokBotAcquisition(
+            testingSpec: .exact020,
+            runner: runner,
+            fileManager: CleanupFailingFileManager(),
+            temporaryDirectory: root
+        )
+        try expectAcquisitionFailure(.cleanupFailed) {
+            try acquisition.withOfficialApp { _ in
+                throw TestFailure.assertion("invalid download unexpectedly mounted")
+            }
+        }
+        try expect(!runner.calls.contains { $0.executable.path == "/usr/bin/hdiutil" },
+                   "invalid download reached image verification")
+    }
+
+    static func testLiveOfficialDownloadIfRequested() throws {
+        guard ProcessInfo.processInfo.environment["OPENBOT_TEST_LIVE_VENDOR_DOWNLOAD"] == "1" else {
+            return
+        }
+        let acquisition = GrokBotAcquisition(runner: ProcessCommandRunner())
+        try acquisition.withOfficialApp { app in
+            let info = try readPlist(app.appendingPathComponent("Contents/Info.plist"))
+            try expect(info["CFBundleIdentifier"] as? String == "com.anysphere.sand",
+                       "downloaded source bundle identifier mismatch")
+            try expect(info["CFBundleShortVersionString"] as? String == "0.20.0",
+                       "downloaded source version mismatch")
+            let asar = app.appendingPathComponent("Contents/Resources/app.asar")
+            try expect(fileSHA256(asar) == "1e41f9da52be5d2ff24892b150a74d3d0145659cf6cbd83e9476d025865fb997",
+                       "downloaded source ASAR mismatch")
+        }
+        print("PASS live official Grok Bot download mounts the exact verified 0.20.0 source")
+    }
+
     static func main() throws {
         try testInstallsTransactionally()
         print("PASS installer copies and patches a separate app without modifying Grok Bot")
@@ -607,5 +906,18 @@ struct InstallerCoreTestMain {
         try testRejectsWorkingTreeInsideVendorBeforeMutation()
         print("PASS installer rejects direct and symlink-resolved work trees inside Grok Bot")
         try testExactVendorIntegrationIfRequested()
+        try testOfficialDownloadUsesPinnedCurlArgumentsAndNoShell()
+        print("PASS official Grok Bot download uses pinned HTTPS curl policy")
+        try testOfficialDownloadRejectsSizeAndHashBeforeMount()
+        print("PASS official Grok Bot download verifies size and hash before mounting")
+        try testOfficialDownloadRejectsHostileOrAmbiguousMountPlist()
+        print("PASS official Grok Bot mount parser rejects hostile and ambiguous plist output")
+        try testOfficialDownloadDetachesAndCleansPrivateWorkDirectory()
+        print("PASS official Grok Bot download detaches and cleans its private work directory")
+        try testOfficialDownloadSurfacesDetachFailure()
+        print("PASS official Grok Bot download surfaces detach failure and retries force")
+        try testOfficialDownloadSurfacesPreMountCleanupFailure()
+        print("PASS official Grok Bot download surfaces pre-mount cleanup failure")
+        try testLiveOfficialDownloadIfRequested()
     }
 }

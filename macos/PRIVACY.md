@@ -51,8 +51,12 @@ other private session material. The app cannot control or make privacy promises
 for the upstream model providers, remote-runtime provider, vendor shell, or
 websites selected by the user.
 
-The installer reads a user-owned, exact Grok Bot 0.20.0 application and creates
-a separate OpenBot application. It does not modify the source Grok Bot app.
+The installer reads an exact Grok Bot 0.20.0 application and creates a separate
+OpenBot application. The user may select an existing app or explicitly choose
+the pinned official vendor download. That download is kept in a private
+temporary directory, bounded and SHA-256 verified before a read-only mount,
+then detached and removed after installation. The installer does not modify an
+existing source Grok Bot app.
 On first launch, a legacy Codex Bot profile is copied atomically into OpenBot;
 the legacy application and profile are retained for compatibility and rollback.
 The OpenBot DMG contains no Grok Bot application, user profile, local permission
