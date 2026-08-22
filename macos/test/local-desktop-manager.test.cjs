@@ -342,9 +342,9 @@ async function fixture(t, overrides = {}) {
   });
   if (!hasCurrentReader) {
     const open = manager.open.bind(manager);
-    manager.open = async (value) => {
+    manager.open = async (value, options) => {
       current.set(value.botId, value);
-      return open(value);
+      return open(value, options);
     };
   }
   return { ...electron, helpers, manager, permissionBroker, root };
@@ -560,6 +560,249 @@ test("two bots receive distinct partitions workspaces and current frames", async
   assert.equal(frame.height, 680);
   assert.equal(Object.hasOwn(frame, "bytes"), false);
   assert.equal(frames.filter((event) => event.botId === BOT_B).length, 0);
+});
+
+test("successful external capture and navigation publish bounded internal currentness events", async (t) => {
+  const { manager } = await fixture(t);
+  const frameEvents = [];
+  const navigationEvents = [];
+  manager.on("frame-changed", (value) => frameEvents.push(value));
+  manager.on("navigation-changed", (value) => navigationEvents.push(value));
+  const session = await manager.open(localComputer());
+
+  const captured = await manager.capture(identity(session));
+  await manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/next" });
+
+  assert.deepEqual(Object.keys(captured).sort(), [
+    "botId", "frameId", "height", "mimeType", "targetGeneration", "targetId", "width",
+  ]);
+  assert.equal(frameEvents.length, 1);
+  assert.deepEqual(Object.keys(frameEvents[0]).sort(), [
+    "botId", "frameId", "frameSequence", "pageGeneration", "sessionGeneration", "targetGeneration", "targetId",
+  ]);
+  assert.deepEqual(frameEvents[0], {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: session.sessionGeneration,
+    pageGeneration: session.pageGeneration,
+    frameId: captured.frameId,
+    frameSequence: 1,
+  });
+  assert.equal(navigationEvents.length, 1);
+  assert.deepEqual(Object.keys(navigationEvents[0]).sort(), [
+    "action", "botId", "pageGeneration", "sessionGeneration", "targetGeneration", "targetId", "url",
+  ]);
+  assert.deepEqual(navigationEvents[0], {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: session.sessionGeneration,
+    pageGeneration: session.pageGeneration + 1,
+    action: "navigate",
+    url: "https://example.com/next",
+  });
+  assert.doesNotMatch(JSON.stringify({ frameEvents, navigationEvents }), /bytes|partition|workspace|Users|token/i);
+});
+
+test("spontaneous main-frame navigation emits one ordered currentness event while subframes do nothing", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+  const webContents = windows[0].webContents;
+
+  webContents.emit("did-start-navigation", {}, "https://example.com/child", false, false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.length, 0);
+
+  webContents.urls.push("https://example.com/hidden-input");
+  webContents.emit("did-start-navigation", {}, "https://example.com/hidden-input", false, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0], {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: session.sessionGeneration,
+    pageGeneration: session.pageGeneration + 1,
+    action: "navigate",
+    url: "https://example.com/hidden-input",
+  });
+});
+
+test("internal programmatic navigation publishes one manager notification for IPC ownership", async (t) => {
+  const { manager } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+
+  await manager.navigate(
+    { ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/internal" },
+    { internal: true },
+  );
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action, "navigate");
+  assert.equal(events[0].url, "https://example.com/internal");
+});
+
+test("history navigation to the built-in home emits a known-home null URL", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+  await manager.navigate({ ...identity(session), sessionGeneration: session.sessionGeneration, url: "https://example.com/next" });
+  events.length = 0;
+  const webContents = windows[0].webContents;
+  webContents.canGoBack = () => true;
+  webContents.goBack = () => queueMicrotask(() => {
+    webContents.urls.push(LOCAL_DESKTOP_START_URL);
+    webContents.emit("did-start-navigation", {}, LOCAL_DESKTOP_START_URL, false, true);
+    webContents.emit("did-navigate", {}, LOCAL_DESKTOP_START_URL);
+  });
+
+  await manager.goBack({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    pageGeneration: session.pageGeneration + 1,
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action, "goBack");
+  assert.equal(events[0].url, null);
+});
+
+test("history navigation preserves its public action while hiding the destination URL", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+  const webContents = windows[0].webContents;
+  webContents.canGoBack = () => true;
+  webContents.goBack = () => queueMicrotask(() => {
+    webContents.urls.push("https://example.com/back");
+    webContents.emit("did-start-navigation", {}, "https://example.com/back", false, true);
+    webContents.emit("did-navigate", {}, "https://example.com/back");
+  });
+
+  await manager.goBack({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    pageGeneration: session.pageGeneration,
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action, "goBack");
+  assert.equal(events[0].url, null);
+});
+
+test("spontaneous main-frame navigation storms publish only the latest URL and page", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+  const webContents = windows[0].webContents;
+
+  webContents.urls.push("https://example.com/first");
+  webContents.emit("did-start-navigation", {}, "https://example.com/first", false, true);
+  webContents.urls.push("https://example.com/latest");
+  webContents.emit("did-start-navigation", {}, "https://example.com/latest", false, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].url, "https://example.com/latest");
+  assert.equal(events[0].pageGeneration, session.pageGeneration + 1);
+});
+
+test("programmatic navigation redirects remain command-owned and publish one result event", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+  windows[0].webContents.loadURL = async (url) => {
+    windows[0].webContents.urls.push(url);
+    windows[0].webContents.emit("did-start-navigation", {}, url, false, true);
+    windows[0].webContents.urls.push("https://example.com/redirect");
+    windows[0].webContents.emit("did-start-navigation", {}, "https://example.com/redirect", false, true);
+  };
+
+  await manager.navigate({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    url: "https://example.com/requested",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action, "navigate");
+  assert.equal(events[0].url, "https://example.com/redirect");
+  assert.equal(events[0].pageGeneration, session.pageGeneration + 1);
+});
+
+test("internal programmatic navigation still publishes one manager event for IPC ownership", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+  windows[0].webContents.loadURL = async (url) => {
+    windows[0].webContents.urls.push(url);
+    windows[0].webContents.emit("did-start-navigation", {}, url, false, true);
+    windows[0].webContents.urls.push("https://example.com/internal-redirect");
+    windows[0].webContents.emit("did-start-navigation", {}, "https://example.com/internal-redirect", false, true);
+  };
+
+  await manager.navigate({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    url: "https://example.com/internal",
+  }, { internal: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0].url, "https://example.com/internal-redirect");
+});
+
+test("malformed spontaneous main-frame navigation fails closed before fencing currentness", async (t) => {
+  const { manager, windows } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
+  const webContents = windows[0].webContents;
+
+  webContents.emit("did-start-navigation", {}, undefined, false, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(session.pageGeneration, 1);
+  assert.equal(events.length, 0);
+});
+
+test("successful external session replacement publishes only bounded current session identity", async (t) => {
+  const { manager } = await fixture(t);
+  const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("session-changed", (value) => events.push(value));
+
+  const replacement = await manager.retry(localComputer(BOT_A, LOCAL_A, 1));
+
+  assert.equal(events.length, 1);
+  assert.deepEqual(Object.keys(events[0]).sort(), [
+    "botId", "pageGeneration", "sessionGeneration", "targetGeneration", "targetId",
+  ]);
+  assert.deepEqual(events[0], {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: replacement.sessionGeneration,
+    pageGeneration: replacement.pageGeneration,
+  });
+  assert.doesNotMatch(JSON.stringify(events), /bytes|partition|workspace|Users|token/i);
 });
 
 test("display capture returns bounded private PNG bytes while tool capture remains metadata only", async (t) => {
@@ -1790,23 +2033,26 @@ test("history navigation fails within its bound when no authoritative navigation
   );
 });
 
-test("history navigation preserves an explicit stale code when a second main-frame start advances the page", async (t) => {
+test("history navigation treats redirect main-frame starts as one command", async (t) => {
   const { manager, windows } = await fixture(t, { navigationTimeoutMs: 50 });
   const session = await manager.open(localComputer());
+  const events = [];
+  manager.on("navigation-changed", (value) => events.push(value));
   const webContents = windows[0].webContents;
   webContents.goForward = () => queueMicrotask(() => {
     webContents.emit("did-start-navigation", {}, "https://example.com/one", false, true);
     webContents.emit("did-start-navigation", {}, "https://example.com/two", false, true);
     webContents.emit("did-navigate", {}, "https://example.com/two");
   });
-  await assert.rejects(
-    manager.goForward({
-      ...identity(session),
-      sessionGeneration: session.sessionGeneration,
-      pageGeneration: session.pageGeneration,
-    }),
-    (error) => error?.code === "OPENBOT_LOCAL_NAVIGATION_STALE",
-  );
+  const result = await manager.goForward({
+    ...identity(session),
+    sessionGeneration: session.sessionGeneration,
+    pageGeneration: session.pageGeneration,
+  });
+  assert.equal(result.pageGeneration, session.pageGeneration + 1);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].action, "goForward");
+  assert.equal(events[0].url, null);
 });
 
 test("synchronous debugger detach during attach cannot publish a live session", async (t) => {

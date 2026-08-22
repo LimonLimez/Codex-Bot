@@ -686,6 +686,28 @@ test("rich frame, status, and navigation DTOs are exact-current and stale genera
   mounted.dispose();
 });
 
+test("renderer applies the existing navigation action union and clears the address for known home", async () => {
+  const value = fixture();
+  const { createLocalDesktopView } = require(viewPath);
+  const mounted = createLocalDesktopView(value);
+  mounted.selectBot(BOT_A);
+  value.emitFrame(richFrame());
+  findNode(value, "openbot-local-desktop-open").click();
+  await tick();
+  value.emitFrame(richFrame({ presentation: "interactive", frameId: "frame-interactive", frameSequence: 2 }));
+  await tick();
+
+  const address = findNode(value, "openbot-local-desktop-address");
+  address.value = "https://example.com/current";
+  const applied = value.emitNavigation(richNavigation({ action: "navigate", url: "https://example.com/external" }));
+  assert.equal(applied.action, "navigate");
+  assert.equal(address.value, "https://example.com/external");
+  const home = value.emitNavigation(richNavigation({ action: "goBack", pageGeneration: 4, url: null }));
+  assert.equal(home.action, "goBack");
+  assert.equal(address.value, "");
+  mounted.dispose();
+});
+
 test("letterbox geometry maps only content pixels to the fixed 1280x800 surface", () => {
   const { computeLetterbox, mapPointerToSurface } = require(viewPath);
   const layout = computeLetterbox({ left: 0, top: 0, width: 1000, height: 700 }, 1280, 800);

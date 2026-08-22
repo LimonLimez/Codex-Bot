@@ -129,7 +129,8 @@ function fixture({ captureDisplayFrame, read } = {}) {
     }
   }
   const computerBoundary = new Boundary();
-  const manager = {
+  const manager = new EventEmitter();
+  Object.assign(manager, {
     ownedWindows: new Set(),
     openCalls: [],
     captureCalls: [],
@@ -140,7 +141,7 @@ function fixture({ captureDisplayFrame, read } = {}) {
       if (captureDisplayFrame) return captureDisplayFrame(identity, this.captureCalls.length);
       return frame(identity.botId, identity.targetId, identity.targetGeneration, `frame-${this.captureCalls.length}`);
     },
-  };
+  });
   function setIntervalFn(callback, milliseconds) {
     const timer = { callback, milliseconds, cleared: false };
     timers.push(timer);
@@ -1058,6 +1059,1309 @@ test("retry uses the manager retry lifecycle when the interactive core provides 
   installed.dispose();
 });
 
+test("external manager frame and navigation events fence stale control and republish the current presentation", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_CHANNELS,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const oldFrame = current.frame;
+  const oldLease = current.lease.controlGeneration;
+
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    frameId: "frame-external",
+    frameSequence: oldFrame.frameSequence + 1,
+  });
+  await assert.rejects(
+    value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+      ...current.request,
+      frameId: oldFrame.frameId,
+      frameSequence: oldFrame.frameSequence,
+      inputSequence: 1,
+      controlGeneration: oldLease,
+      type: "mouseMoved",
+      x: 4,
+      y: 5,
+    }),
+    { code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED" },
+  );
+  await tick();
+  const refreshed = frameEvents(value).at(-1).value;
+  assert.equal(refreshed.frameSequence > oldFrame.frameSequence, true);
+  assert.equal(refreshed.pageGeneration, 2);
+  const refreshedRequest = { ...current.request, pageGeneration: 2 };
+  const replacementLease = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(current.event, refreshedRequest);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+    ...refreshedRequest,
+    frameId: refreshed.frameId,
+    frameSequence: refreshed.frameSequence,
+    inputSequence: 1,
+    controlGeneration: replacementLease.controlGeneration,
+    type: "mouseMoved",
+    x: 6,
+    y: 7,
+  });
+
+  interactiveState.pages.set(BOT_A, 3);
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/external",
+  });
+  await assert.rejects(
+    value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+      ...refreshedRequest,
+      frameId: refreshed.frameId,
+      frameSequence: refreshed.frameSequence,
+      inputSequence: 2,
+      controlGeneration: replacementLease.controlGeneration,
+      type: "mouseMoved",
+      x: 8,
+      y: 9,
+    }),
+    { code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED" },
+  );
+  await tick();
+  const navigatedFrame = frameEvents(value).at(-1).value;
+  const navigation = value.first.sent
+    .filter((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL)
+    .at(-1).value;
+  assert.equal(navigatedFrame.pageGeneration, 3);
+  assert.equal(navigation.action, "navigate");
+  assert.equal(navigation.url, "https://example.com/external");
+  const navigatedRequest = { ...current.request, pageGeneration: 3 };
+  const navigatedLease = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(current.event, navigatedRequest);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+    ...navigatedRequest,
+    frameId: navigatedFrame.frameId,
+    frameSequence: navigatedFrame.frameSequence,
+    inputSequence: 1,
+    controlGeneration: navigatedLease.controlGeneration,
+    type: "mouseMoved",
+    x: 10,
+    y: 11,
+  });
+  installed.dispose();
+});
+
+test("external navigation publishes a reset navigation DTO before its current frame", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  await prepareInteractive(value);
+  interactiveState.pages.set(BOT_A, 3);
+
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/latest",
+  });
+  await tick();
+
+  const outputs = value.first.sent;
+  const navigationIndex = outputs.findIndex((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL);
+  const frameIndex = outputs.findIndex((entry, index) => index > navigationIndex
+    && entry.channel === LOCAL_DESKTOP_FRAME_EVENT_CHANNEL);
+  assert.equal(navigationIndex >= 0, true);
+  assert.equal(frameIndex > navigationIndex, true);
+  const navigation = outputs[navigationIndex].value;
+  assert.equal(navigation.frameId, null);
+  assert.equal(navigation.frameSequence, 0);
+  assert.equal(navigation.action, "navigate");
+  assert.equal(navigation.url, "https://example.com/latest");
+  await installed.dispose();
+});
+
+test("IPC-owned manager command notification is suppressed while its returned navigation publishes once", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_CHANNELS,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  value.manager.navigate = async (record, options) => {
+    assert.equal(options.internal, true);
+    interactiveState.pages.set(BOT_A, 3);
+    value.manager.emit("navigation-changed", {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 4,
+      pageGeneration: 3,
+      action: "navigate",
+      url: record.url,
+    });
+    return publicSession(value.states.get(BOT_A), 4, 3);
+  };
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.navigate)(current.event, {
+    ...current.request,
+    url: "https://example.com/command",
+  });
+  await tick();
+
+  const navigations = value.first.sent.filter((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL);
+  assert.equal(navigations.length, 1);
+  assert.equal(navigations[0].value.url, "https://example.com/command");
+  assert.equal(navigations[0].value.pageGeneration, 3);
+  await installed.dispose();
+});
+
+test("external manager events are exact-bot, exact-session, coalesced, and detached on dispose", async () => {
+  const held = deferred();
+  let holdRefresh = false;
+  const value = fixture();
+  const interactiveState = enableInteractive(value, {
+    captureInteractiveFrame(identity, call, state) {
+      if (holdRefresh && call === 2) return held.promise;
+      return richFrame(identity, {
+        frameId: `frame-event-${call}`,
+        frameSequence: call + 2,
+        sessionGeneration: 4,
+        pageGeneration: state.pages.get(identity.botId) || 2,
+        presentation: "interactive",
+        byte: call,
+      });
+    },
+  });
+  const { installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  await prepareInteractive(value);
+  holdRefresh = true;
+  assert.equal(value.manager.listenerCount("frame-changed"), 1);
+  assert.equal(value.manager.listenerCount("navigation-changed"), 1);
+  assert.equal(value.manager.listenerCount("session-changed"), 1);
+
+  value.manager.emit("frame-changed", {
+    botId: BOT_B,
+    targetId: LOCAL_B,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    frameId: "frame-other-bot",
+    frameSequence: 99,
+  });
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 999,
+    pageGeneration: 2,
+    frameId: "frame-wrong-session",
+    frameSequence: 100,
+  });
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    frameId: "frame-coalesced-one",
+    frameSequence: 4,
+  });
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    frameId: "frame-coalesced-two",
+    frameSequence: 5,
+  });
+  await tick();
+  assert.equal(interactiveState.interactiveCalls, 2);
+  held.resolve(richFrame({ botId: BOT_A, targetId: LOCAL_A, targetGeneration: 1 }, {
+    frameId: "frame-event-final", frameSequence: 6, presentation: "interactive", byte: 8,
+  }));
+  await tick();
+  await tick();
+  assert.equal(interactiveState.interactiveCalls, 2);
+
+  await installed.dispose();
+  assert.equal(value.manager.listenerCount("frame-changed"), 0);
+  assert.equal(value.manager.listenerCount("navigation-changed"), 0);
+  assert.equal(value.manager.listenerCount("session-changed"), 0);
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 2,
+    frameId: "frame-after-dispose",
+    frameSequence: 4,
+  });
+  assert.equal(interactiveState.interactiveCalls, 2);
+});
+
+test("a newer-page external frame cannot strand the presentation when navigation metadata races", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const oldFrame = current.frame;
+  interactiveState.pages.set(BOT_A, 3);
+
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    frameId: "frame-page-ahead",
+    frameSequence: oldFrame.frameSequence + 1,
+  });
+  await tick();
+
+  const refreshed = frameEvents(value).at(-1).value;
+  assert.equal(refreshed.pageGeneration, 3);
+  const lease = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(current.event, {
+    ...current.request,
+    pageGeneration: 3,
+  });
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+    ...current.request,
+    pageGeneration: 3,
+    frameId: refreshed.frameId,
+    frameSequence: refreshed.frameSequence,
+    inputSequence: 1,
+    controlGeneration: lease.controlGeneration,
+    type: "mouseMoved",
+    x: 12,
+    y: 13,
+  });
+  assert.equal(interactiveState.interactiveCalls >= 2, true);
+  await installed.dispose();
+});
+
+test("a page-ahead frame followed by its paired navigation still publishes the navigation DTO", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  interactiveState.pages.set(BOT_A, 3);
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    frameId: "frame-page-ahead-paired",
+    frameSequence: current.frame.frameSequence + 1,
+  });
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/paired",
+  });
+  await tick();
+
+  const navigations = value.first.sent.filter((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL);
+  assert.equal(navigations.length, 1);
+  assert.equal(navigations[0].value.pageGeneration, 3);
+  assert.equal(navigations[0].value.url, "https://example.com/paired");
+  await installed.dispose();
+});
+
+test("same-stack navigation followed by its frame publishes one renderer transaction in order", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const start = value.first.sent.length;
+  const callsBefore = interactiveState.interactiveCalls;
+  interactiveState.pages.set(BOT_A, 3);
+
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/order-nav-first",
+  });
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    frameId: "frame-order-nav-first",
+    frameSequence: current.frame.frameSequence + 1,
+  });
+  await tick();
+
+  const outputs = value.first.sent.slice(start);
+  assert.deepEqual(outputs.map((entry) => entry.channel), [
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+  ]);
+  assert.equal(outputs[0].value.url, "https://example.com/order-nav-first");
+  assert.equal(interactiveState.interactiveCalls, callsBefore + 1);
+  await installed.dispose();
+});
+
+test("same-stack frame followed by its navigation still publishes navigation before one frame", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const start = value.first.sent.length;
+  const callsBefore = interactiveState.interactiveCalls;
+  interactiveState.pages.set(BOT_A, 3);
+
+  value.manager.emit("frame-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    frameId: "frame-order-frame-first",
+    frameSequence: current.frame.frameSequence + 1,
+  });
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/order-frame-first",
+  });
+  await tick();
+
+  const outputs = value.first.sent.slice(start);
+  assert.deepEqual(outputs.map((entry) => entry.channel), [
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+  ]);
+  assert.equal(outputs[0].value.url, "https://example.com/order-frame-first");
+  assert.equal(interactiveState.interactiveCalls, callsBefore + 1);
+  await installed.dispose();
+});
+
+test("same-stack session and frame events in either order publish one frame and status without navigation", async () => {
+  for (const order of ["session-first", "frame-first"]) {
+    const value = fixture();
+    let activeSession = 4;
+    const interactiveState = enableInteractive(value, {
+      captureInteractiveFrame(identity, call, state) {
+        return richFrame(identity, {
+          frameId: `frame-order-${order}-${call}`,
+          frameSequence: call + 1,
+          sessionGeneration: activeSession,
+          pageGeneration: state.pages.get(identity.botId) || 2,
+          presentation: "interactive",
+          byte: call,
+        });
+      },
+    });
+    const {
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+      installLocalDesktopFrameIpc,
+    } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    const current = await prepareInteractive(value);
+    const start = value.first.sent.length;
+    const callsBefore = interactiveState.interactiveCalls;
+    activeSession = 5;
+    interactiveState.pages.set(BOT_A, 3);
+    const sessionChanged = {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 5,
+      pageGeneration: 3,
+    };
+    const frameChanged = {
+      ...sessionChanged,
+      frameId: `frame-order-${order}`,
+      frameSequence: current.frame.frameSequence + 1,
+    };
+    if (order === "session-first") {
+      value.manager.emit("session-changed", sessionChanged);
+      value.manager.emit("frame-changed", frameChanged);
+    } else {
+      value.manager.emit("frame-changed", frameChanged);
+      value.manager.emit("session-changed", sessionChanged);
+    }
+    await tick();
+
+    const outputs = value.first.sent.slice(start);
+    assert.deepEqual(outputs.map((entry) => entry.channel), [
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    ], order);
+    assert.equal(outputs[0].value.sessionGeneration, 5, order);
+    assert.equal(outputs[0].value.pageGeneration, 3, order);
+    assert.equal(outputs.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false, order);
+    assert.equal(interactiveState.interactiveCalls, callsBefore + 1, order);
+    await installed.dispose();
+  }
+});
+
+test("Round5 nav/session permutations publish only the dominant session frame", async () => {
+  for (const order of ["navigation-first", "session-first"]) {
+    const value = fixture();
+    let activeSession = 4;
+    const interactiveState = enableInteractive(value, {
+      captureInteractiveFrame(identity, call, state) {
+        return richFrame(identity, {
+          frameId: `frame-round5-nav-session-${order}-${call}`,
+          frameSequence: 20 + call,
+          sessionGeneration: activeSession,
+          pageGeneration: state.pages.get(identity.botId) || 2,
+          presentation: "interactive",
+          byte: call,
+        });
+      },
+    });
+    const {
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+      installLocalDesktopFrameIpc,
+    } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    await prepareInteractive(value);
+    const start = value.first.sent.length;
+    const callsBefore = interactiveState.interactiveCalls;
+    activeSession = 5;
+    const events = {
+      navigation: {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 4,
+        pageGeneration: 3,
+        action: "navigate",
+        url: `https://example.com/round5-nav-session-${order}`,
+      },
+      session: {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 5,
+        pageGeneration: 2,
+      },
+    };
+    const kinds = order === "navigation-first" ? ["navigation", "session"] : ["session", "navigation"];
+    for (const kind of kinds) value.manager.emit(`${kind}-changed`, events[kind]);
+    await tick();
+
+    const outputs = value.first.sent.slice(start);
+    assert.deepEqual(outputs.map((entry) => entry.channel), [
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    ], order);
+    assert.equal(outputs.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false, order);
+    assert.equal(outputs[0].value.sessionGeneration, 5, order);
+    assert.equal(outputs[0].value.pageGeneration, 2, order);
+    assert.equal(interactiveState.interactiveCalls, callsBefore + 1, order);
+    await installed.dispose();
+  }
+});
+
+test("Round5 nav/frame permutations drop navigation below the dominant page", async () => {
+  for (const order of ["navigation-first", "frame-first"]) {
+    const value = fixture();
+    let latestFrameSequence = 8;
+    const interactiveState = enableInteractive(value, {
+      captureInteractiveFrame(identity, call, state) {
+        return richFrame(identity, {
+          frameId: `frame-round5-nav-frame-${order}-${call}`,
+          frameSequence: latestFrameSequence + 1,
+          sessionGeneration: 4,
+          pageGeneration: state.pages.get(identity.botId) || 2,
+          presentation: "interactive",
+          byte: call,
+        });
+      },
+    });
+    const {
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+      installLocalDesktopFrameIpc,
+    } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    const current = await prepareInteractive(value);
+    const start = value.first.sent.length;
+    const callsBefore = interactiveState.interactiveCalls;
+    interactiveState.pages.set(BOT_A, 4);
+    const events = {
+      navigation: {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 4,
+        pageGeneration: 3,
+        action: "navigate",
+        url: `https://example.com/round5-nav-frame-${order}`,
+      },
+      frame: {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 4,
+        pageGeneration: 4,
+        frameId: `frame-round5-authoritative-${order}`,
+        frameSequence: latestFrameSequence,
+      },
+    };
+    const kinds = order === "navigation-first" ? ["navigation", "frame"] : ["frame", "navigation"];
+    for (const kind of kinds) value.manager.emit(`${kind}-changed`, events[kind]);
+    await tick();
+
+    const outputs = value.first.sent.slice(start);
+    assert.deepEqual(outputs.map((entry) => entry.channel), [
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    ], order);
+    assert.equal(outputs.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false, order);
+    assert.equal(outputs[0].value.sessionGeneration, 4, order);
+    assert.equal(outputs[0].value.pageGeneration, 4, order);
+    assert.equal(interactiveState.interactiveCalls, callsBefore + 1, order);
+    assert.equal(current.frame.pageGeneration, 2, order);
+    await installed.dispose();
+  }
+});
+
+test("Round5 session/frame permutations publish one current frame without navigation", async () => {
+  for (const order of ["session-first", "frame-first"]) {
+    const value = fixture();
+    let activeSession = 4;
+    let latestFrameSequence = 8;
+    const interactiveState = enableInteractive(value, {
+      captureInteractiveFrame(identity, call, state) {
+        return richFrame(identity, {
+          frameId: `frame-round5-session-frame-${order}-${call}`,
+          frameSequence: latestFrameSequence + 1,
+          sessionGeneration: activeSession,
+          pageGeneration: state.pages.get(identity.botId) || 2,
+          presentation: "interactive",
+          byte: call,
+        });
+      },
+    });
+    const {
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+      installLocalDesktopFrameIpc,
+    } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    await prepareInteractive(value);
+    const start = value.first.sent.length;
+    const callsBefore = interactiveState.interactiveCalls;
+    activeSession = 5;
+    const session = {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 5,
+      pageGeneration: 2,
+    };
+    const frame = {
+      ...session,
+      frameId: `frame-round5-session-frame-authoritative-${order}`,
+      frameSequence: latestFrameSequence,
+    };
+    const kinds = order === "session-first" ? ["session", "frame"] : ["frame", "session"];
+    for (const kind of kinds) value.manager.emit(`${kind}-changed`, kind === "session" ? session : frame);
+    await tick();
+
+    const outputs = value.first.sent.slice(start);
+    assert.deepEqual(outputs.map((entry) => entry.channel), [
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    ], order);
+    assert.equal(outputs.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false, order);
+    assert.equal(outputs[0].value.sessionGeneration, 5, order);
+    assert.equal(outputs[0].value.pageGeneration, 2, order);
+    assert.equal(interactiveState.interactiveCalls, callsBefore + 1, order);
+    await installed.dispose();
+  }
+});
+
+test("Round5 three-way permutations keep only the highest session/page token", async () => {
+  const permutations = [
+    ["navigation", "frame", "session"],
+    ["navigation", "session", "frame"],
+    ["frame", "navigation", "session"],
+    ["frame", "session", "navigation"],
+    ["session", "navigation", "frame"],
+    ["session", "frame", "navigation"],
+  ];
+  for (const order of permutations) {
+    const value = fixture();
+    let activeSession = 4;
+    let latestFrameSequence = 8;
+    const interactiveState = enableInteractive(value, {
+      captureInteractiveFrame(identity, call, state) {
+        return richFrame(identity, {
+          frameId: `frame-round5-three-way-${order.join("-")}-${call}`,
+          frameSequence: latestFrameSequence + 1,
+          sessionGeneration: activeSession,
+          pageGeneration: state.pages.get(identity.botId) || 2,
+          presentation: "interactive",
+          byte: call,
+        });
+      },
+    });
+    const {
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+      installLocalDesktopFrameIpc,
+    } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    await prepareInteractive(value);
+    const start = value.first.sent.length;
+    activeSession = 5;
+    const events = {
+      navigation: {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 4,
+        pageGeneration: 3,
+        action: "navigate",
+        url: `https://example.com/round5-three-way-${order.join("-")}`,
+      },
+      frame: {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 4,
+        pageGeneration: 4,
+        frameId: `frame-round5-three-way-authoritative-${order.join("-")}`,
+        frameSequence: latestFrameSequence,
+      },
+      session: {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 5,
+        pageGeneration: 2,
+      },
+    };
+    interactiveState.pages.set(BOT_A, 2);
+    for (const kind of order) value.manager.emit(`${kind}-changed`, events[kind]);
+    await tick();
+
+    const outputs = value.first.sent.slice(start);
+    assert.deepEqual(outputs.map((entry) => entry.channel), [
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    ], order.join(","));
+    assert.equal(outputs.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false, order.join(","));
+    assert.equal(outputs[0].value.sessionGeneration, 5, order.join(","));
+    assert.equal(outputs[0].value.pageGeneration, 2, order.join(","));
+    await installed.dispose();
+  }
+});
+
+test("Round5 equal-token navigation keeps the latest address while sharing one capture", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  await prepareInteractive(value);
+  const start = value.first.sent.length;
+  const callsBefore = interactiveState.interactiveCalls;
+  interactiveState.pages.set(BOT_A, 3);
+  const base = {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+  };
+  value.manager.emit("navigation-changed", { ...base, url: "https://example.com/round5-old" });
+  value.manager.emit("frame-changed", {
+    ...base,
+    frameId: "frame-round5-equal-token",
+    frameSequence: 8,
+  });
+  value.manager.emit("navigation-changed", { ...base, url: "https://example.com/round5-latest" });
+  await tick();
+
+  const outputs = value.first.sent.slice(start);
+  assert.deepEqual(outputs.map((entry) => entry.channel), [
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+  ]);
+  assert.equal(outputs[0].value.url, "https://example.com/round5-latest");
+  assert.equal(outputs[0].value.sessionGeneration, 4);
+  assert.equal(outputs[0].value.pageGeneration, 3);
+  assert.equal(interactiveState.interactiveCalls, callsBefore + 1);
+  await installed.dispose();
+});
+
+test("Round5 newer cross-kind events during an awaited capture suppress stale navigation", async () => {
+  const held = deferred();
+  const value = fixture();
+  let activeSession = 4;
+  const interactiveState = enableInteractive(value, {
+    captureInteractiveFrame(identity, call, state) {
+      if (call === 2) return held.promise;
+      return richFrame(identity, {
+        frameId: `frame-round5-await-${call}`,
+        frameSequence: 20 + call,
+        sessionGeneration: activeSession,
+        pageGeneration: state.pages.get(identity.botId) || 2,
+        presentation: "interactive",
+        byte: call,
+      });
+    },
+  });
+  const {
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    LOCAL_DESKTOP_FRAME_CHANNELS,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const start = value.first.sent.length;
+  const pendingPresentation = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(current.event, {
+    ...current.request,
+    presentation: "interactive",
+  });
+  await Promise.resolve();
+  activeSession = 5;
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/round5-await-stale",
+  });
+  value.manager.emit("session-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 5,
+    pageGeneration: 2,
+  });
+  held.resolve(richFrame({ botId: BOT_A, targetId: LOCAL_A, targetGeneration: 1 }, {
+    frameId: "frame-round5-await-held",
+    frameSequence: 30,
+    sessionGeneration: 5,
+    pageGeneration: 2,
+    presentation: "interactive",
+    byte: 30,
+  }));
+  await pendingPresentation;
+  await tick();
+
+  const outputs = value.first.sent.slice(start);
+  assert.deepEqual(outputs.map((entry) => entry.channel), [
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+  ]);
+  assert.equal(outputs.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false);
+  assert.equal(outputs[0].value.sessionGeneration, 5);
+  assert.equal(outputs[0].value.pageGeneration, 2);
+  assert.equal(interactiveState.interactiveCalls, 3);
+  await installed.dispose();
+});
+
+test("adjudicated manager refresh merges session or frame arrivals after its snapshot", async () => {
+  for (const newerType of ["session", "frame"]) {
+    const held = deferred();
+    const value = fixture();
+    let activeSession = 4;
+    const interactiveState = enableInteractive(value, {
+      captureInteractiveFrame(identity, call, state) {
+        if (call === 2) return held.promise;
+        return richFrame(identity, {
+          frameId: `frame-adjudicated-${newerType}-${call}`,
+          frameSequence: 200 + call,
+          sessionGeneration: activeSession,
+          pageGeneration: state.pages.get(identity.botId) || 2,
+          presentation: "interactive",
+          byte: call,
+        });
+      },
+    });
+    const {
+      LOCAL_DESKTOP_FRAME_CHANNELS,
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+      installLocalDesktopFrameIpc,
+    } = require(frameIpcPath);
+    const installed = installLocalDesktopFrameIpc(value);
+    const current = await prepareInteractive(value);
+    const start = value.first.sent.length;
+    const callsBefore = interactiveState.interactiveCalls;
+    const pendingPresentation = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(current.event, {
+      ...current.request,
+      presentation: "interactive",
+    });
+    await Promise.resolve();
+
+    value.manager.emit("navigation-changed", {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 4,
+      pageGeneration: 3,
+      action: "navigate",
+      url: `https://example.com/adjudicated-${newerType}-stale`,
+    });
+    await tick();
+
+    // Equal-token and lower-token notifications must not manufacture a
+    // second transaction while the first one is waiting on its capture.
+    value.manager.emit("navigation-changed", {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 4,
+      pageGeneration: 3,
+      action: "navigate",
+      url: `https://example.com/adjudicated-${newerType}-equal`,
+    });
+    value.manager.emit("frame-changed", {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 4,
+      pageGeneration: 2,
+      frameId: `frame-adjudicated-${newerType}-lower`,
+      frameSequence: current.frame.frameSequence + 100,
+    });
+
+    if (newerType === "session") {
+      activeSession = 5;
+      value.manager.emit("session-changed", {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 5,
+        pageGeneration: 2,
+      });
+      value.manager.emit("frame-changed", {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 5,
+        pageGeneration: 2,
+        frameId: "frame-adjudicated-session-current",
+        frameSequence: 100,
+      });
+    } else {
+      interactiveState.pages.set(BOT_A, 4);
+      value.manager.emit("frame-changed", {
+        botId: BOT_A,
+        targetId: LOCAL_A,
+        targetGeneration: 1,
+        sessionGeneration: 4,
+        pageGeneration: 4,
+        frameId: "frame-adjudicated-frame-current",
+        frameSequence: 100,
+      });
+    }
+
+    held.resolve(richFrame({ botId: BOT_A, targetId: LOCAL_A, targetGeneration: 1 }, {
+      frameId: `frame-adjudicated-${newerType}-held`,
+      frameSequence: 50,
+      sessionGeneration: newerType === "session" ? 5 : 4,
+      pageGeneration: newerType === "session" ? 2 : 4,
+      presentation: "interactive",
+      byte: 50,
+    }));
+    await pendingPresentation;
+    for (let settle = 0; settle < 5; settle += 1) await tick();
+
+    const firstOutputs = value.first.sent.slice(start);
+    assert.deepEqual(firstOutputs.map((entry) => entry.channel), [
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    ], newerType);
+    assert.equal(firstOutputs.some((entry) => entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false, newerType);
+    assert.equal(firstOutputs[0].value.sessionGeneration, newerType === "session" ? 5 : 4, newerType);
+    assert.equal(firstOutputs[0].value.pageGeneration, newerType === "session" ? 2 : 4, newerType);
+    assert.equal(firstOutputs[1].value.sessionGeneration, newerType === "session" ? 5 : 4, newerType);
+    assert.equal(firstOutputs[1].value.pageGeneration, newerType === "session" ? 2 : 4, newerType);
+    assert.equal(interactiveState.interactiveCalls, callsBefore + 2, newerType);
+
+    const laterPage = newerType === "session" ? 3 : 5;
+    interactiveState.pages.set(BOT_A, laterPage);
+    value.manager.emit("navigation-changed", {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: newerType === "session" ? 5 : 4,
+      pageGeneration: laterPage,
+      action: "navigate",
+      url: `https://example.com/adjudicated-${newerType}-later`,
+    });
+    for (let settle = 0; settle < 5; settle += 1) await tick();
+
+    const allOutputs = value.first.sent.slice(start);
+    const laterOutputs = allOutputs.slice(2);
+    assert.deepEqual(laterOutputs.map((entry) => entry.channel), [
+      LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+      LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+      LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    ], newerType);
+    assert.equal(laterOutputs[0].value.pageGeneration, laterPage, newerType);
+    assert.equal(interactiveState.interactiveCalls, callsBefore + 3, newerType);
+    await installed.dispose();
+  }
+});
+
+test("adjudicated manager refresh stays bot-scoped and detaches a disposed sibling", async () => {
+  const held = deferred();
+  const value = fixture();
+  const interactiveState = enableInteractive(value, {
+    captureInteractiveFrame(identity, call, state) {
+      if (identity.botId === BOT_A && call === 3) return held.promise;
+      return richFrame(identity, {
+        frameId: `frame-adjudicated-sibling-${identity.botId}-${call}`,
+        frameSequence: 60 + call,
+        sessionGeneration: 4,
+        pageGeneration: state.pages.get(identity.botId) || 2,
+        presentation: "interactive",
+        byte: call,
+      });
+    },
+  });
+  const {
+    LOCAL_DESKTOP_FRAME_CHANNELS,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const currentA = await prepareInteractive(value, value.first.sender, BOT_A, 1);
+  const currentB = await prepareInteractive(value, value.second.sender, BOT_B, 1);
+  const startA = value.first.sent.length;
+  const startB = value.second.sent.length;
+  const pendingPresentation = value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(currentA.event, {
+    ...currentA.request,
+    presentation: "interactive",
+  });
+  await Promise.resolve();
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/adjudicated-sibling-stale",
+  });
+  await tick();
+  value.manager.emit("session-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 5,
+    pageGeneration: 2,
+  });
+  value.manager.emit("navigation-changed", {
+    botId: BOT_B,
+    targetId: LOCAL_B,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/adjudicated-sibling-b",
+  });
+  await installed.dispose();
+  held.resolve(richFrame({ botId: BOT_A, targetId: LOCAL_A, targetGeneration: 1 }, {
+    frameId: "frame-adjudicated-sibling-held",
+    frameSequence: 70,
+    sessionGeneration: 5,
+    pageGeneration: 2,
+    presentation: "interactive",
+    byte: 70,
+  }));
+  await Promise.allSettled([pendingPresentation]);
+  await tick();
+
+  assert.equal(value.manager.listenerCount("frame-changed"), 0);
+  assert.equal(value.manager.listenerCount("navigation-changed"), 0);
+  assert.equal(value.manager.listenerCount("session-changed"), 0);
+  assert.equal(value.first.sent.slice(startA).some((entry) =>
+    entry.channel === LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL), false);
+  assert.equal(value.first.sent.slice(startA).some((entry) =>
+    entry.channel === LOCAL_DESKTOP_FRAME_EVENT_CHANNEL || entry.channel === LOCAL_DESKTOP_STATUS_EVENT_CHANNEL), false);
+  assert.equal(value.second.sent.slice(startB).length, 0);
+  assert.equal(interactiveState.interactiveCalls, 3);
+});
+
+test("Round5 manager refresh remains bot-scoped and detaches on dispose", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  await prepareInteractive(value, value.first.sender, BOT_A, 1);
+  await prepareInteractive(value, value.second.sender, BOT_B, 1);
+  const startA = value.first.sent.length;
+  const startB = value.second.sent.length;
+  interactiveState.pages.set(BOT_A, 3);
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    action: "navigate",
+    url: "https://example.com/round5-bot-a",
+  });
+  await tick();
+  const outputsA = value.first.sent.slice(startA);
+  const outputsB = value.second.sent.slice(startB);
+  assert.deepEqual(outputsA.map((entry) => entry.channel), [
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+  ]);
+  assert.equal(outputsA[0].value.botId, BOT_A);
+  assert.equal(outputsB.length, 0);
+  const callsAfterA = interactiveState.interactiveCalls;
+  await installed.dispose();
+  assert.equal(value.manager.listenerCount("frame-changed"), 0);
+  assert.equal(value.manager.listenerCount("navigation-changed"), 0);
+  assert.equal(value.manager.listenerCount("session-changed"), 0);
+  value.manager.emit("navigation-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 4,
+    action: "navigate",
+    url: "https://example.com/round5-after-dispose",
+  });
+  value.manager.emit("frame-changed", {
+    botId: BOT_B,
+    targetId: LOCAL_B,
+    targetGeneration: 1,
+    sessionGeneration: 4,
+    pageGeneration: 3,
+    frameId: "frame-round5-after-dispose",
+    frameSequence: 8,
+  });
+  await tick();
+  assert.equal(interactiveState.interactiveCalls, callsAfterA);
+});
+
+test("a same-stack frame storm coalesces to one authoritative renderer frame and status", async () => {
+  const value = fixture();
+  let latestEventFrameSequence = 2;
+  const interactiveState = enableInteractive(value, {
+    captureInteractiveFrame(identity, call, state) {
+      return richFrame(identity, {
+        frameId: `frame-storm-capture-${call}`,
+        frameSequence: latestEventFrameSequence > 2 ? latestEventFrameSequence + 1 : call + 1,
+        pageGeneration: state.pages.get(identity.botId) || 2,
+        presentation: "interactive",
+        byte: call,
+      });
+    },
+  });
+  const {
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const start = value.first.sent.length;
+  const callsBefore = interactiveState.interactiveCalls;
+  for (let offset = 1; offset <= 4; offset += 1) {
+    latestEventFrameSequence = current.frame.frameSequence + offset;
+    value.manager.emit("frame-changed", {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 4,
+      pageGeneration: 2,
+      frameId: `frame-storm-${offset}`,
+      frameSequence: latestEventFrameSequence,
+    });
+  }
+  await tick();
+
+  const outputs = value.first.sent.slice(start);
+  assert.deepEqual(outputs.map((entry) => entry.channel), [
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+  ]);
+  assert.equal(interactiveState.interactiveCalls, callsBefore + 1);
+  await installed.dispose();
+});
+
+test("a same-stack navigation storm publishes only the latest navigation before one frame", async () => {
+  const value = fixture();
+  const interactiveState = enableInteractive(value);
+  const {
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+    installLocalDesktopFrameIpc,
+  } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  await prepareInteractive(value);
+  const start = value.first.sent.length;
+  const callsBefore = interactiveState.interactiveCalls;
+  for (let pageGeneration = 3; pageGeneration <= 5; pageGeneration += 1) {
+    interactiveState.pages.set(BOT_A, pageGeneration);
+    value.manager.emit("navigation-changed", {
+      botId: BOT_A,
+      targetId: LOCAL_A,
+      targetGeneration: 1,
+      sessionGeneration: 4,
+      pageGeneration,
+      action: "navigate",
+      url: `https://example.com/order-nav-${pageGeneration}`,
+    });
+  }
+  await tick();
+
+  const outputs = value.first.sent.slice(start);
+  assert.deepEqual(outputs.map((entry) => entry.channel), [
+    LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL,
+    LOCAL_DESKTOP_FRAME_EVENT_CHANNEL,
+    LOCAL_DESKTOP_STATUS_EVENT_CHANNEL,
+  ]);
+  assert.equal(outputs[0].value.pageGeneration, 5);
+  assert.equal(outputs[0].value.url, "https://example.com/order-nav-5");
+  assert.equal(interactiveState.interactiveCalls, callsBefore + 1);
+  await installed.dispose();
+});
+
+test("external manager session replacement fences old tokens and republishes the new session", async () => {
+  const value = fixture();
+  let sessionGeneration = 4;
+  enableInteractive(value, {
+    open(record) { return publicSession(record, sessionGeneration, 2); },
+    captureInteractiveFrame(identity, call) {
+      return richFrame(identity, {
+        frameId: `frame-session-${call}`,
+        frameSequence: call + 1,
+        sessionGeneration,
+        pageGeneration: 2,
+        presentation: "interactive",
+        byte: call,
+      });
+    },
+  });
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const current = await prepareInteractive(value);
+  const oldFrame = current.frame;
+  const oldLease = current.lease.controlGeneration;
+  sessionGeneration = 5;
+  value.manager.emit("session-changed", {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 5,
+    pageGeneration: 2,
+  });
+  await assert.rejects(
+    value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+      ...current.request,
+      frameId: oldFrame.frameId,
+      frameSequence: oldFrame.frameSequence,
+      inputSequence: 1,
+      controlGeneration: oldLease,
+      type: "mouseMoved",
+      x: 1,
+      y: 2,
+    }),
+    { code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED" },
+  );
+  await tick();
+  const refreshed = frameEvents(value).at(-1).value;
+  assert.equal(refreshed.sessionGeneration, 5);
+  assert.equal(value.first.sent.filter((entry) => entry.channel === "openbot-local-frame:navigation").length, 0);
+  const request = { ...current.request, sessionGeneration: 5, pageGeneration: 2 };
+  const lease = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(current.event, request);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.sendInput)(current.event, {
+    ...request,
+    frameId: refreshed.frameId,
+    frameSequence: refreshed.frameSequence,
+    inputSequence: 1,
+    controlGeneration: lease.controlGeneration,
+    type: "mouseMoved",
+    x: 3,
+    y: 4,
+  });
+  await installed.dispose();
+});
+
 test("successful select returns one exact rich preview bootstrap while preview events stay legacy", async () => {
   const value = fixture();
   enableInteractive(value);
@@ -1314,6 +2618,33 @@ test("real-manager rich preview is projected to the exact legacy DTO consumed by
   installed.dispose();
 });
 
+test("legacy display-only managers cannot enable the interactive presentation stage", async () => {
+  const value = fixture();
+  const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+  const installed = installLocalDesktopFrameIpc(value);
+  const event = ipcEvent(value.first.sender);
+  await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.select)(event, { botId: BOT_A, viewGeneration: 1 });
+  const result = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.presentation)(event, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    sessionGeneration: 1,
+    pageGeneration: 1,
+    viewGeneration: 1,
+    presentation: "interactive",
+  });
+  assert.deepEqual(result, {
+    botId: BOT_A,
+    targetId: LOCAL_A,
+    targetGeneration: 1,
+    viewGeneration: 1,
+    state: "unavailable",
+    code: "OPENBOT_LOCAL_CAPTURE_FAILED",
+  });
+  assert.equal(frameEvents(value).some((entry) => entry.value.presentation === "interactive"), false);
+  installed.dispose();
+});
+
 test("an interactive presentation request cannot be satisfied by a held preview capture", async () => {
   const preview = deferred();
   const value = fixture();
@@ -1529,6 +2860,60 @@ test("sender destruction removes every exact navigation and lifecycle listener i
   value.first.sender.emit("destroyed");
   assert.deepEqual(names.map((name) => value.first.sender.listenerCount(name)), [0, 0, 0, 0, 0, 0, 0]);
   installed.dispose();
+});
+
+test("sender lifecycle classification keeps exact state for subframes and malformed frame events", async (t) => {
+  const cases = [
+    ["did-start-navigation positional subframe", "did-start-navigation", [{}, "https://example.com/frame", false, false]],
+    ["did-start-navigation details subframe", "did-start-navigation", [{ isMainFrame: false }]],
+    ["did-frame-navigate positional subframe", "did-frame-navigate", [{}, "https://example.com/frame", 200, "OK", false]],
+    ["did-frame-navigate details subframe", "did-frame-navigate", [{ isMainFrame: false }]],
+    ["did-navigate-in-page positional subframe", "did-navigate-in-page", [{}, "https://example.com/#frame", false]],
+    ["did-navigate-in-page details subframe", "did-navigate-in-page", [{ isMainFrame: false }]],
+    ["did-frame-navigate malformed", "did-frame-navigate", [{}, "https://example.com/ambiguous", 200, "OK"]],
+  ];
+  for (const [label, eventName, args] of cases) {
+    await t.test(label, async () => {
+      const value = fixture();
+      enableInteractive(value);
+      const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+      const installed = installLocalDesktopFrameIpc(value);
+      const current = await prepareInteractive(value);
+      value.first.sender.emit(eventName, ...args);
+      const lease = await value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(current.event, current.request);
+      assert.equal(lease.controlGeneration, current.lease.controlGeneration);
+      installed.dispose();
+    });
+  }
+});
+
+test("sender lifecycle classification invalidates only known main or terminal events", async (t) => {
+  const cases = [
+    ["did-start-navigation positional main", "did-start-navigation", [{}, "https://example.com/main", false, true]],
+    ["did-start-navigation details main", "did-start-navigation", [{ isMainFrame: true }]],
+    ["did-frame-navigate positional main", "did-frame-navigate", [{}, "https://example.com/main", 200, "OK", true]],
+    ["did-frame-navigate details main", "did-frame-navigate", [{ isMainFrame: true }]],
+    ["did-navigate-in-page positional main", "did-navigate-in-page", [{}, "https://example.com/#main", true]],
+    ["did-navigate-in-page details main", "did-navigate-in-page", [{ isMainFrame: true }]],
+    ["will-navigate is main-only", "will-navigate", [{}]],
+    ["did-navigate is main-only", "did-navigate", [{}]],
+    ["render-process-gone is terminal", "render-process-gone", [{}]],
+  ];
+  for (const [label, eventName, args] of cases) {
+    await t.test(label, async () => {
+      const value = fixture();
+      enableInteractive(value);
+      const { LOCAL_DESKTOP_FRAME_CHANNELS, installLocalDesktopFrameIpc } = require(frameIpcPath);
+      const installed = installLocalDesktopFrameIpc(value);
+      const current = await prepareInteractive(value);
+      value.first.sender.emit(eventName, ...args);
+      await assert.rejects(
+        Promise.resolve().then(() => value.handlers.get(LOCAL_DESKTOP_FRAME_CHANNELS.acquireControl)(current.event, current.request)),
+        { code: "OPENBOT_LOCAL_FRAME_OPERATION_FAILED" },
+      );
+      await installed.dispose();
+    });
+  }
 });
 
 test("a distinct rich frame must strictly increase manager frameSequence", async () => {

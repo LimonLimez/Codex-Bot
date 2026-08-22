@@ -63,8 +63,18 @@ const MOUSE_TYPES = new Set(["mousePressed", "mouseReleased", "mouseMoved", "mou
 const KEY_TYPES = new Set(["keyDown", "keyUp", "rawKeyDown", "char"]);
 const MOUSE_BUTTONS = new Set(["none", "left", "middle", "right", "back", "forward"]);
 const COORDINATE_SPACES = new Set(["css-dip", "dip"]);
+const NAVIGATION_ACTIONS = new Set(["navigate", "goBack", "goForward", "reload"]);
+const MANAGER_FRAME_CHANGED_FIELDS = new Set([
+  "botId", "targetId", "targetGeneration", "sessionGeneration", "pageGeneration", "frameId", "frameSequence",
+]);
+const MANAGER_NAVIGATION_CHANGED_FIELDS = new Set([
+  "botId", "targetId", "targetGeneration", "sessionGeneration", "pageGeneration", "action", "url",
+]);
+const MANAGER_SESSION_CHANGED_FIELDS = new Set([
+  "botId", "targetId", "targetGeneration", "sessionGeneration", "pageGeneration",
+]);
 const EVENT_NAMES = Object.freeze([
-  "did-start-loading", "did-start-navigation", "did-navigate", "did-frame-navigate", "will-navigate",
+  "did-start-loading", "did-start-navigation", "did-navigate", "did-frame-navigate", "did-navigate-in-page", "will-navigate",
   "destroyed", "render-process-gone",
 ]);
 
@@ -170,6 +180,84 @@ function sameFrame(left, right) {
       && Number.isSafeInteger(rightRoutingId) && rightRoutingId >= 0
       && leftProcessId === rightProcessId && leftRoutingId === rightRoutingId;
   } catch { return false; }
+}
+
+function senderMainFrameClassification(eventName, args) {
+  if (eventName === "destroyed" || eventName === "render-process-gone"
+    || eventName === "did-start-loading" || eventName === "will-navigate" || eventName === "did-navigate") return true;
+  const positionalIndex = eventName === "did-start-navigation" ? 3
+    : eventName === "did-frame-navigate" ? 4
+      : eventName === "did-navigate-in-page" ? 2 : -1;
+  if (positionalIndex < 0) return null;
+  let detailFlag;
+  for (const candidate of args) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    let descriptor;
+    try { descriptor = Object.getOwnPropertyDescriptor(candidate, "isMainFrame"); } catch { return null; }
+    if (!descriptor) continue;
+    if (!("value" in descriptor) || typeof descriptor.value !== "boolean") return null;
+    if (detailFlag !== undefined && detailFlag !== descriptor.value) return null;
+    detailFlag = descriptor.value;
+  }
+  let positionalFlag;
+  try {
+    if (typeof args[positionalIndex] === "boolean") positionalFlag = args[positionalIndex];
+  } catch { return null; }
+  if (detailFlag !== undefined && positionalFlag !== undefined && detailFlag !== positionalFlag) return null;
+  if (detailFlag !== undefined) return detailFlag;
+  if (positionalFlag !== undefined) return positionalFlag;
+  return null;
+}
+
+function managerFrameChanged(value) {
+  try {
+    const input = ownData(value, MANAGER_FRAME_CHANGED_FIELDS, MANAGER_FRAME_CHANGED_FIELDS);
+    return Object.freeze({
+      botId: botId(input.botId),
+      targetId: targetId(input.targetId),
+      targetGeneration: nonNegative(input.targetGeneration),
+      sessionGeneration: positive(input.sessionGeneration),
+      pageGeneration: positive(input.pageGeneration),
+      frameId: frameId(input.frameId),
+      frameSequence: positive(input.frameSequence),
+    });
+  } catch { return null; }
+}
+
+function managerNavigationChanged(value) {
+  try {
+    const input = ownData(value, MANAGER_NAVIGATION_CHANGED_FIELDS, MANAGER_NAVIGATION_CHANGED_FIELDS);
+    if (!NAVIGATION_ACTIONS.has(input.action)) return null;
+    if (input.action === "navigate" && input.url === null) return null;
+    if (input.action !== "navigate" && input.url !== null) return null;
+    if (input.url !== null) {
+      if (typeof input.url !== "string" || input.url.length === 0 || input.url.length > 4096 || input.url.includes("\0")) return null;
+      const parsed = new URL(input.url);
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
+    }
+    return Object.freeze({
+      botId: botId(input.botId),
+      targetId: targetId(input.targetId),
+      targetGeneration: nonNegative(input.targetGeneration),
+      sessionGeneration: positive(input.sessionGeneration),
+      pageGeneration: positive(input.pageGeneration),
+      action: input.action,
+      url: input.url,
+    });
+  } catch { return null; }
+}
+
+function managerSessionChanged(value) {
+  try {
+    const input = ownData(value, MANAGER_SESSION_CHANGED_FIELDS, MANAGER_SESSION_CHANGED_FIELDS);
+    return Object.freeze({
+      botId: botId(input.botId),
+      targetId: targetId(input.targetId),
+      targetGeneration: nonNegative(input.targetGeneration),
+      sessionGeneration: positive(input.sessionGeneration),
+      pageGeneration: positive(input.pageGeneration),
+    });
+  } catch { return null; }
 }
 
 function identity(value) {
@@ -565,6 +653,106 @@ function installLocalDesktopFrameIpc({
     }
   }
 
+  function resetPresentationToken(state, event) {
+    if (event.sessionGeneration > state.sessionGeneration) {
+      state.sessionGeneration = event.sessionGeneration;
+      state.pageGeneration = event.pageGeneration;
+      state.frameSequence = Math.max(0, event.frameSequence ? event.frameSequence - 1 : 0);
+      state.inputSequence = 0;
+    } else if (event.pageGeneration > state.pageGeneration) {
+      state.pageGeneration = event.pageGeneration;
+      state.frameSequence = Math.max(0, event.frameSequence ? event.frameSequence - 1 : 0);
+      state.inputSequence = 0;
+    } else if (Number.isSafeInteger(event.frameSequence)) {
+      state.frameSequence = Math.max(0, event.frameSequence ? event.frameSequence - 1 : 0);
+    }
+    state.frameId = null;
+    state.lastPublishedFrameId = null;
+    state.lastPublishedFrameSequence = 0;
+    state.lastPublishedPresentation = null;
+  }
+
+  function managerEventToken(value) {
+    return Object.freeze({
+      sessionGeneration: value.sessionGeneration,
+      pageGeneration: value.pageGeneration,
+      frameSequence: value.frameSequence ?? 0,
+    });
+  }
+
+  function compareManagerEventToken(left, right) {
+    if (!right) return 1;
+    if (left.sessionGeneration !== right.sessionGeneration) {
+      return left.sessionGeneration > right.sessionGeneration ? 1 : -1;
+    }
+    if (left.pageGeneration !== right.pageGeneration) {
+      return left.pageGeneration > right.pageGeneration ? 1 : -1;
+    }
+    if (left.frameSequence !== right.frameSequence) {
+      return left.frameSequence > right.frameSequence ? 1 : -1;
+    }
+    return 0;
+  }
+
+  function dominantManagerRefresh(change) {
+    let dominant = null;
+    for (const event of [change?.frameEvent, change?.navigationEvent, change?.sessionEvent]) {
+      if (!event) continue;
+      const token = managerEventToken(event);
+      if (!dominant || compareManagerEventToken(token, dominant.token) > 0) {
+        dominant = { event, token };
+      }
+    }
+    return dominant;
+  }
+
+  function reconcileManagerRefresh(change) {
+    const dominant = dominantManagerRefresh(change);
+    const navigation = change?.navigationEvent;
+    if (navigation && dominant
+      && (navigation.sessionGeneration !== dominant.event.sessionGeneration
+        || navigation.pageGeneration !== dominant.event.pageGeneration)) {
+      change.navigationEvent = null;
+    }
+  }
+
+  function mergeManagerRefresh(target, incoming) {
+    for (const field of ["frameEvent", "navigationEvent", "sessionEvent"]) {
+      const next = incoming?.[field];
+      if (!next) continue;
+      const previous = target[field];
+      if (!previous || compareManagerEventToken(managerEventToken(next), managerEventToken(previous)) >= 0) {
+        target[field] = next;
+      }
+    }
+    reconcileManagerRefresh(target);
+    return target;
+  }
+
+  function consumeManagerRefresh(state, transaction) {
+    const queued = state.managerRefresh;
+    if (!queued) return false;
+    state.managerRefresh = null;
+    mergeManagerRefresh(transaction, queued);
+    return true;
+  }
+
+  function managerNavigationDto(state, event) {
+    return Object.freeze({
+      botId: state.botId,
+      targetId: state.targetId,
+      targetGeneration: state.targetGeneration,
+      sessionGeneration: event.sessionGeneration,
+      pageGeneration: event.pageGeneration,
+      viewGeneration: state.viewGeneration,
+      frameId: null,
+      frameSequence: 0,
+      inputSequence: 0,
+      action: event.action,
+      url: event.url,
+    });
+  }
+
   function controlKey(state) {
     if (!state?.botId || !state.targetId || !Number.isSafeInteger(state.targetGeneration)
       || !Number.isSafeInteger(state.sessionGeneration)) return null;
@@ -579,12 +767,10 @@ function installLocalDesktopFrameIpc({
   }
 
   function removeSenderListener(sender) {
-    const listener = senderListeners.get(sender);
-    if (!listener) return;
+    const listeners = senderListeners.get(sender);
+    if (!listeners) return;
     senderListeners.delete(sender);
-    for (const name of EVENT_NAMES) {
-      try { sender.off(name, listener); } catch {}
-    }
+    for (const [name, listener] of listeners) try { sender.off(name, listener); } catch {}
   }
 
   function registerOpenOwner(owner) {
@@ -712,8 +898,8 @@ function installLocalDesktopFrameIpc({
     let effect;
     try {
       effect = retrying && typeof manager.retry === "function"
-        ? manager.retry(record)
-        : manager.open(record);
+        ? manager.retry(record, { internal: true })
+        : manager.open(record, { internal: true });
     } catch (error) {
       effect = Promise.reject(error);
     }
@@ -735,8 +921,8 @@ function installLocalDesktopFrameIpc({
     return state.closePromise;
   }
 
-  function onSenderNavigation(sender, navigation = null) {
-    if (navigation && navigation.isMainFrame === false) return;
+  function onSenderNavigation(sender, eventName, ...args) {
+    if (senderMainFrameClassification(eventName, args) !== true) return;
     const state = states.get(sender);
     if (state) invalidate(state, true, true);
     else {
@@ -747,11 +933,15 @@ function installLocalDesktopFrameIpc({
 
   function installSenderListeners(sender) {
     if (senderListeners.has(sender)) return;
-    const listener = (navigation) => onSenderNavigation(sender, navigation);
+    const listeners = new Map();
     for (const name of EVENT_NAMES) {
-      try { sender.on(name, listener); } catch {}
+      try {
+        const eventListener = (...args) => onSenderNavigation(sender, name, ...args);
+        sender.on(name, eventListener);
+        listeners.set(name, eventListener);
+      } catch {}
     }
-    senderListeners.set(sender, listener);
+    senderListeners.set(sender, listeners);
   }
 
   function removeSenderListeners() {
@@ -771,6 +961,8 @@ function installLocalDesktopFrameIpc({
     const next = session(value, fallback, state.sessionGeneration ? state : null);
     state.sessionGeneration = next.sessionGeneration;
     state.pageGeneration = next.pageGeneration;
+    state.navigationEventSessionGeneration = next.sessionGeneration;
+    state.navigationEventPageGeneration = next.pageGeneration;
     state.surface = next.surface;
     state.presentations = next.presentations;
     setRich(state, next.rich);
@@ -837,10 +1029,15 @@ function installLocalDesktopFrameIpc({
         if (!currentState(state) || state.captureGeneration !== generation) return null;
         const expected = { botId: state.botId, targetId: state.targetId, targetGeneration: state.targetGeneration };
         let raw;
-        if (presentation === "interactive" && typeof manager.captureInteractiveFrame === "function") raw = await manager.captureInteractiveFrame(expected);
-        else if (presentation === "preview" && typeof manager.capturePreviewFrame === "function") raw = await manager.capturePreviewFrame(expected);
-        else if (typeof manager.captureDisplayFrame === "function") raw = await manager.captureDisplayFrame(expected);
-        else throw failure("OPENBOT_LOCAL_CAPTURE_FAILED");
+        if (presentation === "interactive" && typeof manager.captureInteractiveFrame === "function") {
+          raw = await manager.captureInteractiveFrame(expected, { internal: true });
+        } else if (presentation === "interactive") {
+          throw failure("OPENBOT_LOCAL_CAPTURE_FAILED");
+        } else if (presentation === "preview" && typeof manager.capturePreviewFrame === "function") {
+          raw = await manager.capturePreviewFrame(expected, { internal: true });
+        } else if (typeof manager.captureDisplayFrame === "function") {
+          raw = await manager.captureDisplayFrame(expected, { internal: true });
+        } else throw failure("OPENBOT_LOCAL_CAPTURE_FAILED");
         if (!currentState(state) || state.captureGeneration !== generation) return null;
         const currentRecord = await computerBoundary.read(state.botId);
         if (!currentState(state) || state.captureGeneration !== generation) return null;
@@ -859,7 +1056,7 @@ function installLocalDesktopFrameIpc({
         }
         return statusDto(state, "live", null);
       } catch (error) {
-        if (!currentState(state) || lifecycle(error) || staleCode(error)) {
+        if (!currentState(state) || state.captureGeneration !== generation || lifecycle(error) || staleCode(error)) {
           if (lifecycle(error) || staleCode(error)) invalidate(state, false, true);
           return null;
         }
@@ -877,6 +1074,121 @@ function installLocalDesktopFrameIpc({
       if (state.captureFlight === record) state.captureFlight = null;
     });
     return flight;
+  }
+
+  function scheduleManagerRefresh(state) {
+    if (!currentState(state) || state.managerRefreshPromise) return;
+    const refresh = (async () => {
+      while (currentState(state)) {
+        // Keep the accumulator open through one microtask so same-stack
+        // manager notifications become one renderer transaction regardless
+        // of their arrival order.
+        await Promise.resolve();
+        if (!currentState(state) || !state.managerRefresh) return;
+        const change = state.managerRefresh;
+        state.managerRefresh = null;
+        const pendingCapture = state.captureFlight?.promise;
+        if (pendingCapture) {
+          await Promise.allSettled([pendingCapture]);
+          // Capture completion may release manager callbacks in either the
+          // current continuation or the following microtask. Keep merging
+          // until that boundary is quiet before deciding dominance.
+          for (;;) {
+            consumeManagerRefresh(state, change);
+            await Promise.resolve();
+            if (!consumeManagerRefresh(state, change)) break;
+          }
+        }
+        if (!currentState(state)) return;
+        const dominant = dominantManagerRefresh(change);
+        const navigation = change.navigationEvent;
+        if (navigation && dominant
+          && navigation.sessionGeneration === dominant.event.sessionGeneration
+          && navigation.pageGeneration === dominant.event.pageGeneration) {
+          send(state, LOCAL_DESKTOP_NAVIGATION_EVENT_CHANNEL, managerNavigationDto(state, navigation));
+        }
+        await capture(state, state.presentation);
+        if (!currentState(state)) return;
+      }
+    })();
+    state.managerRefreshPromise = refresh;
+    void refresh.then(() => {
+      if (state.managerRefreshPromise === refresh) state.managerRefreshPromise = null;
+      if (state.managerRefresh) scheduleManagerRefresh(state);
+    }, () => {
+      if (state.managerRefreshPromise === refresh) state.managerRefreshPromise = null;
+      if (state.managerRefresh) scheduleManagerRefresh(state);
+    });
+  }
+
+  function queueManagerRefresh(state, kind, event) {
+    const existing = state.managerRefresh || {
+      frameEvent: null,
+      navigationEvent: null,
+      sessionEvent: null,
+    };
+    const field = kind === "frame" ? "frameEvent" : kind === "navigation" ? "navigationEvent" : "sessionEvent";
+    mergeManagerRefresh(existing, { [field]: event });
+    state.managerRefresh = existing;
+  }
+
+  function onManagerFrameChanged(value) {
+    const event = managerFrameChanged(value);
+    if (!event) return;
+    for (const state of [...states.values()]) {
+      if (!currentState(state) || !Number.isSafeInteger(state.sessionGeneration)
+        || !Number.isSafeInteger(state.pageGeneration) || state.botId !== event.botId
+        || state.targetId !== event.targetId || state.targetGeneration !== event.targetGeneration
+        || event.sessionGeneration < state.sessionGeneration
+        || event.sessionGeneration === state.sessionGeneration && event.pageGeneration < state.pageGeneration
+        || event.sessionGeneration === state.sessionGeneration && event.pageGeneration === state.pageGeneration
+          && event.frameSequence <= state.frameSequence
+        || state.managerFrameEventToken && compareManagerEventToken(managerEventToken(event), state.managerFrameEventToken) <= 0) continue;
+      releaseControl(state);
+      state.managerFrameEventToken = managerEventToken(event);
+      resetPresentationToken(state, event);
+      queueManagerRefresh(state, "frame", event);
+      state.captureGeneration += 1;
+      scheduleManagerRefresh(state);
+    }
+  }
+
+  function onManagerNavigationChanged(value) {
+    const event = managerNavigationChanged(value);
+    if (!event) return;
+    for (const state of [...states.values()]) {
+      if (!currentState(state) || !Number.isSafeInteger(state.sessionGeneration)
+        || !Number.isSafeInteger(state.pageGeneration) || state.botId !== event.botId
+        || state.targetId !== event.targetId || state.targetGeneration !== event.targetGeneration
+        || event.sessionGeneration < state.sessionGeneration
+        || event.sessionGeneration === state.sessionGeneration && event.pageGeneration < state.pageGeneration) continue;
+      if (state.managerNavigationCommandDepth > 0) continue;
+      releaseControl(state);
+      resetPresentationToken(state, event);
+      state.navigationEventSessionGeneration = event.sessionGeneration;
+      state.navigationEventPageGeneration = event.pageGeneration;
+      queueManagerRefresh(state, "navigation", event);
+      state.captureGeneration += 1;
+      scheduleManagerRefresh(state);
+    }
+  }
+
+  function onManagerSessionChanged(value) {
+    const event = managerSessionChanged(value);
+    if (!event) return;
+    for (const state of [...states.values()]) {
+      if (!currentState(state) || !Number.isSafeInteger(state.sessionGeneration)
+        || !Number.isSafeInteger(state.pageGeneration) || state.botId !== event.botId
+        || state.targetId !== event.targetId || state.targetGeneration !== event.targetGeneration
+        || event.sessionGeneration <= state.sessionGeneration) continue;
+      releaseControl(state);
+      resetPresentationToken(state, event);
+      state.navigationEventSessionGeneration = event.sessionGeneration;
+      state.navigationEventPageGeneration = Math.max(0, event.pageGeneration - 1);
+      queueManagerRefresh(state, "session", event);
+      state.captureGeneration += 1;
+      scheduleManagerRefresh(state);
+    }
   }
 
   function prepareView(checked, request, retrying) {
@@ -899,6 +1211,9 @@ function installLocalDesktopFrameIpc({
       }),
       rich: typeof manager.capturePreviewFrame === "function" || typeof manager.captureInteractiveFrame === "function",
       invalidated: false, timer: null, captureFlight: null, captureGeneration: 0, closePromise: null,
+      managerRefresh: null, managerRefreshPromise: null, managerNavigationCommandDepth: 0,
+      managerFrameEventToken: null,
+      navigationEventSessionGeneration: null, navigationEventPageGeneration: 0,
       openOwner: null,
       frameId: null, frameSequence: 0, inputSequence: 0, sequence: 0,
       lastPublishedFrameId: null, lastPublishedFrameSequence: 0, lastPublishedPresentation: null, lease: null,
@@ -1049,7 +1364,13 @@ function installLocalDesktopFrameIpc({
       };
       const method = action === "navigate" ? "navigate" : action;
       if (typeof manager[method] !== "function") throw failure();
-      const result = await manager[method](managerValue);
+      state.managerNavigationCommandDepth += 1;
+      let result;
+      try {
+        result = await manager[method](managerValue, { internal: true });
+      } finally {
+        state.managerNavigationCommandDepth = Math.max(0, state.managerNavigationCommandDepth - 1);
+      }
       if (!currentState(state)) throw staleFailure();
       syncSession(state, result, {
         botId: state.botId, targetId: state.targetId, targetGeneration: state.targetGeneration,
@@ -1151,7 +1472,13 @@ function installLocalDesktopFrameIpc({
       if (closedBot === null || state.botId === closedBot) invalidate(state);
     }
   };
+  const onManagerFrame = (value) => onManagerFrameChanged(value);
+  const onManagerNavigation = (value) => onManagerNavigationChanged(value);
+  const onManagerSession = (value) => onManagerSessionChanged(value);
   try { computerBoundary.on?.("changed", onChanged); } catch {}
+  try { manager.on?.("frame-changed", onManagerFrame); } catch {}
+  try { manager.on?.("navigation-changed", onManagerNavigation); } catch {}
+  try { manager.on?.("session-changed", onManagerSession); } catch {}
   try { manager.on?.("closed", onManagerClosed); } catch {}
   try { manager.on?.("disposed", onManagerClosed); } catch {}
 
@@ -1171,6 +1498,9 @@ function installLocalDesktopFrameIpc({
       controlLeases.clear();
       senderClosures.clear();
       try { computerBoundary.off?.("changed", onChanged); } catch {}
+      try { manager.off?.("frame-changed", onManagerFrame); } catch {}
+      try { manager.off?.("navigation-changed", onManagerNavigation); } catch {}
+      try { manager.off?.("session-changed", onManagerSession); } catch {}
       try { manager.off?.("closed", onManagerClosed); } catch {}
       try { manager.off?.("disposed", onManagerClosed); } catch {}
       for (const channel of registered) electron.ipcMain.removeHandler(channel);
