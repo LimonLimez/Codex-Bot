@@ -26,7 +26,7 @@ private final class InstallerModel: ObservableObject {
         let panel = NSOpenPanel()
         panel.title = "Choose Grok Bot 0.20.0"
         panel.prompt = "Choose Grok Bot"
-        panel.allowedContentTypes = [.application]
+        panel.allowedContentTypes = [.applicationBundle]
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
