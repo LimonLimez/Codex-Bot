@@ -73,6 +73,8 @@ const VENDOR_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardi
 const OPENBOT_NATIVE_SHELL_GATE = 'function MHn(){const n=wLt(),{phase:e,onboardingRunId:t,completeOnboarding:s}=RFn();return n?p.jsxs(p.Fragment,{children:[p.jsx(Upe,{}),p.jsx(ggt,{})]}):e==="checking"?null:p.jsx(TDn,{chrome:JHn,children:e==="onboarding"&&!(window.openbotProtocol?.schemaVersion===1&&window.openbotProtocol?.mode==="local-protocol")?p.jsx(qFn,{onComplete:s,presentation:KUn},t):p.jsx(BHn,{})})}';
 const OPENBOT_LOCAL_COORDINATOR_PREDICATE =
   'window.openbotProtocol?.schemaVersion===1&&window.openbotProtocol?.mode==="local-protocol"';
+const VENDOR_UPDATE_BLOCKER = 'function NYn(){const{status:n}=eme(),{check:e,isPending:t}=Qnt(),{quitAndInstall:s,isPending:r}=bJt();if(n==null||!n.isBelowMinimumVersion)return null;const i=n.state;let o;if(i.type==="ready"){const d=i.version;o=p.jsx(Ls,{disabled:r,onClick:()=>{Yf({surface:"blocker",action:"clicked",kind:"ready",targetVersion:d}),s(d)},type:"button",variant:"primary",children:r?p.jsx(Re,{id:"fvg2KT"}):p.jsx(Re,{id:"FzpXvM"})})}else if(SYn(i)){const d=xYn(i),m={className:"sand-78zum5 sand-6s0dn4 sand-ehausa sand-e0p6wg"};o=p.jsxs("div",{...m,"aria-label":d,role:"status",children:[p.jsx(_Z,{size:16}),p.jsx(yt,{color:"tertiary",size:"sm",children:d})]})}else{const d=i.type==="idle"&&i.lastCheck?.result==="error";o=p.jsxs(p.Fragment,{children:[d?p.jsx(yt,{as:"p",color:"tertiary",size:"sm",children:p.jsx(Re,{id:"QAfOI6"})}):null,p.jsx(Ls,{disabled:t,onClick:()=>{Yf({surface:"blocker",action:"clicked",kind:d?"error":"check"}),e()},type:"button",variant:"primary",children:d?p.jsx(Re,{id:"KDw4GX"}):p.jsx(Re,{id:"EkH9pt"})})]})}const l={className:"sand-ixxii4 sand-10a8y8t sand-1q2oy4v sand-78zum5 sand-6s0dn4 sand-l56j7k sand-jcuf1o sand-9f619 sand-1ua6jya"},c={className:"sand-78zum5 sand-dt5ytf sand-6s0dn4 sand-2b8uid sand-1jlwbde sand-1j9u4d2 sand-1h75b27 sand-1vnydn9 sand-1pkpdue sand-mkeg23 sand-1y0btm7 sand-13747pv sand-cq4si4"},u={className:"sand-78zum5 sand-dt5ytf sand-6s0dn4 sand-11twubx"};return p.jsx("div",{...l,className:ie("sand-update-required",l.className),children:p.jsxs("div",{...c,role:"alert",children:[p.jsxs("div",{...u,children:[p.jsx(yt,{as:"p",size:"lg",weight:"medium",children:p.jsx(Re,{id:"zBrSTo"})}),p.jsx(yt,{as:"p",color:"tertiary",size:"sm",children:p.jsx(Re,{id:"iZCiGL",values:{0:n.currentVersion,SAND_PRODUCT_DISPLAY_NAME:cZ}})})]}),o]})})}Hqn();';
+const OPENBOT_UPDATE_BLOCKER = `function NYn(){if(${OPENBOT_LOCAL_COORDINATOR_PREDICATE})return null;${VENDOR_UPDATE_BLOCKER.slice('function NYn(){'.length)}`;
 const VENDOR_SEND_JOURNAL_DEFINITION =
   'const Bgt={slice:"send-journal",schemaVersion:2,scope:"client-persisted",accountSensitive:!0}';
 const OPENBOT_SEND_JOURNAL_DEFINITION =
@@ -788,6 +790,59 @@ function reverseBotOverviewSource(source) {
   );
 }
 
+function patchVendorUpdateBlockerSource(source, allowAbsent = false) {
+  if (typeof source !== "string") {
+    throw new TypeError("Grok update blocker source must be a string");
+  }
+  const stock = source.split(VENDOR_UPDATE_BLOCKER).length - 1;
+  const openbot = source.split(OPENBOT_UPDATE_BLOCKER).length - 1;
+  if (stock > 1 || openbot > 1) {
+    throw new Error("Grok update blocker anchor is ambiguous");
+  }
+  if (stock === 1 && openbot === 0) {
+    return replaceUnique(
+      source,
+      VENDOR_UPDATE_BLOCKER,
+      OPENBOT_UPDATE_BLOCKER,
+      "Grok NYn update blocker",
+    );
+  }
+  if (stock === 0 && openbot === 1) {
+    throw new Error("Grok update blocker is already patched");
+  }
+  if (stock === 0 && openbot === 0 && allowAbsent) return source;
+  if (stock === 0 && openbot === 0) {
+    throw new Error("Grok NYn update blocker anchor not found");
+  }
+  throw new Error("Grok update blocker anchors are mixed");
+}
+
+function reverseVendorUpdateBlockerSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("OpenBot update blocker source must be a string");
+  }
+  const stock = source.split(VENDOR_UPDATE_BLOCKER).length - 1;
+  const openbot = source.split(OPENBOT_UPDATE_BLOCKER).length - 1;
+  if (stock > 1 || openbot > 1) {
+    throw new Error("OpenBot update blocker inverse anchor is ambiguous");
+  }
+  if (stock === 1 && openbot === 0) {
+    throw new Error("Grok update blocker is already reversed");
+  }
+  if (stock === 0 && openbot === 1) {
+    return replaceUnique(
+      source,
+      OPENBOT_UPDATE_BLOCKER,
+      VENDOR_UPDATE_BLOCKER,
+      "OpenBot NYn update blocker",
+    );
+  }
+  if (stock === 0 && openbot === 0) {
+    throw new Error("OpenBot update blocker inverse anchor not found");
+  }
+  throw new Error("OpenBot update blocker inverse anchors are mixed");
+}
+
 function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSET_SHA256) {
   if (typeof source !== "string" || source.length < 1) {
     throw new Error("Grok renderer asset is invalid");
@@ -799,7 +854,11 @@ function patchVendorRendererSource(source, expectedSha256 = VENDOR_RENDERER_ASSE
   if (actualSha256 !== expectedSha256) {
     throw new Error(`Unsupported Grok renderer asset hash: ${actualSha256}`);
   }
-  let patched = patchAvatarCatalogSource(source);
+  let patched = patchVendorUpdateBlockerSource(
+    source,
+    expectedSha256 !== VENDOR_RENDERER_ASSET_SHA256,
+  );
+  patched = patchAvatarCatalogSource(patched);
   patched = patchAvatarAccentSource(
     patched,
     expectedSha256 !== VENDOR_RENDERER_ASSET_SHA256,
@@ -1031,6 +1090,7 @@ module.exports = {
   VENDOR_RENDERER_ASSET_SHA256,
   VENDOR_SETTINGS_ASSET,
   VENDOR_SETTINGS_ASSET_SHA256,
+  VENDOR_UPDATE_BLOCKER,
   VENDOR_VISIBLE_SHAPES,
   patchAvatarAccentSource,
   patchAvatarCatalogSource,
@@ -1042,12 +1102,15 @@ module.exports = {
   patchRendererIndexSource,
   patchVendorRendererSource,
   patchVendorSettingsSource,
+  patchVendorUpdateBlockerSource,
   reverseAvatarAccentSource,
   reverseAvatarCatalogSource,
   reverseNewBotCharacterEditorSource,
   reverseNewBotCreatePayloadSource,
   reverseNewBotAvatarPickerSource,
   reverseBotOverviewSource,
+  reverseVendorUpdateBlockerSource,
+  OPENBOT_UPDATE_BLOCKER,
   validateAvatarAccentPath,
   mergeNewBotAvatarSelection,
 };

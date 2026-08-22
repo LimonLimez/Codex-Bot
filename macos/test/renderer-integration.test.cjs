@@ -27,21 +27,25 @@ const {
   OPENBOT_NEW_BOT_CREATE_DISPATCH,
   OPENBOT_NEW_BOT_CREATE_RESOLVE,
   OPENBOT_VISIBLE_SHAPES,
+  OPENBOT_UPDATE_BLOCKER,
   VENDOR_AVATAR_ACCENT_FACE,
   VENDOR_AVATAR_ACCENT_MORPH,
   VENDOR_AVATAR_ACCENT_REF,
   VENDOR_AVATAR_ACCENT_STATIC,
   VENDOR_GEOMETRY_TAIL,
   VENDOR_RENDERER_ASSET_SHA256,
+  VENDOR_UPDATE_BLOCKER,
   VENDOR_VISIBLE_SHAPES,
   patchAvatarCatalogSource,
   patchAvatarAccentSource,
   patchNewBotAvatarPickerSource,
+  patchVendorUpdateBlockerSource,
   mergeNewBotAvatarSelection,
   reverseAvatarCatalogSource,
   reverseAvatarAccentSource,
   reverseNewBotCharacterEditorSource,
   reverseNewBotAvatarPickerSource,
+  reverseVendorUpdateBlockerSource,
   validateAvatarAccentPath,
 } = require(patchPath);
 
@@ -124,6 +128,31 @@ const SYNTHETIC_VENDOR_RENDERER = [
 function sha256Text(source) {
   return crypto.createHash("sha256").update(source, "utf8").digest("hex");
 }
+
+test("OpenBot updater blocker is an exact reversible NYn transform and bypasses hostile stock state", () => {
+  const stock = `prefix;${VENDOR_UPDATE_BLOCKER};suffix`;
+  const patched = patchVendorUpdateBlockerSource(stock);
+  assert.equal(patched.split(OPENBOT_UPDATE_BLOCKER).length - 1, 1);
+  assert.equal(patched.split(VENDOR_UPDATE_BLOCKER).length - 1, 0);
+  assert.equal(reverseVendorUpdateBlockerSource(patched), stock);
+  assert.throws(() => patchVendorUpdateBlockerSource("prefix;suffix"), /missing|not found/i);
+  assert.throws(
+    () => patchVendorUpdateBlockerSource(`prefix;${VENDOR_UPDATE_BLOCKER};${VENDOR_UPDATE_BLOCKER};suffix`),
+    /ambiguous/i,
+  );
+  assert.throws(
+    () => patchVendorUpdateBlockerSource(`prefix;${VENDOR_UPDATE_BLOCKER};${OPENBOT_UPDATE_BLOCKER};suffix`),
+    /mixed|already|ambiguous/i,
+  );
+  assert.throws(() => reverseVendorUpdateBlockerSource(stock), /already reversed|stock/i);
+
+  const context = {
+    window: { openbotProtocol: { schemaVersion: 1, mode: "local-protocol" } },
+    eme() { throw new Error("stock update state must not be read in local protocol"); },
+  };
+  vm.runInNewContext(`${patched.slice(patched.indexOf("function NYn()"), patched.indexOf("Hqn();", patched.indexOf("function NYn()")))};globalThis.NYn=NYn;`, context);
+  assert.equal(context.NYn(), null);
+});
 
 function tempRoot(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-renderer-patch-test-"));

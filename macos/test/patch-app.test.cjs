@@ -44,6 +44,7 @@ const {
   VENDOR_AVATAR_ACCENT_REF,
   VENDOR_AVATAR_ACCENT_STATIC,
   VENDOR_GEOMETRY_TAIL,
+  VENDOR_UPDATE_BLOCKER,
   VENDOR_VISIBLE_SHAPES,
   patchAvatarAccentSource,
   patchAvatarCatalogSource,
@@ -52,7 +53,7 @@ const {
   reverseAvatarCatalogSource,
   validateAvatarAccentPath,
 } = rendererPatch;
-const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_OVERVIEW_COMPUTER}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
+const SYNTHETIC_VENDOR_RENDERER = `const before="kept";${VENDOR_UPDATE_BLOCKER}${STOCK_NATIVE_SHELL_GATE}${STOCK_LOCAL_IDENTITY_ANCHORS}${STOCK_PROMPT_TRAILING}${STOCK_NEW_BOT_RECIPIENT}${STOCK_NEW_BOT_COMMIT}${STOCK_BOT_OVERVIEW_COMPUTER}${STOCK_BOT_SETTINGS_ROOT}${VENDOR_GEOMETRY_TAIL}${VENDOR_VISIBLE_SHAPES}const after="kept";`;
 const SYNTHETIC_VENDOR_RENDERER_SHA256 = crypto
   .createHash("sha256")
   .update(SYNTHETIC_VENDOR_RENDERER, "utf8")
@@ -113,7 +114,7 @@ async function syntheticAsar(t, overrides = {}) {
   );
   fs.writeFileSync(
     path.join(tree, "dist", "electron-main", "main.cjs"),
-    `const setup="kept";\n"use strict";var fjn=Object.create;jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase("auth_service");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const stockFeature="kept";\n${STOCK_MACHINE_ID_MAIN}\n`,
+    `const setup="kept";\n"use strict";var fjn=Object.create;jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase("auth_service");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const stockFeature="kept";const e={version:"0.20.0",buildDefaultTrack:null},r="fixture-machine",li={};mh=Rzn({currentVersion:e.version,buildDefaultTrack:e.buildDefaultTrack,disabledReason:await nGs(),machineId:r,settingsStore:li,getExperimentService:cJt,getHostStatus:()=>Yd.getHostStatus(),emitStatus:F=>o.emit("update-status",F),reportOutcome:lJt.reportOutcome,reportCheck:lJt.reportCheck,reportApply:lJt.reportApply});\n${STOCK_MACHINE_ID_MAIN}\n`,
   );
   fs.writeFileSync(
     path.join(tree, "dist", "host", "host-main.cjs"),
@@ -697,9 +698,18 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
   assert.match(patchedMain, /stockFeature="kept"/);
   assert.match(patchedMain, /codex\/desktop\/runtime\.cjs/);
   assert.match(patchedMain, /async function Ds\(\)\{return __openbotDesktopRuntime\.readMachineId\(\)\}/);
-  assert.match(patchedMain, /let e=uJt\(\),r=await __openbotDesktopRuntime\.readMachineId\(\)\.catch\(F=>\(xe\("update","machine-id",F\),crypto\.randomUUID\(\)\)\)/);
+  assert.match(patchedMain, /let e=uJt\(\);mh=__openbotDesktopUpdateService\(\{currentVersion:e\.version\}\);let r=await __openbotDesktopRuntime\.readMachineId\(\)\.catch\(F=>\(xe\("update","machine-id",F\),crypto\.randomUUID\(\)\)\)/);
   assert.match(patchedMain, /Ic\.markPhase\("telemetry"\);let x=r,C=hHn\(/);
   assert.doesNotMatch(patchedMain, /F5n\(\);let e=uJt\(\)/);
+  assert.doesNotMatch(patchedMain, /mh=Rzn\(\{currentVersion:e\.version/);
+  assert.match(patchedMain, /mh=__openbotDesktopUpdateService\(\{currentVersion:e\.version/);
+  assert.match(patchedMain, /reason:\"disabled-by-env\"/);
+  assert.doesNotMatch(patchedMain, /await nGs\(\)/);
+  for (const method of [
+    "isRestartingForUpdate", "willRunStagedInstallerOnQuit", "applyStagedOnQuit", "dispose",
+    "noteBackendUpdateRequirement", "noteMinimumVersionMayHaveChanged", "noteReleaseTrackGateMayHaveChanged",
+  ]) assert.match(patchedMain, new RegExp(`${method}:`));
+  assert.match(patchedMain, /__openbotDesktopUpdateService/);
   for (const relative of [
     "provider-descriptors.cjs",
     "desktop/runtime.cjs",
@@ -778,6 +788,13 @@ test("the patch engine rebrands an exact ASAR, stages Advanced renderer assets, 
       "utf8",
     ),
     /window\.openbotProtocol\?\.schemaVersion===1/,
+  );
+  assert.match(
+    fs.readFileSync(
+      path.join(extracted, "dist", "renderer", "assets", "index-CphCyQnY.js"),
+      "utf8",
+    ),
+    /function NYn\(\)\{if\(window\.openbotProtocol\?\.schemaVersion===1&&window\.openbotProtocol\?\.mode===\"local-protocol\"\)return null;/,
   );
   assert.match(
     fs.readFileSync(

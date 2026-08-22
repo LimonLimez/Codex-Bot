@@ -8,9 +8,10 @@ const vm = require("node:vm");
 
 const patchPath = path.join(__dirname, "..", "src", "patch", "desktop.cjs");
 
-const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;jEr=F=>o.emit(\"mcp-auth-completed\",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase(\"auth_service\");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase(\"window\"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on(\"activate\",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const mainFeature='kept';\n";
+const STOCK_MAIN = "const setup='stock';\n\"use strict\";var fjn=Object.create;jEr=F=>o.emit(\"mcp-auth-completed\",F),mh=Rzn(remoteReady);aJn(),Ic.markPhase(\"auth_service\");let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});qEr?.hardenWebviewAttach(r.webContents),bu=r;UOn({}),Ic.markPhase(\"window\"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on(\"activate\",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});const mainFeature='kept';const e={version:\"0.20.0\",buildDefaultTrack:null},r=\"fixture-machine\",li={},lJt={reportOutcome(){},reportCheck(){},reportApply(){}};mh=Rzn({currentVersion:e.version,buildDefaultTrack:e.buildDefaultTrack,disabledReason:await nGs(),machineId:r,settingsStore:li,getExperimentService:cJt,getHostStatus:()=>Yd.getHostStatus(),emitStatus:F=>o.emit(\"update-status\",F),reportOutcome:lJt.reportOutcome,reportCheck:lJt.reportCheck,reportApply:lJt.reportApply});\n";
 const STOCK_MACHINE_DS = "async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}";
 const STOCK_MACHINE_STARTUP = 'Ic.markPhase("update_service"),Ic.armStuckWatchdog(),F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
+const STOCK_MACHINE_PROBE_STARTUP = 'Ic.markPhase("update_service"),Ic.armStuckWatchdog();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
 const STOCK_MACHINE_TELEMETRY = 'Ic.markPhase("telemetry");let x=await Ds(),C=hHn(';
 const STOCK_MACHINE_TOKEN_FUNCTIONS = [
   "function z9t(){globalThis.__machine.safeStorageCalls+=1;return globalThis.__machine.safeStorageAvailable}",
@@ -23,20 +24,24 @@ const Ic=globalThis.__startup.Ic,o={emit(){}},xt={
   BrowserWindow:class BrowserWindow{constructor(){globalThis.__startup.windows+=1;globalThis.__startup.events.push("browser-window");this.webContents=createWebContents();this.destroyed=false;globalThis.__startup.liveWindows.push(this)}static getAllWindows(){return globalThis.__startup.liveWindows.filter(window=>!window.isDestroyed())}isDestroyed(){return this.destroyed}destroy(){this.destroyed=true}},
   app:{on(name,handler){if(name==="activate"){globalThis.__startup.activateHandlers+=1;globalThis.__startup.activateHandler=handler}}}
 };
-const Rzn=value=>{globalThis.__startup.remoteCompleted=true;return value},UOn=()=>{},Dzn=()=>({
+const Rzn=value=>{globalThis.__startup.remoteCompleted=true;if(value!=null&&typeof value==="object"&&value.currentVersion!=null)globalThis.__startup.stockUpdaterEffects+=1;return (value===undefined||typeof value==="string")&&globalThis.__startup.updateAtWindow!=null?globalThis.__startup.updateAtWindow:value},UOn=()=>{},Dzn=()=>({
   configureBoxVncSession(){globalThis.__startup.vncConfigurations+=1},
   hardenWebviewAttach(contents){if(globalThis.__startup.hardenerFailure!=null)throw globalThis.__startup.hardenerFailure;globalThis.__startup.hardenedContents.push(contents);contents.on("will-attach-webview",()=>{globalThis.__startup.realWebviewAttachEvents+=1})}
 });
-const cJt=()=>null;
+const cJt=()=>null,lJt={reportOutcome(){},reportCheck(){},reportApply(){}};
+const Yd={getHostStatus(){return {isBusy:false}}};
 function VOn(){globalThis.__startup.stockSyncRegistrations+=1}
 let ijn=false,jEr,mh,qEr,s,bu,FEr;
 function aJn(){globalThis.__startup.protocolRegistrations+=1;globalThis.__startup.events.push("protocol")}
-async function mjn(){qEr?.configureBoxVncSession();let r=new xt.BrowserWindow();qEr?.hardenWebviewAttach(r.webContents),bu=r,globalThis.__startup.window=r}
+async function mjn(){qEr?.configureBoxVncSession();let r=new xt.BrowserWindow();qEr?.hardenWebviewAttach(r.webContents),bu=r,globalThis.__startup.window=r,globalThis.__startup.updateAtWindow=mh}
 function sjn(){bu!=null&&!bu.isDestroyed()||FEr==null&&(FEr=mjn().finally(()=>{FEr=void 0}))}
 globalThis.__bootstrapDone=(async()=>{
+  Ic.markPhase("update_service"),Ic.armStuckWatchdog(),F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()));
   jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(await globalThis.__remoteReady);aJn(),Ic.markPhase("auth_service");
   let $=Dzn({});qEr=$,s={pipes:{}};VOn({ipcMain:xt.ipcMain,getExperimentService:cJt});
-  UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})
+  UOn({}),Ic.markPhase("window"),ijn=!0,await mjn(),Ic.noteReady(),xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()});
+  const li={};
+  mh=Rzn({currentVersion:e.version,buildDefaultTrack:e.buildDefaultTrack,disabledReason:await nGs(),machineId:r,settingsStore:li,getExperimentService:cJt,getHostStatus:()=>Yd.getHostStatus(),emitStatus:F=>o.emit("update-status",F),reportOutcome:lJt.reportOutcome,reportCheck:lJt.reportCheck,reportApply:lJt.reportApply}),globalThis.__startup.updateAtLate=mh
 })().catch(error=>{Ic.noteFailed(error);throw error});
 `;
 const STOCK_MAIN_WITH_MACHINE_ID = `${STOCK_MAIN_WITH_HELD_REMOTE_READY}
@@ -48,9 +53,10 @@ function F5n(){z9t()}
 async function $9t(){__machine.safeStorageCalls+=1;return false}
 ${STOCK_MACHINE_DS}
 function uJt(){return {version:"0.20.0"}}
+function nGs(){globalThis.__startup.nGsCalls+=1;throw new Error("synthetic update gate must stay unreachable")}
 function xe(){__machine.events.push("machine-id-fallback")}
 function hHn(value){__machine.events.push(["telemetry",value]);return value}
-globalThis.__machineProbe=async()=>{${STOCK_MACHINE_STARTUP};${STOCK_MACHINE_TELEMETRY}{machineId:x});return {startupId:r,telemetryId:x,telemetry:C}};
+globalThis.__machineProbe=async()=>{${STOCK_MACHINE_PROBE_STARTUP};${STOCK_MACHINE_TELEMETRY}{machineId:x});return {startupId:r,telemetryId:x,telemetry:C}};
 `;
 const STOCK_MAIN_WITH_MACHINE_ANCHORS = `${STOCK_MAIN}
 ${STOCK_MACHINE_DS}
@@ -119,6 +125,11 @@ function startSyntheticMain(remoteReady, overrides = {}) {
     remoteFailures: [],
     removedWebviewGuards: 0,
     stockSyncRegistrations: 0,
+    stockUpdaterEffects: 0,
+    nGsCalls: 0,
+    updateAtWindow: null,
+    updateAtLate: null,
+    machine: { machineId: "fixture-machine", runtimeReads: 0 },
     vncConfigurations: 0,
     window: null,
     windows: 0,
@@ -182,7 +193,7 @@ test("desktop patch isolates the vendor machine-id path from stock secure storag
   assert.doesNotMatch(patched, new RegExp(STOCK_MACHINE_DS.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(
     patched,
-    /let e=uJt\(\),r=await __openbotDesktopRuntime\.readMachineId\(\)\.catch\(F=>\(xe\("update","machine-id",F\),crypto\.randomUUID\(\)\)\)/,
+    /let e=uJt\(\);mh=__openbotDesktopUpdateService\(\{currentVersion:e\.version\}\);let r=await __openbotDesktopRuntime\.readMachineId\(\)\.catch\(F=>\(xe\("update","machine-id",F\),crypto\.randomUUID\(\)\)\)/,
   );
   assert.doesNotMatch(patched, /F5n\(\);let e=uJt\(\)/);
   assert.match(patched, /Ic\.markPhase\("telemetry"\);let x=r,C=hHn\(/);
@@ -213,6 +224,10 @@ test("desktop patch isolates the vendor machine-id path from stock secure storag
     remoteFailures: [],
     removedWebviewGuards: 0,
     stockSyncRegistrations: 0,
+    stockUpdaterEffects: 0,
+    nGsCalls: 0,
+    updateAtWindow: null,
+    updateAtLate: null,
     vncConfigurations: 0,
     window: null,
     windows: 0,
@@ -252,7 +267,7 @@ test("desktop patch isolates the vendor machine-id path from stock secure storag
   assert.equal(result.startupId, "openbot-machine-id");
   assert.equal(result.telemetryId, "openbot-machine-id");
   assert.equal(result.telemetry.machineId, "openbot-machine-id");
-  assert.equal(machine.runtimeReads, 1);
+  assert.equal(machine.runtimeReads, 2);
   assert.equal(machine.safeStorageCalls, 0);
   assert.equal(machine.stockRandomCalls, 0);
 });
@@ -317,6 +332,152 @@ test("desktop patch adds isolated main/preload facades without changing stock ex
   }
   assert.throws(() => patchMainSource(main), /already|anchor/i);
   assert.throws(() => patchPreloadSource(preload), /already|anchor/i);
+});
+
+test("vendor update service shutdown is an exact reversible v0.20 transform", () => {
+  const {
+    MAIN_UPDATE_SERVICE_ANCHOR,
+    OPENBOT_UPDATE_SERVICE_ANCHOR,
+    MAIN_UPDATE_SERVICE_EARLY_ANCHOR,
+    OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR,
+    patchVendorUpdateServiceSource,
+    patchVendorUpdateServiceStartupSource,
+    reverseVendorUpdateServiceSource,
+    reverseVendorUpdateServiceStartupSource,
+  } = require(patchPath);
+  const stock = `prefix;${MAIN_UPDATE_SERVICE_ANCHOR};suffix`;
+  const patched = patchVendorUpdateServiceSource(stock);
+
+  assert.equal(patched.split(OPENBOT_UPDATE_SERVICE_ANCHOR).length - 1, 1);
+  assert.equal(patched.split(MAIN_UPDATE_SERVICE_ANCHOR).length - 1, 0);
+  assert.equal(reverseVendorUpdateServiceSource(patched), stock);
+  assert.throws(() => patchVendorUpdateServiceSource("prefix;suffix"), /missing|not found/i);
+  assert.throws(
+    () => patchVendorUpdateServiceSource(`prefix;${MAIN_UPDATE_SERVICE_ANCHOR};${MAIN_UPDATE_SERVICE_ANCHOR};suffix`),
+    /ambiguous/i,
+  );
+  assert.throws(
+    () => patchVendorUpdateServiceSource(`prefix;${MAIN_UPDATE_SERVICE_ANCHOR};${OPENBOT_UPDATE_SERVICE_ANCHOR};suffix`),
+    /mixed|already|ambiguous/i,
+  );
+  assert.throws(() => reverseVendorUpdateServiceSource(stock), /already reversed|stock/i);
+  assert.throws(
+    () => reverseVendorUpdateServiceSource(`prefix;${OPENBOT_UPDATE_SERVICE_ANCHOR};${OPENBOT_UPDATE_SERVICE_ANCHOR};suffix`),
+    /ambiguous/i,
+  );
+
+  const earlyStock = `prefix;${MAIN_UPDATE_SERVICE_EARLY_ANCHOR};suffix`;
+  const earlyPatched = patchVendorUpdateServiceStartupSource(earlyStock);
+  assert.equal(earlyPatched.split(OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR).length - 1, 1);
+  assert.equal(reverseVendorUpdateServiceStartupSource(earlyPatched), earlyStock);
+  assert.throws(() => reverseVendorUpdateServiceStartupSource(earlyStock), /already|reversed/i);
+  assert.throws(() => patchVendorUpdateServiceStartupSource("prefix;suffix"), /missing|not found/i);
+  assert.throws(() => patchVendorUpdateServiceStartupSource(earlyPatched), /already|patched/i);
+  assert.throws(
+    () => patchVendorUpdateServiceStartupSource(`prefix;${MAIN_UPDATE_SERVICE_EARLY_ANCHOR};${MAIN_UPDATE_SERVICE_EARLY_ANCHOR};suffix`),
+    /ambiguous/i,
+  );
+  assert.throws(
+    () => reverseVendorUpdateServiceStartupSource(`prefix;${OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR};${OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR};suffix`),
+    /ambiguous/i,
+  );
+});
+
+function stockUpdateStatusValid(value) {
+  const plain = candidate => typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+  const validTrack = candidate => candidate === "stable" || candidate === "nightly" || candidate === "dogfood";
+  const validLastCheck = candidate => candidate === undefined || plain(candidate) && typeof candidate.at === "number" &&
+    (candidate.result === "up-to-date" || candidate.result === "error") &&
+    (candidate.errorMessage === undefined || typeof candidate.errorMessage === "string");
+  const validState = candidate => {
+    if (!plain(candidate)) return false;
+    switch (candidate.type) {
+      case "disabled": return candidate.reason === "disabled-by-env" || candidate.reason === "lab-build" ||
+        candidate.reason === "not-packaged" || candidate.reason === "unsupported-platform";
+      case "idle": return validLastCheck(candidate.lastCheck);
+      case "checking": return true;
+      case "available":
+      case "staging": return typeof candidate.version === "string";
+      case "downloading": return typeof candidate.version === "string" &&
+        (candidate.progress === null || typeof candidate.progress === "number" && candidate.progress >= 0 && candidate.progress <= 1);
+      case "ready": return typeof candidate.version === "string" && validLastCheck(candidate.lastCheck);
+      default: return false;
+    }
+  };
+  return plain(value) && validState(value.state) && typeof value.currentVersion === "string" &&
+    validTrack(value.currentTrack) && (value.trackOverride === null || validTrack(value.trackOverride)) &&
+    (value.buildDefaultTrack === null || validTrack(value.buildDefaultTrack)) && Array.isArray(value.availableTracks) &&
+    value.availableTracks.every(validTrack) && typeof value.isTrackManagedByPolicy === "boolean" &&
+    typeof value.isBelowMinimumVersion === "boolean" && typeof value.autoUpdateWhenIdleOptIn === "boolean" &&
+    typeof value.autoUpdateWhenIdleGateEnabled === "boolean";
+}
+
+test("disabled updater is synchronous before first window, schema-valid, lifecycle-complete, and identity-stable", async () => {
+  const { patchMainSource } = require(patchPath);
+  const patched = patchMainSource(STOCK_MAIN_WITH_MACHINE_ID);
+  const early = patched.indexOf("mh=__openbotDesktopUpdateService({currentVersion:e.version});let r=await");
+  const firstWindow = patched.indexOf("await mjn()");
+  const late = patched.indexOf("mh=mh");
+  assert.ok(early >= 0 && early < firstWindow, "the inert service must exist before the first local window");
+  assert.ok(late > firstWindow, "the late vendor construction must be replaced after the existing bootstrap edge");
+  assert.match(patched, /updateAtLate/);
+
+  let releaseRemoteReady;
+  const remoteReady = new Promise(resolve => { releaseRemoteReady = resolve; });
+  const { context, startup } = startSyntheticMain(remoteReady);
+  await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  const service = startup.updateAtWindow;
+  assert.ok(service, "the first loaded window must already have an update service");
+  assert.equal(startup.nGsCalls, 0, "late minimum-version gate evaluation must be unreachable");
+  assert.equal(startup.stockUpdaterEffects, 0, "the vendor Rzn factory must remain unreachable");
+  assert.equal(Object.isFrozen(service), true);
+
+  const status = service.getStatus();
+  assert.equal(Object.isFrozen(status), true);
+  assert.equal(Object.isFrozen(status.state), true);
+  assert.equal(Object.isFrozen(status.availableTracks), true);
+  assert.equal(stockUpdateStatusValid(status), true);
+  assert.equal(status.state.reason, "disabled-by-env");
+  assert.strictEqual(await service.checkForUpdates({ trigger: "explicit" }), status);
+  assert.strictEqual(await service.setTrackOverride("dogfood"), status);
+  assert.strictEqual(service.setAutoUpdateWhenIdleOptIn(true), status);
+  assert.strictEqual(service.getStatus(), status);
+  assert.equal(stockUpdateStatusValid(status), true);
+  assert.equal(service.quitAndInstall("0.20.1").status, "not-ready");
+  assert.equal(Object.isFrozen(service.quitAndInstall("0.20.1")), true);
+
+  for (const method of [
+    "isRestartingForUpdate", "willRunStagedInstallerOnQuit", "applyStagedOnQuit", "dispose",
+    "noteBackendUpdateRequirement", "noteMinimumVersionMayHaveChanged", "noteReleaseTrackGateMayHaveChanged",
+  ]) {
+    assert.equal(typeof service[method], "function", `${method} must exist for stock downstream callers`);
+    assert.doesNotThrow(() => service[method](true));
+    assert.doesNotThrow(() => service[method](false));
+  }
+  assert.equal(service.isRestartingForUpdate(), false);
+  assert.equal(service.willRunStagedInstallerOnQuit(), false);
+  service.applyStagedOnQuit();
+  service.dispose();
+  service.dispose();
+
+  releaseRemoteReady();
+  await context.__bootstrapDone;
+  assert.strictEqual(startup.updateAtLate, service, "late startup must retain the exact early service identity");
+
+  let releaseNeverSettlingRemote;
+  const neverSettlingRemote = new Promise(resolve => { releaseNeverSettlingRemote = resolve; });
+  const neverSettlingSource = STOCK_MAIN_WITH_MACHINE_ID.replace(
+    'throw new Error("synthetic update gate must stay unreachable")',
+    "return new Promise(() => {})",
+  );
+  const neverSettling = startSyntheticMain(neverSettlingRemote, { source: neverSettlingSource });
+  await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(neverSettling.startup.updateAtWindow, "a never-settling nGs must not delay the first window");
+  assert.equal(neverSettling.startup.nGsCalls, 0);
+  releaseNeverSettlingRemote();
+  await neverSettling.context.__bootstrapDone;
 });
 
 test("local desktop preload facade exposes exact frame and status channels with removable listeners", async () => {
@@ -506,9 +667,10 @@ test("desktop patch creates the stock window while remote-service readiness is h
   });
   const { context, startup } = startSyntheticMain(remoteReady);
   await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(startup.remoteCompleted, false, "the stock remote gate must still be held");
-  assert.deepEqual(startup.events, ["protocol", "browser-window"], "media protocol must precede the window");
+  assert.deepEqual([...startup.events], ["protocol", "browser-window"], "media protocol must precede the window");
   assert.equal(startup.protocolRegistrations, 1);
   assert.equal(startup.earlySyncReleases, 0, "bootstrap sync IPC must remain active while the remote gate is held");
   assert.equal(startup.stockSyncRegistrations, 0);
@@ -532,6 +694,7 @@ test("desktop patch creates the stock window while remote-service readiness is h
   releaseRemoteReady();
   await context.__bootstrapDone;
   assert.equal(startup.remoteCompleted, true);
+  assert.equal(startup.stockUpdaterEffects, 0, "OpenBot startup must never enter the vendor Rzn updater factory");
   assert.equal(startup.ready, true);
   assert.equal(startup.readyCalls, 1);
   assert.equal(startup.protocolRegistrations, 1, "the relocated media protocol registration must run once");
@@ -569,6 +732,7 @@ test("early webview denial survives a throwing real hardener", async () => {
   const hardenerFailure = new Error("synthetic hardener failure");
   const { context, startup } = startSyntheticMain(remoteReady, { hardenerFailure });
   await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(startup.ready, true);
   assert.equal(startup.readyCalls, 1);
 
@@ -594,6 +758,7 @@ test("a remote failure after local readiness remains captured", async () => {
   const remoteFailure = new Error("synthetic remote readiness failure");
   const { context, startup } = startSyntheticMain(remoteReady);
   await Promise.resolve();
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(startup.ready, true);
   assert.equal(startup.readyCalls, 1);
 

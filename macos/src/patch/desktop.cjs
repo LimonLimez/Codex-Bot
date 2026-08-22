@@ -87,17 +87,22 @@ const WS_FILES = Object.freeze([
 ]);
 
 const MAIN_ANCHOR = '"use strict";var fjn=Object.create;';
-const MAIN_PATCH = '"use strict";var __openbotDesktopRuntime=require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));var __openbotEarlyWebviewGuard;var fjn=Object.create;';
+const OPENBOT_DISABLED_UPDATE_SERVICE = 'var __openbotDesktopUpdateService=t=>{const e=Object.freeze({state:Object.freeze({type:"disabled",reason:"disabled-by-env"}),currentVersion:typeof t?.currentVersion==="string"?t.currentVersion:"0.0.0",currentTrack:"stable",trackOverride:null,buildDefaultTrack:null,availableTracks:Object.freeze(["stable"]),isTrackManagedByPolicy:!1,isBelowMinimumVersion:!1,autoUpdateWhenIdleOptIn:!1,autoUpdateWhenIdleGateEnabled:!1}),r=Object.freeze({status:"not-ready"});return Object.freeze({getStatus:()=>e,checkForUpdates:async()=>e,setTrackOverride:async()=>e,quitAndInstall:()=>r,setAutoUpdateWhenIdleOptIn:()=>e,isRestartingForUpdate:()=>!1,willRunStagedInstallerOnQuit:()=>!1,applyStagedOnQuit:()=>{},dispose:()=>{},noteBackendUpdateRequirement:()=>{},noteMinimumVersionMayHaveChanged:()=>{},noteReleaseTrackGateMayHaveChanged:()=>{}})};';
+const MAIN_PATCH = `"use strict";var __openbotDesktopRuntime=require("../codex/desktop/runtime.cjs").installDesktopRuntime(require("electron"));${OPENBOT_DISABLED_UPDATE_SERVICE}var __openbotEarlyWebviewGuard;var fjn=Object.create;`;
 const MAIN_MACHINE_ID_FUNCTION_ANCHOR = 'async function Ds(){let t=await xgt(Ihr);if(t!=null)return t;await $9t();let e=await xgt(Ihr);if(e!=null)return e;let r=(0,j5n.randomUUID)();return await j9t(Ihr,r),r}';
 const MAIN_MACHINE_ID_FUNCTION_PATCH = 'async function Ds(){return __openbotDesktopRuntime.readMachineId()}';
 const MAIN_MACHINE_ID_STARTUP_ANCHOR = 'Ic.markPhase("update_service"),Ic.armStuckWatchdog(),F5n();let e=uJt(),r=await Ds().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
 const MAIN_MACHINE_ID_STARTUP_PATCH = 'Ic.markPhase("update_service"),Ic.armStuckWatchdog();let e=uJt(),r=await __openbotDesktopRuntime.readMachineId().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
+const MAIN_UPDATE_SERVICE_EARLY_ANCHOR = MAIN_MACHINE_ID_STARTUP_PATCH;
+const OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR = 'Ic.markPhase("update_service"),Ic.armStuckWatchdog();let e=uJt();mh=__openbotDesktopUpdateService({currentVersion:e.version});let r=await __openbotDesktopRuntime.readMachineId().catch(F=>(xe("update","machine-id",F),crypto.randomUUID()))';
 const MAIN_MACHINE_ID_TELEMETRY_ANCHOR = 'Ic.markPhase("telemetry");let x=await Ds(),C=hHn(';
 const MAIN_MACHINE_ID_TELEMETRY_PATCH = 'Ic.markPhase("telemetry");let x=r,C=hHn(';
 const MAIN_ACTIVATE_HANDLER = 'xt.app.on("activate",()=>{xt.BrowserWindow.getAllWindows().length===0&&sjn()})';
 // A loaded local-protocol window is app-ready; stock remote-only services keep booting under the existing catch.
 const MAIN_WINDOW_EDGE_ANCHOR = 'jEr=F=>o.emit("mcp-auth-completed",F),mh=Rzn(';
 const MAIN_WINDOW_EDGE_PATCH = `jEr=F=>o.emit("mcp-auth-completed",F),aJn(),Ic.markPhase("window"),ijn=!0,await mjn(),${MAIN_ACTIVATE_HANDLER},Ic.noteReady(),mh=Rzn(`;
+const MAIN_UPDATE_SERVICE_ANCHOR = 'mh=Rzn({currentVersion:e.version,buildDefaultTrack:e.buildDefaultTrack,disabledReason:await nGs(),machineId:r,settingsStore:li,getExperimentService:cJt,getHostStatus:()=>Yd.getHostStatus(),emitStatus:F=>o.emit("update-status",F),reportOutcome:lJt.reportOutcome,reportCheck:lJt.reportCheck,reportApply:lJt.reportApply})';
+const OPENBOT_UPDATE_SERVICE_ANCHOR = 'mh=mh';
 const MAIN_MEDIA_PROTOCOL_ANCHOR = ';aJn(),Ic.markPhase("auth_service");';
 const MAIN_MEDIA_PROTOCOL_PATCH = ';Ic.markPhase("auth_service");';
 const MAIN_WEBVIEW_HARDENER_ANCHOR = 'qEr?.hardenWebviewAttach(r.webContents),bu=r';
@@ -137,8 +142,9 @@ function patchMainSource(source) {
     MAIN_MACHINE_ID_STARTUP_PATCH,
     "Grok machine identity startup",
   );
+  const earlyUpdateService = patchVendorUpdateServiceStartupSource(machineStartup);
   const machineTelemetry = replaceUnique(
-    machineStartup,
+    earlyUpdateService,
     MAIN_MACHINE_ID_TELEMETRY_ANCHOR,
     MAIN_MACHINE_ID_TELEMETRY_PATCH,
     "Grok machine identity telemetry",
@@ -173,12 +179,125 @@ function patchMainSource(source) {
     MAIN_STOCK_SYNC_IPC_PATCH,
     "Grok Electron stock sync IPC handoff",
   );
+  const updateService = patchVendorUpdateServiceSource(syncIpcHandoff);
   return replaceUnique(
-    syncIpcHandoff,
+    updateService,
     MAIN_LATE_WINDOW_ANCHOR,
     MAIN_LATE_WINDOW_PATCH,
     "Grok Electron late window bootstrap",
   );
+}
+
+function patchVendorUpdateServiceSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("Grok update service source must be a string");
+  }
+  const stock = source.split(MAIN_UPDATE_SERVICE_ANCHOR).length - 1;
+  const openbot = source.split(OPENBOT_UPDATE_SERVICE_ANCHOR).length - 1;
+  if (stock > 1 || openbot > 1) {
+    throw new Error("Grok update service anchor is ambiguous");
+  }
+  if (stock === 1 && openbot === 0) {
+    return replaceUnique(
+      source,
+      MAIN_UPDATE_SERVICE_ANCHOR,
+      OPENBOT_UPDATE_SERVICE_ANCHOR,
+      "Grok v0.20 update service startup",
+    );
+  }
+  if (stock === 0 && openbot === 1) {
+    throw new Error("Grok update service is already patched");
+  }
+  if (stock === 0 && openbot === 0) {
+    throw new Error("Grok v0.20 update service startup anchor not found");
+  }
+  throw new Error("Grok update service anchors are mixed");
+}
+
+function reverseVendorUpdateServiceSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("OpenBot update service source must be a string");
+  }
+  const stock = source.split(MAIN_UPDATE_SERVICE_ANCHOR).length - 1;
+  const openbot = source.split(OPENBOT_UPDATE_SERVICE_ANCHOR).length - 1;
+  if (stock > 1 || openbot > 1) {
+    throw new Error("Grok update service inverse anchor is ambiguous");
+  }
+  if (stock === 1 && openbot === 0) {
+    throw new Error("Grok update service is already reversed");
+  }
+  if (stock === 0 && openbot === 1) {
+    const lateReversed = replaceUnique(
+      source,
+      OPENBOT_UPDATE_SERVICE_ANCHOR,
+      MAIN_UPDATE_SERVICE_ANCHOR,
+      "OpenBot v0.20 update service startup",
+    );
+    return reverseVendorUpdateServiceSourceIfPresent(lateReversed);
+  }
+  if (stock === 0 && openbot === 0) {
+    throw new Error("OpenBot update service inverse anchor not found");
+  }
+  throw new Error("OpenBot update service inverse anchors are mixed");
+}
+
+function patchVendorUpdateServiceStartupSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("Grok update service startup source must be a string");
+  }
+  const stock = source.split(MAIN_UPDATE_SERVICE_EARLY_ANCHOR).length - 1;
+  const openbot = source.split(OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR).length - 1;
+  if (stock > 1 || openbot > 1) {
+    throw new Error("Grok update service startup anchor is ambiguous");
+  }
+  if (stock === 1 && openbot === 0) {
+    return replaceUnique(
+      source,
+      MAIN_UPDATE_SERVICE_EARLY_ANCHOR,
+      OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR,
+      "Grok v0.20 early update service startup",
+    );
+  }
+  if (stock === 0 && openbot === 1) {
+    throw new Error("Grok update service startup is already patched");
+  }
+  if (stock === 0 && openbot === 0) {
+    throw new Error("Grok v0.20 early update service startup anchor not found");
+  }
+  throw new Error("Grok update service startup anchors are mixed");
+}
+
+function reverseVendorUpdateServiceStartupSource(source) {
+  if (typeof source !== "string") {
+    throw new TypeError("OpenBot update service startup source must be a string");
+  }
+  const stock = source.split(MAIN_UPDATE_SERVICE_EARLY_ANCHOR).length - 1;
+  const openbot = source.split(OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR).length - 1;
+  if (stock > 1 || openbot > 1) {
+    throw new Error("OpenBot update service startup inverse anchor is ambiguous");
+  }
+  if (stock === 1 && openbot === 0) {
+    throw new Error("OpenBot update service startup is already reversed");
+  }
+  if (stock === 0 && openbot === 1) {
+    return replaceUnique(
+      source,
+      OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR,
+      MAIN_UPDATE_SERVICE_EARLY_ANCHOR,
+      "OpenBot v0.20 early update service startup",
+    );
+  }
+  if (stock === 0 && openbot === 0) {
+    throw new Error("OpenBot update service startup inverse anchor not found");
+  }
+  throw new Error("OpenBot update service startup inverse anchors are mixed");
+}
+
+function reverseVendorUpdateServiceSourceIfPresent(source) {
+  const stock = source.split(MAIN_UPDATE_SERVICE_EARLY_ANCHOR).length - 1;
+  const openbot = source.split(OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR).length - 1;
+  if (stock === 0 && openbot === 0) return source;
+  return reverseVendorUpdateServiceStartupSource(source);
 }
 
 function patchPreloadSource(source) {
@@ -264,4 +383,12 @@ module.exports = {
   patchDesktop,
   patchMainSource,
   patchPreloadSource,
+  MAIN_UPDATE_SERVICE_ANCHOR,
+  OPENBOT_UPDATE_SERVICE_ANCHOR,
+  MAIN_UPDATE_SERVICE_EARLY_ANCHOR,
+  OPENBOT_UPDATE_SERVICE_EARLY_ANCHOR,
+  patchVendorUpdateServiceSource,
+  patchVendorUpdateServiceStartupSource,
+  reverseVendorUpdateServiceSource,
+  reverseVendorUpdateServiceStartupSource,
 };
