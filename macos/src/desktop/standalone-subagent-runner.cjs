@@ -88,6 +88,7 @@ function safeUuid(makeId) {
 function sameSelection(left, right) {
   return left.botId === right.botId
     && left.generation === right.generation
+    && left.catalogGeneration === right.catalogGeneration
     && left.provider === right.provider
     && left.model === right.model
     && left.reasoningEffort === right.reasoningEffort

@@ -184,6 +184,170 @@ test("standalone IPC rejects a request when its exact main frame navigates durin
   await installed.dispose();
 });
 
+test("standalone IPC cancels an in-flight send when its exact main frame navigates", async () => {
+  const {
+    STANDALONE_IPC_CHANNELS,
+    installStandaloneConversationIpc,
+  } = require(ipcPath);
+  const handlers = new Map();
+  const sendEntered = deferred();
+  const sendGate = deferred();
+  const sent = [];
+  const cancels = [];
+  const originalFrame = {
+    processId: 17,
+    routingId: 1,
+    isDestroyed: () => false,
+  };
+  const sender = {
+    mainFrame: originalFrame,
+    isDestroyed: () => false,
+    send: (...value) => sent.push(value),
+    once() {},
+  };
+  const window = { isDestroyed: () => false, webContents: sender };
+  class Controller extends EventEmitter {
+    list() { return []; }
+    create() { throw new Error("unused"); }
+    read() { throw new Error("unused"); }
+    async send(value) {
+      this.emit("event", {
+        type: "text-delta",
+        botId: value.botId,
+        conversationId: value.conversationId,
+        invocationId: INVOCATION,
+        generation: 7,
+        text: "must stay with the requesting frame",
+      });
+      sendEntered.resolve();
+      await sendGate.promise;
+      return {
+        botId: value.botId,
+        conversationId: value.conversationId,
+        invocationId: INVOCATION,
+        generation: 7,
+        status: "streaming",
+      };
+    }
+    cancel(value) {
+      cancels.push(Object.freeze({ ...value }));
+      return { ...value, generation: 7, status: "cancelled" };
+    }
+  }
+  const controller = new Controller();
+  const installed = installStandaloneConversationIpc({
+    controller,
+    ready: Promise.resolve(),
+    electron: {
+      ipcMain: {
+        handle(channel, handler) { handlers.set(channel, handler); },
+        removeHandler(channel) { handlers.delete(channel); },
+      },
+      BrowserWindow: { fromWebContents: () => window },
+    },
+  });
+  const sending = handlers.get(STANDALONE_IPC_CHANNELS.send)(
+    { sender, senderFrame: originalFrame },
+    { botId: BOT_A, conversationId: CONVERSATION, text: "hello" },
+  );
+  const rejected = assert.rejects(sending, { code: "OPENBOT_CONVERSATION_OPERATION_FAILED" });
+  await sendEntered.promise;
+  sender.mainFrame = { processId: 17, routingId: 2, isDestroyed: () => false };
+  sendGate.resolve();
+  await rejected;
+  assert.deepEqual(cancels, [{
+    botId: BOT_A,
+    conversationId: CONVERSATION,
+    invocationId: INVOCATION,
+  }]);
+  assert.deepEqual(sent, []);
+  controller.emit("event", {
+    type: "text-delta",
+    botId: BOT_A,
+    conversationId: CONVERSATION,
+    invocationId: INVOCATION,
+    generation: 7,
+    text: "late",
+  });
+  assert.deepEqual(sent, []);
+  await installed.dispose();
+});
+
+test("main-frame navigation releases a no-event hung send from its IPC reservation", async () => {
+  const {
+    STANDALONE_IPC_CHANNELS,
+    installStandaloneConversationIpc,
+  } = require(ipcPath);
+  const handlers = new Map();
+  const firstEntered = deferred();
+  const originalFrame = {
+    processId: 17,
+    routingId: 1,
+    isDestroyed: () => false,
+  };
+  const nextFrame = {
+    processId: 17,
+    routingId: 1,
+    isDestroyed: () => false,
+  };
+  const sender = new EventEmitter();
+  Object.assign(sender, {
+    mainFrame: originalFrame,
+    isDestroyed: () => false,
+    send() {},
+  });
+  const window = { isDestroyed: () => false, webContents: sender };
+  let sends = 0;
+  class Controller extends EventEmitter {
+    list() { return []; }
+    create() { throw new Error("unused"); }
+    read() { throw new Error("unused"); }
+    async send(value) {
+      sends += 1;
+      if (sends === 1) {
+        firstEntered.resolve();
+        await new Promise(() => {});
+      }
+      return {
+        botId: value.botId,
+        conversationId: value.conversationId,
+        invocationId: INVOCATION,
+        generation: 7,
+        status: "streaming",
+      };
+    }
+    cancel(value) { return { ...value, generation: 7, status: "cancelled" }; }
+  }
+  const installed = installStandaloneConversationIpc({
+    controller: new Controller(),
+    ready: Promise.resolve(),
+    electron: {
+      ipcMain: {
+        handle(channel, handler) { handlers.set(channel, handler); },
+        removeHandler(channel) { handlers.delete(channel); },
+      },
+      BrowserWindow: { fromWebContents: () => window },
+    },
+  });
+  const first = handlers.get(STANDALONE_IPC_CHANNELS.send)(
+    { sender, senderFrame: originalFrame },
+    { botId: BOT_A, conversationId: CONVERSATION, text: "old document" },
+  );
+  const rejected = assert.rejects(first, { code: "OPENBOT_CONVERSATION_OPERATION_FAILED" });
+  await firstEntered.promise;
+  sender.mainFrame = nextFrame;
+  sender.emit("did-start-navigation", {}, "file:///next", false, true, 17, 1);
+  await rejected;
+
+  const accepted = await handlers.get(STANDALONE_IPC_CHANNELS.send)(
+    { sender, senderFrame: nextFrame },
+    { botId: BOT_A, conversationId: CONVERSATION, text: "new document" },
+  );
+  assert.equal(accepted.status, "streaming");
+  assert.equal(sends, 2);
+  await installed.dispose();
+});
+
 test("destroying one sender awaits cancellation of only its exact owned invocation", async () => {
   const { STANDALONE_IPC_CHANNELS, installStandaloneConversationIpc } = require(ipcPath);
   const handlers = new Map();

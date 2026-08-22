@@ -332,6 +332,45 @@ test("selection changes fence streaming publication and disposal makes late work
   assert.deepEqual(beforeDispose.messages.map(({ role }) => role), ["user"]);
 });
 
+test("catalog generation changes fence streaming publication", async () => {
+  const { StandaloneConversationController } = require(controllerPath);
+  let current = selection({ catalogGeneration: 21 });
+  let release;
+  const controller = new StandaloneConversationController({
+    router: {
+      async stream() {
+        return {
+          fullStream: (async function* () {
+            yield { type: "text-delta", textDelta: "Current" };
+            await new Promise((resolve) => { release = resolve; });
+            yield { type: "text-delta", textDelta: "stale catalog output" };
+            yield { type: "finish", finishReason: "stop", usage: {} };
+          })(),
+        };
+      },
+    },
+    async readSelection() { return current; },
+    makeId: ids(),
+    now: () => "2026-08-16T12:00:00.000Z",
+  });
+  const events = [];
+  const terminal = new Promise((resolve) => controller.on("event", (event) => {
+    events.push(event);
+    if (["completed", "cancelled", "failed"].includes(event.type)) resolve(event);
+  }));
+  const created = controller.create({ botId: BOT_A });
+  await controller.send({ botId: BOT_A, conversationId: created.conversationId, text: "Fence the catalog." });
+  while (!events.length) await new Promise((resolve) => setImmediate(resolve));
+  current = selection({ catalogGeneration: 22 });
+  release();
+  const finalEvent = await terminal;
+
+  assert.equal(finalEvent.type, "failed");
+  assert.equal(finalEvent.code, "OPENBOT_CONVERSATION_STALE");
+  assert.doesNotMatch(JSON.stringify(events), /stale catalog output/);
+  await controller.dispose();
+});
+
 test("standalone controller rejects hostile and cross-bot DTOs without invoking accessors", async () => {
   const { StandaloneConversationController } = require(controllerPath);
   let reads = 0;

@@ -1176,6 +1176,45 @@ test("selection drift suppresses every late child result and disposes its task",
   runner.dispose();
 });
 
+test("catalog generation drift suppresses every late child result", async () => {
+  const { StandaloneSubagentRunner } = require(runnerPath);
+  const initial = Object.freeze({ ...SELECTION, catalogGeneration: 21 });
+  let current = initial;
+  let entered = false;
+  let release = null;
+  const runner = new StandaloneSubagentRunner({
+    router: {
+      async stream() {
+        return Object.freeze({
+          fullStream: (async function* () {
+            entered = true;
+            await new Promise((resolve) => { release = resolve; });
+            yield Object.freeze({ type: "text-delta", textDelta: "stale catalog child output" });
+            yield Object.freeze({ type: "finish", finishReason: "stop" });
+          })(),
+        });
+      },
+    },
+    async readSelection() { return current; },
+    makeId: ids(
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ),
+  });
+  const session = await runner.open(parentIdentity({ selection: initial }));
+  const pending = session.dispatch(spawnCall()).catch((error) => error);
+  while (!entered) await new Promise((resolve) => setImmediate(resolve));
+  current = Object.freeze({ ...initial, catalogGeneration: 22 });
+  release();
+  const error = await pending;
+
+  assert.equal(error.code, "OPENBOT_SUBAGENT_STALE");
+  assert.doesNotMatch(String(error.stack), /stale|catalog|child output|Users|token/i);
+  await session.dispose();
+  await runner.dispose();
+});
+
 test("selection drift after the final stream event cannot publish a completed child result", async () => {
   const { StandaloneSubagentRunner } = require(runnerPath);
   let current = SELECTION;

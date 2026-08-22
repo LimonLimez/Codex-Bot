@@ -281,15 +281,30 @@ function installStandaloneConversationIpc({ electron, controller, ready = null }
     trackedSenders.add(sender);
     try { sender.once?.("destroyed", () => { void cleanupSender(sender); }); } catch {}
   }
-  function subscribe(sender, owner) {
+  function subscribe(sender, owner, senderFrame) {
     trackSender(sender);
     const generation = (subscriptions.get(sender)?.subscriptionGeneration ?? 0) + 1;
-    const subscription = Object.freeze({ botId: owner, subscriptionGeneration: generation });
+    const subscription = Object.freeze({
+      botId: owner,
+      senderFrame,
+      subscriptionGeneration: generation,
+    });
     subscriptions.set(sender, subscription);
     return subscription;
   }
   function alive(sender) {
     try { return !sender.isDestroyed(); } catch { return false; }
+  }
+  function frameAlive(sender, senderFrame) {
+    if (!alive(sender)) return false;
+    if (senderFrame === null) return true;
+    try {
+      return typeof senderFrame?.isDestroyed === "function" && !senderFrame.isDestroyed()
+        && sameFrame(sender.mainFrame, senderFrame);
+    } catch { return false; }
+  }
+  function sameOwnedFrame(left, right) {
+    return left === null ? right === null : right !== null && sameFrame(left, right);
   }
   function publish(sender, channel, value) {
     if (!alive(sender)) {
@@ -304,47 +319,94 @@ function installStandaloneConversationIpc({ electron, controller, ready = null }
       if (disposed || !sender) throw failure();
       const senderFrame = ready === null ? null : currentMainFrame(event, sender);
       if (ready !== null && !senderFrame) throw failure();
-      try {
-        await readiness;
-        if (disposed || currentSender(event) !== sender) throw failure();
-        if (senderFrame) {
-          const currentFrame = currentMainFrame(event, sender);
-          if (!currentFrame || !sameFrame(currentFrame, senderFrame)) throw failure();
+      let frameInvalidated = false;
+      let rejectFrameInvalidation = null;
+      let navigationListener = null;
+      const frameInvalidation = senderFrame === null ? null : new Promise((resolve, reject) => {
+        rejectFrameInvalidation = reject;
+      });
+      void frameInvalidation?.catch(() => {});
+      const context = {
+        senderFrame,
+        onInvalidate: null,
+        onStale: null,
+        current() {
+          return !frameInvalidated && !disposed
+            && currentSender(event) === sender && frameAlive(sender, senderFrame);
+        },
+      };
+      const invalidateFrame = () => {
+        if (frameInvalidated) return;
+        frameInvalidated = true;
+        try { context.onInvalidate?.(); } catch {}
+        if (typeof context.onStale === "function") {
+          try { void Promise.resolve(context.onStale()).catch(() => {}); } catch {}
         }
-        return await operation(sender, value);
+        rejectFrameInvalidation?.(failure());
+      };
+      if (senderFrame !== null && typeof sender.on === "function") {
+        navigationListener = (_navigationEvent, _url, _isInPlace, isMainFrame) => {
+          if (isMainFrame === true) invalidateFrame();
+        };
+        try { sender.on("did-start-navigation", navigationListener); }
+        catch { navigationListener = null; }
+      }
+      const whileCurrent = (promise) => frameInvalidation === null
+        ? promise
+        : Promise.race([promise, frameInvalidation]);
+      try {
+        await whileCurrent(readiness);
+        if (!context.current()) throw failure();
+        const result = await whileCurrent(Promise.resolve().then(() => operation(sender, value, context)));
+        if (!context.current()) {
+          if (typeof context.onStale === "function") {
+            try { await context.onStale(); } catch {}
+          }
+          throw failure();
+        }
+        return result;
       } catch { throw failure(); }
+      finally {
+        if (navigationListener !== null) {
+          try { sender.off?.("did-start-navigation", navigationListener); }
+          catch {
+            try { sender.removeListener?.("did-start-navigation", navigationListener); } catch {}
+          }
+        }
+      }
     });
     registered.push(channel);
   }
-  handle(STANDALONE_IPC_CHANNELS.list, async (sender, value) => {
+  handle(STANDALONE_IPC_CHANNELS.list, async (sender, value, context) => {
     const owner = botId(value);
-    subscribe(sender, owner);
+    subscribe(sender, owner, context.senderFrame);
     const records = Object.freeze(denseArray(await controller.list(owner), 256).map(summaryPublic));
     if (records.some((record) => record.botId !== owner)) throw failure();
     return records;
   });
-  handle(STANDALONE_IPC_CHANNELS.create, async (sender, value) => {
+  handle(STANDALONE_IPC_CHANNELS.create, async (sender, value, context) => {
     const request = createRequest(value);
-    subscribe(sender, request.botId);
+    subscribe(sender, request.botId, context.senderFrame);
     const record = summaryPublic(await controller.create(request));
     if (record.botId !== request.botId) throw failure();
     return record;
   });
-  handle(STANDALONE_IPC_CHANNELS.read, async (sender, value) => {
+  handle(STANDALONE_IPC_CHANNELS.read, async (sender, value, context) => {
     const request = readRequest(value);
-    subscribe(sender, request.botId);
+    subscribe(sender, request.botId, context.senderFrame);
     const record = conversationPublic(await controller.read(request));
     if (record.botId !== request.botId || record.conversationId !== request.conversationId) throw failure();
     return record;
   });
-  handle(STANDALONE_IPC_CHANNELS.send, async (sender, value) => {
+  handle(STANDALONE_IPC_CHANNELS.send, async (sender, value, context) => {
     const request = sendRequest(value);
     const key = `${request.botId}\0${request.conversationId}`;
     if (pendingSends.has(key)) throw failure();
-    subscribe(sender, request.botId);
+    subscribe(sender, request.botId, context.senderFrame);
     let settlePending;
     const pending = {
       sender,
+      senderFrame: context.senderFrame,
       botId: request.botId,
       conversationId: request.conversationId,
       events: [],
@@ -353,20 +415,32 @@ function installStandaloneConversationIpc({ electron, controller, ready = null }
       done: new Promise((resolve) => { settlePending = resolve; }),
     };
     pendingSends.set(key, pending);
+    context.onInvalidate = () => {
+      pending.cancelRequested = true;
+      pending.events.length = 0;
+      pending.bytes = 0;
+      if (pendingSends.get(key) === pending) pendingSends.delete(key);
+    };
     try {
       const operation = operationPublic(await controller.send(request));
       if (operation.botId !== request.botId || operation.conversationId !== request.conversationId) throw failure();
       const owner = {
-        sender, botId: operation.botId, conversationId: operation.conversationId,
+        sender, senderFrame: context.senderFrame,
+        botId: operation.botId, conversationId: operation.conversationId,
         generation: operation.generation, cancelPromise: null,
       };
-      if (pending.cancelRequested || disposed || !alive(sender)) {
+      context.onStale = () => cancelOwnedInvocation(operation.invocationId, owner);
+      if (pending.cancelRequested || disposed || !frameAlive(sender, context.senderFrame)) {
         await Promise.allSettled([cancelOwnedInvocation(operation.invocationId, owner)]);
         throw failure();
       }
       invocationOwners.set(operation.invocationId, owner);
       pendingSends.delete(key);
       for (const event of pending.events) {
+        if (!frameAlive(sender, context.senderFrame)) {
+          await Promise.allSettled([cancelOwnedInvocation(operation.invocationId, owner)]);
+          throw failure();
+        }
         if (event.invocationId === operation.invocationId
           && event.generation === operation.generation) {
           publish(sender, STANDALONE_EVENT_CHANNEL, event);
@@ -379,11 +453,16 @@ function installStandaloneConversationIpc({ electron, controller, ready = null }
       settlePending();
     }
   });
-  handle(STANDALONE_IPC_CHANNELS.cancel, async (sender, value) => {
+  handle(STANDALONE_IPC_CHANNELS.cancel, async (sender, value, context) => {
     const request = cancelRequest(value);
     const owner = invocationOwners.get(request.invocationId);
     if (!owner || owner.sender !== sender || owner.botId !== request.botId
       || owner.conversationId !== request.conversationId) throw failure();
+    if (!sameOwnedFrame(owner.senderFrame, context.senderFrame)
+      || !frameAlive(owner.sender, owner.senderFrame)) {
+      await Promise.allSettled([cancelOwnedInvocation(request.invocationId, owner)]);
+      throw failure();
+    }
     let operation;
     try {
       operation = operationPublic(await cancelOwnedInvocation(request.invocationId, owner, false));
@@ -403,6 +482,10 @@ function installStandaloneConversationIpc({ electron, controller, ready = null }
     let record;
     try { record = summaryPublic(value); } catch { return; }
     for (const [sender, subscription] of subscriptions) {
+      if (!frameAlive(sender, subscription.senderFrame)) {
+        if (subscriptions.get(sender) === subscription) subscriptions.delete(sender);
+        continue;
+      }
       if (subscription.botId === record.botId) publish(sender, STANDALONE_CHANGE_CHANNEL, record);
     }
   };
@@ -413,12 +496,22 @@ function installStandaloneConversationIpc({ electron, controller, ready = null }
     const owner = invocationOwners.get(event.invocationId);
     if (owner && owner.botId === event.botId && owner.conversationId === event.conversationId
       && owner.generation === event.generation) {
+      if (!frameAlive(owner.sender, owner.senderFrame)) {
+        void cancelOwnedInvocation(event.invocationId, owner).catch(() => {});
+        return;
+      }
       publish(owner.sender, STANDALONE_EVENT_CHANNEL, event);
       if (event.type !== "text-delta") invocationOwners.delete(event.invocationId);
       return;
     }
     const pending = pendingSends.get(`${event.botId}\0${event.conversationId}`);
-    if (!pending || !alive(pending.sender)) return;
+    if (!pending) return;
+    if (!frameAlive(pending.sender, pending.senderFrame)) {
+      pending.cancelRequested = true;
+      pending.events.length = 0;
+      pending.bytes = 0;
+      return;
+    }
     const bytes = event.type === "text-delta" ? Buffer.byteLength(event.text, "utf8") : 0;
     if (pending.events.length >= 65_536 || pending.bytes + bytes > 64 * 1024) return;
     pending.events.push(event);
