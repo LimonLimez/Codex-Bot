@@ -27,8 +27,8 @@ private final class InstallerModel: ObservableObject {
         panel.title = "Choose Grok Bot 0.20.0"
         panel.prompt = "Choose Grok Bot"
         panel.allowedContentTypes = [.application]
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let selected = panel.url {
             vendorApp = selected

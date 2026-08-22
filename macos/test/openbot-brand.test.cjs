@@ -56,6 +56,9 @@ test("installer and DMG sources expose only the versioned OpenBot release identi
   assert.match(core, /com\.limonlimez\.openbot/);
   assert.match(packageDmg, /OpenBot-0\.2\.0-macos\.1\.dmg/);
   assert.match(packageDmg, /OpenBot Installer/);
+  assert.match(installer, /panel\.allowedContentTypes = \[\.application\]/);
+  assert.match(installer, /panel\.canChooseDirectories = false/);
+  assert.match(installer, /panel\.canChooseFiles = true/);
 
   for (const source of [builder, packageDmg, core, installer]) {
     assert.doesNotMatch(source, /Install Codex Bot|Codex Bot Installer|Codex Bot\.app/);
